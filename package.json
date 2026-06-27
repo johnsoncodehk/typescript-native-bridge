@@ -1,0 +1,22 @@
+{
+	"name": "typescript-native-bridge",
+	"version": "0.0.0",
+	"description": "typescript-shaped drop-in backed by the typescript-go in-process NAPI bridge. Alias as `\"typescript\": \"npm:typescript-native-bridge\"` to switch a consumer (tsslint, vue-tsc, ...) onto tsgo with no code changes.",
+	"main": "src/index.js",
+	"types": "src/index.d.ts",
+	"scripts": {
+		"setup": "git submodule update --init && node tools/patch-tsgo.js",
+		"patch:tsgo": "node tools/patch-tsgo.js",
+		"save-patches": "node tools/save-tsgo-patches.js",
+		"build:bridge": "node tools/patch-tsgo.js && cd typescript-go/poc-napi && go build -buildmode=c-shared -o bridge.dylib bridge.go",
+		"test": "node test/smoke.js"
+	},
+	"dependencies": {
+		"@typescript/native-preview": "*",
+		"koffi": "^2.16.0",
+		"typescript": "*"
+	},
+	"files": [
+		"src"
+	]
+}
