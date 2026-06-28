@@ -1,0 +1,80 @@
+diff --git a/src/compiler/_namespaces/ts.ts b/src/compiler/_namespaces/ts.ts
+index bd9684e48..74b178d66 100644
+--- a/src/compiler/_namespaces/ts.ts
++++ b/src/compiler/_namespaces/ts.ts
+@@ -29,6 +29,8 @@ export * from "../moduleNameResolver.js";
+ export * from "../binder.js";
+ export * from "../symbolWalker.js";
+ export * from "../checker.js";
++export * from "../tsgoChecker.js";
++export * from "../tsgoBackedSourceFile.js";
+ export * from "../visitorPublic.js";
+ export * from "../sourcemap.js";
+ export * from "../transformers/utilities.js";
+diff --git a/src/compiler/parser.ts b/src/compiler/parser.ts
+index 68133ac5f..3effa07d2 100644
+--- a/src/compiler/parser.ts
++++ b/src/compiler/parser.ts
+@@ -1250,6 +1250,12 @@ export function forEachChild<T>(node: Node, cbNode: (node: Node) => T | undefine
+     if (node === undefined || node.kind <= SyntaxKind.LastToken) {
+         return;
+     }
++    // tsgo RemoteNode/RemoteSourceFile have their own forEachChild that walks
++    // the binary blob. The fork's forEachChildTable is indexed by fork kind
++    // values which differ from tsgo's — delegate to the node's own method.
++    if (typeof (node as any).forEachChild === "function" && "_offsetNodes" in (node as any)) {
++        return (node as any).forEachChild(cbNode, cbNodes);
++    }
+     const fn = (forEachChildTable as Record<SyntaxKind, ForEachChildFunction<any>>)[node.kind];
+     return fn === undefined ? undefined : fn(node, cbNode, cbNodes);
+ }
+diff --git a/src/compiler/program.ts b/src/compiler/program.ts
+index b44a155f0..1b95ceffd 100644
+--- a/src/compiler/program.ts
++++ b/src/compiler/program.ts
+@@ -48,6 +48,7 @@ import {
+     CreateSourceFileOptions,
+     createSymlinkCache,
+     createTypeChecker,
++    createTsgoProgram,
+     createTypeReferenceDirectiveResolutionCache,
+     CustomTransformers,
+     Debug,
+@@ -407,7 +408,10 @@ export function createGetSourceFile(
+             }
+             text = "";
+         }
+-        return text !== undefined ? createSourceFile(fileName, text, languageVersionOrOptions, setParentNodes) : undefined;
++        if (text !== undefined) {
++            return createSourceFile(fileName, text, languageVersionOrOptions, setParentNodes);
++        }
++        return undefined;
+     };
+ }
+ 
+@@ -1528,6 +1532,15 @@ export function createProgram(_rootNamesOrOptions: readonly string[] | CreatePro
+         }
+     }
+ 
++    // Thin tsgo-backed program: skip the entire TS file-resolution / module-
++    // resolution / source-file-creation pipeline. tsgo resolves files from
++    // the tsconfig and uses host-fed overlay content. Saves ~576ms of
++    // createProgram overhead on self-lint. The tsgo backend is the fork's whole
++    // purpose, so it is always taken when a tsconfig is available.
++    if (options.configFilePath) {
++        return createTsgoProgram(rootNames, options, createProgramOptionsHost, projectReferences) as Program;
++    }
++
+     const reportInvalidIgnoreDeprecations = memoize(() => createOptionValueDiagnostic("ignoreDeprecations", Diagnostics.Invalid_value_for_ignoreDeprecations));
+ 
+     let processingDefaultLibFiles: SourceFile[] | undefined;
+@@ -2682,7 +2695,8 @@ export function createProgram(_rootNamesOrOptions: readonly string[] | CreatePro
+     }
+ 
+     function getTypeChecker() {
+-        return typeChecker || (typeChecker = createTypeChecker(program));
++        if (typeChecker) return typeChecker;
++        return typeChecker = createTypeChecker(program);
+     }
+ 
+     function emit(
