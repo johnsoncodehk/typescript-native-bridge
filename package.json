@@ -1,22 +1,19 @@
 {
 	"name": "typescript-native-bridge",
 	"version": "0.0.0",
-	"description": "typescript-shaped drop-in backed by the typescript-go in-process NAPI bridge. Alias as `\"typescript\": \"npm:typescript-native-bridge\"` to switch a consumer (tsslint, vue-tsc, ...) onto tsgo with no code changes.",
-	"main": "src/index.js",
-	"types": "src/index.d.ts",
+	"private": true,
+	"description": "Build host for a tsgo-backed TypeScript fork: pins upstream `microsoft/TypeScript` and `microsoft/typescript-go` as submodules and materializes a small patch set on top — a tsgoChecker overlay on TypeScript plus a cgo bridge (bridge.dylib) on typescript-go. The built fork (`typescript/lib/typescript.js`) is a drop-in `typescript` whose type checker runs in-process on tsgo via the NAPI bridge.",
 	"scripts": {
-		"setup": "git submodule update --init && node tools/patch-tsgo.js",
+		"setup": "git submodule update --init && node tools/patch-tsgo.js && node tools/patch-typescript.js && npm run build:js && npm run build:bridge && npm run build:ts",
 		"patch:tsgo": "node tools/patch-tsgo.js",
+		"patch:ts": "node tools/patch-typescript.js",
 		"save-patches": "node tools/save-tsgo-patches.js",
-		"build:bridge": "node tools/patch-tsgo.js && cd typescript-go/poc-napi && go build -buildmode=c-shared -o bridge.dylib bridge.go",
-		"test": "node test/smoke.js"
+		"save-ts-patches": "node tools/save-typescript-patches.js",
+		"build:js": "cd typescript-go/_packages/native-preview && npm install --no-save @types/node && npx tsc -b",
+		"build:ts": "node tools/patch-typescript.js && cd typescript && npm install && npm run build:compiler && npx hereby lkg",
+		"build:bridge": "node tools/patch-tsgo.js && npm run build:js && cd typescript-go/bridge && go build -buildmode=c-shared -o bridge.dylib bridge.go"
 	},
 	"dependencies": {
-		"@typescript/native-preview": "*",
-		"koffi": "^2.16.0",
-		"typescript": "*"
-	},
-	"files": [
-		"src"
-	]
+		"koffi": "^2.16.0"
+	}
 }
