@@ -29,7 +29,7 @@ index 68133ac5f..3effa07d2 100644
      return fn === undefined ? undefined : fn(node, cbNode, cbNodes);
  }
 diff --git a/src/compiler/program.ts b/src/compiler/program.ts
-index b44a155f0..1b95ceffd 100644
+index b44a155f0..c631f17df 100644
 --- a/src/compiler/program.ts
 +++ b/src/compiler/program.ts
 @@ -48,6 +48,7 @@ import {
@@ -62,7 +62,7 @@ index b44a155f0..1b95ceffd 100644
 +    // createProgram overhead on self-lint. The tsgo backend is the fork's whole
 +    // purpose, so it is always taken when a tsconfig is available.
 +    if (options.configFilePath) {
-+        return createTsgoProgram(rootNames, options, createProgramOptionsHost, projectReferences) as Program;
++        return createTsgoProgram(rootNames, options, createProgramOptionsHost, projectReferences, configFileParsingDiagnostics) as Program;
 +    }
 +
      const reportInvalidIgnoreDeprecations = memoize(() => createOptionValueDiagnostic("ignoreDeprecations", Diagnostics.Invalid_value_for_ignoreDeprecations));

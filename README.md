@@ -1,126 +1,85 @@
 # typescript-native-bridge
 
-Build host for a **tsgo-backed TypeScript fork**. This repo pins upstream
-`microsoft/TypeScript` and `microsoft/typescript-go` as submodules and
-materializes a small patch set on top of each. The built fork
-(`typescript/lib/typescript.js`) is a drop-in `typescript` whose **type checker
-runs in-process on tsgo** via a cgo NAPI bridge — no IPC child process, no
-module-hijacking.
+A **drop-in `typescript`** whose type checking runs **in-process on tsgo** (the Go
+port of TypeScript) — no IPC child process, no module hijacking. To adopt it,
+override `typescript` in your project to point at this fork; every tool that
+resolves `typescript` (`tsc`, `vue-tsc`, `@typescript-eslint`, `tsslint`, your
+editor's workspace version, …) then runs on the Go engine. There is **no API to
+call and no per-tool config**.
 
-```ts
-import * as ts from "typescript";            // → the built fork
-const program = ts.createProgram(rootNames, options);  // tsgo, in-process
-const checker = program.getTypeChecker();
-const t = checker.getTypeAtLocation(node);   // resolved by tsgo (Go), via FFI
+```jsonc
+// package.json — pnpm
+{
+  "pnpm": {
+    "overrides": {
+      "typescript": "npm:typescript-native-bridge@<version>"
+    }
+  }
+}
 ```
+
+```jsonc
+// package.json — npm                              // package.json — yarn
+{ "overrides": {                                   { "resolutions": {
+    "typescript":                                      "typescript":
+      "npm:typescript-native-bridge@<version>" } }       "npm:typescript-native-bridge@<version>" } }
+```
+
+Reinstall after editing so the override takes effect — it's repo-wide, so
+transitive `typescript` consumers switch over too.
 
 ## How it works
 
-```
-┌───────────────────────────────────────────────────────────────────┐
-│  consumer process                                                  │
-│                                                                    │
-│  require('typescript')  ─►  typescript/lib/typescript.js (the fork)│
-│                               │  upstream TypeScript +             │
-│                               │  tsgoChecker overlay:              │
-│                               │   createProgram → createTsgoProgram│
-│                               │   getTypeChecker → tsgo adapter    │
-│                               ▼                                    │
-│                       koffi FFI  ─►  bridge.dylib (cgo)            │
-│                               │   BridgeCall / BridgeCallBinary    │
-│                               ▼                                    │
-│                       typescript-go internal/api (Go, in-process)  │
-└───────────────────────────────────────────────────────────────────┘
-```
-
-- **`typescript/`** — submodule pinned to upstream `microsoft/TypeScript`. The
-  patch set adds a `tsgoChecker` overlay (`src/compiler/tsgoChecker.ts`,
-  `tsgoBackedSourceFile.ts`) plus three small in-place hooks
-  (`program.ts` / `parser.ts` / `_namespaces/ts.ts`) so that, when a tsconfig is
-  present, `createProgram` returns a thin tsgo-backed program (single parse, AST
-  from tsgo) and the checker delegates to tsgo over the bridge.
-- **`typescript-go/`** — submodule pinned to upstream `microsoft/typescript-go`.
-  The patch set adds the cgo bridge (`bridge/`) — a `c-shared` library exposing
-  `BridgeCall` / `BridgeCallBinary` over `internal/api`, the same dispatch the
-  IPC server uses — plus a few in-place edits to the API layer (e.g. raw-kind
-  accessors, host-content overlay support).
-- **The dylib is resolved deterministically** from
-  `typescript-go/bridge/bridge.<dylib|so|dll>` — no environment variable.
-
-## Repo layout
-
-Each submodule's customization is a **two-part delta** (handled by
-`tools/patch-common.js`, shared by both) — same pattern as
-[auvred/golar](https://github.com/auvred/golar), no fork repos:
+Normal `typescript` parses and type-checks in JavaScript. This fork keeps the
+**exact same JS API**, but does the actual work in the Go engine (`tsgo`) running
+**in the same process**:
 
 ```
-typescript-native-bridge/
-  tools/                       patch-common.js + patch-{tsgo,typescript}.js
-                               save-{tsgo,typescript}-patches.js
-  patches/
-    typescript-go/             delta over upstream typescript-go
-      overlay/bridge/...       net-new files (the cgo bridge) — copied in
-      0001-bridge-inplace.patch  in-place edits to existing tsgo files
-    typescript/                delta over upstream TypeScript
-      overlay/src/compiler/... net-new files (tsgoChecker.ts, …) — copied in
-      0001-tsgo-hooks.patch    in-place hooks (program/parser/_namespaces)
-  typescript-go/               submodule → microsoft/typescript-go (pinned)
-  typescript/                  submodule → microsoft/TypeScript (pinned, shallow)
+your tool ──► typescript (this fork) ──► tsgo engine (Go)
+              same JS API as always       does the real work
+                       └────── direct in-process call ──────┘
 ```
 
-### The two-part delta convention
-
-- **`overlay/`** — a path tree mirroring the submodule root, holding **net-new
-  files**. These never conflict on upstream rebase, so they're kept as plain
-  files (not baked into a patch). Applied by copying into the submodule.
-- **`*.patch`** — **in-place edits** to existing upstream files. Applied with
-  `git apply` (idempotent: already-applied patches are skipped).
-
-Bumping a submodule = move it to a new upstream commit + re-apply/refresh its
-delta. Only the in-place patches can conflict, and they're small (tsgo: 14
-files / ~320 lines; TypeScript: 3 files / 53 lines).
-
-## Build (dev)
-
-```bash
-git clone --recurse-submodules <this-repo>
-cd typescript-native-bridge
-npm install
-
-# one-shot: init submodules + apply both deltas + build tsgo JS + dylib + fork
-npm run setup
+```ts
+import * as ts from "typescript";                       // → the bridged fork
+const program = ts.createProgram(rootNames, options);   // tsgo, in-process
+const checker = program.getTypeChecker();
+const t = checker.getTypeAtLocation(node);              // resolved by tsgo (Go)
 ```
 
-`npm run setup` runs `git submodule update --init` + `patch-tsgo.js` +
-`patch-typescript.js` + `build:js` (tsgo native-preview) + `build:bridge`
-(the dylib) + `build:ts` (the TypeScript fork: `npm install` + `build:compiler`
-+ LKG).
+- You use `ts.createProgram(...)`, `getTypeChecker()`, etc. exactly as before.
+- Parsing, module resolution, and type checking actually run in Go.
+- Calls cross into Go through a direct in-process bridge — **no child process, no
+  IPC, no monkey-patching** of `typescript`.
 
-## Scripts
+## SFC / `extraFileExtensions` support (Volar family)
 
-| script | purpose |
-|---|---|
-| `setup` | init both submodules + apply both deltas + build everything |
-| `patch:tsgo` / `patch:ts` | apply one submodule's delta (overlay + patch) |
-| `save-patches` / `save-ts-patches` | regenerate one submodule's delta from its working tree |
-| `build:js` | build tsgo's `@typescript/native-preview` JS |
-| `build:bridge` | patch tsgo + build JS + compile `bridge.dylib` |
-| `build:ts` | apply TS delta + `npm install` + `build:compiler` + LKG |
+`vue-tsc` and the wider Volar family (`.vue`, `.svelte`, `.astro`, `.mdx`,
+`ts-macro`, …) work on the fork. The support is **general, keyed on the standard
+`extraFileExtensions` host contract — there is no per-extension (`.vue`)
+hardcoding**:
 
-## Editing a delta (patch round-trip)
+- The tsgo module resolver resolves a specifier whose extension is a
+  host-registered extra extension (e.g. `import App from './App.vue'`) **to the
+  file itself**, instead of only looking for a `./App.d.vue.ts` declaration.
+- When extra extensions are registered and `allowArbitraryExtensions` is **unset**
+  in tsconfig, it is inferred `true` (so the resolved file isn't rejected). This
+  mirrors what Volar sets at runtime, which the on-disk tsconfig lacks.
 
-The bridge source lives at `typescript-go/bridge/bridge.go` *inside the
-submodule checkout* (it must — `bridge.go` imports tsgo's `internal/api`, only
-importable from within the tsgo module tree). Edit files inside a submodule,
-then regenerate its delta so it's versioned here:
+### Boundaries
 
-```bash
-# edit files inside typescript-go/ (and/or typescript/)
-npm run save-patches          # → regenerates patches/typescript-go/{overlay,*.patch}
-npm run save-ts-patches       # → regenerates patches/typescript/{overlay,*.patch}
-npm run build:bridge          # rebuild the dylib
-```
+These are deliberate limits of the in-process, synchronous bridge — worth knowing
+before relying on the fork for exotic setups:
 
-The patch tools are idempotent (skip already-applied patches / up-to-date
-overlays), so re-running `npm run setup` after a fresh `git submodule update`
-re-materializes everything.
+1. **Resolve-to-self only.** An extra-extension specifier resolves to the file at
+   the *same* resolved path (the universal SFC pattern). A host that uses a custom
+   `resolveModuleNameLiterals` / `resolveModuleNames` to remap an extension to a
+   *different* file is **not** honored: the bridge is synchronous (JS→Go only, no
+   Go→JS callback), so tsgo never consults JS host module-resolution hooks. It
+   resolves natively in Go and is fed host *content* via overlays, not host
+   *resolutions*.
+2. **`allowArbitraryExtensions` is inferred from the presence of extras** (unless
+   tsconfig sets it explicitly). An explicit `allowArbitraryExtensions: false` is
+   respected (opt-out), and yields the faithful `TS6263` diagnostic. In stock
+   TypeScript these two settings are independent; the fork couples them as a
+   convenience for SFC tooling.

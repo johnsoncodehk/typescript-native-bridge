@@ -71,6 +71,7 @@ const _projectCache = new Map<string, any>();
 // ensureProject runs). In thin-createProgram mode, program.getSourceFiles()
 // is empty, so ensureProject reads from this instead.
 let _pendingOverlays: any[] | undefined;
+let _pendingExtraFileExtensions: any[] | undefined;
 let _pendingReferencedProjects: string[] | undefined;
 // Overlay-path cache: only files missing on disk are fed to tsgo as overlays
 // (typically Volar virtual documents).
@@ -124,12 +125,69 @@ function fileExistsOnDisk(fileName: string): boolean {
     }
     return exists;
 }
-// Only files missing on disk (e.g. Volar virtual documents) need their content
-// fed to tsgo as an overlay; tsgo reads everything else from disk itself. This
-// keeps the host the source of truth for virtual content without re-sending
-// megabytes of unchanged on-disk source over FFI.
-function shouldOverlayFile(fileName: string): boolean {
-    return !fileExistsOnDisk(fileName);
+function readDiskText(fileName: string): string | undefined {
+    try {
+        const fs = require("fs") as typeof import("fs");
+        return fs.readFileSync(fileName, "utf8");
+    } catch {
+        return undefined;
+    }
+}
+function isOverlayCandidatePath(fileName: string): boolean {
+    return !fileName.includes("/lib.") && !fileName.includes("/node_modules/");
+}
+/** Host script text — prefers getSourceFile (Volar virtual .vue TS) over readFile. */
+function getHostScriptContent(host: any, fileName: string, options: any): { text: string; scriptKind: number } | undefined {
+    const languageVersion = options.target ?? 99;
+    let scriptKind = inferScriptKind(fileName);
+    const sf = host?.getSourceFile?.(fileName, languageVersion);
+    if (sf && typeof sf.text === "string") {
+        if (typeof sf.scriptKind === "number") scriptKind = sf.scriptKind;
+        return { text: sf.text, scriptKind };
+    }
+    const text = host?.readFile?.(fileName);
+    if (typeof text === "string") return { text, scriptKind };
+    return undefined;
+}
+/** Overlay when the host view differs from disk (virtual docs) or the file is absent on disk. */
+function shouldSendHostOverlay(fileName: string, hostText: string): boolean {
+    if (!isOverlayCandidatePath(fileName)) return false;
+    if (!fileExistsOnDisk(fileName)) return true;
+    const disk = readDiskText(fileName);
+    return disk !== hostText;
+}
+function convertTsgoDiagnostic(d: any, getSourceFile: (fileName: string) => any): any {
+    return {
+        file: d.fileName ? getSourceFile(d.fileName) : undefined,
+        start: d.pos,
+        length: (d.end ?? d.pos) - d.pos,
+        messageText: d.text,
+        category: d.category,
+        code: d.code,
+        reportsUnnecessary: d.reportsUnnecessary,
+        reportsDeprecated: d.reportsDeprecated,
+        relatedInformation: d.relatedInformation?.map((r: any) => convertTsgoDiagnostic(r, getSourceFile)),
+    };
+}
+function mapTsgoDiagnostics(raw: readonly any[] | undefined, getSourceFile: (fileName: string) => any): readonly any[] {
+    if (!raw?.length) return [];
+    return raw.map(d => convertTsgoDiagnostic(d, getSourceFile));
+}
+/** Extra extensions for tsgo tsconfig parse when allowArbitraryExtensions is on (vue-tsc). */
+function collectExtraFileExtensions(rootNames: readonly string[], options: any): any[] | undefined {
+    if (!options?.allowArbitraryExtensions) return undefined;
+    const builtin = new Set([".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs", ".json"]);
+    const exts = new Set<string>();
+    for (const fn of rootNames) {
+        if (typeof fn !== "string") continue;
+        const dot = fn.lastIndexOf(".");
+        if (dot < 0) continue;
+        const ext = fn.slice(dot);
+        if (!builtin.has(ext)) exts.add(ext);
+    }
+    if (!exts.size) return undefined;
+    // ScriptKind.Deferred — include extension in all project contexts.
+    return [...exts].map(extension => ({ extension, scriptKind: 7 }));
 }
 function _profRpc(method: string, ms: number): void {
     if (process.env.TSGO_PROFILE !== "1") return;
@@ -242,30 +300,53 @@ function patchRemoteNodeKinds(sampleNode: any): void {
 // overlay RPC so tsgo doesn't double-read from disk.
 
 /** @internal */
-export function createTsgoProgram(rootNames: readonly string[], options: any, host: any, projectReferences?: readonly any[]): any {
+export function createTsgoProgram(
+    rootNames: readonly string[],
+    options: any,
+    host: any,
+    projectReferences?: readonly any[],
+    configFileParsingDiagnostics?: readonly any[],
+): any {
     const configFilePath = options.configFilePath as string;
     if (!configFilePath) {
         throw new Error("createTsgoProgram: options.configFilePath is required");
     }
+    const configDiags = configFileParsingDiagnostics ?? [];
+
+    // Host script text captured once at createProgram time (safe to call
+    // host.getSourceFile here — program does not exist yet; Volar injects
+    // virtual TS for .vue via getSourceFile). Reused by getOrCreateSourceFile
+    // for skeleton text / diagnostic line maps without re-entering getSourceFile.
+    const hostContentByFile = new Map<string, { text: string; scriptKind: number }>();
 
     // Collect host file content for tsgo overlays — makes the fork host the
-    // single source of truth (no disk double-read, Volar virtual content
-    // injection). Only user files are overlaid; lib/node_modules are read
-    // from disk by tsgo (unchanged content, avoids serializing lib.d.ts).
+    // single source of truth. Uses getSourceFile when present (vue-tsc / Volar
+    // inject virtual TS for .vue); falls back to readFile. Only sends content
+    // that differs from disk (or is missing on disk); unchanged on-disk .ts is
+    // read by tsgo itself.
     const overlays: any[] = [];
     {
-        const scriptNames = host?.getScriptFileNames?.() ?? rootNames;
-        for (const fn of scriptNames) {
-            if (typeof fn !== "string") continue;
-            if (!fn.endsWith(".ts") && !fn.endsWith(".tsx") && !fn.endsWith(".js") && !fn.endsWith(".jsx")) continue;
-            if (fn.includes("/lib.") || fn.includes("/node_modules/")) continue;
-            if (!shouldOverlayFile(fn)) continue;
-            const text = host?.readFile?.(fn);
-            if (typeof text !== "string") continue;
-            overlays.push({ fileName: fn, content: text, scriptKind: inferScriptKind(fn) });
+        const names = new Set<string>();
+        for (const fn of rootNames) {
+            if (typeof fn === "string") names.add(fn);
+        }
+        const scriptNames = host?.getScriptFileNames?.();
+        if (scriptNames) {
+            for (const fn of scriptNames) {
+                if (typeof fn === "string") names.add(fn);
+            }
+        }
+        for (const fn of names) {
+            if (!isOverlayCandidatePath(fn)) continue;
+            const content = getHostScriptContent(host, fn, options);
+            if (!content) continue;
+            hostContentByFile.set(fn, content);
+            if (!shouldSendHostOverlay(fn, content.text)) continue;
+            overlays.push({ fileName: fn, content: content.text, scriptKind: content.scriptKind });
         }
     }
     _pendingOverlays = overlays.length > 0 ? overlays : undefined;
+    _pendingExtraFileExtensions = collectExtraFileExtensions(rootNames, options);
 
     // Collect referenced project paths for tsgo to open alongside the main
     // project — tsgo needs all referenced tsconfigs to resolve imports
@@ -305,8 +386,10 @@ export function createTsgoProgram(rootNames: readonly string[], options: any, ho
     const sfCache = new Map<string, any>();
     const getOrCreateSourceFile = (fileName: string): any => {
         if (sfCache.has(fileName)) return sfCache.get(fileName);
-        const text = host?.readFile?.(fileName) ?? "";
-        const sf = createSkeletonSourceFile(fileName, text, options.target ?? 99, inferScriptKind(fileName));
+        const hostContent = hostContentByFile.get(fileName);
+        const text = hostContent?.text ?? host?.readFile?.(fileName) ?? "";
+        const scriptKind = hostContent?.scriptKind ?? inferScriptKind(fileName);
+        const sf = createSkeletonSourceFile(fileName, text, options.target ?? 99, scriptKind);
         const anySf = sf as any;
         anySf.version = "1";
         const backed = getTsgoBackedSourceFile(anySf);
@@ -326,6 +409,19 @@ export function createTsgoProgram(rootNames: readonly string[], options: any, ho
         }
         sfCache.set(fileName, result);
         return result;
+    };
+
+    // Writable skeleton SourceFiles for diagnostics — Volar vue-tsc mutates
+    // diagnostic.file.text during span remapping; tsgo RemoteSourceFile.text is read-only.
+    const diagnosticSfCache = new Map<string, any>();
+    const getDiagnosticSourceFile = (fileName: string): any => {
+        if (diagnosticSfCache.has(fileName)) return diagnosticSfCache.get(fileName);
+        const hostContent = hostContentByFile.get(fileName);
+        const text = hostContent?.text ?? host?.readFile?.(fileName) ?? "";
+        const scriptKind = hostContent?.scriptKind ?? inferScriptKind(fileName);
+        const sf = createSkeletonSourceFile(fileName, text, options.target ?? 99, scriptKind);
+        diagnosticSfCache.set(fileName, sf);
+        return sf;
     };
 
     // Lightweight skeleton stub (no tsgo RPC) for getSourceFiles() —
@@ -401,14 +497,47 @@ export function createTsgoProgram(rootNames: readonly string[], options: any, ho
             return result;
         },
         getTypeChecker: () => checker,
-        getSemanticDiagnostics: () => [],
-        getSyntacticDiagnostics: () => [],
-        getGlobalDiagnostics: () => [],
-        getSuggestionDiagnostics: () => [],
-        getDeclarationDiagnostics: () => [],
+        getConfigFileParsingDiagnostics: () => configDiags,
+        getOptionsDiagnostics: () => [],
+        getSemanticDiagnostics: (sourceFile?: any) => {
+            const raw = sourceFile?.fileName
+                ? project?.program?.getSemanticDiagnostics?.(sourceFile.fileName)
+                : project?.program?.getSemanticDiagnostics?.();
+            return mapTsgoDiagnostics(raw, getDiagnosticSourceFile);
+        },
+        getSyntacticDiagnostics: (sourceFile?: any) => {
+            const raw = sourceFile?.fileName
+                ? project?.program?.getSyntacticDiagnostics?.(sourceFile.fileName)
+                : project?.program?.getSyntacticDiagnostics?.();
+            return mapTsgoDiagnostics(raw, getDiagnosticSourceFile);
+        },
+        getGlobalDiagnostics: () => mapTsgoDiagnostics(project?.program?.getGlobalDiagnostics?.(), getDiagnosticSourceFile),
+        getSuggestionDiagnostics: (sourceFile?: any) => {
+            const raw = sourceFile?.fileName
+                ? project?.program?.getSuggestionDiagnostics?.(sourceFile.fileName)
+                : project?.program?.getSuggestionDiagnostics?.();
+            return mapTsgoDiagnostics(raw, getDiagnosticSourceFile);
+        },
+        getDeclarationDiagnostics: (sourceFile?: any) => {
+            const raw = sourceFile?.fileName
+                ? project?.program?.getDeclarationDiagnostics?.(sourceFile.fileName)
+                : project?.program?.getDeclarationDiagnostics?.();
+            return mapTsgoDiagnostics(raw, getDiagnosticSourceFile);
+        },
         getDiagnostics: () => [],
-        getBindAndCheckDiagnostics: () => [],
-        getProgramDiagnostics: () => [],
+        getBindAndCheckDiagnostics: (sourceFile?: any) => {
+            const synRaw = sourceFile?.fileName
+                ? project?.program?.getSyntacticDiagnostics?.(sourceFile.fileName)
+                : project?.program?.getSyntacticDiagnostics?.();
+            const semRaw = sourceFile?.fileName
+                ? project?.program?.getSemanticDiagnostics?.(sourceFile.fileName)
+                : project?.program?.getSemanticDiagnostics?.();
+            return [
+                ...mapTsgoDiagnostics(synRaw, getDiagnosticSourceFile),
+                ...mapTsgoDiagnostics(semRaw, getDiagnosticSourceFile),
+            ];
+        },
+        getProgramDiagnostics: () => mapTsgoDiagnostics(project?.program?.getProgramDiagnostics?.(), getDiagnosticSourceFile),
         getMissingFilePaths: () => [],
         getFilesByNameMap: () => new Map(),
         getClassifiableNames: () => new Set(),
@@ -646,9 +775,13 @@ export function createTsgoChecker(program: any): any {
             _pendingOverlays = undefined;
         }
 
+        const extraFileExtensions = _pendingExtraFileExtensions;
+        _pendingExtraFileExtensions = undefined;
+
         const snapshot: any = _api.updateSnapshot({
             openProject: configFilePath!,
             ...(openFilesWithContent.length > 0 ? { openFilesWithContent } : {}),
+            ...(extraFileExtensions ? { extraFileExtensions } : {}),
         });
         _pendingReferencedProjects = undefined;
         project = snapshot.getProject(configFilePath!);

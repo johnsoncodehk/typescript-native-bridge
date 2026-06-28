@@ -6,3 +6,4 @@
 	path = typescript-go
 	url = https://github.com/microsoft/typescript-go.git
 	branch = main
+	shallow = true

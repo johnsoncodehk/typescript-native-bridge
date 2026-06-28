@@ -100,8 +100,37 @@ function saveOverlay(subDir, overlayDir) {
 	console.log(`save: overlay <- ${files.length} new file(s)`);
 }
 
+// Realign each modified tracked file's line endings to its HEAD blob before
+// diffing. Editors/codegen tools that rewrite a whole file in one EOL style
+// (e.g. CRLF->LF) would otherwise turn a 16-line edit into a whole-file diff;
+// upstream TypeScript ships many CRLF files, so this is a real hazard. Only the
+// EOL convention is realigned to upstream's — content changes are preserved
+// byte-for-byte (latin1 round-trip avoids corrupting UTF-8). This makes the
+// CRLF<->LF flip impossible to leak into a saved patch.
+function realignEolToHead(subDir) {
+	const names = git(subDir, ["diff", "--name-only"]);
+	if (names.status !== 0) return;
+	for (const rel of names.stdout.split("\n").map((s) => s.trim()).filter(Boolean)) {
+		const abs = path.join(subDir, rel);
+		let wt;
+		try { wt = fs.readFileSync(abs); } catch { continue; } // deleted in worktree
+		if (wt.includes(0)) continue; // binary (NUL byte) — leave untouched
+		const head = spawnSync("git", ["-C", subDir, "show", `HEAD:${rel}`], { encoding: "buffer", maxBuffer: 1 << 28 });
+		if (head.status !== 0 || !head.stdout) continue; // new/renamed — no HEAD blob to match
+		const headHasCRLF = head.stdout.includes("\r\n");
+		const wtStr = wt.toString("latin1");
+		const lf = wtStr.replace(/\r\n/g, "\n");
+		const normalized = headHasCRLF ? lf.replace(/\n/g, "\r\n") : lf;
+		if (normalized !== wtStr) {
+			fs.writeFileSync(abs, Buffer.from(normalized, "latin1"));
+			console.log(`eol: realigned ${rel} -> ${headHasCRLF ? "CRLF" : "LF"} (matched HEAD)`);
+		}
+	}
+}
+
 // Save: in-place edits to tracked files (git diff) -> single patch.
 function savePatch(subDir, patchPath) {
+	realignEolToHead(subDir);
 	const diff = git(subDir, ["diff"]);
 	if (diff.status !== 0) {
 		console.error("save: git diff failed\n" + diff.stderr);

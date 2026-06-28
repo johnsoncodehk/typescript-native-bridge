@@ -279,7 +279,7 @@ index 9381d5122..184427c17 100644
      getTypeOfSymbol(symbols: readonly Symbol[]): (Type | undefined)[];
      getTypeOfSymbol(symbolOrSymbols: Symbol | readonly Symbol[]): Type | (Type | undefined)[] | undefined {
 diff --git a/internal/api/proto.go b/internal/api/proto.go
-index 952b572a6..a3fca2126 100644
+index 952b572a6..1598a1960 100644
 --- a/internal/api/proto.go
 +++ b/internal/api/proto.go
 @@ -63,7 +63,8 @@ const (
@@ -292,7 +292,7 @@ index 952b572a6..a3fca2126 100644
  	MethodGetTypeOfSymbol          Method = "getTypeOfSymbol"
  	MethodGetTypesOfSymbols        Method = "getTypesOfSymbols"
  	MethodGetDeclaredTypeOfSymbol  Method = "getDeclaredTypeOfSymbol"
-@@ -309,6 +310,20 @@ type UpdateSnapshotParams struct {
+@@ -309,6 +310,29 @@ type UpdateSnapshotParams struct {
  	// CloseFiles lists files to release in the new snapshot. A file is only fully
  	// closed once every API client that opened it closes it.
  	CloseFiles []DocumentIdentifier `json:"closeFiles,omitempty"`
@@ -302,6 +302,15 @@ index 952b572a6..a3fca2126 100644
 +	// Used by the fork to avoid double disk reads and to inject Volar virtual
 +	// TS content (.vue/.mdx) that doesn't exist on disk.
 +	OpenFilesWithContent []OpenFileWithContent `json:"openFilesWithContent,omitempty"`
++	// ExtraFileExtensions extends tsconfig file-name discovery for allowArbitraryExtensions
++	// hosts (vue-tsc / Volar). Each entry uses core.ScriptKind values (7 = Deferred).
++	ExtraFileExtensions []ExtraFileExtensionWire `json:"extraFileExtensions,omitempty"`
++}
++
++// ExtraFileExtensionWire is the JSON form of tsoptions.FileExtensionInfo for updateSnapshot.
++type ExtraFileExtensionWire struct {
++	Extension string `json:"extension"`
++	ScriptKind int    `json:"scriptKind"`
 +}
 +
 +// OpenFileWithContent pairs a file name with its content and script kind for
@@ -309,11 +318,11 @@ index 952b572a6..a3fca2126 100644
 +type OpenFileWithContent struct {
 +	FileName   string `json:"fileName"`
 +	Content    string `json:"content"`
-+	ScriptKind int    `json:"scriptKind"` // 1=TS 2=JS 3=JSX 4=TSX 5=JSON
++	ScriptKind int    `json:"scriptKind"` // core.ScriptKind (3=TS, 7=Deferred, …)
  }
  
  // ProjectFileChanges describes what source files changed within a single project.
-@@ -353,7 +368,8 @@ var unmarshalers = map[Method]func([]byte) (any, error){
+@@ -353,7 +377,8 @@ var unmarshalers = map[Method]func([]byte) (any, error){
  	MethodGetSymbolAtPosition:      unmarshallerFor[GetSymbolAtPositionParams],
  	MethodGetSymbolsAtPositions:    unmarshallerFor[GetSymbolsAtPositionsParams],
  	MethodGetSymbolAtLocation:      unmarshallerFor[GetSymbolAtLocationParams],
@@ -323,7 +332,7 @@ index 952b572a6..a3fca2126 100644
  	MethodGetTypeOfSymbol:          unmarshallerFor[GetTypeOfSymbolParams],
  	MethodGetTypesOfSymbols:        unmarshallerFor[GetTypesOfSymbolsParams],
  	MethodGetDeclaredTypeOfSymbol:  unmarshallerFor[GetTypeOfSymbolParams],
-@@ -509,6 +525,31 @@ type GetSymbolAtPositionParams struct {
+@@ -509,6 +534,31 @@ type GetSymbolAtPositionParams struct {
  	Position uint32             `json:"position"`
  }
  
@@ -356,7 +365,7 @@ index 952b572a6..a3fca2126 100644
  	Snapshot  SnapshotID         `json:"snapshot"`
  	Project   ProjectID          `json:"project"`
 diff --git a/internal/api/session.go b/internal/api/session.go
-index b350c6334..96e26c6b1 100644
+index b350c6334..d634a8925 100644
 --- a/internal/api/session.go
 +++ b/internal/api/session.go
 @@ -154,6 +154,19 @@ func (sd *snapshotData) newSymbolResponse(symbol *ast.Symbol) *SymbolResponse {
@@ -388,7 +397,25 @@ index b350c6334..96e26c6b1 100644
  	case string(MethodGetTypeOfSymbol):
  		return s.handleGetTypeOfSymbol(ctx, parsed.(*GetTypeOfSymbolParams))
  	case string(MethodGetTypesOfSymbols):
-@@ -856,6 +871,36 @@ func (s *Session) handleUpdateSnapshot(ctx context.Context, params *UpdateSnapsh
+@@ -793,6 +808,17 @@ func (s *Session) handleUpdateSnapshot(ctx context.Context, params *UpdateSnapsh
+ 	s.updateMu.Lock()
+ 	defer s.updateMu.Unlock()
+ 
++	if len(params.ExtraFileExtensions) > 0 {
++		extras := make([]tsoptions.FileExtensionInfo, 0, len(params.ExtraFileExtensions))
++		for _, e := range params.ExtraFileExtensions {
++			extras = append(extras, tsoptions.FileExtensionInfo{
++				Extension:  e.Extension,
++				ScriptKind: core.ScriptKind(e.ScriptKind),
++			})
++		}
++		s.projectSession.SetAPIExtraFileExtensions(extras)
++	}
++
+ 	fileChanges := s.toFileChangeSummary(params.FileChanges)
+ 
+ 	apiRequest := &project.APISnapshotRequest{}
+@@ -856,6 +882,47 @@ func (s *Session) handleUpdateSnapshot(ctx context.Context, params *UpdateSnapsh
  		closedFiles = append(closedFiles, path)
  	}
  
@@ -397,9 +424,9 @@ index b350c6334..96e26c6b1 100644
 +	// all at once and build ONE snapshot with overlays — avoiding N
 +	// individual DidOpenFile snapshot builds. Makes the client host the
 +	// single source of truth for file content (no disk double-read, and
-+	// Volar virtual TS content for .vue/.mdx can be injected).
-+	// ContentOverride=true: creates overlay but skips project reassignment
-+	// (files are already in their configured project from openProject).
++	// Volar virtual TS content for .vue/.mdx can be injected). ContentOverride
++	// replaces on-disk content for files already listed by tsconfig (via
++	// extraFileExtensions) instead of treating them as separate LSP opens.
 +	cwd := s.projectSession.GetCurrentDirectory()
 +	var openFileChanges []project.FileChange
 +	for _, f := range params.OpenFilesWithContent {
@@ -408,14 +435,25 @@ index b350c6334..96e26c6b1 100644
 +			fileName = cwd + "/" + fileName
 +		}
 +		uri := lsproto.DocumentUri("file://" + fileName)
++		path := s.toPath(fileName)
++		// Register as API-open so the file is assigned to a configured project
++		// (same as textDocument/didOpen). Overlays alone do not add root files
++		// such as .vue that tsconfig discovery skips.
++		if !s.openFiles.Has(path) {
++			if apiRequest.OpenFiles == nil {
++				apiRequest.OpenFiles = collections.NewSetWithSizeHint[lsproto.DocumentUri](len(params.OpenFilesWithContent))
++			}
++			apiRequest.OpenFiles.Add(uri)
++			openedFiles = append(openedFiles, path)
++		}
++		languageKind := scriptKindToLanguageKind(f.ScriptKind)
 +		openFileChanges = append(openFileChanges, project.FileChange{
 +			Kind:            project.FileChangeKindOpen,
 +			URI:             uri,
 +			Version:         1,
 +			Content:         f.Content,
 +			ContentOverride: true,
-+			// LanguageKind left empty so tsgo infers scriptKind from the file
-+			// extension (same as disk files) — avoids TS/TSX/JS mismatch.
++			LanguageKind:    languageKind,
 +		})
 +	}
 +	if len(openFileChanges) > 0 {
@@ -425,7 +463,7 @@ index b350c6334..96e26c6b1 100644
  	// Even when nothing is opened or closed, APIUpdate ensures all projects and
  	// files opened by the API are up to date. For an API connected to an LSP server,
  	// this brings the API state up to date with the LSP state and ensures projects
-@@ -1109,6 +1154,62 @@ func (s *Session) handleGetSymbolsAtPositions(ctx context.Context, params *GetSy
+@@ -1109,6 +1176,62 @@ func (s *Session) handleGetSymbolsAtPositions(ctx context.Context, params *GetSy
  	return results, nil
  }
  
@@ -488,30 +526,185 @@ index b350c6334..96e26c6b1 100644
  // handleGetSymbolAtLocation returns the symbol at a node location.
  func (s *Session) handleGetSymbolAtLocation(ctx context.Context, params *GetSymbolAtLocationParams) (*SymbolResponse, error) {
  	setup, err := s.setupChecker(ctx, params.Snapshot, params.Project)
-@@ -3184,3 +3285,23 @@ func (s *Session) handleGetReferencedSymbolsForNode(ctx context.Context, params
+@@ -3184,3 +3307,24 @@ func (s *Session) handleGetReferencedSymbolsForNode(ctx context.Context, params
  	}
  	return result, nil
  }
 +
-+// scriptKindToLanguageKind maps the fork's ScriptKind values (sent from JS)
-+// to lsproto LanguageKind for DidOpenFile overlays.
-+// Fork ScriptKind: 0=Unknown 1=TS 2=JS 3=JSX 4=TSX 5=JSON.
++// scriptKindToLanguageKind maps TypeScript ScriptKind values (from the fork
++// overlay) to lsproto LanguageKind for host-fed content overrides. When the
++// host sends virtual TS for a .vue path, ScriptKind must be honoured — the
++// file extension alone is not enough.
 +func scriptKindToLanguageKind(scriptKind int) lsproto.LanguageKind {
-+	switch scriptKind {
-+	case 1:
++	switch core.ScriptKind(scriptKind) {
++	case core.ScriptKindTS:
 +		return lsproto.LanguageKindTypeScript
-+	case 2:
++	case core.ScriptKindJS:
 +		return lsproto.LanguageKindJavaScript
-+	case 3:
++	case core.ScriptKindJSX:
 +		return lsproto.LanguageKindJavaScriptReact
-+	case 4:
++	case core.ScriptKindTSX:
 +		return lsproto.LanguageKindTypeScriptReact
-+	case 5:
++	case core.ScriptKindJSON:
 +		return lsproto.LanguageKindJSON
 +	default:
-+		return lsproto.LanguageKindTypeScript
++		return ""
 +	}
 +}
+diff --git a/internal/compiler/fileloader.go b/internal/compiler/fileloader.go
+index f8d006e92..8f90cd03b 100644
+--- a/internal/compiler/fileloader.go
++++ b/internal/compiler/fileloader.go
+@@ -125,7 +125,7 @@ func processAllProgramFiles(
+ ) processedFiles {
+ 	compilerOptions := opts.Config.CompilerOptions()
+ 	rootFiles := opts.Config.FileNames()
+-	supportedExtensions := tsoptions.GetSupportedExtensions(compilerOptions, nil /*extraFileExtensions*/)
++	supportedExtensions := tsoptions.GetSupportedExtensions(compilerOptions, opts.Config.ExtraFileExtensions())
+ 	supportedExtensionsWithJsonIfResolveJsonModule := tsoptions.GetSupportedExtensionsWithJsonIfResolveJsonModule(compilerOptions, supportedExtensions)
+ 	var maxNodeModuleJsDepth int
+ 	if p := opts.Config.CompilerOptions().MaxNodeModuleJsDepth; p != nil {
+@@ -148,6 +148,17 @@ func processAllProgramFiles(
+ 	}
+ 	loader.addProjectReferenceTasks(singleThreaded)
+ 	loader.resolver = module.NewResolver(loader.projectReferenceFileMapper.host, compilerOptions, opts.TypingsLocation, opts.ProjectName)
++	if extras := opts.Config.ExtraFileExtensions(); len(extras) > 0 {
++		extraExtensions := make([]string, 0, len(extras))
++		for _, x := range extras {
++			ext := x.Extension
++			if ext != "" && ext[0] != '.' {
++				ext = "." + ext
++			}
++			extraExtensions = append(extraExtensions, ext)
++		}
++		loader.resolver.SetExtraExtensions(extraExtensions)
++	}
+ 	if opts.Tracing != nil {
+ 		defer opts.Tracing.Push(tracing.PhaseProgram, "processRootFiles", map[string]any{"count": len(rootFiles)}, false)()
+ 	}
+diff --git a/internal/compiler/program.go b/internal/compiler/program.go
+index 35093fab6..d7d464dcc 100644
+--- a/internal/compiler/program.go
++++ b/internal/compiler/program.go
+@@ -229,7 +229,7 @@ func (p *Program) GetSourceFileFromReference(origin *ast.SourceFile, ref *ast.Fi
+ 	// Still, without the failed lookup reporting that only the loader does, this isn't terribly complicated
+ 
+ 	fileName := tspath.ResolvePath(tspath.GetDirectoryPath(origin.FileName()), ref.FileName)
+-	supportedExtensionsBase := tsoptions.GetSupportedExtensions(p.Options(), nil /*extraFileExtensions*/)
++	supportedExtensionsBase := tsoptions.GetSupportedExtensions(p.Options(), p.CommandLine().ExtraFileExtensions())
+ 	supportedExtensions := tsoptions.GetSupportedExtensionsWithJsonIfResolveJsonModule(p.Options(), supportedExtensionsBase)
+ 	allowNonTsExtensions := p.Options().AllowNonTsExtensions.IsTrue()
+ 	if tspath.HasExtension(fileName) {
+diff --git a/internal/module/resolver.go b/internal/module/resolver.go
+index cad204f5b..c8966680b 100644
+--- a/internal/module/resolver.go
++++ b/internal/module/resolver.go
+@@ -158,9 +158,18 @@ type Resolver struct {
+ 	compilerOptions *core.CompilerOptions
+ 	typingsLocation string
+ 	projectName     string
++	// extraExtensions are host-registered file extensions (e.g. ".vue") that
++	// should resolve to the file itself, not just to a ".d.<ext>.ts" declaration.
++	extraExtensions []string
+ 	// reportDiagnostic: DiagnosticReporter
+ }
+ 
++// SetExtraExtensions registers host-provided file extensions (e.g. ".vue") so
++// the resolver can resolve module specifiers ending in them to the file itself.
++func (r *Resolver) SetExtraExtensions(extensions []string) {
++	r.extraExtensions = extensions
++}
++
+ type ResolverOptions struct {
+ 	PackageJsonCache *packagejson.InfoCache
+ }
+@@ -1554,6 +1563,20 @@ func (r *resolutionState) tryAddingExtensions(extensionless string, extensions e
+ 		}
+ 		return continueSearching()
+ 	default:
++		// Host-registered extra extensions (e.g. ".vue") resolve to the file
++		// itself, matching how a TS host with extraFileExtensions + a custom
++		// resolver (Volar) resolves them. Preferred over the ".d.<ext>.ts"
++		// declaration fallback below.
++		if originalExtension != "" && len(r.resolver.extraExtensions) > 0 {
++			for _, extraExt := range r.resolver.extraExtensions {
++				if extraExt == originalExtension {
++					if resolved := r.tryExtension(originalExtension, extensionless, false); !resolved.shouldContinueSearching() {
++						return resolved
++					}
++					break
++				}
++			}
++		}
+ 		if extensions&extensionsDeclaration != 0 && !tspath.IsDeclarationFileName(extensionless+originalExtension) {
+ 			if resolved := r.tryExtension(".d"+originalExtension+".ts", extensionless, false); !resolved.shouldContinueSearching() {
+ 				return resolved
+diff --git a/internal/project/configfileregistrybuilder.go b/internal/project/configfileregistrybuilder.go
+index cd4a2f618..e501ffe0a 100644
+--- a/internal/project/configfileregistrybuilder.go
++++ b/internal/project/configfileregistrybuilder.go
+@@ -31,6 +31,7 @@ type configFileRegistryBuilder struct {
+ 	snapshotID                   uint64
+ 	sessionOptions               *SessionOptions
+ 	customConfigFileName         string
++	extraFileExtensions          []tsoptions.FileExtensionInfo
+ 
+ 	base                        *ConfigFileRegistry
+ 	configs                     *dirty.SyncMap[tspath.Path, *configFileEntry]
+@@ -46,6 +47,7 @@ func newConfigFileRegistryBuilder(
+ 	snapshotID uint64,
+ 	sessionOptions *SessionOptions,
+ 	customConfigFileName string,
++	extraFileExtensions []tsoptions.FileExtensionInfo,
+ 	logger *logging.LogTree,
+ ) *configFileRegistryBuilder {
+ 	return &configFileRegistryBuilder{
+@@ -58,6 +60,7 @@ func newConfigFileRegistryBuilder(
+ 		snapshotID:                   snapshotID,
+ 		customConfigFileName:         customConfigFileName,
+ 		customConfigFileNameChanged:  customConfigFileName != oldConfigFileRegistry.customConfigFileName,
++		extraFileExtensions:          extraFileExtensions,
+ 
+ 		configs:         dirty.NewSyncMap(oldConfigFileRegistry.configs),
+ 		configFileNames: dirty.NewMap(oldConfigFileRegistry.configFileNames),
+@@ -125,7 +128,36 @@ func (c *configFileRegistryBuilder) reloadIfNeeded(entry *configFileEntry, fileN
+ 	case PendingReloadFull:
+ 		logger.Log("Loading config file: " + fileName)
+ 		oldCommandLine := entry.commandLine
+-		entry.commandLine, _ = tsoptions.GetParsedCommandLineOfConfigFilePath(fileName, path, nil, nil /*optionsRaw*/, c, c)
++		configFileText, ok := c.fs.ReadFile(fileName)
++		if !ok {
++			logger.Log("Failed to read config file: " + fileName)
++			entry.commandLine = nil
++		} else {
++			tsConfigSourceFile := tsoptions.NewTsconfigSourceFileFromFilePath(fileName, path, configFileText)
++			entry.commandLine = tsoptions.ParseJsonSourceFileConfigFileContent(
++				tsConfigSourceFile,
++				c,
++				tspath.GetDirectoryPath(fileName),
++				nil, /*existingOptions*/
++				nil, /*existingOptionsRaw*/
++				fileName,
++				nil, /*resolutionStack*/
++				c.extraFileExtensions,
++				c,
++			)
++			// When host-provided extra file extensions are present (e.g. Volar
++			// registers ".vue"), enable allowArbitraryExtensions so the resolver
++			// may resolve those extensions to the file itself and the include
++			// check does not reject them. Mirrors Volar's runtime setting of
++			// options.allowArbitraryExtensions, which the on-disk tsconfig lacks.
++			// Only infer when the option is unset — an explicit `false` in
++			// tsconfig is the user opting out and must be respected.
++			if entry.commandLine != nil && len(c.extraFileExtensions) > 0 {
++				if opts := entry.commandLine.CompilerOptions(); opts.AllowArbitraryExtensions == core.TSUnknown {
++					opts.AllowArbitraryExtensions = core.TSTrue
++				}
++			}
++		}
+ 		c.updateExtendingConfigs(path, entry.commandLine, oldCommandLine)
+ 		c.updateRootFilesWatch(fileName, entry)
+ 		logger.Log("Finished loading config file")
 diff --git a/internal/project/filechange.go b/internal/project/filechange.go
 index edc209b39..21928e66e 100644
 --- a/internal/project/filechange.go
@@ -595,10 +788,27 @@ index 4659530ff..64a4c905b 100644
  		assert.Assert(t, result.Changed.Has(testURI1), "close then open should mark as changed")
  		// Should have the new content
 diff --git a/internal/project/projectcollectionbuilder.go b/internal/project/projectcollectionbuilder.go
-index 4096e30f3..4f95371d2 100644
+index 4096e30f3..207fe560f 100644
 --- a/internal/project/projectcollectionbuilder.go
 +++ b/internal/project/projectcollectionbuilder.go
-@@ -251,7 +251,7 @@ func (b *ProjectCollectionBuilder) HandleAPIRequest(apiRequest *APISnapshotReque
+@@ -62,6 +62,7 @@ func newProjectCollectionBuilder(
+ 	compilerOptionsForInferredProjects *core.CompilerOptions,
+ 	sessionOptions *SessionOptions,
+ 	customConfigFileName string,
++	extraFileExtensions []tsoptions.FileExtensionInfo,
+ 	parseCache *ParseCache,
+ 	extendedConfigCache *ExtendedConfigCache,
+ 	client Client,
+@@ -75,7 +76,7 @@ func newProjectCollectionBuilder(
+ 		parseCache:                         parseCache,
+ 		extendedConfigCache:                extendedConfigCache,
+ 		base:                               oldProjectCollection,
+-		configFileRegistryBuilder:          newConfigFileRegistryBuilder(lsproto.GetClientCapabilities(ctx).Workspace.DidChangeWatchedFiles.RelativePatternSupport, fs, oldConfigFileRegistry, extendedConfigCache, newSnapshotID, sessionOptions, customConfigFileName, nil),
++		configFileRegistryBuilder:          newConfigFileRegistryBuilder(lsproto.GetClientCapabilities(ctx).Workspace.DidChangeWatchedFiles.RelativePatternSupport, fs, oldConfigFileRegistry, extendedConfigCache, newSnapshotID, sessionOptions, customConfigFileName, extraFileExtensions, nil),
+ 		newSnapshotID:                      newSnapshotID,
+ 		configuredProjects:                 dirty.NewSyncMap(oldProjectCollection.configuredProjects),
+ 		inferredProject:                    dirty.NewBox(oldProjectCollection.inferredProject),
+@@ -251,7 +252,7 @@ func (b *ProjectCollectionBuilder) HandleAPIRequest(apiRequest *APISnapshotReque
  }
  
  func (b *ProjectCollectionBuilder) DidChangeFiles(summary FileChangeSummary, logger *logging.LogTree) {
@@ -607,7 +817,7 @@ index 4096e30f3..4f95371d2 100644
  
  	changedFiles := make([]tspath.Path, 0, summary.Changed.Len())
  	for uri := range summary.Changed.Keys() {
-@@ -319,9 +319,17 @@ func (b *ProjectCollectionBuilder) DidChangeFiles(summary FileChangeSummary, log
+@@ -319,9 +320,17 @@ func (b *ProjectCollectionBuilder) DidChangeFiles(summary FileChangeSummary, log
  		return true
  	})
  
@@ -629,10 +839,42 @@ index 4096e30f3..4f95371d2 100644
  		openFileResult := b.ensureConfiguredProjectAndAncestorsForFile(fileName, path, logger)
  		b.cleanupConfiguredProjects(&openFileResult.retain, logger)
 diff --git a/internal/project/session.go b/internal/project/session.go
-index a5c7fefd4..a22a8bf10 100644
+index a5c7fefd4..a717cf2d6 100644
 --- a/internal/project/session.go
 +++ b/internal/project/session.go
-@@ -329,6 +329,21 @@ func (s *Session) DidCloseFile(ctx context.Context, uri lsproto.DocumentUri) {
+@@ -26,6 +26,7 @@ import (
+ 	"github.com/microsoft/typescript-go/internal/project/ata"
+ 	"github.com/microsoft/typescript-go/internal/project/background"
+ 	"github.com/microsoft/typescript-go/internal/project/logging"
++	"github.com/microsoft/typescript-go/internal/tsoptions"
+ 	"github.com/microsoft/typescript-go/internal/tspath"
+ 	"github.com/microsoft/typescript-go/internal/vfs"
+ )
+@@ -110,6 +111,8 @@ type Session struct {
+ 	compilerOptionsForInferredProjects *core.CompilerOptions
+ 	typingsInstaller                   *ata.TypingsInstaller
+ 	backgroundQueue                    *background.Queue
++	// Host-provided extra file extensions (vue-tsc / Volar). Applied when parsing tsconfigs for API snapshots.
++	apiExtraFileExtensions []tsoptions.FileExtensionInfo
+ 
+ 	// snapshotID is the counter for snapshot IDs. It does not necessarily
+ 	// equal the `snapshot.ID`. It is stored on Session instead of globally
+@@ -261,6 +264,14 @@ func (s *Session) GetCurrentDirectory() string {
+ 	return s.options.CurrentDirectory
+ }
+ 
++func (s *Session) SetAPIExtraFileExtensions(extras []tsoptions.FileExtensionInfo) {
++	s.apiExtraFileExtensions = extras
++}
++
++func (s *Session) APIExtraFileExtensions() []tsoptions.FileExtensionInfo {
++	return s.apiExtraFileExtensions
++}
++
+ // Gets copy of current configuration
+ func (s *Session) Config() lsutil.UserPreferences {
+ 	s.userConfigRWMu.Lock()
+@@ -329,6 +340,21 @@ func (s *Session) DidCloseFile(ctx context.Context, uri lsproto.DocumentUri) {
  	s.ScheduleSnapshotUpdate(UpdateReasonDidCloseFile)
  }
  
@@ -655,7 +897,7 @@ index a5c7fefd4..a22a8bf10 100644
  	s.cancelDiagnosticsRefresh()
  	s.cancelWarmAutoImportCache()
 diff --git a/internal/project/snapshot.go b/internal/project/snapshot.go
-index 61af433d3..6b5da65a7 100644
+index 61af433d3..04b4f3370 100644
 --- a/internal/project/snapshot.go
 +++ b/internal/project/snapshot.go
 @@ -264,8 +264,8 @@ func (s *Snapshot) Clone(ctx context.Context, change SnapshotChange, overlays ma
@@ -669,7 +911,15 @@ index 61af433d3..6b5da65a7 100644
  		case UpdateReasonDidCloseFile:
  			logger.Logf("Reason: DidCloseFile - %v", change.fileChanges.Closed)
  		case UpdateReasonDidChangeCompilerOptionsForInferredProjects:
-@@ -381,8 +381,8 @@ func (s *Snapshot) Clone(ctx context.Context, change SnapshotChange, overlays ma
+@@ -333,6 +333,7 @@ func (s *Snapshot) Clone(ctx context.Context, change SnapshotChange, overlays ma
+ 		compilerOptionsForInferredProjects,
+ 		s.sessionOptions,
+ 		customConfigFileName,
++		session.apiExtraFileExtensions,
+ 		session.parseCache,
+ 		session.extendedConfigCache,
+ 		session.client,
+@@ -381,8 +382,8 @@ func (s *Snapshot) Clone(ctx context.Context, change SnapshotChange, overlays ma
  	// Clean cached disk files not touched by any open project on file open, close, delete,
  	// or when explicitly requested (e.g. by an idle timer).
  	shouldCleanDiskCache := change.cleanDiskCache ||
@@ -709,3 +959,33 @@ index b8629b15d..abc42a7c3 100644
  			}
  		}
  	}
+diff --git a/internal/tsoptions/parsedcommandline.go b/internal/tsoptions/parsedcommandline.go
+index ab93e527f..ad3a1fb48 100644
+--- a/internal/tsoptions/parsedcommandline.go
++++ b/internal/tsoptions/parsedcommandline.go
+@@ -89,6 +89,13 @@ func (p *ParsedCommandLine) ConfigName() string {
+ 	return p.ConfigFile.SourceFile.FileName()
+ }
+ 
++func (p *ParsedCommandLine) ExtraFileExtensions() []FileExtensionInfo {
++	if p == nil {
++		return nil
++	}
++	return p.extraFileExtensions
++}
++
+ func (p *ParsedCommandLine) SourceToProjectReference() map[tspath.Path]*SourceOutputAndProjectReference {
+ 	return p.sourceToProjectReference
+ }
+diff --git a/internal/tsoptions/tsconfigparsing.go b/internal/tsoptions/tsconfigparsing.go
+index 4f8578275..bc0971d30 100644
+--- a/internal/tsoptions/tsconfigparsing.go
++++ b/internal/tsoptions/tsconfigparsing.go
+@@ -1673,7 +1673,6 @@ func getFileNamesFromConfigSpecs(
+ 	host vfs.FS,
+ 	extraFileExtensions []FileExtensionInfo,
+ ) ([]string, int) {
+-	extraFileExtensions = []FileExtensionInfo{}
+ 	basePath = tspath.NormalizePath(basePath)
+ 	keyMappper := func(value string) string { return tspath.GetCanonicalFileName(value, host.UseCaseSensitiveFileNames()) }
+ 	// Literal file names (provided via the "files" array in tsconfig.json) are stored in a
