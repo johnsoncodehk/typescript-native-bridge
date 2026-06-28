@@ -1,0 +1,711 @@
+diff --git a/_packages/native-preview/src/api/async/api.ts b/_packages/native-preview/src/api/async/api.ts
+index 27b3ad932..856cb3d79 100644
+--- a/_packages/native-preview/src/api/async/api.ts
++++ b/_packages/native-preview/src/api/async/api.ts
+@@ -51,6 +51,7 @@ import type {
+     ProjectResponse,
+     SignatureResponse,
+     SymbolResponse,
++    GetResolvedReferencesInFileResponse,
+     TypePredicateResponse,
+     TypeResponse,
+     UpdateSnapshotParams,
+@@ -755,6 +756,30 @@ export class Checker {
+         return data.map(d => d ? this.objectRegistry.getOrCreateSymbol(d) : undefined);
+     }
+ 
++    /** Batch-resolves symbols at every Identifier in a file (one RPC). Light symbol payloads. */
++    async getResolvedReferencesInFile(file: DocumentIdentifier): Promise<GetResolvedReferencesInFileResponse> {
++        const data = await this.client.apiRequest<GetResolvedReferencesInFileResponse>("getResolvedReferencesInFile", {
++            snapshot: this.snapshotId,
++            project: this.projectId,
++            file,
++        });
++        return data ?? { references: [], symbols: [] };
++    }
++
++    /** Register light symbols and return end-position → Symbol map for scope-manager prefetch. */
++    async prefetchResolvedReferences(file: DocumentIdentifier): Promise<Map<number, Symbol | undefined>> {
++        const data = await this.getResolvedReferencesInFile(file);
++        const byId = new Map<number, Symbol>();
++        for (const s of data.symbols) {
++            byId.set(s.id, this.objectRegistry.getOrCreateSymbol(s));
++        }
++        const byPos = new Map<number, Symbol | undefined>();
++        for (const ref of data.references) {
++            byPos.set(ref.position, byId.get(ref.symbolId));
++        }
++        return byPos;
++    }
++
+     getTypeOfSymbol(symbol: Symbol): Promise<Type | undefined>;
+     getTypeOfSymbol(symbols: readonly Symbol[]): Promise<(Type | undefined)[]>;
+     async getTypeOfSymbol(symbolOrSymbols: Symbol | readonly Symbol[]): Promise<Type | (Type | undefined)[] | undefined> {
+diff --git a/_packages/native-preview/src/api/node/node.generated.ts b/_packages/native-preview/src/api/node/node.generated.ts
+index ff74677b3..82d0e3f28 100644
+--- a/_packages/native-preview/src/api/node/node.generated.ts
++++ b/_packages/native-preview/src/api/node/node.generated.ts
+@@ -36,6 +36,12 @@ import {
+ } from "./protocol.ts";
+ 
+ export class RemoteNodeList extends Array<RemoteNode> implements NodeArray<RemoteNode> {
++    // Array.prototype.map/filter/etc use Symbol.species to construct the
++    // result. Without this override, they'd try `new RemoteNodeList(0)`
++    // which expects (view, index, parent, sourceFile, offsetNodes) —
++    // producing a broken instance. Force plain Array results instead.
++    static get [Symbol.species](): ArrayConstructor { return Array; }
++
+     parent: RemoteNode;
+     hasTrailingComma?: boolean;
+     transformFlags: number = 0;
+@@ -197,7 +203,7 @@ export class RemoteNode extends RemoteNodeBase implements Node {
+     }
+     protected _sourceFile: SourceFileInfo;
+     get id(): string {
+-        return `${this.index}.${this.kind}.${this.sourceFile.path}`;
++        return `${this.index}.${this._rawKind}.${this.sourceFile.path}`;
+     }
+ 
+     constructor(view: DataView, index: number, parent: RemoteNode, sourceFile: SourceFileInfo, offsetNodes: number) {
+@@ -222,7 +228,7 @@ export class RemoteNode extends RemoteNodeBase implements Node {
+                         return result;
+                     }
+                 }
+-                else if (child.kind !== SyntaxKind.JSDoc) {
++                else if (child._rawKind !== SyntaxKind.JSDoc) {
+                     const result = visitNode(child);
+                     if (result) {
+                         return result;
+@@ -242,7 +248,7 @@ export class RemoteNode extends RemoteNodeBase implements Node {
+         let next = this.index + 1;
+         do {
+             const child = this.getOrCreateChildAtNodeIndex(next);
+-            if (!(child instanceof RemoteNodeList) && child.kind === SyntaxKind.JSDoc) {
++            if (!(child instanceof RemoteNodeList) && child._rawKind === SyntaxKind.JSDoc) {
+                 (result ??= []).push(child);
+             }
+             next = child.next;
+@@ -322,7 +328,7 @@ export class RemoteNode extends RemoteNodeBase implements Node {
+     private getNamedChild(propertyName: string): RemoteNode | RemoteNodeList | undefined {
+         // JSDocPropertyTag and JSDocParameterTag have runtime-dependent child order based on isNameFirst.
+         // Handle them before the general childProperties lookup.
+-        const kind = this.kind;
++        const kind = this._rawKind;
+         if (kind === SyntaxKind.JSDocPropertyTag) {
+             let order: number;
+             switch (propertyName) {
+@@ -418,7 +424,7 @@ export class RemoteNode extends RemoteNodeBase implements Node {
+         const result = [];
+         result.push(`index: ${this.index}`);
+         result.push(`byteIndex: ${this._byteIndex}`);
+-        result.push(`kind: ${SyntaxKind[this.kind]}`);
++        result.push(`kind: ${SyntaxKind[this._rawKind]}`);
+         result.push(`pos: ${this.pos}`);
+         result.push(`end: ${this.end}`);
+         result.push(`next: ${this.next}`);
+@@ -430,7 +436,7 @@ export class RemoteNode extends RemoteNodeBase implements Node {
+         result.push(`dataType: ${dataType}`);
+         if (this.dataType === NODE_DATA_TYPE_CHILDREN) {
+             result.push(`childMask: ${this.childMask.toString(2).padStart(8, "0")}`);
+-            result.push(`childProperties: ${childProperties[this.kind]?.join(", ")}`);
++            result.push(`childProperties: ${childProperties[this._rawKind]?.join(", ")}`);
+         }
+         return result.join("\n");
+     }
+@@ -494,21 +500,21 @@ export class RemoteNode extends RemoteNodeBase implements Node {
+     // ═══ Generated SyntaxKind union property getters ═══
+ 
+     get keyword(): SyntaxKind | undefined {
+-        switch (this.kind) {
++        switch (this._rawKind) {
+             case SyntaxKind.ModuleDeclaration:
+                 return (this.data >> 24) & 0x1 ? SyntaxKind.NamespaceKeyword : SyntaxKind.ModuleKeyword;
+         }
+     }
+ 
+     get keywordToken(): SyntaxKind | undefined {
+-        switch (this.kind) {
++        switch (this._rawKind) {
+             case SyntaxKind.MetaProperty:
+                 return (this.data >> 24) & 0x1 ? SyntaxKind.NewKeyword : SyntaxKind.ImportKeyword;
+         }
+     }
+ 
+     get operator(): SyntaxKind | undefined {
+-        switch (this.kind) {
++        switch (this._rawKind) {
+             case SyntaxKind.PrefixUnaryExpression: {
+                 const idx = (this.data >> 24) & 0x7;
+                 if (idx === 1) return SyntaxKind.MinusToken;
+@@ -530,7 +536,7 @@ export class RemoteNode extends RemoteNodeBase implements Node {
+     }
+ 
+     get phaseModifier(): SyntaxKind | undefined {
+-        switch (this.kind) {
++        switch (this._rawKind) {
+             case SyntaxKind.ImportClause: {
+                 const idx = (this.data >> 24) & 0x3;
+                 if (idx === 0) return undefined;
+@@ -540,7 +546,7 @@ export class RemoteNode extends RemoteNodeBase implements Node {
+     }
+ 
+     get token(): SyntaxKind | undefined {
+-        switch (this.kind) {
++        switch (this._rawKind) {
+             case SyntaxKind.HeritageClause:
+                 return (this.data >> 24) & 0x1 ? SyntaxKind.ImplementsKeyword : SyntaxKind.ExtendsKeyword;
+             case SyntaxKind.ImportAttributes:
+@@ -549,7 +555,7 @@ export class RemoteNode extends RemoteNodeBase implements Node {
+     }
+ 
+     get templateFlags(): number | undefined {
+-        switch (this.kind) {
++        switch (this._rawKind) {
+             case SyntaxKind.TemplateHead:
+             case SyntaxKind.TemplateMiddle:
+             case SyntaxKind.TemplateTail:
+@@ -559,7 +565,7 @@ export class RemoteNode extends RemoteNodeBase implements Node {
+     }
+ 
+     get tokenFlags(): number {
+-        switch (this.kind) {
++        switch (this._rawKind) {
+             case SyntaxKind.StringLiteral:
+             case SyntaxKind.NumericLiteral:
+             case SyntaxKind.BigIntLiteral:
+@@ -865,7 +871,7 @@ export class RemoteNode extends RemoteNodeBase implements Node {
+     // ═══ Generated string property getters ═══
+ 
+     get text(): string | undefined {
+-        switch (this.kind) {
++        switch (this._rawKind) {
+             case SyntaxKind.Identifier:
+             case SyntaxKind.PrivateIdentifier:
+             case SyntaxKind.JsxText:
+@@ -893,7 +899,7 @@ export class RemoteNode extends RemoteNodeBase implements Node {
+     }
+ 
+     get rawText(): string | undefined {
+-        switch (this.kind) {
++        switch (this._rawKind) {
+             case SyntaxKind.TemplateHead:
+             case SyntaxKind.TemplateMiddle:
+             case SyntaxKind.TemplateTail:
+diff --git a/_packages/native-preview/src/api/node/node.infrastructure.ts b/_packages/native-preview/src/api/node/node.infrastructure.ts
+index f5f3d842e..e81417976 100644
+--- a/_packages/native-preview/src/api/node/node.infrastructure.ts
++++ b/_packages/native-preview/src/api/node/node.infrastructure.ts
+@@ -142,6 +142,11 @@ export class RemoteNodeBase {
+         return this.view.getUint32(this._byteIndex + NODE_OFFSET_KIND, true);
+     }
+ 
++    /** Raw kind without fork remapping — used by tsgo internal dispatchers. */
++    get _rawKind(): SyntaxKind {
++        return this.view.getUint32(this._byteIndex + NODE_OFFSET_KIND, true);
++    }
++
+     get pos(): number {
+         return this.view.getInt32(this._byteIndex + NODE_OFFSET_POS, true);
+     }
+diff --git a/_packages/native-preview/src/api/proto.ts b/_packages/native-preview/src/api/proto.ts
+index 656f7cc4e..09d5f8470 100644
+--- a/_packages/native-preview/src/api/proto.ts
++++ b/_packages/native-preview/src/api/proto.ts
+@@ -183,6 +183,23 @@ export interface SymbolResponse {
+     exportSymbol?: number;
+ }
+ 
++export interface ResolvedReferenceEntry {
++    position: number;
++    symbolId: number;
++}
++
++export interface LightSymbolResponse {
++    id: number;
++    name: string;
++    flags: number;
++    checkFlags: number;
++}
++
++export interface GetResolvedReferencesInFileResponse {
++    references: ResolvedReferenceEntry[];
++    symbols: LightSymbolResponse[];
++}
++
+ export interface TypeResponse {
+     id: number;
+     flags: number;
+diff --git a/_packages/native-preview/src/api/sync/api.ts b/_packages/native-preview/src/api/sync/api.ts
+index 9381d5122..184427c17 100644
+--- a/_packages/native-preview/src/api/sync/api.ts
++++ b/_packages/native-preview/src/api/sync/api.ts
+@@ -57,6 +57,7 @@ import type {
+     LSPUpdateSnapshotParams,
+     ProfileResult,
+     ProjectResponse,
++    GetResolvedReferencesInFileResponse,
+     SignatureResponse,
+     SymbolResponse,
+     TypePredicateResponse,
+@@ -763,6 +764,30 @@ export class Checker {
+         return data.map(d => d ? this.objectRegistry.getOrCreateSymbol(d) : undefined);
+     }
+ 
++    /** Batch-resolves symbols at every Identifier in a file (one RPC). Light symbol payloads. */
++    getResolvedReferencesInFile(file: DocumentIdentifier): GetResolvedReferencesInFileResponse {
++        const data = this.client.apiRequest<GetResolvedReferencesInFileResponse>("getResolvedReferencesInFile", {
++            snapshot: this.snapshotId,
++            project: this.projectId,
++            file,
++        });
++        return data ?? { references: [], symbols: [] };
++    }
++
++    /** Register light symbols and return end-position → Symbol map for scope-manager prefetch. */
++    prefetchResolvedReferences(file: DocumentIdentifier): Map<number, Symbol | undefined> {
++        const data = this.getResolvedReferencesInFile(file);
++        const byId = new Map<number, Symbol>();
++        for (const s of data.symbols) {
++            byId.set(s.id, this.objectRegistry.getOrCreateSymbol(s));
++        }
++        const byPos = new Map<number, Symbol | undefined>();
++        for (const ref of data.references) {
++            byPos.set(ref.position, byId.get(ref.symbolId));
++        }
++        return byPos;
++    }
++
+     getTypeOfSymbol(symbol: Symbol): Type | undefined;
+     getTypeOfSymbol(symbols: readonly Symbol[]): (Type | undefined)[];
+     getTypeOfSymbol(symbolOrSymbols: Symbol | readonly Symbol[]): Type | (Type | undefined)[] | undefined {
+diff --git a/internal/api/proto.go b/internal/api/proto.go
+index 952b572a6..a3fca2126 100644
+--- a/internal/api/proto.go
++++ b/internal/api/proto.go
+@@ -63,7 +63,8 @@ const (
+ 	MethodGetSymbolAtPosition      Method = "getSymbolAtPosition"
+ 	MethodGetSymbolsAtPositions    Method = "getSymbolsAtPositions"
+ 	MethodGetSymbolAtLocation      Method = "getSymbolAtLocation"
+-	MethodGetSymbolsAtLocations    Method = "getSymbolsAtLocations"
++	MethodGetSymbolsAtLocations           Method = "getSymbolsAtLocations"
++	MethodGetResolvedReferencesInFile     Method = "getResolvedReferencesInFile"
+ 	MethodGetTypeOfSymbol          Method = "getTypeOfSymbol"
+ 	MethodGetTypesOfSymbols        Method = "getTypesOfSymbols"
+ 	MethodGetDeclaredTypeOfSymbol  Method = "getDeclaredTypeOfSymbol"
+@@ -309,6 +310,20 @@ type UpdateSnapshotParams struct {
+ 	// CloseFiles lists files to release in the new snapshot. A file is only fully
+ 	// closed once every API client that opened it closes it.
+ 	CloseFiles []DocumentIdentifier `json:"closeFiles,omitempty"`
++	// OpenFilesWithContent feeds file content from the client (host overlays)
++	// instead of reading from disk. Each entry creates a SnapshotFS overlay,
++	// making the client host the single source of truth for file content.
++	// Used by the fork to avoid double disk reads and to inject Volar virtual
++	// TS content (.vue/.mdx) that doesn't exist on disk.
++	OpenFilesWithContent []OpenFileWithContent `json:"openFilesWithContent,omitempty"`
++}
++
++// OpenFileWithContent pairs a file name with its content and script kind for
++// host-fed overlays (mirrors LSP textDocument/didOpen with content).
++type OpenFileWithContent struct {
++	FileName   string `json:"fileName"`
++	Content    string `json:"content"`
++	ScriptKind int    `json:"scriptKind"` // 1=TS 2=JS 3=JSX 4=TSX 5=JSON
+ }
+ 
+ // ProjectFileChanges describes what source files changed within a single project.
+@@ -353,7 +368,8 @@ var unmarshalers = map[Method]func([]byte) (any, error){
+ 	MethodGetSymbolAtPosition:      unmarshallerFor[GetSymbolAtPositionParams],
+ 	MethodGetSymbolsAtPositions:    unmarshallerFor[GetSymbolsAtPositionsParams],
+ 	MethodGetSymbolAtLocation:      unmarshallerFor[GetSymbolAtLocationParams],
+-	MethodGetSymbolsAtLocations:    unmarshallerFor[GetSymbolsAtLocationsParams],
++	MethodGetSymbolsAtLocations:           unmarshallerFor[GetSymbolsAtLocationsParams],
++	MethodGetResolvedReferencesInFile:       unmarshallerFor[GetResolvedReferencesInFileParams],
+ 	MethodGetTypeOfSymbol:          unmarshallerFor[GetTypeOfSymbolParams],
+ 	MethodGetTypesOfSymbols:        unmarshallerFor[GetTypesOfSymbolsParams],
+ 	MethodGetDeclaredTypeOfSymbol:  unmarshallerFor[GetTypeOfSymbolParams],
+@@ -509,6 +525,31 @@ type GetSymbolAtPositionParams struct {
+ 	Position uint32             `json:"position"`
+ }
+ 
++type GetResolvedReferencesInFileParams struct {
++	Snapshot SnapshotID         `json:"snapshot"`
++	Project  ProjectID          `json:"project"`
++	File     DocumentIdentifier `json:"file"`
++}
++
++// ResolvedReferenceEntry maps a UTF-16 end position to a symbol id (light batch prefetch).
++type ResolvedReferenceEntry struct {
++	Position uint32   `json:"position"`
++	SymbolId SymbolID `json:"symbolId"`
++}
++
++// LightSymbolResponse is a symbol wire shape without declarations (cheap to serialize).
++type LightSymbolResponse struct {
++	Id         SymbolID `json:"id"`
++	Name       string   `json:"name"`
++	Flags      uint32   `json:"flags"`
++	CheckFlags uint32   `json:"checkFlags"`
++}
++
++type GetResolvedReferencesInFileResponse struct {
++	References []ResolvedReferenceEntry `json:"references"`
++	Symbols    []LightSymbolResponse    `json:"symbols"`
++}
++
+ type GetSymbolsAtPositionsParams struct {
+ 	Snapshot  SnapshotID         `json:"snapshot"`
+ 	Project   ProjectID          `json:"project"`
+diff --git a/internal/api/session.go b/internal/api/session.go
+index b350c6334..96e26c6b1 100644
+--- a/internal/api/session.go
++++ b/internal/api/session.go
+@@ -154,6 +154,19 @@ func (sd *snapshotData) newSymbolResponse(symbol *ast.Symbol) *SymbolResponse {
+ 	return resp
+ }
+ 
++// newLightSymbolResponse registers a symbol and returns id/name/flags only (no declarations).
++func (sd *snapshotData) newLightSymbolResponse(symbol *ast.Symbol) *LightSymbolResponse {
++	if symbol == nil {
++		return nil
++	}
++	return &LightSymbolResponse{
++		Id:         sd.registerSymbol(symbol),
++		Name:       symbol.Name,
++		Flags:      uint32(symbol.Flags),
++		CheckFlags: uint32(symbol.CheckFlags),
++	}
++}
++
+ func (sd *snapshotData) registerSymbol(symbol *ast.Symbol) SymbolID {
+ 	if symbol == nil {
+ 		return 0
+@@ -535,6 +548,8 @@ func (s *Session) HandleRequest(ctx context.Context, method string, params json.
+ 		return s.handleGetSymbolAtLocation(ctx, parsed.(*GetSymbolAtLocationParams))
+ 	case string(MethodGetSymbolsAtLocations):
+ 		return s.handleGetSymbolsAtLocations(ctx, parsed.(*GetSymbolsAtLocationsParams))
++	case string(MethodGetResolvedReferencesInFile):
++		return s.handleGetResolvedReferencesInFile(ctx, parsed.(*GetResolvedReferencesInFileParams))
+ 	case string(MethodGetTypeOfSymbol):
+ 		return s.handleGetTypeOfSymbol(ctx, parsed.(*GetTypeOfSymbolParams))
+ 	case string(MethodGetTypesOfSymbols):
+@@ -856,6 +871,36 @@ func (s *Session) handleUpdateSnapshot(ctx context.Context, params *UpdateSnapsh
+ 		closedFiles = append(closedFiles, path)
+ 	}
+ 
++	// Open files with content: feed host-provided content as overlays by
++	// enqueuing pending changes. APIUpdate (called below) will flush them
++	// all at once and build ONE snapshot with overlays — avoiding N
++	// individual DidOpenFile snapshot builds. Makes the client host the
++	// single source of truth for file content (no disk double-read, and
++	// Volar virtual TS content for .vue/.mdx can be injected).
++	// ContentOverride=true: creates overlay but skips project reassignment
++	// (files are already in their configured project from openProject).
++	cwd := s.projectSession.GetCurrentDirectory()
++	var openFileChanges []project.FileChange
++	for _, f := range params.OpenFilesWithContent {
++		fileName := f.FileName
++		if !strings.HasPrefix(fileName, "/") {
++			fileName = cwd + "/" + fileName
++		}
++		uri := lsproto.DocumentUri("file://" + fileName)
++		openFileChanges = append(openFileChanges, project.FileChange{
++			Kind:            project.FileChangeKindOpen,
++			URI:             uri,
++			Version:         1,
++			Content:         f.Content,
++			ContentOverride: true,
++			// LanguageKind left empty so tsgo infers scriptKind from the file
++			// extension (same as disk files) — avoids TS/TSX/JS mismatch.
++		})
++	}
++	if len(openFileChanges) > 0 {
++		s.projectSession.EnqueueOpenFiles(openFileChanges)
++	}
++
+ 	// Even when nothing is opened or closed, APIUpdate ensures all projects and
+ 	// files opened by the API are up to date. For an API connected to an LSP server,
+ 	// this brings the API state up to date with the LSP state and ensures projects
+@@ -1109,6 +1154,62 @@ func (s *Session) handleGetSymbolsAtPositions(ctx context.Context, params *GetSy
+ 	return results, nil
+ }
+ 
++// handleGetResolvedReferencesInFile walks a source file Go-side and resolves symbols at
++// every Identifier in one checker acquisition. Returns light symbol payloads plus
++// (endPosition → symbolId) entries for JS-side prefetch (one RPC per file vs ~30k).
++func (s *Session) handleGetResolvedReferencesInFile(ctx context.Context, params *GetResolvedReferencesInFileParams) (*GetResolvedReferencesInFileResponse, error) {
++	setup, err := s.setupChecker(ctx, params.Snapshot, params.Project)
++	if err != nil {
++		return nil, err
++	}
++	defer setup.done()
++
++	sourceFile := setup.program.GetSourceFile(params.File.ToFileName())
++	if sourceFile == nil {
++		return nil, fmt.Errorf("%w: source file not found: %v", ErrClientError, params.File)
++	}
++
++	positionMap := sourceFile.GetPositionMap()
++	refs := make([]ResolvedReferenceEntry, 0, 256)
++	lightByID := make(map[SymbolID]*LightSymbolResponse)
++
++	var visit func(*ast.Node) bool
++	visit = func(node *ast.Node) bool {
++		if node == nil {
++			return false
++		}
++		if ast.IsIdentifier(node) || node.Kind == ast.KindPrivateIdentifier {
++			symbol := setup.checker.GetSymbolAtLocation(node)
++			if symbol != nil {
++				light := setup.sd.newLightSymbolResponse(symbol)
++				if light != nil {
++					endUTF16 := positionMap.UTF8ToUTF16(node.End())
++					refs = append(refs, ResolvedReferenceEntry{
++						Position: uint32(endUTF16),
++						SymbolId: light.Id,
++					})
++					if _, ok := lightByID[light.Id]; !ok {
++						lightByID[light.Id] = light
++					}
++				}
++			}
++		}
++		node.ForEachChild(visit)
++		return false
++	}
++	visit(sourceFile.AsNode())
++
++	symbols := make([]LightSymbolResponse, 0, len(lightByID))
++	for _, sym := range lightByID {
++		symbols = append(symbols, *sym)
++	}
++
++	return &GetResolvedReferencesInFileResponse{
++		References: refs,
++		Symbols:    symbols,
++	}, nil
++}
++
+ // handleGetSymbolAtLocation returns the symbol at a node location.
+ func (s *Session) handleGetSymbolAtLocation(ctx context.Context, params *GetSymbolAtLocationParams) (*SymbolResponse, error) {
+ 	setup, err := s.setupChecker(ctx, params.Snapshot, params.Project)
+@@ -3184,3 +3285,23 @@ func (s *Session) handleGetReferencedSymbolsForNode(ctx context.Context, params
+ 	}
+ 	return result, nil
+ }
++
++// scriptKindToLanguageKind maps the fork's ScriptKind values (sent from JS)
++// to lsproto LanguageKind for DidOpenFile overlays.
++// Fork ScriptKind: 0=Unknown 1=TS 2=JS 3=JSX 4=TSX 5=JSON.
++func scriptKindToLanguageKind(scriptKind int) lsproto.LanguageKind {
++	switch scriptKind {
++	case 1:
++		return lsproto.LanguageKindTypeScript
++	case 2:
++		return lsproto.LanguageKindJavaScript
++	case 3:
++		return lsproto.LanguageKindJavaScriptReact
++	case 4:
++		return lsproto.LanguageKindTypeScriptReact
++	case 5:
++		return lsproto.LanguageKindJSON
++	default:
++		return lsproto.LanguageKindTypeScript
++	}
++}
+diff --git a/internal/project/filechange.go b/internal/project/filechange.go
+index edc209b39..21928e66e 100644
+--- a/internal/project/filechange.go
++++ b/internal/project/filechange.go
+@@ -30,13 +30,18 @@ type FileChange struct {
+ 	Content      string                                                    // Only set for Open
+ 	LanguageKind lsproto.LanguageKind                                      // Only set for Open
+ 	Changes      []lsproto.TextDocumentContentChangePartialOrWholeDocument // Only set for Change
++	// ContentOverride marks this as a host-fed content override, not an LSP
++	// didOpen. The overlay is created (content used instead of disk) but
++	// result.Opened/Reopened are NOT set, so project reassignment is skipped.
++	ContentOverride bool
+ }
+ 
+ type FileChangeSummary struct {
+-	// Only one file can be opened at a time per request
+-	Opened lsproto.DocumentUri
+-	// Reopened is set if a close and open occurred for the same file in a single batch of changes.
+-	Reopened lsproto.DocumentUri
++	// Opened lists files opened in this batch (overlays created).
++	// Extended from a single URI to a set to support batch host-fed overlays.
++	Opened collections.Set[lsproto.DocumentUri]
++	// Reopened lists files that were closed and reopened in the same batch.
++	Reopened collections.Set[lsproto.DocumentUri]
+ 	Closed   collections.Set[lsproto.DocumentUri]
+ 	Changed  collections.Set[lsproto.DocumentUri]
+ 	// Only set when file watching is enabled
+@@ -52,7 +57,7 @@ type FileChangeSummary struct {
+ }
+ 
+ func (f FileChangeSummary) IsEmpty() bool {
+-	return !f.InvalidateAll && f.Opened == "" && f.Reopened == "" && f.Closed.Len() == 0 && f.Changed.Len() == 0 && f.Created.Len() == 0 && f.Deleted.Len() == 0
++	return !f.InvalidateAll && f.Opened.Len() == 0 && f.Reopened.Len() == 0 && f.Closed.Len() == 0 && f.Changed.Len() == 0 && f.Created.Len() == 0 && f.Deleted.Len() == 0
+ }
+ 
+ func (f FileChangeSummary) HasExcessiveWatchEvents() bool {
+diff --git a/internal/project/overlayfs.go b/internal/project/overlayfs.go
+index 1b300a013..de14d03a0 100644
+--- a/internal/project/overlayfs.go
++++ b/internal/project/overlayfs.go
+@@ -300,15 +300,20 @@ func (fs *overlayFS) processChanges(changes []FileChange) (FileChangeSummary, ma
+ 		o := newOverlays[path]
+ 
+ 		if events.openChange != nil {
+-			if result.Opened != "" || result.Reopened != "" {
+-				panic("can only process one file open event at a time")
+-			}
+-			if o != nil && o.Content() != events.openChange.Content {
+-				result.Changed.Add(uri)
+-			} else if o == nil {
+-				result.Opened = uri
++			if !events.openChange.ContentOverride {
++				if o != nil && o.Content() != events.openChange.Content {
++					result.Changed.Add(uri)
++				} else if o == nil {
++					result.Opened.Add(uri)
++				} else {
++					result.Reopened.Add(uri)
++				}
+ 			} else {
+-				result.Reopened = uri
++				// Content override: mark as Changed so the project rebuilds
++				// with the new content, but don't set Opened/Reopened (no
++				// project reassignment — the file is already in its project
++				// from the configured tsconfig).
++				result.Changed.Add(uri)
+ 			}
+ 			scriptKind := lsconv.LanguageKindToScriptKind(events.openChange.LanguageKind)
+ 			if scriptKind == core.ScriptKindUnknown {
+diff --git a/internal/project/overlayfs_test.go b/internal/project/overlayfs_test.go
+index 4659530ff..64a4c905b 100644
+--- a/internal/project/overlayfs_test.go
++++ b/internal/project/overlayfs_test.go
+@@ -266,7 +266,7 @@ func TestProcessChanges(t *testing.T) {
+ 		})
+ 
+ 		// Should not be marked as opened since it was already open
+-		assert.Assert(t, result.Opened == "", "close then open should not mark as opened")
++		assert.Assert(t, result.Opened.Len() == 0, "close then open should not mark as opened")
+ 		// Should also be marked as changed since it was closed and reopened
+ 		assert.Assert(t, result.Changed.Has(testURI1), "close then open should mark as changed")
+ 		// Should have the new content
+diff --git a/internal/project/projectcollectionbuilder.go b/internal/project/projectcollectionbuilder.go
+index 4096e30f3..4f95371d2 100644
+--- a/internal/project/projectcollectionbuilder.go
++++ b/internal/project/projectcollectionbuilder.go
+@@ -251,7 +251,7 @@ func (b *ProjectCollectionBuilder) HandleAPIRequest(apiRequest *APISnapshotReque
+ }
+ 
+ func (b *ProjectCollectionBuilder) DidChangeFiles(summary FileChangeSummary, logger *logging.LogTree) {
+-	b.openFilesChanged = b.openFilesChanged || summary.Opened != "" || summary.Closed.Len() > 0
++	b.openFilesChanged = b.openFilesChanged || summary.Opened.Len() > 0 || summary.Closed.Len() > 0
+ 
+ 	changedFiles := make([]tspath.Path, 0, summary.Changed.Len())
+ 	for uri := range summary.Changed.Keys() {
+@@ -319,9 +319,17 @@ func (b *ProjectCollectionBuilder) DidChangeFiles(summary FileChangeSummary, log
+ 		return true
+ 	})
+ 
+-	// Handle opened file
+-	if summary.Opened != "" || summary.Reopened != "" {
+-		fileName := core.FirstNonZero(summary.Opened, summary.Reopened).FileName()
++	// Handle opened files — ensure each has a configured project + ancestors.
++	// (Extended from single-file to iterate the Opened/Reopened sets for
++	// batch host-fed overlays.)
++	for uri := range summary.Opened.Keys() {
++		fileName := uri.FileName()
++		path := b.toPath(fileName)
++		openFileResult := b.ensureConfiguredProjectAndAncestorsForFile(fileName, path, logger)
++		b.cleanupConfiguredProjects(&openFileResult.retain, logger)
++	}
++	for uri := range summary.Reopened.Keys() {
++		fileName := uri.FileName()
+ 		path := b.toPath(fileName)
+ 		openFileResult := b.ensureConfiguredProjectAndAncestorsForFile(fileName, path, logger)
+ 		b.cleanupConfiguredProjects(&openFileResult.retain, logger)
+diff --git a/internal/project/session.go b/internal/project/session.go
+index a5c7fefd4..a22a8bf10 100644
+--- a/internal/project/session.go
++++ b/internal/project/session.go
+@@ -329,6 +329,21 @@ func (s *Session) DidCloseFile(ctx context.Context, uri lsproto.DocumentUri) {
+ 	s.ScheduleSnapshotUpdate(UpdateReasonDidCloseFile)
+ }
+ 
++// EnqueueOpenFiles adds open-file overlays to the pending changes queue
++// WITHOUT flushing or building a snapshot. The caller (e.g. APIUpdate)
++// is responsible for flushing. This enables batch-feeding host content
++// for many files in one snapshot build instead of N individual DidOpenFile
++// calls (each of which builds a snapshot).
++func (s *Session) EnqueueOpenFiles(changes []FileChange) {
++	if len(changes) == 0 {
++		return
++	}
++	s.cancelScheduledSnapshotUpdate()
++	s.pendingFileChangesMu.Lock()
++	s.pendingFileChanges = append(s.pendingFileChanges, changes...)
++	s.pendingFileChangesMu.Unlock()
++}
++
+ func (s *Session) DidChangeFile(ctx context.Context, uri lsproto.DocumentUri, version int32, changes []lsproto.TextDocumentContentChangePartialOrWholeDocument) {
+ 	s.cancelDiagnosticsRefresh()
+ 	s.cancelWarmAutoImportCache()
+diff --git a/internal/project/snapshot.go b/internal/project/snapshot.go
+index 61af433d3..6b5da65a7 100644
+--- a/internal/project/snapshot.go
++++ b/internal/project/snapshot.go
+@@ -264,8 +264,8 @@ func (s *Snapshot) Clone(ctx context.Context, change SnapshotChange, overlays ma
+ 			return details
+ 		}
+ 		switch change.reason {
+-		case UpdateReasonDidOpenFile:
+-			logger.Logf("Reason: DidOpenFile - %s", change.fileChanges.Opened)
++	case UpdateReasonDidOpenFile:
++		logger.Logf("Reason: DidOpenFile - %v", change.fileChanges.Opened)
+ 		case UpdateReasonDidCloseFile:
+ 			logger.Logf("Reason: DidCloseFile - %v", change.fileChanges.Closed)
+ 		case UpdateReasonDidChangeCompilerOptionsForInferredProjects:
+@@ -381,8 +381,8 @@ func (s *Snapshot) Clone(ctx context.Context, change SnapshotChange, overlays ma
+ 	// Clean cached disk files not touched by any open project on file open, close, delete,
+ 	// or when explicitly requested (e.g. by an idle timer).
+ 	shouldCleanDiskCache := change.cleanDiskCache ||
+-		change.fileChanges.Opened != "" ||
+-		change.fileChanges.Reopened != "" ||
++		change.fileChanges.Opened.Len() > 0 ||
++		change.fileChanges.Reopened.Len() > 0 ||
+ 		change.fileChanges.Closed.Len() > 0 ||
+ 		change.fileChanges.Deleted.Len() > 0
+ 	if shouldCleanDiskCache {
+diff --git a/internal/project/snapshotfs.go b/internal/project/snapshotfs.go
+index b8629b15d..abc42a7c3 100644
+--- a/internal/project/snapshotfs.go
++++ b/internal/project/snapshotfs.go
+@@ -607,17 +607,20 @@ func (s *snapshotFSBuilder) collectFilesRecursive(dirPath tspath.Path, files *co
+ }
+ 
+ func (s *snapshotFSBuilder) convertOpenAndCloseToChanges(change FileChangeSummary) FileChangeSummary {
+-	if change.Opened != "" && !tspath.IsDynamicFileName(change.Opened.FileName()) {
+-		path := s.toPath(change.Opened.FileName())
++	for uri := range change.Opened.Keys() {
++		if tspath.IsDynamicFileName(uri.FileName()) {
++			continue
++		}
++		path := s.toPath(uri.FileName())
+ 		if entry, ok := s.diskFiles.Load(path); !ok || entry.Original() == nil {
+-			change.Created.Add(change.Opened)
++			change.Created.Add(uri)
+ 		} else if overlay, ok := s.overlays[path]; ok {
+ 			// The file already exists in the program, but the overlay content from
+ 			// didOpen may differ from what was originally read from disk (e.g. the
+ 			// editor normalizes line endings, or the file changed on disk since the
+ 			// project was loaded). Mark it as Changed so the project rebuilds.
+ 			if diskFile := entry.Original(); diskFile != nil && overlay.Hash() != diskFile.Hash() {
+-				change.Changed.Add(change.Opened)
++				change.Changed.Add(uri)
+ 			}
+ 		}
+ 	}
