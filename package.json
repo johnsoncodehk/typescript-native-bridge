@@ -9,6 +9,7 @@
 		"patch:ts": "node tools/patch-typescript.js",
 		"save-patches": "node tools/save-tsgo-patches.js",
 		"save-ts-patches": "node tools/save-typescript-patches.js",
+		"check:enums": "node tools/check-enum-remap.mjs",
 		"build:js": "cd typescript-go/_packages/native-preview && npm install --no-save @types/node && npx tsc -b",
 		"build:ts": "node tools/patch-typescript.js && cd typescript && npm install && npm run build:compiler && npx hereby lkg",
 		"build:bridge": "node tools/patch-tsgo.js && npm run build:js && cd typescript-go/bridge && go build -buildmode=c-shared -o bridge.dylib bridge.go"
