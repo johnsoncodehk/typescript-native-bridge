@@ -749,14 +749,16 @@ export function createTsgoProgram(
             if (options.noEmit && !forceDtsEmit) {
                 return { emitSkipped: true, diagnostics: [], emittedFiles: [], sourceMaps: [] };
             }
-            const file = targetSourceFile?.fileName ? { fileName: targetSourceFile.fileName } : undefined;
+            // DocumentIdentifier wire format is plain path string or { uri }, not { fileName }.
+            const file = targetSourceFile?.fileName || undefined;
             const emitOnly = forceDtsEmit ? 3 : (emitOnlyDtsFiles ? 2 : undefined);
             const res = project?.program?.emit?.({ file, emitOnly, forceDtsEmit: !!forceDtsEmit });
             const outputs = res?.outputFiles ?? [];
             const write = typeof writeFile === "function" ? writeFile : host?.writeFile?.bind(host);
             const emittedFiles: string[] = [];
+            const sourceFiles = targetSourceFile ? [targetSourceFile] : undefined;
             for (const o of outputs) {
-                if (write) write(o.fileName, o.text, !!o.writeByteOrderMark);
+                if (write) write(o.fileName, o.text, !!o.writeByteOrderMark, undefined, sourceFiles);
                 emittedFiles.push(o.fileName);
             }
             return {
