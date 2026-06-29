@@ -236,7 +236,7 @@ index 656f7cc4e..09d5f8470 100644
      id: number;
      flags: number;
 diff --git a/_packages/native-preview/src/api/sync/api.ts b/_packages/native-preview/src/api/sync/api.ts
-index 9381d5122..184427c17 100644
+index 9381d5122..1e86c4d80 100644
 --- a/_packages/native-preview/src/api/sync/api.ts
 +++ b/_packages/native-preview/src/api/sync/api.ts
 @@ -57,6 +57,7 @@ import type {
@@ -247,7 +247,38 @@ index 9381d5122..184427c17 100644
      SignatureResponse,
      SymbolResponse,
      TypePredicateResponse,
-@@ -763,6 +764,30 @@ export class Checker {
+@@ -84,6 +85,7 @@ import type {
+     CompletionOptions,
+     ConditionalType,
+     Diagnostic,
++    EmitResult,
+     FreshableType,
+     IdentifierTypePredicate,
+     IndexedAccessType,
+@@ -641,6 +643,22 @@ export class Program {
+         return data ?? [];
+     }
+ 
++    /**
++     * Emit JS/declaration output for a file (or the whole program). Output files
++     * are returned for the caller to write, so --noEmit and custom writeFile hosts
++     * stay in control. `emitOnly`: 0=All, 1=Js, 2=Dts, 3=ForcedDts.
++     */
++    emit(options?: { file?: DocumentIdentifier; emitOnly?: number; forceDtsEmit?: boolean; }): EmitResult {
++        const data = this.client.apiRequest<EmitResult>("emit", {
++            snapshot: this.snapshotId,
++            project: this.projectId,
++            ...(options?.file !== undefined ? { file: options.file } : {}),
++            ...(options?.emitOnly !== undefined ? { emitOnly: options.emitOnly } : {}),
++            ...(options?.forceDtsEmit ? { forceDtsEmit: true } : {}),
++        });
++        return data ?? { emitSkipped: true };
++    }
++
+     /**
+      * Get suggestion diagnostics for a specific file or all files.
+      * @param file - Optional file to get diagnostics for. If omitted, returns diagnostics for all files.
+@@ -763,6 +781,30 @@ export class Checker {
          return data.map(d => d ? this.objectRegistry.getOrCreateSymbol(d) : undefined);
      }
  
@@ -278,8 +309,34 @@ index 9381d5122..184427c17 100644
      getTypeOfSymbol(symbol: Symbol): Type | undefined;
      getTypeOfSymbol(symbols: readonly Symbol[]): (Type | undefined)[];
      getTypeOfSymbol(symbolOrSymbols: Symbol | readonly Symbol[]): Type | (Type | undefined)[] | undefined {
+diff --git a/_packages/native-preview/src/api/sync/types.ts b/_packages/native-preview/src/api/sync/types.ts
+index 4ccc3047d..6b0d80267 100644
+--- a/_packages/native-preview/src/api/sync/types.ts
++++ b/_packages/native-preview/src/api/sync/types.ts
+@@ -321,6 +321,21 @@ export interface CompletionInfo {
+     readonly entries: readonly CompletionEntry[];
+ }
+ 
++/** One file produced by {@link Program.emit}. */
++export interface EmitOutputFile {
++    readonly fileName: string;
++    readonly text: string;
++    readonly writeByteOrderMark: boolean;
++}
++
++/** Result of {@link Program.emit}; output files are written by the caller. */
++export interface EmitResult {
++    readonly emitSkipped: boolean;
++    readonly diagnostics?: readonly Diagnostic[];
++    readonly emittedFiles?: readonly string[];
++    readonly outputFiles?: readonly EmitOutputFile[];
++}
++
+ /**
+  * A diagnostic message from the TypeScript compiler.
+  */
 diff --git a/internal/api/proto.go b/internal/api/proto.go
-index 952b572a6..1598a1960 100644
+index 952b572a6..bb7062f11 100644
 --- a/internal/api/proto.go
 +++ b/internal/api/proto.go
 @@ -63,7 +63,8 @@ const (
@@ -292,7 +349,15 @@ index 952b572a6..1598a1960 100644
  	MethodGetTypeOfSymbol          Method = "getTypeOfSymbol"
  	MethodGetTypesOfSymbols        Method = "getTypesOfSymbols"
  	MethodGetDeclaredTypeOfSymbol  Method = "getDeclaredTypeOfSymbol"
-@@ -309,6 +310,29 @@ type UpdateSnapshotParams struct {
+@@ -167,6 +168,7 @@ const (
+ 
+ 	// Emitter methods
+ 	MethodPrintNode Method = "printNode"
++	MethodEmit      Method = "emit"
+ 
+ 	// Intrinsic type getters
+ 	MethodGetAnyType       Method = "getAnyType"
+@@ -309,6 +311,29 @@ type UpdateSnapshotParams struct {
  	// CloseFiles lists files to release in the new snapshot. A file is only fully
  	// closed once every API client that opened it closes it.
  	CloseFiles []DocumentIdentifier `json:"closeFiles,omitempty"`
@@ -322,7 +387,7 @@ index 952b572a6..1598a1960 100644
  }
  
  // ProjectFileChanges describes what source files changed within a single project.
-@@ -353,7 +377,8 @@ var unmarshalers = map[Method]func([]byte) (any, error){
+@@ -353,7 +378,8 @@ var unmarshalers = map[Method]func([]byte) (any, error){
  	MethodGetSymbolAtPosition:      unmarshallerFor[GetSymbolAtPositionParams],
  	MethodGetSymbolsAtPositions:    unmarshallerFor[GetSymbolsAtPositionsParams],
  	MethodGetSymbolAtLocation:      unmarshallerFor[GetSymbolAtLocationParams],
@@ -332,7 +397,15 @@ index 952b572a6..1598a1960 100644
  	MethodGetTypeOfSymbol:          unmarshallerFor[GetTypeOfSymbolParams],
  	MethodGetTypesOfSymbols:        unmarshallerFor[GetTypesOfSymbolsParams],
  	MethodGetDeclaredTypeOfSymbol:  unmarshallerFor[GetTypeOfSymbolParams],
-@@ -509,6 +534,31 @@ type GetSymbolAtPositionParams struct {
+@@ -451,6 +477,7 @@ var unmarshalers = map[Method]func([]byte) (any, error){
+ 	MethodGetSemanticDiagnostics:            unmarshallerFor[GetDiagnosticsParams],
+ 	MethodGetSuggestionDiagnostics:          unmarshallerFor[GetDiagnosticsParams],
+ 	MethodGetDeclarationDiagnostics:         unmarshallerFor[GetDiagnosticsParams],
++	MethodEmit:                              unmarshallerFor[EmitParams],
+ 	MethodGetProgramDiagnostics:             unmarshallerFor[GetProjectDiagnosticsParams],
+ 	MethodGetGlobalDiagnostics:              unmarshallerFor[GetProjectDiagnosticsParams],
+ 	MethodGetConfigFileParsingDiagnostics:   unmarshallerFor[GetProjectDiagnosticsParams],
+@@ -509,6 +536,31 @@ type GetSymbolAtPositionParams struct {
  	Position uint32             `json:"position"`
  }
  
@@ -364,8 +437,41 @@ index 952b572a6..1598a1960 100644
  type GetSymbolsAtPositionsParams struct {
  	Snapshot  SnapshotID         `json:"snapshot"`
  	Project   ProjectID          `json:"project"`
+@@ -1070,6 +1122,32 @@ type GetDiagnosticsParams struct {
+ 	File     *DocumentIdentifier `json:"file,omitempty"`
+ }
+ 
++// EmitParams are parameters for the emit method.
++type EmitParams struct {
++	Snapshot SnapshotID          `json:"snapshot"`
++	Project  ProjectID           `json:"project"`
++	File     *DocumentIdentifier `json:"file,omitempty"`
++	// EmitOnly maps to compiler.EmitOnly (0=All, 1=Js, 2=Dts, 3=ForcedDts). nil = All.
++	EmitOnly     *int `json:"emitOnly,omitempty"`
++	ForceDtsEmit bool `json:"forceDtsEmit,omitempty"`
++}
++
++// EmitOutputFile is one file produced by emit; the JS host writes it to disk so
++// --noEmit, Volar output redirection, and build-mode writeFile wrapping are honored.
++type EmitOutputFile struct {
++	FileName           string `json:"fileName"`
++	Text               string `json:"text"`
++	WriteByteOrderMark bool   `json:"writeByteOrderMark"`
++}
++
++// EmitResponse is the API response for the emit method.
++type EmitResponse struct {
++	EmitSkipped  bool                  `json:"emitSkipped"`
++	Diagnostics  []*DiagnosticResponse `json:"diagnostics,omitempty"`
++	EmittedFiles []string              `json:"emittedFiles,omitempty"`
++	OutputFiles  []*EmitOutputFile     `json:"outputFiles,omitempty"`
++}
++
+ // GetProjectDiagnosticsParams are parameters for project-wide diagnostic methods.
+ type GetProjectDiagnosticsParams struct {
+ 	Snapshot SnapshotID `json:"snapshot"`
 diff --git a/internal/api/session.go b/internal/api/session.go
-index b350c6334..d634a8925 100644
+index b350c6334..7d74041c4 100644
 --- a/internal/api/session.go
 +++ b/internal/api/session.go
 @@ -154,6 +154,19 @@ func (sd *snapshotData) newSymbolResponse(symbol *ast.Symbol) *SymbolResponse {
@@ -397,7 +503,16 @@ index b350c6334..d634a8925 100644
  	case string(MethodGetTypeOfSymbol):
  		return s.handleGetTypeOfSymbol(ctx, parsed.(*GetTypeOfSymbolParams))
  	case string(MethodGetTypesOfSymbols):
-@@ -793,6 +808,17 @@ func (s *Session) handleUpdateSnapshot(ctx context.Context, params *UpdateSnapsh
+@@ -709,6 +724,8 @@ func (s *Session) HandleRequest(ctx context.Context, method string, params json.
+ 		return s.handleGetBindDiagnostics(ctx, parsed.(*GetDiagnosticsParams))
+ 	case string(MethodGetSemanticDiagnostics):
+ 		return s.handleGetSemanticDiagnostics(ctx, parsed.(*GetDiagnosticsParams))
++	case string(MethodEmit):
++		return s.handleEmit(ctx, parsed.(*EmitParams))
+ 	case string(MethodGetSuggestionDiagnostics):
+ 		return s.handleGetSuggestionDiagnostics(ctx, parsed.(*GetDiagnosticsParams))
+ 	case string(MethodGetDeclarationDiagnostics):
+@@ -793,6 +810,17 @@ func (s *Session) handleUpdateSnapshot(ctx context.Context, params *UpdateSnapsh
  	s.updateMu.Lock()
  	defer s.updateMu.Unlock()
  
@@ -415,7 +530,7 @@ index b350c6334..d634a8925 100644
  	fileChanges := s.toFileChangeSummary(params.FileChanges)
  
  	apiRequest := &project.APISnapshotRequest{}
-@@ -856,6 +882,47 @@ func (s *Session) handleUpdateSnapshot(ctx context.Context, params *UpdateSnapsh
+@@ -856,6 +884,47 @@ func (s *Session) handleUpdateSnapshot(ctx context.Context, params *UpdateSnapsh
  		closedFiles = append(closedFiles, path)
  	}
  
@@ -463,7 +578,7 @@ index b350c6334..d634a8925 100644
  	// Even when nothing is opened or closed, APIUpdate ensures all projects and
  	// files opened by the API are up to date. For an API connected to an LSP server,
  	// this brings the API state up to date with the LSP state and ensures projects
-@@ -1109,6 +1176,62 @@ func (s *Session) handleGetSymbolsAtPositions(ctx context.Context, params *GetSy
+@@ -1109,6 +1178,62 @@ func (s *Session) handleGetSymbolsAtPositions(ctx context.Context, params *GetSy
  	return results, nil
  }
  
@@ -526,7 +641,61 @@ index b350c6334..d634a8925 100644
  // handleGetSymbolAtLocation returns the symbol at a node location.
  func (s *Session) handleGetSymbolAtLocation(ctx context.Context, params *GetSymbolAtLocationParams) (*SymbolResponse, error) {
  	setup, err := s.setupChecker(ctx, params.Snapshot, params.Project)
-@@ -3184,3 +3307,24 @@ func (s *Session) handleGetReferencedSymbolsForNode(ctx context.Context, params
+@@ -2888,6 +3013,53 @@ func (s *Session) handleGetSemanticDiagnostics(ctx context.Context, params *GetD
+ 	return NewDiagnosticResponses(diags), nil
+ }
+ 
++// handleEmit runs the program emitter and returns the produced files for the JS
++// host to write — keeping --noEmit, Volar output redirection, and build-mode
++// writeFile wrapping under the host's control rather than writing from Go.
++func (s *Session) handleEmit(ctx context.Context, params *EmitParams) (*EmitResponse, error) {
++	sd, err := s.getSnapshotData(params.Snapshot)
++	if err != nil {
++		return nil, err
++	}
++	program, err := sd.getProgram(params.Project)
++	if err != nil {
++		return nil, err
++	}
++	sourceFile, err := s.resolveOptionalSourceFile(program, params.File)
++	if err != nil {
++		return nil, err
++	}
++
++	emitOnly := compiler.EmitAll
++	if params.ForceDtsEmit {
++		emitOnly = compiler.EmitOnlyForcedDts
++	} else if params.EmitOnly != nil {
++		emitOnly = compiler.EmitOnly(*params.EmitOnly)
++	}
++
++	var mu sync.Mutex
++	var outputs []*EmitOutputFile
++	result := program.Emit(ctx, compiler.EmitOptions{
++		TargetSourceFile: sourceFile,
++		EmitOnly:         emitOnly,
++		WriteFile: func(fileName string, text string, _ *compiler.WriteFileData) error {
++			mu.Lock()
++			outputs = append(outputs, &EmitOutputFile{FileName: fileName, Text: text})
++			mu.Unlock()
++			return nil
++		},
++	})
++	if result == nil {
++		return &EmitResponse{EmitSkipped: true}, nil
++	}
++	return &EmitResponse{
++		EmitSkipped:  result.EmitSkipped,
++		Diagnostics:  NewDiagnosticResponses(result.Diagnostics),
++		EmittedFiles: result.EmittedFiles,
++		OutputFiles:  outputs,
++	}, nil
++}
++
+ // handleGetSuggestionDiagnostics returns suggestion diagnostics for a file or all files.
+ func (s *Session) handleGetSuggestionDiagnostics(ctx context.Context, params *GetDiagnosticsParams) ([]*DiagnosticResponse, error) {
+ 	ctx = core.WithCheckerLifetime(ctx, core.CheckerLifetimeDiagnostics)
+@@ -3184,3 +3356,24 @@ func (s *Session) handleGetReferencedSymbolsForNode(ctx context.Context, params
  	}
  	return result, nil
  }

@@ -543,7 +543,37 @@ export function createTsgoProgram(
         getClassifiableNames: () => new Set(),
         getCommonSourceDirectory: () => "",
         getCurrentDirectory: () => host?.getCurrentDirectory?.() ?? process.cwd(),
-        emit: () => ({ diagnostics: [], emittedFiles: [], sourceMaps: [] }),
+        // Emit via tsgo: the Go emitter produces the output text, which we write
+        // through the caller's writeFile (or the host's) so --noEmit, Volar output
+        // redirection, and build-mode writeFile wrapping stay in the host's control.
+        // emitBuildInfo returns a well-formed (skipped) result: the `tsc -b` /
+        // `vue-tsc -b` solution builder reads `.emitSkipped` off it, and the Proxy's
+        // no-op fallback would otherwise yield `undefined` and crash.
+        emit: (targetSourceFile?: any, writeFile?: any, _ct?: any, emitOnlyDtsFiles?: boolean, _customTransformers?: any, forceDtsEmit?: boolean) => {
+            // Respect --noEmit: never produce output during a type-check-only run.
+            // tsgo parses options from the tsconfig on disk and may not see the CLI
+            // flag, so gate here on the JS-side compiler options.
+            if (options.noEmit && !forceDtsEmit) {
+                return { emitSkipped: true, diagnostics: [], emittedFiles: [], sourceMaps: [] };
+            }
+            const file = targetSourceFile?.fileName ? { fileName: targetSourceFile.fileName } : undefined;
+            const emitOnly = forceDtsEmit ? 3 : (emitOnlyDtsFiles ? 2 : undefined);
+            const res = project?.program?.emit?.({ file, emitOnly, forceDtsEmit: !!forceDtsEmit });
+            const outputs = res?.outputFiles ?? [];
+            const write = typeof writeFile === "function" ? writeFile : host?.writeFile?.bind(host);
+            const emittedFiles: string[] = [];
+            for (const o of outputs) {
+                if (write) write(o.fileName, o.text, !!o.writeByteOrderMark);
+                emittedFiles.push(o.fileName);
+            }
+            return {
+                emitSkipped: res?.emitSkipped ?? false,
+                diagnostics: mapTsgoDiagnostics(res?.diagnostics, getDiagnosticSourceFile),
+                emittedFiles,
+                sourceMaps: [],
+            };
+        },
+        emitBuildInfo: () => ({ emitSkipped: true, diagnostics: [] }),
         isSourceFileFromExternalLibrary: () => false,
         isSourceFileDefaultLibrary: (sf: any) => {
             const fn = sf?.fileName ?? "";
