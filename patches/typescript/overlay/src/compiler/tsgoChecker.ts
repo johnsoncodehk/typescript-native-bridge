@@ -1535,6 +1535,30 @@ export function createTsgoChecker(program: any): any {
                     try { const sym = obj.getSymbol(); if (sym) obj.symbol = sym; } catch { /* best-effort */ }
                 }
                 resolveRawTypeProps(obj);
+                // tsgo may expose `aliasTypeArguments: []` on reference/array
+                // types. Rule helpers (no-unnecessary-type-assertion's
+                // containsAny) use `type.aliasTypeArguments ??
+                // checker.getTypeArguments(type)` — an empty array is
+                // truthy for ?? so getTypeArguments is never consulted and
+                // `any[]` is misclassified as not containing `any`.
+                const aliasArgs = obj.aliasTypeArguments;
+                if (Array.isArray(aliasArgs) && aliasArgs.length === 0) {
+                    try {
+                        const resolved = typeof obj.getAliasTypeArguments === "function"
+                            ? obj.getAliasTypeArguments()
+                            : undefined;
+                        if (Array.isArray(resolved) && resolved.length > 0) {
+                            fixupType(resolved);
+                            obj.aliasTypeArguments = resolved;
+                        }
+                        else {
+                            delete obj.aliasTypeArguments;
+                        }
+                    }
+                    catch {
+                        delete obj.aliasTypeArguments;
+                    }
+                }
             }
             patchTypeProto(obj, sync);
         }
