@@ -28,6 +28,21 @@ call and no per-tool config**.
 Reinstall after editing so the override takes effect — it's repo-wide, so
 transitive `typescript` consumers switch over too.
 
+## ✅ Verify it's active
+
+When the fork is in use it **always** prints a banner to stderr on first run:
+
+```
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  ✅  TNB ACTIVE — `typescript` is the tsgo-backed fork
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+```
+
+**No banner means you're still on stock `typescript`** — the override didn't take
+effect. This silently fails more often than not: pnpm 11 ignores `package.json`
+`pnpm.overrides` (use `pnpm-workspace.yaml`), monorepos override at the **root**,
+and a `catalog:` can shadow it.
+
 ## How it works
 
 Normal `typescript` parses and type-checks in JavaScript. This fork keeps the

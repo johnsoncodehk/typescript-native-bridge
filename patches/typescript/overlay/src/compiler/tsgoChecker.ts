@@ -67,6 +67,11 @@ let _client: any;
 let _api: any;
 let _sourceFileCache: any;
 const _projectCache = new Map<string, any>();
+
+// One-shot banner, printed the first time the tsgo bridge is engaged, so users
+// can always tell their tooling is running on the fork. No banner means stock
+// `typescript` is in use (the override didn't take effect).
+let _tnbDebugAnnounced = false;
 // Overlay content collected by createTsgoProgram from the host (before
 // ensureProject runs). In thin-createProgram mode, program.getSourceFiles()
 // is empty, so ensureProject reads from this instead.
@@ -771,6 +776,19 @@ export function createTsgoChecker(program: any): any {
             const cwd = process.cwd();
             _client = new BridgeClient(cwd);
             const init = _client.apiRequest("initialize", null) || {};
+            if (!_tnbDebugAnnounced) {
+                _tnbDebugAnnounced = true;
+                const tty = !!(process.stderr as any).isTTY;
+                const hi = tty ? "\u001b[1;42;30m" : ""; // bold, green bg, black text
+                const bar = tty ? "\u001b[1;32m" : ""; // bold green
+                const off = tty ? "\u001b[0m" : "";
+                const line = "\u2501".repeat(56);
+                process.stderr.write(
+                    `\n${bar}${line}${off}\n`
+                    + `${hi}  \u2705  TNB ACTIVE \u2014 \`typescript\` is the tsgo-backed fork  ${off}\n`
+                    + `${bar}${line}${off}\n\n`,
+                );
+            }
             const useCaseSensitive = !!init.useCaseSensitiveFileNames;
             _tsgoUseCaseSensitive = useCaseSensitive;
             const toPath = (f: string) => useCaseSensitive ? f : f.toLowerCase();
