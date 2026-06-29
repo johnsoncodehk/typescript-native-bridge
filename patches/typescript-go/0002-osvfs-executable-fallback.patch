@@ -1,0 +1,17 @@
+diff --git a/internal/vfs/osvfs/os.go b/internal/vfs/osvfs/os.go
+index 7db6f338b..75bbe0b78 100644
+--- a/internal/vfs/osvfs/os.go
++++ b/internal/vfs/osvfs/os.go
+@@ -60,7 +60,11 @@ var isFileSystemCaseSensitive = func() bool {
+ 	// but this is largely good enough for our purposes (and what sys.ts used to do with __filename).
+ 	exe, err := os.Executable()
+ 	if err != nil {
+-		panic(fmt.Sprintf("vfs: failed to get executable path: %v", err))
++		// Forked Node workers (e.g. vitest pool=forks) may not resolve argv0 on macOS.
++		if runtime.GOOS == "darwin" || runtime.GOOS == "windows" {
++			return false
++		}
++		return true
+ 	}
+ 
+ 	// If the current executable exists under a different case, we must be case-insensitive.
