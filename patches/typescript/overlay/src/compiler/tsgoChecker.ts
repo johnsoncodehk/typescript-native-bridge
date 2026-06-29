@@ -280,21 +280,37 @@ function patchRemoteNodeKinds(sampleNode: any): void {
     // consumers (lazy-estree, ts.forEachChild, ts.isXxx). tsgo internal
     // methods use _rawKind (patched in node.generated.js) which always
     // returns the raw tsgo kind, so they are unaffected.
-    let proto: any = Object.getPrototypeOf(sampleNode);
-    while (proto && proto !== Object.prototype) {
-        const kindDesc = Object.getOwnPropertyDescriptor(proto, "kind");
-        if (kindDesc?.get) {
-            const origKindGet = kindDesc.get;
-            Object.defineProperty(proto, "kind", {
-                configurable: true,
-                get(this: any) {
-                    return remapKind(origKindGet.call(this));
-                },
-            });
-            break;
+    //
+    // `operator` (Prefix/PostfixUnaryExpression) and `keywordToken`
+    // (MetaProperty) are scalar SyntaxKind token values, not child nodes, and
+    // are emitted as raw tsgo kinds just like `kind`. typescript-estree reads
+    // them directly (e.g. getTextForTokenKind(node.operator) when converting
+    // UpdateExpression); without remapping, the off-by-one tsgo enum makes
+    // `++`→`%` (mis-typed as UnaryExpression → no-unused-expressions) and
+    // `--`→`++` (wrong-direction UpdateExpression → for-direction). Remap them
+    // on whichever proto owns each getter (they live on different prototypes:
+    // `kind` on RemoteNodeBase, `operator`/`keywordToken` on RemoteNode).
+    const patchKindGetter = (name: string) => {
+        let proto: any = Object.getPrototypeOf(sampleNode);
+        while (proto && proto !== Object.prototype) {
+            const desc = Object.getOwnPropertyDescriptor(proto, name);
+            if (desc?.get) {
+                const origGet = desc.get;
+                Object.defineProperty(proto, name, {
+                    configurable: true,
+                    get(this: any) {
+                        const v = origGet.call(this);
+                        return typeof v === "number" ? remapKind(v) : v;
+                    },
+                });
+                return;
+            }
+            proto = Object.getPrototypeOf(proto);
         }
-        proto = Object.getPrototypeOf(proto);
-    }
+    };
+    patchKindGetter("kind");
+    patchKindGetter("operator");
+    patchKindGetter("keywordToken");
 }
 
 // ── Thin tsgo-backed Program ──
@@ -1426,9 +1442,19 @@ export function createTsgoChecker(program: any): any {
                 }
             } catch { /* fall through */ }
         }
-        // PropertyAccessExpression / ElementAccessExpression — use
-        // getTypeAtPosition at the node END (not start) for correct resolution.
-        if (k === SyntaxKind.PropertyAccessExpression || k === SyntaxKind.ElementAccessExpression) {
+        // PropertyAccessExpression — use getTypeAtPosition at the node END (not
+        // start) for correct resolution; the end lands on the property name so
+        // the type resolves correctly.
+        //
+        // ElementAccessExpression deliberately falls through to the default
+        // node-based getTypeAtLocation below: its END position is the `]`
+        // token, where getTypeAtPosition resolves to `any` (or the wrong
+        // contextual type), dropping the `| undefined` that
+        // noUncheckedIndexedAccess adds to indexed element access. That made
+        // `arr[i]!` non-null assertions look unnecessary (false-positive
+        // no-unnecessary-type-assertion). getTypeAtLocation(node) resolves the
+        // indexed-access element type (incl. `| undefined`) correctly.
+        if (k === SyntaxKind.PropertyAccessExpression) {
             const sfPath = tsgoNode.getSourceFile?.()?.fileName;
             if (sfPath) {
                 const t = project.checker.getTypeAtPosition(sfPath, tsgoNode.end);
