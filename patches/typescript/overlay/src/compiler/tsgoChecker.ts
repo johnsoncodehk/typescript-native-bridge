@@ -617,6 +617,15 @@ function installNodeHandleHooks(s: any): void {
     if (!NodeHandle?.prototype) return;
     const proto = NodeHandle.prototype;
     _nodeHandlePatched = true;
+    // Resolve the handle to its full tsgo RemoteNode once, caching on the
+    // instance so repeat reads skip the resolve() walk.
+    const resolveSelf = (self: any): any => {
+        if (self._resolvedNode === undefined) {
+            const project = _currentProjectRef.project;
+            self._resolvedNode = project ? (self.resolve(project) ?? null) : null;
+        }
+        return self._resolvedNode;
+    };
     // NodeHandle.getSourceFile() — scope manager calls this on declaration
     // handles to check if a symbol is from a lib file. Short-circuit to
     // project.program.getSourceFile(path) without full Node materialisation.
@@ -628,19 +637,37 @@ function installNodeHandleHooks(s: any): void {
         };
     }
     // NodeHandle.parent — rule code reads `.parent` on declarations. Resolve
-    // the handle to a full tsgo Node, then read its parent. Cached on the
-    // instance so repeat reads skip the resolve() walk.
+    // the handle to a full tsgo Node, then read its parent.
     if (!Object.getOwnPropertyDescriptor(proto, "parent")) {
         Object.defineProperty(proto, "parent", {
             configurable: true,
-            get() {
-                if (this._resolvedNode === undefined) {
-                    const project = _currentProjectRef.project;
-                    this._resolvedNode = project ? (this.resolve(project) ?? null) : null;
-                }
-                return this._resolvedNode?.parent;
-            },
+            get() { return resolveSelf(this)?.parent; },
         });
+    }
+    // Position methods — a bare NodeHandle only carries {index, kind, path}.
+    // When a full symbol's `declarations` (NodeHandles) are materialised to
+    // ESTree (compat-eslint's lazy-estree `range(tn)` calls tn.getStart()/
+    // getEnd()/getFullStart()), the handle would throw `getStart is not a
+    // function`. The prefetch path uses light symbols (no declarations) and
+    // never hits this, but the on-demand / lib-file fallback resolves full
+    // symbols whose declaration handles DO get materialised. Delegate every
+    // position accessor to the resolved RemoteNode so declaration → ESTree
+    // conversion produces correct ranges instead of crashing.
+    for (const m of ["getStart", "getEnd", "getFullStart", "getWidth", "getText", "getLeadingTriviaWidth", "getFullWidth"]) {
+        if (typeof proto[m] !== "function") {
+            proto[m] = function (...args: any[]) {
+                const n = resolveSelf(this);
+                return n && typeof n[m] === "function" ? n[m](...args) : undefined;
+            };
+        }
+    }
+    for (const p of ["pos", "end"]) {
+        if (!Object.getOwnPropertyDescriptor(proto, p)) {
+            Object.defineProperty(proto, p, {
+                configurable: true,
+                get() { return resolveSelf(this)?.[p]; },
+            });
+        }
     }
 }
 
