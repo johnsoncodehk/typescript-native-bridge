@@ -42,7 +42,7 @@ index 27b3ad932..856cb3d79 100644
      getTypeOfSymbol(symbols: readonly Symbol[]): Promise<(Type | undefined)[]>;
      async getTypeOfSymbol(symbolOrSymbols: Symbol | readonly Symbol[]): Promise<Type | (Type | undefined)[] | undefined> {
 diff --git a/_packages/native-preview/src/api/node/node.generated.ts b/_packages/native-preview/src/api/node/node.generated.ts
-index ff74677b3..82d0e3f28 100644
+index ff74677b3..ef70dfedd 100644
 --- a/_packages/native-preview/src/api/node/node.generated.ts
 +++ b/_packages/native-preview/src/api/node/node.generated.ts
 @@ -36,6 +36,12 @@ import {
@@ -191,6 +191,27 @@ index ff74677b3..82d0e3f28 100644
              case SyntaxKind.TemplateHead:
              case SyntaxKind.TemplateMiddle:
              case SyntaxKind.TemplateTail:
+@@ -911,12 +917,19 @@ export class RemoteNode extends RemoteNodeBase implements Node {
+         return this.view.getUint32(this._byteIndex + NODE_OFFSET_FLAGS, true);
+     }
+ 
++    /** Raw NodeFlags without fork remapping — used by tsgo internal dispatchers. */
++    get _rawFlags(): number {
++        return this.view.getUint32(this._byteIndex + NODE_OFFSET_FLAGS, true);
++    }
++
+     get modifierFlags(): ModifierFlags {
+         const mods = this.modifiers;
+         if (!mods) return ModifierFlags.None;
+         let flags: ModifierFlags = ModifierFlags.None;
+         for (const mod of mods) {
+-            flags |= modifierToFlag(mod.kind);
++            // modifierToFlag switches on raw tsgo SyntaxKind; `mod.kind` is the
++            // fork-remapped getter, so use `_rawKind` to keep the lookup aligned.
++            flags |= modifierToFlag(mod._rawKind);
+         }
+         return flags;
+     }
 diff --git a/_packages/native-preview/src/api/node/node.infrastructure.ts b/_packages/native-preview/src/api/node/node.infrastructure.ts
 index f5f3d842e..e81417976 100644
 --- a/_packages/native-preview/src/api/node/node.infrastructure.ts
@@ -207,6 +228,19 @@ index f5f3d842e..e81417976 100644
      get pos(): number {
          return this.view.getInt32(this._byteIndex + NODE_OFFSET_POS, true);
      }
+diff --git a/_packages/native-preview/src/api/node/node.ts b/_packages/native-preview/src/api/node/node.ts
+index 285aa0e0f..8a62dc9a4 100644
+--- a/_packages/native-preview/src/api/node/node.ts
++++ b/_packages/native-preview/src/api/node/node.ts
+@@ -221,7 +221,7 @@ export class RemoteSourceFile extends RemoteNode implements SourceFileInfo {
+     }
+ 
+     get isDeclarationFile(): boolean {
+-        return (this.flags & NodeFlags.Ambient) !== 0;
++        return (this._rawFlags & NodeFlags.Ambient) !== 0;
+     }
+ 
+     get text(): string {
 diff --git a/_packages/native-preview/src/api/proto.ts b/_packages/native-preview/src/api/proto.ts
 index 656f7cc4e..09d5f8470 100644
 --- a/_packages/native-preview/src/api/proto.ts
@@ -511,6 +545,186 @@ index 4ccc3047d..6b0d80267 100644
  /**
   * A diagnostic message from the TypeScript compiler.
   */
+diff --git a/_packages/native-preview/src/ast/ast.ts b/_packages/native-preview/src/ast/ast.ts
+index c12a7953e..990984aab 100644
+--- a/_packages/native-preview/src/ast/ast.ts
++++ b/_packages/native-preview/src/ast/ast.ts
+@@ -44,6 +44,8 @@ export interface NodeArray<T extends Node> extends ReadonlyArray<T>, ReadonlyTex
+ export interface Node extends ReadonlyTextRange {
+     readonly kind: SyntaxKind;
+     readonly flags: NodeFlags;
++    /** @internal Raw tsgo NodeFlags without fork bit-layout remapping (tsgo internal dispatchers only). */
++    readonly _rawFlags: NodeFlags;
+     readonly parent: Node;
+     readonly jsDoc?: readonly Node[];
+     forEachChild<T>(visitor: (node: Node) => T, visitArray?: (nodes: NodeArray<Node>) => T): T | undefined;
+diff --git a/_packages/native-preview/src/ast/astnav.ts b/_packages/native-preview/src/ast/astnav.ts
+index 8005023f5..b2128fdc2 100644
+--- a/_packages/native-preview/src/ast/astnav.ts
++++ b/_packages/native-preview/src/ast/astnav.ts
+@@ -48,7 +48,7 @@ export function findNextToken(previousToken: Node, parent: Node, sourceFile: Sou
+         let foundNode: Node | undefined;
+ 
+         const visitChild = (node: Node) => {
+-            if (node.flags & NodeFlags.Reparsed) {
++            if (node._rawFlags & NodeFlags.Reparsed) {
+                 return undefined;
+             }
+             if (node.pos <= previousToken.end && node.end > previousToken.end) {
+@@ -69,7 +69,7 @@ export function findNextToken(previousToken: Node, parent: Node, sourceFile: Sou
+             nodes => {
+                 if (nodes.length > 0 && foundNode === undefined) {
+                     for (const node of nodes) {
+-                        if (node.flags & NodeFlags.Reparsed) continue;
++                        if (node._rawFlags & NodeFlags.Reparsed) continue;
+                         if (node.pos > previousToken.end) break;
+                         if (node.end > previousToken.end) {
+                             foundNode = node;
+@@ -162,7 +162,7 @@ function getTokenAtPositionImpl(
+         let skipSingleCommentChildren = false;
+ 
+         const visitNode = (node: Node) => {
+-            if (node.flags & NodeFlags.Reparsed) {
++            if (node._rawFlags & NodeFlags.Reparsed) {
+                 return undefined;
+             }
+             if (skipSingleCommentChildren && isJSDocCommentChildKind(node.kind)) {
+@@ -206,7 +206,7 @@ function getTokenAtPositionImpl(
+                 }
+                 if (nodeAfterLeft === undefined) {
+                     for (const node of nodes) {
+-                        if (!(node.flags & NodeFlags.Reparsed)) {
++                        if (!(node._rawFlags & NodeFlags.Reparsed)) {
+                             nodeAfterLeft = node;
+                             break;
+                         }
+@@ -227,7 +227,7 @@ function getTokenAtPositionImpl(
+                             state.left = node.end;
+                             nodeAfterLeft = undefined;
+                             for (let i = middle + 1; i < arr.length; i++) {
+-                                if (!(arr[i].flags & NodeFlags.Reparsed)) {
++                                if (!(arr[i]._rawFlags & NodeFlags.Reparsed)) {
+                                     nodeAfterLeft = arr[i];
+                                     break;
+                                 }
+@@ -317,7 +317,7 @@ export function getTokenPosOfNode(node: Node, sourceFile: SourceFile, includeJSD
+     if (includeJSDoc && node.jsDoc && node.jsDoc.length > 0) {
+         return getTokenPosOfNode(node.jsDoc[0], sourceFile, /*includeJSDoc*/ false);
+     }
+-    return skipTrivia(sourceFile.text, node.pos, /*stopAfterLineBreak*/ false, /*stopAtComments*/ false, /*inJSDoc*/ !!(node.flags & NodeFlags.JSDoc));
++    return skipTrivia(sourceFile.text, node.pos, /*stopAfterLineBreak*/ false, /*stopAtComments*/ false, /*inJSDoc*/ !!(node._rawFlags & NodeFlags.JSDoc));
+ }
+ 
+ function nodeIsMissing(node: Node): boolean {
+@@ -336,7 +336,7 @@ function findPrecedingTokenImpl(sourceFile: SourceFile, position: number, startN
+         // Visit JSDoc nodes first (mirrors Go's VisitEachChildAndJSDoc).
+         if (n.jsDoc) {
+             for (const jsdoc of n.jsDoc) {
+-                if (jsdoc.flags & NodeFlags.Reparsed) continue;
++                if (jsdoc._rawFlags & NodeFlags.Reparsed) continue;
+                 if (foundChild !== undefined) break;
+                 if (position < jsdoc.end && (prevChild === undefined || prevChild.end <= position)) {
+                     foundChild = jsdoc;
+@@ -350,7 +350,7 @@ function findPrecedingTokenImpl(sourceFile: SourceFile, position: number, startN
+         let skipSingleCommentChildrenImpl = false;
+         n.forEachChild(
+             node => {
+-                if (node.flags & NodeFlags.Reparsed) {
++                if (node._rawFlags & NodeFlags.Reparsed) {
+                     return undefined;
+                 }
+                 if (skipSingleCommentChildrenImpl && isJSDocCommentChildKind(node.kind)) {
+@@ -374,12 +374,12 @@ function findPrecedingTokenImpl(sourceFile: SourceFile, position: number, startN
+                 }
+                 if (nodes.length > 0 && !skipSingleCommentChildrenImpl) {
+                     const index = binarySearchForPrecedingToken(nodes, position);
+-                    if (index >= 0 && !(nodes[index].flags & NodeFlags.Reparsed)) {
++                    if (index >= 0 && !(nodes[index]._rawFlags & NodeFlags.Reparsed)) {
+                         foundChild = nodes[index];
+                     }
+                     const lookupIndex = index >= 0 ? index - 1 : nodes.length - 1;
+                     for (let i = lookupIndex; i >= 0; i--) {
+-                        if (!(nodes[i].flags & NodeFlags.Reparsed)) {
++                        if (!(nodes[i]._rawFlags & NodeFlags.Reparsed)) {
+                             if (prevChild === undefined) {
+                                 prevChild = nodes[i];
+                             }
+@@ -446,7 +446,7 @@ function findRightmostValidToken(sourceFile: SourceFile, endPos: number, contain
+         if (n.jsDoc) {
+             hasChildren = true;
+             for (const jsdoc of n.jsDoc) {
+-                if (jsdoc.flags & NodeFlags.Reparsed) continue;
++                if (jsdoc._rawFlags & NodeFlags.Reparsed) continue;
+                 if (jsdoc.end > endPos || getTokenPosOfNode(jsdoc, sourceFile) >= position) continue;
+                 if (isValidPrecedingNode(jsdoc, sourceFile)) {
+                     rightmostValidNode = jsdoc;
+@@ -457,7 +457,7 @@ function findRightmostValidToken(sourceFile: SourceFile, endPos: number, contain
+         let skipSingleCommentChildren = false;
+         n.forEachChild(
+             node => {
+-                if (node.flags & NodeFlags.Reparsed) {
++                if (node._rawFlags & NodeFlags.Reparsed) {
+                     return undefined;
+                 }
+                 if (skipSingleCommentChildren && isJSDocCommentChildKind(node.kind)) {
+@@ -480,7 +480,7 @@ function findRightmostValidToken(sourceFile: SourceFile, endPos: number, contain
+                     hasChildren = true;
+                     for (let i = nodes.length - 1; i >= 0; i--) {
+                         const node = nodes[i];
+-                        if (node.flags & NodeFlags.Reparsed) continue;
++                        if (node._rawFlags & NodeFlags.Reparsed) continue;
+                         if (node.end > endPos || getTokenPosOfNode(node, sourceFile) >= position) continue;
+                         if (isValidPrecedingNode(node, sourceFile)) {
+                             rightmostValidNode = node;
+@@ -617,11 +617,11 @@ function binarySearchNodeList(
+     while (lo <= hi) {
+         const mid = (lo + hi) >>> 1;
+         const node = nodes[mid];
+-        if (node.flags & NodeFlags.Reparsed) {
++        if (node._rawFlags & NodeFlags.Reparsed) {
+             // Skip reparsed nodes: try to find a non-reparsed node nearby
+             let found = false;
+             for (let i = mid + 1; i <= hi; i++) {
+-                if (!(nodes[i].flags & NodeFlags.Reparsed)) {
++                if (!(nodes[i]._rawFlags & NodeFlags.Reparsed)) {
+                     const cmp = testNode(nodes[i]);
+                     if (cmp < 0) {
+                         onLeft(nodes[i], i, nodes);
+@@ -665,7 +665,7 @@ function binarySearchForPrecedingToken(nodes: NodeArray<Node>, position: number)
+     while (lo <= hi) {
+         const mid = (lo + hi) >>> 1;
+         const node = nodes[mid];
+-        if (node.flags & NodeFlags.Reparsed) {
++        if (node._rawFlags & NodeFlags.Reparsed) {
+             lo = mid + 1;
+             continue;
+         }
+diff --git a/_packages/native-preview/src/ast/factory.generated.ts b/_packages/native-preview/src/ast/factory.generated.ts
+index 2ad54d654..5712aad4c 100644
+--- a/_packages/native-preview/src/ast/factory.generated.ts
++++ b/_packages/native-preview/src/ast/factory.generated.ts
+@@ -267,6 +267,8 @@ import {
+ export class NodeObject {
+     readonly kind: SyntaxKind;
+     flags: NodeFlags = 0 as NodeFlags;
++    /** @internal Synthetic factory nodes are never fork-remapped, so raw == flags. */
++    get _rawFlags(): NodeFlags { return this.flags; }
+     readonly pos: number = -1;
+     readonly end: number = -1;
+     parent: Node = undefined!;
+diff --git a/_packages/native-preview/src/ast/is.ts b/_packages/native-preview/src/ast/is.ts
+index a76d52a54..d90e35c6b 100644
+--- a/_packages/native-preview/src/ast/is.ts
++++ b/_packages/native-preview/src/ast/is.ts
+@@ -256,7 +256,7 @@ function isJSDocTypeAssertion(node: ParenthesizedExpression): boolean {
+     }
+     const asExpression = expression as AsExpression;
+     return !!asExpression.type
+-        && (asExpression.type.flags & NodeFlags.Reparsed) !== 0;
++        && (asExpression.type._rawFlags & NodeFlags.Reparsed) !== 0;
+ }
+ 
+ export function isBindingPattern(node: Node): node is BindingPattern {
 diff --git a/internal/api/proto.go b/internal/api/proto.go
 index 952b572a6..c20489137 100644
 --- a/internal/api/proto.go

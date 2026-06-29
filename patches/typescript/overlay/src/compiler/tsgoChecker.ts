@@ -270,6 +270,98 @@ function remapKind(tsgoKind: number): number {
     return _kindRemap.get(tsgoKind) ?? tsgoKind;
 }
 
+// ── NodeFlags remap (tsgo bit layout → fork bit layout) ──
+// tsgo's NodeFlags (generated from internal/ast/nodeflags.go) and the fork's
+// NodeFlags (compiler/types.ts) assign DIFFERENT bit positions to most flags.
+// `node.flags` is read straight off the tsgo binary blob and handed to JS
+// consumers (typescript-estree node-utils/convert read OptionalChain, the
+// eslint rules read Ambient/AwaitContext/etc.) which compare against fork
+// `ts.NodeFlags.*`. Without remapping, e.g. tsgo OptionalChain (bit 5) is read
+// as fork ExportContext and tsgo Ambient (bit 23) as fork
+// PossiblyContainsImportMeta — so `a?.b` and `declare` are mis-detected.
+//
+// Pairs are [tsgoValue, forkValue] for single-bit flags present in BOTH enums,
+// keyed by member name. tsgo-only bits (Reparsed, HasJSDoc,
+// PossiblyContainsDeprecatedTag, ReparserTransformedLiteral) have no fork
+// equivalent and are dropped so they don't light up an unrelated fork bit.
+const _NODE_FLAGS_REMAP: ReadonlyArray<readonly [number, number]> = [
+    [1, 1], // Let
+    [2, 2], // Const
+    [4, 4], // Using
+    // 8 = tsgo Reparsed → drop (fork bit 3 = NestedNamespace)
+    [16, 16], // Synthesized
+    [32, 64], // OptionalChain
+    [64, 128], // ExportContext
+    [128, 256], // ContainsThis
+    [256, 512], // HasImplicitReturn
+    [512, 1024], // HasExplicitReturn
+    [1024, 8192], // DisallowInContext
+    [2048, 16384], // YieldContext
+    [4096, 32768], // DecoratorContext
+    [8192, 65536], // AwaitContext
+    [16384, 131072], // DisallowConditionalTypesContext
+    [32768, 262144], // ThisNodeHasError
+    [65536, 524288], // JavaScriptFile
+    [131072, 1048576], // ThisNodeOrAnySubNodesHasError
+    [262144, 4096], // HasAsyncFunctions
+    [524288, 4194304], // PossiblyContainsDynamicImport
+    [1048576, 8388608], // PossiblyContainsImportMeta
+    // 2097152 = tsgo HasJSDoc → drop (fork bit 21 = HasAggregatedChildData)
+    [4194304, 16777216], // JSDoc
+    [8388608, 33554432], // Ambient
+    [16777216, 67108864], // InWithStatement
+    [33554432, 134217728], // JsonFile
+    // 67108864 = tsgo PossiblyContainsDeprecatedTag → drop
+    [134217728, 1073741824], // Unreachable
+    // 268435456 = tsgo ReparserTransformedLiteral → drop
+];
+
+// Distinct flags values are few (Const, OptionalChain, Ambient|Const, …) so a
+// tiny memo keeps the per-`node.flags`-read cost to a single Map lookup.
+const _nodeFlagsRemapCache = new Map<number, number>();
+
+function remapNodeFlags(tsgoFlags: number): number {
+    if (!tsgoFlags) return 0;
+    const cached = _nodeFlagsRemapCache.get(tsgoFlags);
+    if (cached !== undefined) return cached;
+    let out = 0;
+    for (let i = 0; i < _NODE_FLAGS_REMAP.length; i++) {
+        const pair = _NODE_FLAGS_REMAP[i];
+        if (tsgoFlags & pair[0]) out |= pair[1];
+    }
+    _nodeFlagsRemapCache.set(tsgoFlags, out);
+    return out;
+}
+
+// ── ObjectFlags remap (tsgo bit layout → fork bit layout) ──
+// Low ObjectFlags bits (Class…CouldContainTypeVariables, bits 0–20) are
+// IDENTICAL in both enums; only the high cache bits (21+) diverge. The single
+// high bit that reaches consumers is InstantiationExpressionType
+// (no-misused-spread reads `type.objectFlags & ts.ObjectFlags.InstantiationExpressionType`).
+// tsgo puts it at bit 24 while the fork reads bit 23 — and tsgo bit 23 is the
+// very common IsGenericObjectType/ObjectRestType, so a generic object type is
+// otherwise mis-read as an instantiation-expression type. Remap the diverging
+// bits to their fork-named homes; tsgo-only / internal-only high bits (21,
+// 25–30) are dropped (no consumer reads them, and api.ts only checks the
+// identical low Reference/Tuple bits).
+const _OBJECT_FLAGS_REMAP: ReadonlyArray<readonly [number, number]> = [
+    [4194304, 2097152], // tsgo ContainsSpread/IsGenericTypeComputed (bit22) → fork bit21
+    [8388608, 4194304], // tsgo ObjectRestType/IsGenericObjectType (bit23) → fork bit22
+    [16777216, 8388608], // tsgo InstantiationExpressionType/IsGenericIndexType (bit24) → fork bit23
+];
+const _OBJECT_FLAGS_HIGH_MASK = 0xFFE00000; // bits 21..31
+
+function remapObjectFlags(tsgoFlags: number): number {
+    // Fast path: nothing above bit 20 set → identical layout, return as-is.
+    if ((tsgoFlags & _OBJECT_FLAGS_HIGH_MASK) === 0) return tsgoFlags;
+    let out = tsgoFlags & ~_OBJECT_FLAGS_HIGH_MASK; // keep identical low bits
+    for (let i = 0; i < _OBJECT_FLAGS_REMAP.length; i++) {
+        const pair = _OBJECT_FLAGS_REMAP[i];
+        if (tsgoFlags & pair[0]) out |= pair[1];
+    }
+    return out;
+}
+
 function patchRemoteNodeKinds(sampleNode: any): void {
     if (_kindRemapApplied) return;
     _kindRemapApplied = true;
@@ -311,6 +403,38 @@ function patchRemoteNodeKinds(sampleNode: any): void {
     patchKindGetter("kind");
     patchKindGetter("operator");
     patchKindGetter("keywordToken");
+    // `token` is a scalar SyntaxKind on HeritageClause (Extends/Implements) and
+    // ImportAttributes (Assert/With), emitted as a raw tsgo kind. typescript-
+    // estree reads `heritageClause.token === ts.SyntaxKind.ExtendsKeyword` /
+    // `ImplementsKeyword` to split a class's superClass vs implements; with the
+    // off-by-one tsgo enum the comparison never matches, so both clauses are
+    // dropped from the ESTree output. (`keyword`/`phaseModifier` return kinds
+    // that happen to be identical across both enums, so they need no remap.)
+    patchKindGetter("token");
+
+    // `node.flags` is a raw tsgo NodeFlags value read off the binary blob (see
+    // remapNodeFlags above). Remap it for external consumers; tsgo internal
+    // dispatchers read `_rawFlags` (patched in node.generated.ts) so they keep
+    // the raw value.
+    const patchFlagsGetter = () => {
+        let proto: any = Object.getPrototypeOf(sampleNode);
+        while (proto && proto !== Object.prototype) {
+            const desc = Object.getOwnPropertyDescriptor(proto, "flags");
+            if (desc?.get) {
+                const origGet = desc.get;
+                Object.defineProperty(proto, "flags", {
+                    configurable: true,
+                    get(this: any) {
+                        const v = origGet.call(this);
+                        return typeof v === "number" ? remapNodeFlags(v) : v;
+                    },
+                });
+                return;
+            }
+            proto = Object.getPrototypeOf(proto);
+        }
+    };
+    patchFlagsGetter();
 }
 
 // ── Thin tsgo-backed Program ──
@@ -1350,6 +1474,12 @@ export function createTsgoChecker(program: any): any {
             const obj = t;
             if (!obj.__tsgoFixupDone) {
                 obj.__tsgoFixupDone = true;
+                // Remap tsgo ObjectFlags bit layout → fork layout before the
+                // value reaches consumers (e.g. no-misused-spread reads
+                // `type.objectFlags & ts.ObjectFlags.InstantiationExpressionType`).
+                if (typeof obj.objectFlags === "number") {
+                    obj.objectFlags = remapObjectFlags(obj.objectFlags);
+                }
                 if (typeof obj.aliasSymbol === "number" && typeof obj.getAliasSymbol === "function") {
                     try { obj.aliasSymbol = obj.getAliasSymbol(); } catch { obj.aliasSymbol = undefined; }
                 }
