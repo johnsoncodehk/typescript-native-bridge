@@ -471,7 +471,7 @@ index 952b572a6..bb7062f11 100644
  type GetProjectDiagnosticsParams struct {
  	Snapshot SnapshotID `json:"snapshot"`
 diff --git a/internal/api/session.go b/internal/api/session.go
-index b350c6334..7d74041c4 100644
+index b350c6334..8e2649968 100644
 --- a/internal/api/session.go
 +++ b/internal/api/session.go
 @@ -154,6 +154,19 @@ func (sd *snapshotData) newSymbolResponse(symbol *ast.Symbol) *SymbolResponse {
@@ -578,7 +578,7 @@ index b350c6334..7d74041c4 100644
  	// Even when nothing is opened or closed, APIUpdate ensures all projects and
  	// files opened by the API are up to date. For an API connected to an LSP server,
  	// this brings the API state up to date with the LSP state and ensures projects
-@@ -1109,6 +1178,62 @@ func (s *Session) handleGetSymbolsAtPositions(ctx context.Context, params *GetSy
+@@ -1109,6 +1178,69 @@ func (s *Session) handleGetSymbolsAtPositions(ctx context.Context, params *GetSy
  	return results, nil
  }
  
@@ -606,7 +606,14 @@ index b350c6334..7d74041c4 100644
 +		if node == nil {
 +			return false
 +		}
-+		if ast.IsIdentifier(node) || node.Kind == ast.KindPrivateIdentifier {
++		// Don't eagerly resolve member-name identifiers — the `.name` of a property
++		// access (`a.b`), the `.right` of a qualified name (`ns.T`), or a meta
++		// property (`new.target`). Resolving these forces the checker to resolve
++		// the receiver type / namespace (disproportionately expensive: ~13% of
++		// identifiers but the bulk of the cost here), while they are seldom looked
++		// up by symbol. This is a prefetch heuristic, not a contract change: a miss
++		// still resolves correctly on demand via getSymbolAtPosition.
++		if (ast.IsIdentifier(node) || node.Kind == ast.KindPrivateIdentifier) && !ast.IsRightSideOfQualifiedNameOrPropertyAccess(node) {
 +			symbol := setup.checker.GetSymbolAtLocation(node)
 +			if symbol != nil {
 +				light := setup.sd.newLightSymbolResponse(symbol)
@@ -641,7 +648,7 @@ index b350c6334..7d74041c4 100644
  // handleGetSymbolAtLocation returns the symbol at a node location.
  func (s *Session) handleGetSymbolAtLocation(ctx context.Context, params *GetSymbolAtLocationParams) (*SymbolResponse, error) {
  	setup, err := s.setupChecker(ctx, params.Snapshot, params.Project)
-@@ -2888,6 +3013,53 @@ func (s *Session) handleGetSemanticDiagnostics(ctx context.Context, params *GetD
+@@ -2888,6 +3020,53 @@ func (s *Session) handleGetSemanticDiagnostics(ctx context.Context, params *GetD
  	return NewDiagnosticResponses(diags), nil
  }
  
@@ -695,7 +702,7 @@ index b350c6334..7d74041c4 100644
  // handleGetSuggestionDiagnostics returns suggestion diagnostics for a file or all files.
  func (s *Session) handleGetSuggestionDiagnostics(ctx context.Context, params *GetDiagnosticsParams) ([]*DiagnosticResponse, error) {
  	ctx = core.WithCheckerLifetime(ctx, core.CheckerLifetimeDiagnostics)
-@@ -3184,3 +3356,24 @@ func (s *Session) handleGetReferencedSymbolsForNode(ctx context.Context, params
+@@ -3184,3 +3363,24 @@ func (s *Session) handleGetReferencedSymbolsForNode(ctx context.Context, params
  	}
  	return result, nil
  }
