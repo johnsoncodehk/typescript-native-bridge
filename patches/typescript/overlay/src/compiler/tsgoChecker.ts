@@ -669,6 +669,63 @@ function installNodeHandleHooks(s: any): void {
             });
         }
     }
+    // Structural-field delegation — a bare NodeHandle only carries
+    // {index, kind, path}. Rules read declaration fields off symbol
+    // declarations/valueDeclaration directly (e.g. no-base-to-string's
+    // isSymbolToPrimitiveMethod reads `node.name`, then `.expression`,
+    // `.text`; await-thenable reads `param.valueDeclaration.dotDotDotToken`).
+    // Without these, the field is `undefined` and the rule crashes
+    // (`Cannot read properties of undefined (reading 'kind')`). Delegate every
+    // named child accessor (and a few scalar fields) to the resolved
+    // RemoteNode, which exposes them with already-remapped child kinds.
+    const STRUCTURAL_FIELDS = [
+        "argument", "argumentExpression", "arguments", "assertsModifier", "asteriskToken",
+        "attributes", "awaitModifier", "block", "body", "caseBlock", "catchClause", "checkType",
+        "children", "className", "clauses", "closingElement", "closingFragment", "colonToken",
+        "comment", "condition", "constraint", "declarationList", "declarations", "defaultType",
+        "dotDotDotToken", "elements", "elementType", "elseStatement", "endOfFileToken",
+        "equalsGreaterThanToken", "equalsToken", "exclamationToken", "exportClause", "expression",
+        "exprName", "extendsType", "falseType", "finallyBlock", "head", "heritageClauses",
+        "importClause", "incrementor", "indexType", "initializer", "jsdocPropertyTags", "label",
+        "left", "literal", "members", "modifiers", "moduleReference", "moduleSpecifier", "name",
+        "namedBindings", "nameExpression", "namespace", "nameType", "objectAssignmentInitializer",
+        "objectType", "openingElement", "openingFragment", "operand", "operatorToken",
+        "parameterName", "parameters", "postfixToken", "properties", "propertyName", "qualifier",
+        "questionDotToken", "questionToken", "readonlyToken", "right", "statement", "statements",
+        "tag", "tagName", "tags", "template", "templateSpans", "thenStatement", "thisArg",
+        "trueType", "tryBlock", "tupleNameSource", "type", "typeArguments", "typeExpression",
+        "typeName", "typeParameter", "typeParameters", "types", "value", "variableDeclaration",
+        "whenFalse", "whenTrue",
+        // Scalar fields rules read directly off declaration nodes.
+        "text", "flags", "modifierFlags", "operator", "keywordToken", "isExportEquals",
+    ];
+    for (const f of STRUCTURAL_FIELDS) {
+        if (!Object.getOwnPropertyDescriptor(proto, f)) {
+            Object.defineProperty(proto, f, {
+                configurable: true,
+                get() { return resolveSelf(this)?.[f]; },
+            });
+        }
+    }
+    // getChildren / forEachChild — some rules walk declaration subtrees.
+    for (const m of ["getChildren", "forEachChild", "getChildCount", "getFirstToken", "getLastToken"]) {
+        if (typeof proto[m] !== "function") {
+            proto[m] = function (...args: any[]) {
+                const n = resolveSelf(this);
+                return n && typeof n[m] === "function" ? n[m](...args) : undefined;
+            };
+        }
+    }
+    // Remap NodeHandle.kind from raw tsgo SyntaxKind to fork SyntaxKind. The
+    // kind is a constructor-set own property (a prototype getter would be
+    // shadowed), so the native-preview NodeHandle constructor applies a remap
+    // hook we install here. RemoteNode.kind is remapped via patchRemoteNodeKinds;
+    // this keeps NodeHandle.kind consistent so `ts.isXxx(handle)` type-guards
+    // (which compare against fork kind values) fire correctly.
+    if (!_kindRemap) _kindRemap = buildKindRemap();
+    if (typeof s.setNodeHandleKindRemap === "function") {
+        s.setNodeHandleKindRemap(remapKind);
+    }
 }
 
 /* @internal */
@@ -1149,6 +1206,43 @@ export function createTsgoChecker(program: any): any {
                 }
                 return undefined;
             };
+        }
+        // getNumberIndexType / getStringIndexType — rule code (no-for-in-array's
+        // isArrayLike, ts-api-utils' rest-param handling) reads these directly
+        // off Type objects. Resolve via the checker's index infos: find the
+        // info whose key type matches Number/String and return its value type.
+        // Falls back to the apparent type so inherited index signatures resolve.
+        const indexTypeOfKind = (self: any, keyFlag: number): any => {
+            const proj = _currentProjectRef.project;
+            if (!proj || !self) return undefined;
+            const pick = (t: any): any => {
+                const infos = proj.checker.getIndexInfosOfType(t) ?? [];
+                for (const info of infos) {
+                    const kt = info?.keyType;
+                    if (kt && typeof kt.flags === "number" && (kt.flags & keyFlag) !== 0) {
+                        const vt = info.valueType;
+                        if (vt) fixupType(vt);
+                        return vt;
+                    }
+                }
+                return undefined;
+            };
+            const direct = pick(self);
+            if (direct !== undefined) return direct;
+            try {
+                const apparent = proj.checker.getApparentType(self);
+                if (apparent && apparent !== self) {
+                    if (apparent) fixupType(apparent);
+                    return pick(apparent);
+                }
+            } catch { /* best-effort */ }
+            return undefined;
+        };
+        if (!proto.getNumberIndexType) {
+            proto.getNumberIndexType = function () { return indexTypeOfKind(this, TF.Number); };
+        }
+        if (!proto.getStringIndexType) {
+            proto.getStringIndexType = function () { return indexTypeOfKind(this, TF.String); };
         }
     }
 
