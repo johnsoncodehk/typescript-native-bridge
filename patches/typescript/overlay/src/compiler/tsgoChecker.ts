@@ -1382,7 +1382,6 @@ export function createTsgoChecker(program: any): any {
             symPrefetched.add(fileName);
             return;
         }
-        symPrefetched.add(fileName);
         syncMissingHostFileToTsgo(fileName);
         const activeProject = _currentProjectRef.project ?? project;
         const t0 = process.env.TSGO_PROFILE === "1" ? Date.now() : 0;
@@ -1392,6 +1391,7 @@ export function createTsgoChecker(program: any): any {
         } else {
             return;
         }
+        symPrefetched.add(fileName);
         let fileCache = symByPos.get(fileName);
         if (!fileCache) {
             fileCache = new Map();
