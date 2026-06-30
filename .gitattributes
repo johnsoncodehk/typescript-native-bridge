@@ -1,0 +1,7 @@
+# Patch files carry exact CRLF/LF bytes matching upstream submodule blobs.
+# Never let core.autocrlf rewrite them, or `git apply` breaks on checkout.
+*.patch -text
+
+# Overlay sources are authored LF; pin so an editor's CRLF flip can't turn a
+# small edit into a whole-file diff (and leak EOL churn into saved patches).
+patches/*/overlay/** text eol=lf

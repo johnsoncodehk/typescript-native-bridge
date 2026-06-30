@@ -1,5 +1,5 @@
 diff --git a/_packages/native-preview/src/api/async/api.ts b/_packages/native-preview/src/api/async/api.ts
-index 27b3ad932..856cb3d79 100644
+index 27b3ad932..4dd6baed3 100644
 --- a/_packages/native-preview/src/api/async/api.ts
 +++ b/_packages/native-preview/src/api/async/api.ts
 @@ -51,6 +51,7 @@ import type {
@@ -10,7 +10,92 @@ index 27b3ad932..856cb3d79 100644
      TypePredicateResponse,
      TypeResponse,
      UpdateSnapshotParams,
-@@ -755,6 +756,30 @@ export class Checker {
+@@ -60,6 +61,8 @@ import {
+     resolveFileName,
+     toUpdateSnapshotRequest,
+ } from "../proto.ts";
++import { decodeResolvedReferences } from "../resolvedrefs.ts";
++import { decodeSourceFilesBatch } from "../sourcefilesbatch.ts";
+ import { SourceFileCache } from "../sourceFileCache.ts";
+ import {
+     Client,
+@@ -322,6 +325,16 @@ class SnapshotObjectRegistry {
+         return symbol;
+     }
+ 
++    /** Create or reuse a Symbol from a light (id/name/flags) payload — no declarations RPC. */
++    getOrCreateLightSymbol(id: number, name: string, flags: number, checkFlags: number): Symbol {
++        let symbol = this.symbols.get(id);
++        if (!symbol) {
++            symbol = new Symbol({ id, name, flags, checkFlags }, this);
++            this.symbols.set(id, symbol);
++        }
++        return symbol;
++    }
++
+     getSymbol(id: number): Symbol | undefined {
+         return this.symbols.get(id);
+     }
+@@ -392,6 +405,10 @@ class ProjectObjectRegistry {
+         return this.snapshotRegistry.getOrCreateSymbol(data);
+     }
+ 
++    getOrCreateLightSymbol(id: number, name: string, flags: number, checkFlags: number): Symbol {
++        return this.snapshotRegistry.getOrCreateLightSymbol(id, name, flags, checkFlags);
++    }
++
+     getSymbol(id: number): Symbol | undefined {
+         return this.snapshotRegistry.getSymbol(id);
+     }
+@@ -594,6 +611,47 @@ export class Program {
+         return data ?? [];
+     }
+ 
++    /** Batch-fetch multiple source files in one RPC (binary AST blobs). */
++    async getSourceFiles(files: readonly DocumentIdentifier[]): Promise<(SourceFile | undefined)[]> {
++        if (files.length === 0) return [];
++        const binaryData = await this.client.apiRequestBinary("getSourceFiles", {
++            snapshot: this.snapshotId,
++            project: this.projectId,
++            files,
++        });
++        if (!binaryData) return files.map(() => undefined);
++        const blobs = decodeSourceFilesBatch(binaryData);
++        const result: (SourceFile | undefined)[] = new Array(files.length);
++        for (let i = 0; i < files.length; i++) {
++            const blob = blobs[i];
++            if (!blob) {
++                result[i] = undefined;
++                continue;
++            }
++            const fileName = resolveFileName(files[i]);
++            const path = this.toPath(fileName);
++            const retained = this.sourceFileCache.getRetained(path, this.snapshotId, this.projectId);
++            if (retained) {
++                result[i] = retained;
++                continue;
++            }
++            const view = new DataView(blob.buffer, blob.byteOffset, blob.byteLength);
++            const contentHash = readSourceFileHash(view);
++            const parseOptionsKey = readParseOptionsKey(view);
++            const sourceFile = new RemoteSourceFile(blob, this.decoder) as unknown as SourceFile;
++            result[i] = this.sourceFileCache.set(path, sourceFile, parseOptionsKey, contentHash, this.snapshotId, this.projectId);
++        }
++        return result;
++    }
++
++    /** Warm the source-file cache for many paths in batched RPCs (chunk size 64). */
++    async prefetchSourceFiles(fileNames: readonly string[], chunkSize = 64): Promise<void> {
++        for (let i = 0; i < fileNames.length; i += chunkSize) {
++            const chunk = fileNames.slice(i, i + chunkSize);
++            await this.getSourceFiles(chunk);
++        }
++    }
++
+     /**
+      * Get syntactic (parse) diagnostics for a specific file or all files.
+      * @param file - Optional file to get diagnostics for. If omitted, returns diagnostics for all files.
+@@ -755,6 +813,36 @@ export class Checker {
          return data.map(d => d ? this.objectRegistry.getOrCreateSymbol(d) : undefined);
      }
  
@@ -26,10 +111,16 @@ index 27b3ad932..856cb3d79 100644
 +
 +    /** Register light symbols and return end-position → Symbol map for scope-manager prefetch. */
 +    async prefetchResolvedReferences(file: DocumentIdentifier): Promise<Map<number, Symbol | undefined>> {
-+        const data = await this.getResolvedReferencesInFile(file);
++        const binaryData = await this.client.apiRequestBinary("getResolvedReferencesInFile", {
++            snapshot: this.snapshotId,
++            project: this.projectId,
++            file,
++        });
++        if (!binaryData) return new Map();
++        const data = decodeResolvedReferences(binaryData);
 +        const byId = new Map<number, Symbol>();
 +        for (const s of data.symbols) {
-+            byId.set(s.id, this.objectRegistry.getOrCreateSymbol(s));
++            byId.set(s.id, this.objectRegistry.getOrCreateLightSymbol(s.id, s.name, s.flags, s.checkFlags));
 +        }
 +        const byPos = new Map<number, Symbol | undefined>();
 +        for (const ref of data.references) {
