@@ -2,7 +2,19 @@
 	"name": "typescript-native-bridge",
 	"version": "0.0.0",
 	"private": true,
-	"description": "Build host for a tsgo-backed TypeScript fork: pins upstream `microsoft/TypeScript` and `microsoft/typescript-go` as submodules and materializes a small patch set on top — a tsgoChecker overlay on TypeScript plus a cgo bridge (bridge.dylib) on typescript-go. The built fork (`typescript/lib/typescript.js`) is a drop-in `typescript` whose type checker runs in-process on tsgo via the NAPI bridge.",
+	"description": "Build host for a tsgo-backed TypeScript fork: pins upstream `microsoft/TypeScript` and `microsoft/typescript-go` as submodules and materializes a small patch set on top — a tsgoChecker overlay on TypeScript plus a cgo bridge (bridge.dylib) on typescript-go. The built fork (`lib/typescript.js`) is a drop-in `typescript` whose type checker runs in-process on tsgo via the NAPI bridge.",
+	"main": "./lib/typescript.js",
+	"types": "./lib/typescript.d.ts",
+	"bin": {
+		"tsc": "./bin/tsc",
+		"tsserver": "./bin/tsserver"
+	},
+	"files": [
+		"bin",
+		"lib",
+		"native",
+		"vendor"
+	],
 	"scripts": {
 		"setup": "git submodule update --init && node tools/patch-tsgo.js && node tools/patch-typescript.js && npm run build:js && npm run build:bridge && npm run build:ts",
 		"patch:tsgo": "node tools/patch-tsgo.js",
@@ -10,9 +22,9 @@
 		"save-patches": "node tools/save-tsgo-patches.js",
 		"save-ts-patches": "node tools/save-typescript-patches.js",
 		"check:enums": "node tools/check-enum-remap.mjs",
-		"build:js": "cd typescript-go/_packages/native-preview && npm install --no-save @types/node && npx tsc -b",
+		"build:js": "node tools/patch-tsgo.js && node tools/sync-vendor-native-preview.js && cd typescript-go/_packages/native-preview && npm install --no-save @types/node && npx tsc -b",
 		"build:ts": "node tools/patch-typescript.js && cd typescript && npm install && npm run build:compiler && npx hereby lkg",
-		"build:bridge": "node tools/patch-tsgo.js && npm run build:js && cd typescript-go/bridge && go build -buildmode=c-shared -o bridge.dylib bridge.go"
+		"build:bridge": "node tools/patch-tsgo.js && npm run build:js && node tools/build-bridge.js"
 	},
 	"dependencies": {
 		"koffi": "^2.16.0"

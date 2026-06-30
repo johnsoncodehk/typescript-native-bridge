@@ -129,9 +129,12 @@ function realignEolToHead(subDir) {
 }
 
 // Save: in-place edits to tracked files (git diff) -> single patch.
-function savePatch(subDir, patchPath) {
+// Optional exclude globs keep named files in separate patch files.
+function savePatch(subDir, patchPath, exclude = []) {
 	realignEolToHead(subDir);
-	const diff = git(subDir, ["diff"]);
+	const args = ["diff", "--", "."];
+	for (const ex of exclude) args.push(`:(exclude)${ex}`);
+	const diff = git(subDir, args);
 	if (diff.status !== 0) {
 		console.error("save: git diff failed\n" + diff.stderr);
 		process.exit(1);
