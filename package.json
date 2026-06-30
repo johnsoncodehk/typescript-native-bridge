@@ -22,7 +22,9 @@
 		"save-patches": "node tools/save-tsgo-patches.js",
 		"save-ts-patches": "node tools/save-typescript-patches.js",
 		"check:enums": "node tools/check-enum-remap.mjs",
+		"check:lib-sync": "node tools/check-lib-sync.mjs",
 		"build:js": "node tools/patch-tsgo.js && node tools/sync-vendor-native-preview.js && cd typescript-go/_packages/native-preview && npm install --no-save @types/node && npx tsc -b",
+		"build:lib": "npm run patch:ts && cd typescript && npm run build:compiler && npx hereby lkg",
 		"build:ts": "node tools/patch-typescript.js && cd typescript && npm install && npm run build:compiler && npx hereby lkg",
 		"build:bridge": "node tools/patch-tsgo.js && node tools/build-bridge.js"
 	},
