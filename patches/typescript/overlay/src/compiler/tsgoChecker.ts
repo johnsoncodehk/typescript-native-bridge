@@ -188,7 +188,7 @@ function getHostScriptContent(host: any, fileName: string, options: any): { text
     const snap = host?.getScriptSnapshot?.(fileName);
     if (snap) {
         const text = snap.getText(0, snap.getLength());
-        if (typeof host?.getScriptKind === "function") scriptKind = host.getScriptKind(fileName);
+        scriptKind = resolveLanguageServiceScriptKind(host, fileName, fileName);
         return { text, scriptKind, fromHostSourceFile: isVirtualDocumentPath(fileName) };
     }
     const sf = host?.getSourceFile?.(fileName, options.target ?? 99);
@@ -207,9 +207,7 @@ function sourceFileFromHostSnapshot(host: any, hostFileName: string, requestFile
     if (!snap) return undefined;
     const text = snap.getText(0, snap.getLength());
     if (!text.length) return undefined;
-    const scriptKind = host?.getScriptKind?.(requestFileName)
-        ?? host?.getScriptKind?.(hostFileName)
-        ?? inferScriptKind(hostFileName);
+    const scriptKind = resolveLanguageServiceScriptKind(host, requestFileName, hostFileName);
     const sf = createSourceFile(hostFileName, text, languageTarget, /*setParentNodes*/ true, scriptKind);
     return attachHostSourceFileMetadata(sf, hostFileName);
 }
@@ -227,6 +225,15 @@ function attachHostSourceFileMetadata(sf: any, hostFileName: string): any {
 }
 function isVirtualDocumentPath(fileName: string): boolean {
     return /\.(vue|mdx|svelte|astro)$/i.test(fileName);
+}
+/** ScriptKind for LS parse — virtual docs use Volar embedded TS, not the outer extension. */
+function resolveLanguageServiceScriptKind(host: any, requestFileName: string, hostFileName: string): number {
+    const fromHost = host?.getScriptKind?.(requestFileName) ?? host?.getScriptKind?.(hostFileName);
+    if (isVirtualDocumentPath(hostFileName)) {
+        if (fromHost === ts.ScriptKind.TS || fromHost === ts.ScriptKind.TSX) return fromHost;
+        return inferScriptKind(hostFileName);
+    }
+    return fromHost ?? inferScriptKind(hostFileName);
 }
 /** Overlay when the host view differs from disk (virtual docs) or the file is absent on disk. */
 function shouldSendHostOverlay(fileName: string, hostText: string, fromHostSourceFile = false): boolean {
