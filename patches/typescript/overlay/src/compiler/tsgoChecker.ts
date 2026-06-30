@@ -637,6 +637,11 @@ export function createTsgoProgram(
     _pendingExtraFileExtensions = collectExtraFileExtensions(names, options);
     _lastExtraFileExtensions = _pendingExtraFileExtensions;
     _overlayHostCtx = { host, options, configFilePath };
+    // Mirror Volar proxyCreateProgram: extra extensions require allowArbitraryExtensions
+    // for module resolution / auto-import in .vue virtual TS.
+    if (_pendingExtraFileExtensions?.length && options.allowArbitraryExtensions !== false) {
+        options.allowArbitraryExtensions = true;
+    }
 
     // Collect referenced project paths for tsgo to open alongside the main
     // project — tsgo needs all referenced tsconfigs to resolve imports
