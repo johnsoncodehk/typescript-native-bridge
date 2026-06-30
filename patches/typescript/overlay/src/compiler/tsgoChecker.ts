@@ -15,7 +15,8 @@
 /* eslint-disable @typescript-eslint/no-explicit-any, @typescript-eslint/no-require-imports */
 
 import * as ts from "./_namespaces/ts.js";
-import { SyntaxKind } from "./types.js";
+import { createSourceFile } from "./parser.js";
+import { SyntaxKind, type Path } from "./types.js";
 import { installTsgoBackedSourceFileLoader, inferScriptKind, createSkeletonSourceFile, getTsgoBackedSourceFile } from "./tsgoBackedSourceFile.js";
 import { getTnbPackageRoot, isBundledLibPath, isHostLibFile, resolveHostFileName, toHostFileName, toTsgoFileName } from "./tsgoLibPaths.js";
 
@@ -177,25 +178,62 @@ function resolveTsconfigPath(configFilePath: string, host?: { getCurrentDirector
     const cwd = host?.getCurrentDirectory?.() ?? process.cwd();
     return path.normalize(path.resolve(cwd, normalized));
 }
-/** Host script text — prefers getSourceFile (Volar virtual .vue TS) over readFile. */
-function getHostScriptContent(host: any, fileName: string, options: any): { text: string; scriptKind: number } | undefined {
-    const languageVersion = options.target ?? 99;
+/** Host script text — prefers getScriptSnapshot (Volar virtual TS, LS-safe) over readFile. */
+function getHostScriptContent(host: any, fileName: string, options: any): { text: string; scriptKind: number; fromHostSourceFile: boolean } | undefined {
     let scriptKind = inferScriptKind(fileName);
-    const sf = host?.getSourceFile?.(fileName, languageVersion);
+    const snap = host?.getScriptSnapshot?.(fileName);
+    if (snap) {
+        const text = snap.getText(0, snap.getLength());
+        if (typeof host?.getScriptKind === "function") scriptKind = host.getScriptKind(fileName);
+        return { text, scriptKind, fromHostSourceFile: isVirtualDocumentPath(fileName) };
+    }
+    const sf = host?.getSourceFile?.(fileName, options.target ?? 99);
     if (sf && typeof sf.text === "string") {
         if (typeof sf.scriptKind === "number") scriptKind = sf.scriptKind;
-        return { text: sf.text, scriptKind };
+        return { text: sf.text, scriptKind, fromHostSourceFile: true };
     }
     const text = host?.readFile?.(fileName);
-    if (typeof text === "string") return { text, scriptKind };
+    if (typeof text === "string") return { text, scriptKind, fromHostSourceFile: false };
     return undefined;
 }
+
+/** Parse host snapshot into a full TS SourceFile for Language Service (safe during LS). */
+function sourceFileFromHostSnapshot(host: any, hostFileName: string, requestFileName: string, languageTarget: number): any | undefined {
+    const snap = host?.getScriptSnapshot?.(requestFileName) ?? host?.getScriptSnapshot?.(hostFileName);
+    if (!snap) return undefined;
+    const text = snap.getText(0, snap.getLength());
+    if (!text.length) return undefined;
+    const scriptKind = host?.getScriptKind?.(requestFileName)
+        ?? host?.getScriptKind?.(hostFileName)
+        ?? inferScriptKind(hostFileName);
+    const sf = createSourceFile(hostFileName, text, languageTarget, /*setParentNodes*/ true, scriptKind);
+    return attachHostSourceFileMetadata(sf, hostFileName);
+}
+
+/** Ensure host SourceFiles expose stable path metadata for LS + module path completion. */
+function attachHostSourceFileMetadata(sf: any, hostFileName: string): any {
+    sf.fileName = hostFileName;
+    sf.originalFileName = hostFileName;
+    sf.path = hostFileName as Path;
+    sf.resolvedPath = hostFileName as Path;
+    if (!("version" in sf)) {
+        try { Object.defineProperty(sf, "version", { value: "1", writable: true, configurable: true, enumerable: false }); } catch {}
+    }
+    return sf;
+}
+function isVirtualDocumentPath(fileName: string): boolean {
+    return /\.(vue|mdx|svelte|astro)$/i.test(fileName);
+}
 /** Overlay when the host view differs from disk (virtual docs) or the file is absent on disk. */
-function shouldSendHostOverlay(fileName: string, hostText: string): boolean {
+function shouldSendHostOverlay(fileName: string, hostText: string, fromHostSourceFile = false): boolean {
     if (!isOverlayCandidatePath(fileName)) return false;
     if (!fileExistsOnDisk(fileName)) return true;
     const disk = readDiskText(fileName);
-    return disk !== hostText;
+    if (disk !== hostText) return true;
+    // Volar may not have injected virtual TS at first createProgram; when host
+    // later serves embedded TS for .vue, always overlay so tsgo matches LS text.
+    if (fromHostSourceFile && isVirtualDocumentPath(fileName)) return true;
+    return false;
 }
 function convertTsgoDiagnostic(d: any, getSourceFile: (fileName: string) => any): any {
     return {
@@ -546,7 +584,7 @@ export function createTsgoProgram(
     // host.getSourceFile here — program does not exist yet; Volar injects
     // virtual TS for .vue via getSourceFile). Reused by getOrCreateSourceFile
     // for skeleton text / diagnostic line maps without re-entering getSourceFile.
-    const hostContentByFile = new Map<string, { text: string; scriptKind: number }>();
+    const hostContentByFile = new Map<string, { text: string; scriptKind: number; fromHostSourceFile?: boolean }>();
     /** Parsed host SourceFiles captured during createProgram (Volar virtual .vue TS). */
     const parsedHostSourceFiles = new Map<string, any>();
 
@@ -571,16 +609,16 @@ export function createTsgoProgram(
         for (const fn of names) {
             trackedHostFiles.add(fn);
             const resolvedFn = resolveHostFileName(fn, host);
-            const liveHostSf = host?.getSourceFile?.(fn, options.target ?? 99);
-            if (liveHostSf?.statements?.length) {
-                parsedHostSourceFiles.set(resolvedFn, liveHostSf);
+            const snapSf = sourceFileFromHostSnapshot(host, resolvedFn, fn, options.target ?? 99);
+            if (snapSf?.statements?.length) {
+                parsedHostSourceFiles.set(resolvedFn, snapSf);
             }
             if (!isOverlayCandidatePath(fn)) continue;
             const content = getHostScriptContent(host, fn, options);
             if (!content) continue;
             hostContentByFile.set(resolvedFn, content);
-            if (!shouldSendHostOverlay(fn, content.text)) continue;
-            overlays.push({ fileName: fn, content: content.text, scriptKind: content.scriptKind });
+            if (!shouldSendHostOverlay(resolvedFn, content.text, content.fromHostSourceFile)) continue;
+            overlays.push({ fileName: resolvedFn, content: content.text, scriptKind: content.scriptKind });
         }
     }
     _pendingOverlays = overlays.length > 0 ? overlays : undefined;
@@ -627,11 +665,60 @@ export function createTsgoProgram(
     // getTsgoBackedSourceFile. BuilderProgram and other TS infrastructure
     // need path/resolvedPath/version on source files.
     const sfCache = new Map<string, any>();
+
+    /** Host-parsed AST for Language Service — never tsgo RemoteSourceFile. */
+    const getLanguageServiceSourceFile = (hostFileName: string, requestFileName: string): any | undefined => {
+        const parsed = parsedHostSourceFiles.get(hostFileName);
+        if (parsed?.statements?.length) {
+            return attachHostSourceFileMetadata(parsed, hostFileName);
+        }
+
+        const fromSnap = sourceFileFromHostSnapshot(host, hostFileName, requestFileName, options.target ?? 99);
+        if (fromSnap) return fromSnap;
+
+        const content = hostContentByFile.get(hostFileName);
+        if (content?.text && (!isVirtualDocumentPath(hostFileName) || content.fromHostSourceFile)) {
+            const sf = createSourceFile(hostFileName, content.text, options.target ?? 99, /*setParentNodes*/ true, content.scriptKind);
+            return attachHostSourceFileMetadata(sf, hostFileName);
+        }
+
+        if (!isVirtualDocumentPath(hostFileName)) {
+            const disk = host?.readFile?.(hostFileName);
+            if (typeof disk === "string" && disk.length) {
+                const sf = createSourceFile(hostFileName, disk, options.target ?? 99, /*setParentNodes*/ true, inferScriptKind(hostFileName));
+                return attachHostSourceFileMetadata(sf, hostFileName);
+            }
+        }
+
+        return undefined;
+    };
+
     const getOrCreateSourceFile = (fileName: string): any => {
         const hostFileName = resolveHostFileName(fileName, host);
-        if (sfCache.has(hostFileName)) return sfCache.get(hostFileName);
+        const scriptVersion = host?.getScriptVersion?.(fileName)
+            ?? host?.getScriptVersion?.(hostFileName)
+            ?? "1";
+        const cacheKey = `${hostFileName}@${scriptVersion}`;
+        if (sfCache.has(cacheKey)) return sfCache.get(cacheKey);
 
-        const parsedHostSf = parsedHostSourceFiles.get(hostFileName);
+        // Language Service token walks need real TS AST (getChildren + parent).
+        // tsgo RemoteSourceFile is for checker RPC only — never expose it here.
+        if (!isHostLibFile(hostFileName)) {
+            const hostSf = getLanguageServiceSourceFile(hostFileName, fileName);
+            if (hostSf) {
+                sfCache.set(cacheKey, hostSf);
+                return hostSf;
+            }
+            if (isVirtualDocumentPath(hostFileName)) {
+                const text = hostContentByFile.get(hostFileName)?.text ?? "";
+                const sf = attachHostSourceFileMetadata(
+                    createSkeletonSourceFile(hostFileName, text, options.target ?? 99, inferScriptKind(hostFileName)),
+                    hostFileName,
+                );
+                sfCache.set(cacheKey, sf);
+                return sf;
+            }
+        }
 
         const hostContent = hostContentByFile.get(hostFileName);
         const text = hostContent?.text ?? host?.readFile?.(hostFileName) ?? "";
@@ -640,26 +727,21 @@ export function createTsgoProgram(
         const anySf = sf as any;
         anySf.version = "1";
         const backed = getTsgoBackedSourceFile(anySf);
-        let result = backed ?? anySf;
-        if (!backed && parsedHostSf?.statements?.length) {
-            // tsgo has no RemoteSourceFile for this Volar virtual doc — use the
-            // parsed host SF so rename/reference token scans don't hit empty skeletons.
-            result = parsedHostSf;
-        }
+        const result = backed ?? anySf;
         if (result && !("version" in result)) {
             try { Object.defineProperty(result, "version", { value: "1", writable: true, configurable: true, enumerable: false }); } catch {}
         }
         if (result && result !== anySf) {
             try {
                 if (result.resolvedPath === undefined) {
-                    Object.defineProperty(result, "resolvedPath", { value: result.path, writable: true, configurable: true });
+                    Object.defineProperty(result, "resolvedPath", { value: hostFileName, writable: true, configurable: true });
                 }
                 if (result.originalFileName === undefined) {
                     Object.defineProperty(result, "originalFileName", { value: hostFileName, writable: true, configurable: true });
                 }
             } catch {}
         }
-        sfCache.set(hostFileName, result);
+        sfCache.set(cacheKey, result);
         return result;
     };
 
