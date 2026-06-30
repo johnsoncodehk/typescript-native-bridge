@@ -65,6 +65,17 @@ function loadBridgeDeps(): void {
             `  Build it: npm run build:bridge`,
         );
     }
+    // The cgo bridge embeds the Go runtime into this Node process. Go's
+    // signal-based async preemption (SIGURG) collides with Node's fatal-signal
+    // handler: SIGURG gets routed into node::SignalExit -> ResetStdio, which
+    // storms tcsetattr/ioctl on a TTY until the CPU is pinned and the process
+    // won't even die on SIGTERM. GODEBUG is read by the Go runtime at dlopen,
+    // so disable async preemption before _koffi.load arms its signal handler.
+    if (!/(?:^|,)asyncpreemptoff=1(?:,|$)/.test(process.env.GODEBUG ?? "")) {
+        process.env.GODEBUG = process.env.GODEBUG
+            ? `${process.env.GODEBUG},asyncpreemptoff=1`
+            : "asyncpreemptoff=1";
+    }
     const lib = _koffi.load(resolvedBridge);
     _bridgeFns = {
         BridgeNewSession: lib.func("char *BridgeNewSession(char *cwd)"),
