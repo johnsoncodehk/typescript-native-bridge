@@ -104,6 +104,10 @@ let _tnbDebugAnnounced = false;
 let _pendingOverlays: any[] | undefined;
 let _pendingExtraFileExtensions: any[] | undefined;
 let _pendingReferencedProjects: string[] | undefined;
+/** Last extraFileExtensions sent to tsgo — reused when syncing late host overlays. */
+let _lastExtraFileExtensions: any[] | undefined;
+/** Host context for incremental overlay sync (Volar virtual TS after createProgram). */
+let _overlayHostCtx: { host: any; options: any; configFilePath: string } | undefined;
 // Overlay-path cache: only files missing on disk are fed to tsgo as overlays
 // (typically Volar virtual documents).
 const _overlayDiskExistsCache = new Map<string, boolean>();
@@ -252,16 +256,17 @@ function mapTsgoDiagnostics(raw: readonly any[] | undefined, getSourceFile: (fil
     if (!raw?.length) return [];
     return raw.map(d => convertTsgoDiagnostic(d, getSourceFile));
 }
-/** Extra extensions for tsgo tsconfig parse when allowArbitraryExtensions is on (vue-tsc). */
-function collectExtraFileExtensions(rootNames: readonly string[], options: any): any[] | undefined {
-    if (!options?.allowArbitraryExtensions) return undefined;
+/** Extra extensions for tsgo when the project contains non-TS root files (.vue, …). */
+function collectExtraFileExtensions(fileNames: Iterable<string>, options: any): any[] | undefined {
+    // Explicit opt-out in tsconfig must be respected (tsgo mirrors this).
+    if (options?.allowArbitraryExtensions === false) return undefined;
     const builtin = new Set([".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs", ".json"]);
     const exts = new Set<string>();
-    for (const fn of rootNames) {
+    for (const fn of fileNames) {
         if (typeof fn !== "string") continue;
         const dot = fn.lastIndexOf(".");
         if (dot < 0) continue;
-        const ext = fn.slice(dot);
+        const ext = fn.slice(dot).toLowerCase();
         if (!builtin.has(ext)) exts.add(ext);
     }
     if (!exts.size) return undefined;
@@ -595,8 +600,8 @@ export function createTsgoProgram(
     // read by tsgo itself.
     const overlays: any[] = [];
     const trackedHostFiles = new Set<string>();
+    const names = new Set<string>();
     {
-        const names = new Set<string>();
         for (const fn of rootNames) {
             if (typeof fn === "string") names.add(fn);
         }
@@ -622,7 +627,9 @@ export function createTsgoProgram(
         }
     }
     _pendingOverlays = overlays.length > 0 ? overlays : undefined;
-    _pendingExtraFileExtensions = collectExtraFileExtensions(rootNames, options);
+    _pendingExtraFileExtensions = collectExtraFileExtensions(names, options);
+    _lastExtraFileExtensions = _pendingExtraFileExtensions;
+    _overlayHostCtx = { host, options, configFilePath };
 
     // Collect referenced project paths for tsgo to open alongside the main
     // project — tsgo needs all referenced tsconfigs to resolve imports
@@ -1249,6 +1256,7 @@ export function createTsgoChecker(program: any): any {
 
         const extraFileExtensions = _pendingExtraFileExtensions;
         _pendingExtraFileExtensions = undefined;
+        if (extraFileExtensions) _lastExtraFileExtensions = extraFileExtensions;
 
         const snapshot: any = _api.updateSnapshot({
             openProject: configFilePath!,
@@ -1300,10 +1308,40 @@ export function createTsgoChecker(program: any): any {
     // getTypeAtLocation / getSymbolAtLocation queries per file.
     const nodeIndexCache = new Map<string, Map<number, any[]>>();
 
+    /** Push host virtual TS into tsgo when a file is open in LS but absent from the tsgo program. */
+    function syncMissingHostFileToTsgo(hostFileName: string): void {
+        ensureProject();
+        if (project?.program?.getSourceFile?.(toTsgoFileName(hostFileName))) return;
+        const ctx = _overlayHostCtx;
+        if (!ctx || !_api || !isOverlayCandidatePath(hostFileName)) return;
+        const requestName = hostFileName;
+        const content = getHostScriptContent(ctx.host, requestName, ctx.options);
+        if (!content) return;
+        if (!shouldSendHostOverlay(hostFileName, content.text, content.fromHostSourceFile)
+            && !isVirtualDocumentPath(hostFileName)) return;
+        const snapshot: any = _api.updateSnapshot({
+            openProject: ctx.configFilePath,
+            openFilesWithContent: [{ fileName: hostFileName, content: content.text, scriptKind: content.scriptKind }],
+            ...(_lastExtraFileExtensions ? { extraFileExtensions: _lastExtraFileExtensions } : {}),
+        });
+        const refreshed = snapshot.getProject(ctx.configFilePath);
+        if (!refreshed) return;
+        project = refreshed;
+        _projectCache.set(ctx.configFilePath, refreshed);
+        _currentProjectRef.project = refreshed;
+        installTsgoBackedSourceFileLoader(() => project);
+        tsgoSfCache.delete(hostFileName);
+        symPrefetched.delete(hostFileName);
+        symPrefetchPopulated.delete(hostFileName);
+        nodeIndexCache.delete(hostFileName);
+        nodeAtPosCache.delete(hostFileName);
+    }
+
     function getTsgoSourceFile(fileName: string): any {
         const hostFileName = toHostFileName(fileName);
         if (tsgoSfCache.has(hostFileName)) return tsgoSfCache.get(hostFileName);
-        const proj = ensureProject();
+        syncMissingHostFileToTsgo(hostFileName);
+        const proj = _currentProjectRef.project ?? ensureProject();
         const sf = proj.program.getSourceFile(toTsgoFileName(hostFileName));
         tsgoSfCache.set(hostFileName, sf);
         return sf;
@@ -1345,10 +1383,12 @@ export function createTsgoChecker(program: any): any {
             return;
         }
         symPrefetched.add(fileName);
+        syncMissingHostFileToTsgo(fileName);
+        const activeProject = _currentProjectRef.project ?? project;
         const t0 = process.env.TSGO_PROFILE === "1" ? Date.now() : 0;
         let byPos: Map<number, any>;
-        if (typeof project.checker.prefetchResolvedReferences === "function") {
-            byPos = project.checker.prefetchResolvedReferences(toTsgoFileName(fileName));
+        if (typeof activeProject?.checker?.prefetchResolvedReferences === "function") {
+            byPos = activeProject.checker.prefetchResolvedReferences(toTsgoFileName(fileName));
         } else {
             return;
         }
@@ -1527,6 +1567,28 @@ export function createTsgoChecker(program: any): any {
                 const t = proj.checker.getNonNullableType(this);
                 if (t) fixupType(t);
                 return t;
+            };
+        }
+        if (!proto.getNonOptionalType) {
+            proto.getNonOptionalType = function () {
+                const proj = _currentProjectRef.project;
+                if (!proj) return this;
+                const checker = proj.checker;
+                if (typeof checker.getNonOptionalType === "function") {
+                    const t = checker.getNonOptionalType(this);
+                    if (t) fixupType(t);
+                    return t ?? this;
+                }
+                // tsgo bridge lacks getNonOptionalType RPC; under strictNullChecks this
+                // strips undefined from optional-chain types (removeOptionalTypeMarker).
+                if (typeof checker.getNonNullableType === "function") {
+                    const t = checker.getNonNullableType(this);
+                    if (t) {
+                        fixupType(t);
+                        return t;
+                    }
+                }
+                return this;
             };
         }
         // getConstraint — delegate to checker.getConstraintOfTypeParameter for
@@ -1968,6 +2030,19 @@ export function createTsgoChecker(program: any): any {
             const t = project.checker.getNonNullableType(type);
             if (t) fixupType(t);
             return t;
+        },
+        getNonOptionalType(type: any): any {
+            ensureProject();
+            if (!type) return type;
+            const checker = project.checker;
+            if (typeof checker.getNonOptionalType === "function") {
+                const t = checker.getNonOptionalType(type);
+                if (t) fixupType(t);
+                return t ?? type;
+            }
+            const t = checker.getNonNullableType(type);
+            if (t) fixupType(t);
+            return t ?? type;
         },
         getBaseTypes(type: any): readonly any[] {
             ensureProject();
