@@ -3,6 +3,7 @@
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
+import { toTsgoFileName } from "./tsgoLibPaths.js";
 import {
     NodeFlags,
     type Path,
@@ -146,7 +147,7 @@ export function getTsgoBackedSourceFile(realSf: any): any | undefined {
 
     let tsgoSf: any;
     try {
-        tsgoSf = project.program.getSourceFile(fileName);
+        tsgoSf = project.program.getSourceFile(toTsgoFileName(fileName));
     } catch {
         return undefined;
     }

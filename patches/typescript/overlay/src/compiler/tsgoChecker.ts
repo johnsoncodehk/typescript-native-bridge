@@ -2,7 +2,7 @@
 // in-process NAPI bridge, while keeping the rest of the tsserver /
 // LanguageService / namespace surface intact.
 //
-// Heavy deps (koffi, @typescript/native-preview) are require()'d on first use.
+// Heavy deps (koffi, vendored native-preview under vendor/) are require()'d on first use.
 //
 // The adapter builds a tsgo project from the Program's configFilePath,
 // then routes checker queries by (fileName, position) — the same file
@@ -17,6 +17,7 @@
 import * as ts from "./_namespaces/ts.js";
 import { SyntaxKind } from "./types.js";
 import { installTsgoBackedSourceFileLoader, inferScriptKind, createSkeletonSourceFile, getTsgoBackedSourceFile } from "./tsgoBackedSourceFile.js";
+import { getTnbPackageRoot, isBundledLibPath, isHostLibFile, resolveHostFileName, toHostFileName, toTsgoFileName } from "./tsgoLibPaths.js";
 
 // ── Module-level bridge deps (shared across all createTsgoChecker calls) ──
 // koffi.struct() registers type names globally, so the struct definition must
@@ -26,33 +27,45 @@ let _koffi: any;
 let _sync: any;
 let _bridgeFns: any;
 
+/** Vendored @typescript/native-preview at vendor/native-preview/. */
+function getNativePreviewDir(): string {
+    const path = require("path") as typeof import("path");
+    const fs = require("fs") as typeof import("fs");
+    const dir = path.join(getTnbPackageRoot(), "vendor", "native-preview");
+    const syncApi = path.join(dir, "dist", "api", "sync", "api.js");
+    if (!fs.existsSync(syncApi)) {
+        throw new Error(
+            `tsgoChecker: vendored native-preview not found at ${dir}\n` +
+            `  Build it: npm run build:js`,
+        );
+    }
+    return dir;
+}
+
 function loadBridgeDeps(): void {
     if (_koffi) return;
     const path = require("path") as typeof import("path");
     const fs = require("fs") as typeof import("fs");
     _koffi = require("koffi");
 
-    // Resolve @typescript/native-preview dist by direct path — the sync API
-    // file is CJS-compatible even though the package is "type": "module"
-    // (Node 22+ require(esm) works for no-top-level-await).
-    const pkgJsonPath = require.resolve("@typescript/native-preview/package.json");
-    const nativePreviewDir = path.dirname(pkgJsonPath);
+    const nativePreviewDir = getNativePreviewDir();
+    // sync API is CJS-compatible even though the package is "type": "module".
     _sync = require(path.join(nativePreviewDir, "dist", "api", "sync", "api.js"));
 
-    // Resolve the bridge shared library deterministically — no env var. It
-    // lives at <typescript-go>/bridge/bridge.<ext>, a sibling of
-    // _packages/native-preview (which pkgJsonPath points into).
+    // Bridge lives at <tnb>/native/bridge.<ext> next to lib/ and vendor/.
     const ext = process.platform === "darwin" ? "dylib" : process.platform === "win32" ? "dll" : "so";
     const libName = `bridge.${ext}`;
-    // nativePreviewDir = <typescript-go>/_packages/native-preview
-    const libPath = path.resolve(nativePreviewDir, "..", "..", "bridge", libName);
-    if (!fs.existsSync(libPath)) {
+    const packageRoot = getTnbPackageRoot();
+    const libPath = path.join(packageRoot, "native", libName);
+    const devBridge = path.join(packageRoot, "typescript-go", "bridge", libName);
+    const resolvedBridge = fs.existsSync(libPath) ? libPath : devBridge;
+    if (!fs.existsSync(resolvedBridge)) {
         throw new Error(
-            `tsgoChecker: bridge shared library not found at ${libPath}\n` +
-            `  Build it: (cd typescript-go/bridge && go build -buildmode=c-shared -o ${libName} bridge.go)`,
+            `tsgoChecker: bridge shared library not found (tried ${libPath}, ${devBridge})\n` +
+            `  Build it: npm run build:bridge`,
         );
     }
-    const lib = _koffi.load(libPath);
+    const lib = _koffi.load(resolvedBridge);
     _bridgeFns = {
         BridgeNewSession: lib.func("char *BridgeNewSession(char *cwd)"),
         BridgeCall: lib.func("char *BridgeCall(int64_t session, char *method, char *paramsJson)"),
@@ -140,7 +153,18 @@ function readDiskText(fileName: string): string | undefined {
     }
 }
 function isOverlayCandidatePath(fileName: string): boolean {
+    if (isBundledLibPath(fileName)) return false;
     return !fileName.includes("/lib.") && !fileName.includes("/node_modules/");
+}
+/** Resolve tsconfig path for tsgo — relative paths from tsserver use the host cwd. */
+function resolveTsconfigPath(configFilePath: string, host?: { getCurrentDirectory?: () => string }): string {
+    const path = require("path") as typeof import("path");
+    const normalized = configFilePath.replace(/\\/g, "/");
+    if (path.isAbsolute(normalized)) {
+        return path.normalize(normalized);
+    }
+    const cwd = host?.getCurrentDirectory?.() ?? process.cwd();
+    return path.normalize(path.resolve(cwd, normalized));
 }
 /** Host script text — prefers getSourceFile (Volar virtual .vue TS) over readFile. */
 function getHostScriptContent(host: any, fileName: string, options: any): { text: string; scriptKind: number } | undefined {
@@ -164,7 +188,7 @@ function shouldSendHostOverlay(fileName: string, hostText: string): boolean {
 }
 function convertTsgoDiagnostic(d: any, getSourceFile: (fileName: string) => any): any {
     return {
-        file: d.fileName ? getSourceFile(d.fileName) : undefined,
+        file: d.fileName ? getSourceFile(toHostFileName(d.fileName)) : undefined,
         start: d.pos,
         length: (d.end ?? d.pos) - d.pos,
         messageText: d.text,
@@ -254,14 +278,13 @@ export function getTsgoProfileStats(): Readonly<typeof _stats> {
 //     exist as name→value objects (the same objects Debug.format* reads);
 //   • tsgo enums — the native-preview generated enum modules (dist/enums/*).
 
-// Lazily-required tsgo enum objects (native-preview dist). Resolved off the
-// package.json the bridge already locates, so no env var / extra dependency.
+// Lazily-required tsgo enum objects (native-preview dist). Resolved from the
+// vendored copy under vendor/native-preview/.
 let _tsgoEnums: { SyntaxKind: any; NodeFlags: any; ObjectFlags: any } | undefined;
 function loadTsgoEnums(): { SyntaxKind: any; NodeFlags: any; ObjectFlags: any } {
     if (_tsgoEnums) return _tsgoEnums;
     const path = require("path") as typeof import("path");
-    const pkgJsonPath = require.resolve("@typescript/native-preview/package.json");
-    const enumsDir = path.join(path.dirname(pkgJsonPath), "dist", "enums");
+    const enumsDir = path.join(getNativePreviewDir(), "dist", "enums");
     const load = (file: string, name: string) => require(path.join(enumsDir, file))[name];
     _tsgoEnums = {
         SyntaxKind: load("syntaxKind.js", "SyntaxKind"),
@@ -500,10 +523,12 @@ export function createTsgoProgram(
     projectReferences?: readonly any[],
     configFileParsingDiagnostics?: readonly any[],
 ): any {
-    const configFilePath = options.configFilePath as string;
+    let configFilePath = options.configFilePath as string;
     if (!configFilePath) {
         throw new Error("createTsgoProgram: options.configFilePath is required");
     }
+    configFilePath = resolveTsconfigPath(configFilePath, host);
+    options.configFilePath = configFilePath;
     const configDiags = configFileParsingDiagnostics ?? [];
 
     // Host script text captured once at createProgram time (safe to call
@@ -511,6 +536,8 @@ export function createTsgoProgram(
     // virtual TS for .vue via getSourceFile). Reused by getOrCreateSourceFile
     // for skeleton text / diagnostic line maps without re-entering getSourceFile.
     const hostContentByFile = new Map<string, { text: string; scriptKind: number }>();
+    /** Parsed host SourceFiles captured during createProgram (Volar virtual .vue TS). */
+    const parsedHostSourceFiles = new Map<string, any>();
 
     // Collect host file content for tsgo overlays — makes the fork host the
     // single source of truth. Uses getSourceFile when present (vue-tsc / Volar
@@ -518,6 +545,7 @@ export function createTsgoProgram(
     // that differs from disk (or is missing on disk); unchanged on-disk .ts is
     // read by tsgo itself.
     const overlays: any[] = [];
+    const trackedHostFiles = new Set<string>();
     {
         const names = new Set<string>();
         for (const fn of rootNames) {
@@ -530,10 +558,16 @@ export function createTsgoProgram(
             }
         }
         for (const fn of names) {
+            trackedHostFiles.add(fn);
+            const resolvedFn = resolveHostFileName(fn, host);
+            const liveHostSf = host?.getSourceFile?.(fn, options.target ?? 99);
+            if (liveHostSf?.statements?.length) {
+                parsedHostSourceFiles.set(resolvedFn, liveHostSf);
+            }
             if (!isOverlayCandidatePath(fn)) continue;
             const content = getHostScriptContent(host, fn, options);
             if (!content) continue;
-            hostContentByFile.set(fn, content);
+            hostContentByFile.set(resolvedFn, content);
             if (!shouldSendHostOverlay(fn, content.text)) continue;
             overlays.push({ fileName: fn, content: content.text, scriptKind: content.scriptKind });
         }
@@ -547,7 +581,7 @@ export function createTsgoProgram(
     // projectReferences; the thin path uses tsgo's openProjects).
     if (projectReferences && projectReferences.length > 0) {
         _pendingReferencedProjects = projectReferences
-            .map((ref: any) => ref.path as string)
+            .map((ref: any) => resolveTsconfigPath(ref.path as string, host))
             .filter((p: string) => typeof p === "string" && p.length > 0);
     } else {
         _pendingReferencedProjects = undefined;
@@ -562,6 +596,10 @@ export function createTsgoProgram(
         getSourceFiles: () => [] as any[],
     };
 
+    // tsserver/Volar open files incrementally (e.g. foo.vue before fixture.vue).
+    // Always refresh the tsgo snapshot so overlays match the latest host content.
+    _projectCache.delete(configFilePath);
+
     const checker = createTsgoChecker(thinProgramForChecker as any);
 
     // The tsgo project is now created (ensureProject ran inside createTsgoChecker).
@@ -569,8 +607,9 @@ export function createTsgoProgram(
     const project = _projectCache.get(configFilePath);
 
     // Build a thin Program object that delegates to the tsgo project.
-    const getSourceFileNames = () => project?.program?.getSourceFileNames?.() ?? [];
-    const tsgoGetSourceFile = (fileName: string) => project?.program?.getSourceFile?.(fileName);
+    const getTsgoSourceFileNames = () => project?.program?.getSourceFileNames?.() ?? [];
+    const getSourceFileNames = () => getTsgoSourceFileNames().map(toHostFileName);
+    const tsgoGetSourceFile = (fileName: string) => project?.program?.getSourceFile?.(toTsgoFileName(fileName));
 
     // Helper: create a proper TS SourceFile shell (with path/resolvedPath/etc.)
     // from host content, then wrap it with the tsgo RemoteSourceFile AST via
@@ -578,15 +617,24 @@ export function createTsgoProgram(
     // need path/resolvedPath/version on source files.
     const sfCache = new Map<string, any>();
     const getOrCreateSourceFile = (fileName: string): any => {
-        if (sfCache.has(fileName)) return sfCache.get(fileName);
-        const hostContent = hostContentByFile.get(fileName);
-        const text = hostContent?.text ?? host?.readFile?.(fileName) ?? "";
-        const scriptKind = hostContent?.scriptKind ?? inferScriptKind(fileName);
-        const sf = createSkeletonSourceFile(fileName, text, options.target ?? 99, scriptKind);
+        const hostFileName = resolveHostFileName(fileName, host);
+        if (sfCache.has(hostFileName)) return sfCache.get(hostFileName);
+
+        const parsedHostSf = parsedHostSourceFiles.get(hostFileName);
+
+        const hostContent = hostContentByFile.get(hostFileName);
+        const text = hostContent?.text ?? host?.readFile?.(hostFileName) ?? "";
+        const scriptKind = hostContent?.scriptKind ?? inferScriptKind(hostFileName);
+        const sf = createSkeletonSourceFile(hostFileName, text, options.target ?? 99, scriptKind);
         const anySf = sf as any;
         anySf.version = "1";
         const backed = getTsgoBackedSourceFile(anySf);
-        const result = backed ?? anySf;
+        let result = backed ?? anySf;
+        if (!backed && parsedHostSf?.statements?.length) {
+            // tsgo has no RemoteSourceFile for this Volar virtual doc — use the
+            // parsed host SF so rename/reference token scans don't hit empty skeletons.
+            result = parsedHostSf;
+        }
         if (result && !("version" in result)) {
             try { Object.defineProperty(result, "version", { value: "1", writable: true, configurable: true, enumerable: false }); } catch {}
         }
@@ -596,11 +644,11 @@ export function createTsgoProgram(
                     Object.defineProperty(result, "resolvedPath", { value: result.path, writable: true, configurable: true });
                 }
                 if (result.originalFileName === undefined) {
-                    Object.defineProperty(result, "originalFileName", { value: fileName, writable: true, configurable: true });
+                    Object.defineProperty(result, "originalFileName", { value: hostFileName, writable: true, configurable: true });
                 }
             } catch {}
         }
-        sfCache.set(fileName, result);
+        sfCache.set(hostFileName, result);
         return result;
     };
 
@@ -624,25 +672,26 @@ export function createTsgoProgram(
     // the files actually linted pay the RPC via getSourceFile(fileName).
     const lightSfCache = new Map<string, any>();
     const getOrCreateLightSourceFile = (fileName: string): any => {
-        if (lightSfCache.has(fileName)) return lightSfCache.get(fileName);
+        const hostFileName = toHostFileName(fileName);
+        if (lightSfCache.has(hostFileName)) return lightSfCache.get(hostFileName);
         // Metadata-only SourceFile stub: no host.readFile, no computeLineStarts,
         // no AST. BuilderProgram state creation only needs these fields to key
         // fileInfos and to ask for referenced/imported files (empty here).
-        // Match tsgo's path format (lowercased on case-insensitive FS) so
-        // BuilderState's fileInfos keys align with tsgo-backed SFs' paths.
-        const tsgoPath = _tsgoUseCaseSensitive ? fileName : fileName.toLowerCase();
+        // tsserver getScriptInfos() requires ScriptInfo for every returned file;
+        // default libs are not opened as ScriptInfo — exclude them here.
+        const tsgoPath = hostFileName;
         const sf: any = {
             kind: SyntaxKind.SourceFile,
-            fileName,
+            fileName: hostFileName,
             path: tsgoPath,
             resolvedPath: tsgoPath,
-            originalFileName: fileName,
+            originalFileName: hostFileName,
             text: "",
             version: "1",
             languageVersion: options.target ?? 99,
             languageVariant: 0,
-            scriptKind: inferScriptKind(fileName),
-            isDeclarationFile: fileName.endsWith(".d.ts"),
+            scriptKind: inferScriptKind(hostFileName),
+            isDeclarationFile: hostFileName.endsWith(".d.ts"),
             hasNoDefaultLib: false,
             referencedFiles: [],
             typeReferenceDirectives: [],
@@ -662,9 +711,11 @@ export function createTsgoProgram(
             getPositionOfLineAndCharacter: () => 0,
             forEachChild: () => undefined,
         };
-        lightSfCache.set(fileName, sf);
+        lightSfCache.set(hostFileName, sf);
         return sf;
     };
+
+    const tsgoFileArg = (fileName: string | undefined) => fileName ? toTsgoFileName(fileName) : fileName;
 
     const thinProgram: any = {
         getRootFileNames: () => rootNames as readonly string[],
@@ -677,13 +728,10 @@ export function createTsgoProgram(
         // RemoteSourceFile materialisation for every program file.
         getSourceFileByPath: (path: any) => getOrCreateLightSourceFile(String(path)),
         getSourceFiles: () => {
-            // Return lightweight stubs — BuilderProgram only needs version +
-            // referencedFiles for state creation, not the AST. The real
-            // tsgo-backed SF (with AST) is fetched lazily via getSourceFile()
-            // when each file is linted.
             const names = getSourceFileNames();
             const result: any[] = [];
             for (const name of names) {
+                if (isHostLibFile(name)) continue;
                 const sf = getOrCreateLightSourceFile(name);
                 if (sf) result.push(sf);
             }
@@ -694,36 +742,36 @@ export function createTsgoProgram(
         getOptionsDiagnostics: () => [],
         getSemanticDiagnostics: (sourceFile?: any) => {
             const raw = sourceFile?.fileName
-                ? project?.program?.getSemanticDiagnostics?.(sourceFile.fileName)
+                ? project?.program?.getSemanticDiagnostics?.(tsgoFileArg(sourceFile.fileName))
                 : project?.program?.getSemanticDiagnostics?.();
             return mapTsgoDiagnostics(raw, getDiagnosticSourceFile);
         },
         getSyntacticDiagnostics: (sourceFile?: any) => {
             const raw = sourceFile?.fileName
-                ? project?.program?.getSyntacticDiagnostics?.(sourceFile.fileName)
+                ? project?.program?.getSyntacticDiagnostics?.(tsgoFileArg(sourceFile.fileName))
                 : project?.program?.getSyntacticDiagnostics?.();
             return mapTsgoDiagnostics(raw, getDiagnosticSourceFile);
         },
         getGlobalDiagnostics: () => mapTsgoDiagnostics(project?.program?.getGlobalDiagnostics?.(), getDiagnosticSourceFile),
         getSuggestionDiagnostics: (sourceFile?: any) => {
             const raw = sourceFile?.fileName
-                ? project?.program?.getSuggestionDiagnostics?.(sourceFile.fileName)
+                ? project?.program?.getSuggestionDiagnostics?.(tsgoFileArg(sourceFile.fileName))
                 : project?.program?.getSuggestionDiagnostics?.();
             return mapTsgoDiagnostics(raw, getDiagnosticSourceFile);
         },
         getDeclarationDiagnostics: (sourceFile?: any) => {
             const raw = sourceFile?.fileName
-                ? project?.program?.getDeclarationDiagnostics?.(sourceFile.fileName)
+                ? project?.program?.getDeclarationDiagnostics?.(tsgoFileArg(sourceFile.fileName))
                 : project?.program?.getDeclarationDiagnostics?.();
             return mapTsgoDiagnostics(raw, getDiagnosticSourceFile);
         },
         getDiagnostics: () => [],
         getBindAndCheckDiagnostics: (sourceFile?: any) => {
             const synRaw = sourceFile?.fileName
-                ? project?.program?.getSyntacticDiagnostics?.(sourceFile.fileName)
+                ? project?.program?.getSyntacticDiagnostics?.(tsgoFileArg(sourceFile.fileName))
                 : project?.program?.getSyntacticDiagnostics?.();
             const semRaw = sourceFile?.fileName
-                ? project?.program?.getSemanticDiagnostics?.(sourceFile.fileName)
+                ? project?.program?.getSemanticDiagnostics?.(tsgoFileArg(sourceFile.fileName))
                 : project?.program?.getSemanticDiagnostics?.();
             return [
                 ...mapTsgoDiagnostics(synRaw, getDiagnosticSourceFile),
@@ -750,7 +798,7 @@ export function createTsgoProgram(
                 return { emitSkipped: true, diagnostics: [], emittedFiles: [], sourceMaps: [] };
             }
             // DocumentIdentifier wire format is plain path string or { uri }, not { fileName }.
-            const file = targetSourceFile?.fileName || undefined;
+            const file = targetSourceFile?.fileName ? tsgoFileArg(targetSourceFile.fileName) : undefined;
             const emitOnly = forceDtsEmit ? 3 : (emitOnlyDtsFiles ? 2 : undefined);
             const res = project?.program?.emit?.({ file, emitOnly, forceDtsEmit: !!forceDtsEmit });
             const outputs = res?.outputFiles ?? [];
@@ -776,7 +824,7 @@ export function createTsgoProgram(
         },
         getBuildInfo: () => undefined,
         getSourceFileFromReference: () => undefined,
-        getFileIncludeReasons: () => [],
+        getFileIncludeReasons: () => new Map(),
         getModuleResolutionCache: () => undefined,
         redirectTargetsMap: new Map(),
         getGlobalTypingsCacheLocation: () => undefined,
@@ -921,10 +969,12 @@ function installNodeHandleHooks(s: any): void {
 /* @internal */
 export function createTsgoChecker(program: any): any {
     const options = program.getCompilerOptions();
-    const configFilePath = options.configFilePath as string | undefined;
+    let configFilePath = options.configFilePath as string | undefined;
     if (!configFilePath) {
         throw new Error("tsgoChecker: program has no configFilePath — tsgo NAPI backend requires a tsconfig path");
     }
+    configFilePath = resolveTsconfigPath(configFilePath);
+    options.configFilePath = configFilePath;
 
     let koffi = _koffi;
     let sync = _sync;
@@ -1156,10 +1206,11 @@ export function createTsgoChecker(program: any): any {
     const nodeIndexCache = new Map<string, Map<number, any[]>>();
 
     function getTsgoSourceFile(fileName: string): any {
-        if (tsgoSfCache.has(fileName)) return tsgoSfCache.get(fileName);
+        const hostFileName = toHostFileName(fileName);
+        if (tsgoSfCache.has(hostFileName)) return tsgoSfCache.get(hostFileName);
         const proj = ensureProject();
-        const sf = proj.program.getSourceFile(fileName);
-        tsgoSfCache.set(fileName, sf);
+        const sf = proj.program.getSourceFile(toTsgoFileName(hostFileName));
+        tsgoSfCache.set(hostFileName, sf);
         return sf;
     }
 
@@ -1202,7 +1253,7 @@ export function createTsgoChecker(program: any): any {
         const t0 = process.env.TSGO_PROFILE === "1" ? Date.now() : 0;
         let byPos: Map<number, any>;
         if (typeof project.checker.prefetchResolvedReferences === "function") {
-            byPos = project.checker.prefetchResolvedReferences(fileName);
+            byPos = project.checker.prefetchResolvedReferences(toTsgoFileName(fileName));
         } else {
             return;
         }
@@ -1661,7 +1712,7 @@ export function createTsgoChecker(program: any): any {
         if (k === SyntaxKind.PropertyAccessExpression) {
             const sfPath = tsgoNode.getSourceFile?.()?.fileName;
             if (sfPath) {
-                const t = project.checker.getTypeAtPosition(sfPath, tsgoNode.end);
+                const t = project.checker.getTypeAtPosition(toTsgoFileName(sfPath), tsgoNode.end);
                 if (t) { fixupType(t); return t; }
             }
         }
@@ -1716,7 +1767,7 @@ export function createTsgoChecker(program: any): any {
                 fileCache = new Map();
                 symByPos.set(sf.fileName, fileCache);
             }
-            let sym: any = project.checker.getSymbolAtPosition(sf.fileName, end);
+            let sym: any = project.checker.getSymbolAtPosition(toTsgoFileName(sf.fileName), end);
             if (!sym && !symPrefetchPopulated.has(sf.fileName)) {
                 const tsgoNode = findTsgoNodeAtPosition(sf.fileName, node.getStart(sf), node.kind, node.getEnd(sf));
                 if (tsgoNode) {

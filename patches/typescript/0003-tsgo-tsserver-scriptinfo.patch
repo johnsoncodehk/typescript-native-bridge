@@ -1,0 +1,19 @@
+diff --git a/src/server/project.ts b/src/server/project.ts
+index 88fa23c1b..47a03927e 100644
+--- a/src/server/project.ts
++++ b/src/server/project.ts
+@@ -1213,10 +1213,10 @@ export abstract class Project implements LanguageServiceHost, ModuleResolutionHo
+             // if language service is not enabled - return just root files
+             return this.getRootScriptInfos();
+         }
+-        return map(this.program!.getSourceFiles(), sourceFile => {
+-            const scriptInfo = this.projectService.getScriptInfoForPath(sourceFile.resolvedPath);
+-            Debug.assert(!!scriptInfo, "getScriptInfo", () => `scriptInfo for a file '${sourceFile.fileName}' Path: '${sourceFile.path}' / '${sourceFile.resolvedPath}' is missing.`);
+-            return scriptInfo;
++        return mapDefined(this.program!.getSourceFiles(), sourceFile => {
++            // tsgo-backed programs may list bundled/default-lib or generated
++            // companion files before tsserver has opened them as ScriptInfo.
++            return this.projectService.getScriptInfoForPath(sourceFile.resolvedPath);
+         });
+     }
+ 
