@@ -1119,14 +1119,16 @@ export function createTsgoChecker(program: any): any {
             if (!_tnbDebugAnnounced) {
                 _tnbDebugAnnounced = true;
                 const tty = !!(process.stderr as any).isTTY;
-                const hi = tty ? "\u001b[1;42;30m" : ""; // bold, green bg, black text
-                const bar = tty ? "\u001b[1;32m" : ""; // bold green
+                const c = tty ? "\u001b[32m" : ""; // green foreground, no background
                 const off = tty ? "\u001b[0m" : "";
-                const line = "\u2501".repeat(56);
+                const text = "\u2705  TNB ACTIVE \u2014 \`typescript\` is the tsgo-backed fork";
+                const inner = 57; // 2 left pad + 53 text cols (✅ = 2) + 2 right pad
+                const top = "\u250c" + "\u2500".repeat(inner) + "\u2510";
+                const bottom = "\u2514" + "\u2500".repeat(inner) + "\u2518";
                 process.stderr.write(
-                    `\n${bar}${line}${off}\n`
-                    + `${hi}  \u2705  TNB ACTIVE \u2014 \`typescript\` is the tsgo-backed fork  ${off}\n`
-                    + `${bar}${line}${off}\n\n`,
+                    `\n${c}${top}${off}\n`
+                    + `${c}\u2502${off}  ${text}  ${c}\u2502${off}\n`
+                    + `${c}${bottom}${off}\n\n`,
                 );
             }
             const useCaseSensitive = !!init.useCaseSensitiveFileNames;
