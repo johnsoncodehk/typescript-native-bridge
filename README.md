@@ -61,6 +61,7 @@ Use this if you just want to try TNB on an existing project:
 - [ ] Run `pnpm install` / `npm install`
 - [ ] Run your usual typecheck (`vue-tsc`, `tsc`, or `nuxi typecheck`)
 - [ ] Confirm the **TNB ACTIVE** banner appears on stderr (first run per process)
+- [ ] **Editor:** set `typescript.tsdk` and switch to the workspace TypeScript version (see [Editor / tsserver](#editor--tsserver-tsdk))
 - [ ] If no banner → see [Troubleshooting](#troubleshooting)
 
 ---
@@ -212,16 +213,59 @@ pnpm exec nuxi typecheck        # or your package.json "typecheck" script
   resolvers)
 - Explicit `allowArbitraryExtensions: false` in tsconfig → normal `TS6263` (opt-out)
 
-### CLI vs editor
+### Editor / tsserver (tsdk)
+
+CLI typecheck (`vue-tsc`, `tsc`) picks up TNB automatically after the override. **The IDE
+does not** — VS Code / Cursor ship their own TypeScript and only use your fork when you
+point **`typescript.tsdk`** at the workspace install and opt in to the workspace version.
+
+After `pnpm install`, `node_modules/typescript` **is** TNB (same layout as stock
+`typescript`: `lib/tsserver.js`, `lib/typescript.js`, …). The editor must load that
+`tsserver`, not the built-in one.
+
+**1. Add workspace settings** (commit `.vscode/settings.json` for the team):
+
+```jsonc
+// .vscode/settings.json — VS Code and Cursor
+{
+  "typescript.tsdk": "node_modules/typescript/lib",
+  "typescript.enablePromptUseWorkspaceTsdk": true
+}
+```
+
+Use a path relative to the **workspace folder** that contains `node_modules` (monorepo:
+usually the repo root). With pnpm overrides this resolves to TNB's `lib/` even when the
+physical path is a symlink.
+
+**2. Switch to the workspace version (required once per machine / workspace)**
+
+Command Palette → **`TypeScript: Select TypeScript Version`** → **Use Workspace Version**.
+
+VS Code deliberately does not run workspace `tsserver` until you confirm (security). The
+prompt appears on first open if `typescript.enablePromptUseWorkspaceTsdk` is set; otherwise
+run the command manually.
+
+**3. Verify**
+
+- Status bar / **TypeScript: Select TypeScript Version** should show a path under
+  `node_modules/typescript/lib`, not "VS Code's Version".
+- Open a `.ts` file and trigger type-checking; **View → Output → TypeScript** may show
+  **TNB ACTIVE** on first project load (same banner as CLI).
+- Vue/Nuxt: keep `@vue/typescript-plugin` in `tsconfig` `compilerOptions.plugins` as today
+  — it runs as a **tsserver LS Plugin** on this fork; no separate tsgo LSP.
 
 | Path | Bundle | Used by |
 |---|---|---|
 | `lib/_tsc.js` | CLI | `tsc`, `vue-tsc -b` |
-| `lib/typescript.js` | Language service | `tsserver`, VS Code workspace TS |
+| `lib/tsserver.js` → `lib/typescript.js` | Language service | IDE, `tsserver`, LS Plugins |
 
-Both should show the banner when type-checking runs. In VS Code: **TypeScript: Select
-TypeScript Version → Use Workspace Version**. Volar/Vue - Official should use the
-workspace `typescript` as well.
+### CLI vs editor (summary)
+
+| | CLI | IDE |
+|---|---|---|
+| Needs override | Yes | Yes (same `node_modules/typescript`) |
+| Extra config | No | **`typescript.tsdk` + Use Workspace Version** |
+| Vue LS Plugin | via `vue-tsc` / program API | via forked `tsserver` + `@vue/typescript-plugin` |
 
 ---
 
@@ -259,8 +303,13 @@ Debug slow runs: `TSGO_PROFILE=1` prints a `[tsgo-profile]` timing summary to st
 
 ### CLI works, editor doesn't (or vice versa)
 
-Point the editor to **workspace** TypeScript (see [CLI vs editor](#cli-vs-editor)). CLI
-and ESLint must resolve the same `node_modules/typescript` path.
+- **CLI OK, IDE not:** add [Editor / tsserver (tsdk)](#editor--tsserver-tsdk) settings and
+  run **TypeScript: Select TypeScript Version → Use Workspace Version**. Override alone is
+  not enough for the editor.
+- **IDE OK, CLI not:** run `node -e "console.log(require.resolve('typescript'))"` — should
+  point at TNB. Reinstall after changing overrides.
+- CLI and IDE must both resolve the same `node_modules/typescript` (same override at
+  monorepo root).
 
 ### Type errors differ from stock TypeScript
 
