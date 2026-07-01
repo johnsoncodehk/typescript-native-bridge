@@ -108,6 +108,23 @@ let _pendingReferencedProjects: string[] | undefined;
 let _lastExtraFileExtensions: any[] | undefined;
 /** Host context for incremental overlay sync (Volar virtual TS after createProgram). */
 let _overlayHostCtx: { host: any; options: any; configFilePath: string } | undefined;
+let _languageServiceHost: any | undefined;
+
+/** @internal */
+export function tnbSetLanguageServiceHost(host: any): void {
+    _languageServiceHost = host;
+}
+
+/** Prefer LS host snapshot when compilerHost only sees empty on-disk placeholder. */
+function getHostScriptContentForOverlay(compilerHost: any, fileName: string, options: any) {
+    const fromCompiler = getHostScriptContent(compilerHost, fileName, options);
+    if (fromCompiler && fromCompiler.text.length === 0 && fileExistsOnDisk(fileName) && _languageServiceHost) {
+        const fromLs = getHostScriptContent(_languageServiceHost, fileName, options);
+        if (fromLs && fromLs.text.length > 0) return fromLs;
+    }
+    return fromCompiler;
+}
+
 // Overlay-path cache: only files missing on disk are fed to tsgo as overlays
 // (typically Volar virtual documents).
 const _overlayDiskExistsCache = new Map<string, boolean>();
@@ -218,6 +235,8 @@ function attachHostSourceFileMetadata(sf: any, hostFileName: string): any {
     sf.originalFileName = hostFileName;
     sf.path = hostFileName as Path;
     sf.resolvedPath = hostFileName as Path;
+    if (!sf.imports) sf.imports = [];
+    if (!sf.moduleAugmentations) sf.moduleAugmentations = [];
     if (!("version" in sf)) {
         try { Object.defineProperty(sf, "version", { value: "1", writable: true, configurable: true, enumerable: false }); } catch {}
     }
@@ -626,7 +645,7 @@ export function createTsgoProgram(
                 parsedHostSourceFiles.set(resolvedFn, snapSf);
             }
             if (!isOverlayCandidatePath(fn)) continue;
-            const content = getHostScriptContent(host, fn, options);
+            const content = getHostScriptContentForOverlay(host, fn, options);
             if (!content) continue;
             hostContentByFile.set(resolvedFn, content);
             if (!shouldSendHostOverlay(resolvedFn, content.text, content.fromHostSourceFile)) continue;

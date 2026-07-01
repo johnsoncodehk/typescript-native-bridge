@@ -78,3 +78,23 @@ index b44a155f0..c631f17df 100644
      }
  
      function emit(
+diff --git a/src/services/services.ts b/src/services/services.ts
+index 9885093ed..57b73f119 100644
+--- a/src/services/services.ts
++++ b/src/services/services.ts
+@@ -330,6 +330,7 @@ import {
+     timestamp,
+     TodoComment,
+     TodoCommentDescriptor,
++    tnbSetLanguageServiceHost,
+     Token,
+     toPath,
+     tracing,
+@@ -1733,6 +1734,7 @@ export function createLanguageService(
+         let parsedCommandLines: Map<Path, ParsedCommandLine | false> | undefined;
+ 
+         // Now create a new compiler
++        tnbSetLanguageServiceHost(host);
+         let compilerHost: CompilerHost | undefined = {
+             getSourceFile: getOrCreateSourceFile,
+             getSourceFileByPath: getOrCreateSourceFileByPath,
