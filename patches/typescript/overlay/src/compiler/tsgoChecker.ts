@@ -17,7 +17,7 @@
 import * as ts from "./_namespaces/ts.js";
 import { bindSourceFile } from "./binder.js";
 import { createSourceFile } from "./parser.js";
-import { SyntaxKind, type Path } from "./types.js";
+import { SyntaxKind, SymbolFlags, type Path } from "./types.js";
 import { installTsgoBackedSourceFileLoader, inferScriptKind, createSkeletonSourceFile, getTsgoBackedSourceFile } from "./tsgoBackedSourceFile.js";
 import { getTnbPackageRoot, isBundledLibPath, isHostLibFile, resolveHostFileName, toHostFileName, toTsgoFileName } from "./tsgoLibPaths.js";
 
@@ -116,14 +116,9 @@ export function tnbSetLanguageServiceHost(host: any): void {
     _languageServiceHost = host;
 }
 
-/** Prefer LS host snapshot when compilerHost only sees empty on-disk placeholder. */
-function getHostScriptContentForOverlay(compilerHost: any, fileName: string, options: any) {
-    const fromCompiler = getHostScriptContent(compilerHost, fileName, options);
-    if (fromCompiler && fromCompiler.text.length === 0 && fileExistsOnDisk(fileName) && _languageServiceHost) {
-        const fromLs = getHostScriptContent(_languageServiceHost, fileName, options);
-        if (fromLs && fromLs.text.length > 0) return fromLs;
-    }
-    return fromCompiler;
+/** Host script content for tsgo overlay — LS host SSOT, compilerHost fallback at createProgram. */
+function getHostScriptContentForOverlay(fileName: string, options: any, compilerHost?: any) {
+    return getHostScriptContent(hostForOverlaySync() ?? compilerHost, fileName, options);
 }
 
 function hostForOverlaySync(): any {
@@ -272,6 +267,44 @@ function exportMemberKey(symbol: any): string | undefined {
 }
 function moduleSymbolSourceFileName(moduleSymbol: any): string | undefined {
     return moduleSymbol?.declarations?.[0]?.getSourceFile?.()?.fileName;
+}
+/** Resolve alias chain on host-bound symbols (bindSourceFile), before tsgo RPC. */
+function resolveHostAliasedSymbol(symbol: any): any {
+    if (!symbol) return symbol;
+    if (!(symbol.flags & SymbolFlags.Alias)) return symbol;
+    const seen = new Set<any>();
+    let current = symbol;
+    while (current && (current.flags & SymbolFlags.Alias) && !seen.has(current)) {
+        seen.add(current);
+        const target = current.target;
+        if (!target || target === current) break;
+        current = target;
+    }
+    return current ?? symbol;
+}
+/** Symbol from host-bound AST when tsgo position RPC misses (LS path). */
+function getHostBoundSymbolAtLocation(node: any): any | undefined {
+    const sf = node?.getSourceFile?.();
+    if (!sf?.__tnbHostBound) return undefined;
+    const parent = node.parent;
+    if (parent) {
+        switch (parent.kind) {
+            case SyntaxKind.ImportSpecifier:
+            case SyntaxKind.ExportSpecifier:
+            case SyntaxKind.BindingElement:
+            case SyntaxKind.VariableDeclaration:
+            case SyntaxKind.FunctionDeclaration:
+            case SyntaxKind.ClassDeclaration:
+            case SyntaxKind.TypeParameter:
+            case SyntaxKind.Parameter:
+            case SyntaxKind.PropertyDeclaration:
+            case SyntaxKind.MethodDeclaration:
+            case SyntaxKind.EnumMember:
+                if (parent.name === node) return parent.symbol;
+                break;
+        }
+    }
+    return node.symbol;
 }
 /** ScriptKind for LS parse — host.getScriptKind is SSOT for snapshot overlays. */
 function resolveLanguageServiceScriptKind(
@@ -678,7 +711,7 @@ export function createTsgoProgram(
                 parsedHostSourceFiles.set(resolvedFn, snapSf);
             }
             if (!isOverlayCandidatePath(fn)) continue;
-            const content = getHostScriptContentForOverlay(_languageServiceHost ?? host, fn, options);
+            const content = getHostScriptContentForOverlay(resolvedFn, options, host);
             if (!content) continue;
             hostContentByFile.set(resolvedFn, content);
             if (!shouldSendHostOverlay(resolvedFn, content.text)) continue;
@@ -766,7 +799,7 @@ export function createTsgoProgram(
         }
 
         if (!hasSnapshot) {
-            const disk = host?.readFile?.(hostFileName);
+            const disk = ls?.readFile?.(hostFileName);
             if (typeof disk === "string" && disk.length) {
                 const sf = createSourceFile(hostFileName, disk, options.target ?? 99, /*setParentNodes*/ true, inferScriptKind(hostFileName));
                 return attachHostSourceFileMetadata(sf, hostFileName);
@@ -774,6 +807,18 @@ export function createTsgoProgram(
         }
 
         return undefined;
+    };
+
+    const createBoundHostSourceFile = (hostFileName: string, requestFileName: string, text: string): any | undefined => {
+        if (!text.length) return undefined;
+        const ls = hostForLs();
+        const scriptKind = resolveLanguageServiceScriptKind(ls, requestFileName, hostFileName, /*fromHostSnapshot*/ true);
+        const sf = attachHostSourceFileMetadata(
+            createSourceFile(hostFileName, text, options.target ?? 99, /*setParentNodes*/ true, scriptKind),
+            hostFileName,
+        );
+        ensureHostSourceFileBound(sf, options);
+        return sf;
     };
 
     const getOrCreateSourceFile = (fileName: string): any => {
@@ -799,6 +844,11 @@ export function createTsgoProgram(
                 const text = snap
                     ? snap.getText(0, snap.getLength())
                     : (hostContentByFile.get(hostFileName)?.text ?? "");
+                const hostSf = createBoundHostSourceFile(hostFileName, fileName, text);
+                if (hostSf) {
+                    sfCache.set(cacheKey, hostSf);
+                    return hostSf;
+                }
                 const scriptKind = resolveLanguageServiceScriptKind(ls, fileName, hostFileName, /*fromHostSnapshot*/ true);
                 const sf = attachHostSourceFileMetadata(
                     createSkeletonSourceFile(hostFileName, text, options.target ?? 99, scriptKind),
@@ -1453,20 +1503,40 @@ export function createTsgoChecker(program: any): any {
         forEachExportEqualsProperties(tsgoChecker, mod, cb);
     }
 
-    /** Push host snapshot into tsgo when missing from tsgo or host text differs from disk. */
-    function pushHostOverlayToTsgo(hostFileName: string): void {
+    /** Push all open host files that need overlay into tsgo (single updateSnapshot). */
+    function pushHostOverlayToTsgo(requestedFileName?: string): void {
         if (_checkerQueryDepth > 0) return;
         ensureProject();
         const ctx = _overlayHostCtx;
-        if (!ctx || !_api || !isOverlayCandidatePath(hostFileName)) return;
-        const content = getHostScriptContent(hostForOverlaySync(), hostFileName, ctx.options);
-        if (!content?.text) return;
-        const inTsgo = !!project?.program?.getSourceFile?.(toTsgoFileName(hostFileName));
-        if (inTsgo && !shouldSendHostOverlay(hostFileName, content.text)) return;
-        if (_syncedOverlayContentByFile.get(hostFileName) === content.text) return;
+        if (!ctx || !_api) return;
+        const syncHost = hostForOverlaySync();
+        if (!syncHost) return;
+
+        const names = new Set<string>();
+        const scriptNames = syncHost.getScriptFileNames?.();
+        if (scriptNames) {
+            for (const fn of scriptNames) {
+                if (typeof fn === "string") names.add(fn);
+            }
+        }
+        if (requestedFileName) names.add(requestedFileName);
+
+        const openFilesWithContent: { fileName: string; content: string; scriptKind: number }[] = [];
+        for (const fn of names) {
+            const hostFileName = resolveHostFileName(fn, syncHost);
+            if (!isOverlayCandidatePath(hostFileName)) continue;
+            const content = getHostScriptContent(syncHost, hostFileName, ctx.options);
+            if (!content?.text) continue;
+            const inTsgo = !!project?.program?.getSourceFile?.(toTsgoFileName(hostFileName));
+            if (inTsgo && !shouldSendHostOverlay(hostFileName, content.text)) continue;
+            if (_syncedOverlayContentByFile.get(hostFileName) === content.text) continue;
+            openFilesWithContent.push({ fileName: hostFileName, content: content.text, scriptKind: content.scriptKind });
+        }
+        if (!openFilesWithContent.length) return;
+
         const snapshot: any = _api.updateSnapshot({
             openProject: ctx.configFilePath,
-            openFilesWithContent: [{ fileName: hostFileName, content: content.text, scriptKind: content.scriptKind }],
+            openFilesWithContent,
             ...(_lastExtraFileExtensions ? { extraFileExtensions: _lastExtraFileExtensions } : {}),
         });
         const refreshed = snapshot.getProject(ctx.configFilePath);
@@ -1475,12 +1545,15 @@ export function createTsgoChecker(program: any): any {
         _projectCache.set(ctx.configFilePath, refreshed);
         _currentProjectRef.project = refreshed;
         installTsgoBackedSourceFileLoader(() => project);
-        _syncedOverlayContentByFile.set(hostFileName, content.text);
-        tsgoSfCache.delete(hostFileName);
-        symPrefetched.delete(hostFileName);
-        symPrefetchPopulated.delete(hostFileName);
-        nodeIndexCache.delete(hostFileName);
-        nodeAtPosCache.delete(hostFileName);
+        for (const f of openFilesWithContent) {
+            _syncedOverlayContentByFile.set(f.fileName, f.content);
+            tsgoSfCache.delete(f.fileName);
+            symPrefetched.delete(f.fileName);
+            symPrefetchPopulated.delete(f.fileName);
+            nodeIndexCache.delete(f.fileName);
+            nodeAtPosCache.delete(f.fileName);
+        }
+        symByPos.clear();
     }
 
     function getTsgoSourceFile(fileName: string): any {
@@ -2056,28 +2129,38 @@ export function createTsgoChecker(program: any): any {
             if (!sf) return undefined;
             ensureFileSymbolsPrefetched(sf.fileName);
             const t0 = process.env.TSGO_PROFILE === "1" ? Date.now() : 0;
+            const start = node.getStart(sf);
             const end = node.getEnd(sf);
             let fileCache = symByPos.get(sf.fileName);
-            if (fileCache?.has(end)) {
+            const cacheKey = start;
+            if (fileCache?.has(cacheKey)) {
                 if (process.env.TSGO_PROFILE === "1") {
                     const d = Date.now() - t0;
                     _stats.getSymCount++;
                     _stats.getSymMs += d;
                     _stats.getSymHitCount++;
                 }
-                return fileCache.get(end);
+                return fileCache.get(cacheKey);
             }
             if (!fileCache) {
                 fileCache = new Map();
                 symByPos.set(sf.fileName, fileCache);
             }
-            let sym: any = project.checker.getSymbolAtPosition(toTsgoFileName(sf.fileName), end);
+            const tsgoFile = toTsgoFileName(sf.fileName);
+            let sym: any = project.checker.getSymbolAtPosition(tsgoFile, start);
+            if (!sym && end > start) {
+                sym = project.checker.getSymbolAtPosition(tsgoFile, end - 1);
+            }
             if (!sym && !symPrefetchPopulated.has(sf.fileName)) {
-                const tsgoNode = findTsgoNodeAtPosition(sf.fileName, node.getStart(sf), node.kind, node.getEnd(sf));
+                const tsgoNode = findTsgoNodeAtPosition(sf.fileName, start, node.kind, end);
                 if (tsgoNode) {
                     sym = project.checker.getSymbolAtLocation(tsgoNode);
                 }
             }
+            if (!sym) {
+                sym = getHostBoundSymbolAtLocation(node);
+            }
+            fileCache.set(cacheKey, sym);
             fileCache.set(end, sym);
             if (process.env.TSGO_PROFILE === "1") {
                 const d = Date.now() - t0;
@@ -2282,21 +2365,29 @@ export function createTsgoChecker(program: any): any {
             if (!symbol) return symbol;
             const SF = sync.SymbolFlags;
             if (!(symbol.flags & SF.Alias)) return symbol;
-            if (typeof symbol.id !== "number") return symbol;
+            if (typeof symbol.id !== "number") {
+                return resolveHostAliasedSymbol(symbol);
+            }
             try {
                 return project.checker.getAliasedSymbol(symbol) ?? symbol;
             } catch {
-                return symbol;
+                return resolveHostAliasedSymbol(symbol);
             }
         },
         getImmediateAliasedSymbol(symbol: any): any {
             ensureProject();
             if (!symbol) return symbol;
-            if (typeof symbol.id !== "number") return symbol;
+            const SF = sync.SymbolFlags;
+            if (!(symbol.flags & SF.Alias)) return symbol;
+            if (typeof symbol.id !== "number") {
+                const target = symbol.target;
+                return target && target !== symbol ? target : symbol;
+            }
             try {
                 return project.checker.getImmediateAliasedSymbol(symbol) ?? symbol;
             } catch {
-                return symbol;
+                const target = symbol.target;
+                return target && target !== symbol ? target : symbol;
             }
         },
         tryGetMemberInModuleExports(memberName: any, moduleSymbol: any): any {
