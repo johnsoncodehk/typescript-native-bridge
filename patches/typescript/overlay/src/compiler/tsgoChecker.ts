@@ -17,7 +17,7 @@
 import * as ts from "./_namespaces/ts.js";
 import { bindSourceFile } from "./binder.js";
 import { createSourceFile } from "./parser.js";
-import { SyntaxKind, SymbolFlags, type Path } from "./types.js";
+import { SyntaxKind, SymbolFlags, NodeFlags, type Path } from "./types.js";
 import { installTsgoBackedSourceFileLoader, inferScriptKind, createSkeletonSourceFile, getTsgoBackedSourceFile } from "./tsgoBackedSourceFile.js";
 import { getTnbPackageRoot, isBundledLibPath, isHostLibFile, resolveHostFileName, toHostFileName, toTsgoFileName } from "./tsgoLibPaths.js";
 
@@ -472,6 +472,93 @@ function findHostNodeAtPosition(sf: any, pos: number): any | undefined {
     visit(sf);
     return best;
 }
+function findHostNodeAtLineCharacter(hostSf: any, remoteSf: any, pos: number): any | undefined {
+    if (!hostSf?.__tnbHostBound || !remoteSf || typeof pos !== "number") return undefined;
+    try {
+        const { line, character } = remoteSf.getLineAndCharacterOfPosition(pos);
+        const hostPos = hostSf.getPositionOfLineAndCharacter(line, character);
+        return findHostNodeAtPosition(hostSf, hostPos);
+    } catch {
+        return undefined;
+    }
+}
+function findHostModuleScopedDeclaration(hostSf: any, escapedName: string): any | undefined {
+    if (!hostSf?.__tnbHostBound || !escapedName) return undefined;
+    for (const stmt of hostSf.statements ?? []) {
+        switch (stmt.kind) {
+            case SyntaxKind.VariableStatement:
+                for (const decl of stmt.declarationList?.declarations ?? []) {
+                    const name = decl.name?.escapedName ?? decl.name?.text;
+                    if (name === escapedName) return decl;
+                }
+                break;
+            case SyntaxKind.FunctionDeclaration:
+            case SyntaxKind.ClassDeclaration:
+            case SyntaxKind.InterfaceDeclaration:
+            case SyntaxKind.TypeAliasDeclaration:
+            case SyntaxKind.EnumDeclaration:
+                if ((stmt.name?.escapedName ?? stmt.name?.text) === escapedName) return stmt;
+                break;
+            case SyntaxKind.ExportDeclaration:
+                for (const el of stmt.exportClause?.elements ?? []) {
+                    const name = el.name?.escapedName ?? el.name?.text;
+                    if (name === escapedName) return el;
+                }
+                break;
+        }
+    }
+    return undefined;
+}
+function symbolMatchesMeaning(symbol: any, meaning: number): boolean {
+    if (!symbol || !meaning) return false;
+    const exportFlags = symbol.exportSymbol?.flags ?? 0;
+    return (((symbol.flags ?? 0) | exportFlags) & meaning) !== 0;
+}
+function copyScopeSymbolsFromTable(table: any, meaning: number, out: Map<string, any>): void {
+    if (!table) return;
+    const add = (sym: any) => {
+        if (!symbolMatchesMeaning(sym, meaning)) return;
+        const id = sym.escapedName ?? sym.name;
+        if (id && !out.has(String(id))) out.set(String(id), sym);
+    };
+    if (typeof table.forEach === "function") {
+        table.forEach((sym: any) => add(sym));
+        return;
+    }
+    if (typeof table.values === "function") {
+        for (const sym of table.values()) add(sym);
+    }
+}
+/** bindSourceFile locals/exports walk — tsgo has no getSymbolsInScope RPC yet. */
+function getHostSymbolsInScope(location: any, meaning: number): any[] {
+    if (!location?.getSourceFile?.()?.__tnbHostBound) return [];
+    if (location.flags & NodeFlags.InWithStatement) return [];
+    const symbols = new Map<string, any>();
+    let node = location;
+    while (node) {
+        if (node.locals) {
+            copyScopeSymbolsFromTable(node.locals, meaning, symbols);
+        }
+        switch (node.kind) {
+            case SyntaxKind.SourceFile: {
+                const sf = node;
+                if (sf.externalModuleIndicator || sf.commonJsModuleIndicator) {
+                    copyScopeSymbolsFromTable(sf.symbol?.exports, meaning, symbols);
+                }
+                break;
+            }
+            case SyntaxKind.ModuleDeclaration:
+                copyScopeSymbolsFromTable(node.symbol?.exports, meaning, symbols);
+                break;
+            case SyntaxKind.EnumDeclaration:
+                copyScopeSymbolsFromTable(node.symbol?.exports, meaning & SymbolFlags.EnumMember, symbols);
+                break;
+        }
+        node = node.parent;
+    }
+    symbols.delete("this");
+    return [...symbols.values()];
+}
 function remapDeclarationToHost(decl: any, getHostSf: (fileName: string) => any | undefined): any {
     if (!decl || !declarationNeedsHostRemap(decl)) return decl;
     if (decl.kind === SyntaxKind.SourceFile) {
@@ -484,7 +571,15 @@ function remapDeclarationToHost(decl: any, getHostSf: (fileName: string) => any 
     const hostSf = getHostSf(fileName);
     if (!hostSf) return decl;
     const pos = decl.getStart?.(remoteSf);
-    const hostNode = typeof pos === "number" ? findHostNodeAtPosition(hostSf, pos) : undefined;
+    let hostNode = typeof pos === "number" ? findHostNodeAtPosition(hostSf, pos) : undefined;
+    if (!hostNode && typeof pos === "number") {
+        hostNode = findHostNodeAtLineCharacter(hostSf, remoteSf, pos);
+    }
+    if (!hostNode) {
+        const name = decl.symbol?.escapedName ?? decl.symbol?.name
+            ?? decl.name?.escapedName ?? decl.name?.text;
+        if (name) hostNode = findHostModuleScopedDeclaration(hostSf, String(name));
+    }
     if (!hostNode) return decl;
     if (hostNode.kind === SyntaxKind.Identifier && hostNode.parent?.symbol?.declarations) {
         const parent = hostNode.parent;
@@ -2627,7 +2722,24 @@ export function createTsgoChecker(program: any): any {
         getAmbientModules(): readonly any[] { return []; },
 
         // ── Stubs ──
-        getSymbolsInScope: () => [],
+        getSymbolsInScope(location: any, meaning: number): any[] {
+            if (!location) return [];
+            const sf = location.getSourceFile?.();
+            if (sf?.__tnbHostBound) {
+                return getHostSymbolsInScope(location, meaning).map(refineNavSymbol);
+            }
+            ensureProject();
+            const tsgoNode = sf
+                ? findTsgoNodeAtPosition(sf.fileName, location.getStart(sf), location.kind, location.getEnd(sf))
+                : undefined;
+            const tsgoGet = project.checker.getSymbolsInScope;
+            if (tsgoNode && typeof tsgoGet === "function") {
+                try {
+                    return (tsgoGet.call(project.checker, tsgoNode, meaning) ?? []).map(refineNavSymbol);
+                } catch { /* host-only */ }
+            }
+            return [];
+        },
         getExportSpecifierLocalTargetSymbol(node: any): any {
             ensureProject();
             const sf = node.getSourceFile?.();
