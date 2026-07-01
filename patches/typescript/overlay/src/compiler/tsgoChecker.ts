@@ -302,6 +302,18 @@ function exportMemberKey(symbol: any): string | undefined {
 function moduleSymbolSourceFileName(moduleSymbol: any): string | undefined {
     return moduleSymbol?.declarations?.[0]?.getSourceFile?.()?.fileName;
 }
+function isModuleDefaultExportMemberName(name: string | undefined): boolean {
+    return name === "default" || name === "export=";
+}
+function hostDefaultExportSymbolForFile(fileName: string, getHostSf: (fileName: string) => any | undefined): any | undefined {
+    const sf = getHostSf(fileName);
+    if (!sf) return undefined;
+    const vlsDecl = findHostVlsExportDeclaration(sf);
+    if (vlsDecl?.symbol) return vlsDecl.symbol;
+    const exp = findHostExportDefaultStatement(sf);
+    if (exp?.symbol) return exp.symbol;
+    return undefined;
+}
 /** Resolve alias chain on host-bound symbols (bindSourceFile), before tsgo RPC. */
 function resolveHostAliasedSymbol(symbol: any): any {
     if (!symbol) return symbol;
@@ -391,16 +403,58 @@ function hostDefaultExportDefinitionSpan(sf: any): { start: number; length: numb
 }
 /** tsgo module/file symbols → host bindSourceFile default-export symbol. */
 function resolveHostExportDefaultSymbol(symbol: any, getHostSf: (fileName: string) => any | undefined): any {
-    if (!symbol || !symbolDeclarationsAreFileLevelOnly(symbol)) return symbol;
-    const fileName = symbol.declarations?.[0]?.getSourceFile?.()?.fileName;
-    if (!fileName) return symbol;
-    const sf = getHostSf(fileName);
-    if (!sf) return symbol;
-    const vlsDecl = findHostVlsExportDeclaration(sf);
-    if (vlsDecl?.symbol) return vlsDecl.symbol;
-    const exp = findHostExportDefaultStatement(sf);
-    if (exp?.symbol) return exp.symbol;
+    if (!symbol) return symbol;
+    if (symbolDeclarationsAreFileLevelOnly(symbol)) {
+        const fileName = symbol.declarations?.[0]?.getSourceFile?.()?.fileName;
+        if (fileName) {
+            const hostSym = hostDefaultExportSymbolForFile(fileName, getHostSf);
+            if (hostSym) return hostSym;
+        }
+    }
+    const memberName = (symbol.escapedName ?? symbol.name) as string | undefined;
+    if (isModuleDefaultExportMemberName(memberName)) {
+        const fileName = moduleSymbolSourceFileName(symbol.parent)
+            ?? symbol.declarations?.[0]?.getSourceFile?.()?.fileName;
+        if (fileName) {
+            const hostSym = hostDefaultExportSymbolForFile(fileName, getHostSf);
+            if (hostSym) return hostSym;
+        }
+    }
     return symbol;
+}
+function tryGetTargetSymbol(symbol: any): any | undefined {
+    if (!symbol) return undefined;
+    let target: any;
+    let next = symbol;
+    const seen = new Set<any>();
+    while (next && !seen.has(next)) {
+        seen.add(next);
+        const t = next.target;
+        if (!t || t === next) break;
+        target = t;
+        next = t;
+    }
+    return target;
+}
+function getImmediateRootSymbolsForNavigation(symbol: any): any[] | undefined {
+    if (!symbol) return undefined;
+    if (symbol.flags & SymbolFlags.Transient) {
+        const target = tryGetTargetSymbol(symbol);
+        return target ? [target] : undefined;
+    }
+    return undefined;
+}
+function resolveNameOnHostBoundAst(name: string, location: any): any | undefined {
+    if (!location || typeof location.getStart !== "function") return undefined;
+    const sf = location.getSourceFile?.();
+    if (!sf?.__tnbHostBound) return undefined;
+    const unescaped = typeof name === "string" && name.charCodeAt(0) === 95 /* _ */
+        ? name
+        : name;
+    if (location.kind === SyntaxKind.Identifier && location.text === unescaped) {
+        return getHostBoundSymbolAtLocation(location);
+    }
+    return undefined;
 }
 function declarationNeedsHostRemap(decl: any): boolean {
     const sf = decl?.getSourceFile?.();
@@ -2581,7 +2635,7 @@ export function createTsgoChecker(program: any): any {
             const tsgoNode = findTsgoNodeAtPosition(sf.fileName, node.getStart(sf), node.kind, node.getEnd(sf));
             if (!tsgoNode) return undefined;
             try {
-                return project.checker.getExportSpecifierLocalTargetSymbol(tsgoNode);
+                return refineNavSymbol(project.checker.getExportSpecifierLocalTargetSymbol(tsgoNode));
             } catch { return undefined; }
         },
         getShorthandAssignmentValueSymbol(node: any): any {
@@ -2591,7 +2645,7 @@ export function createTsgoChecker(program: any): any {
             const tsgoNode = findTsgoNodeAtPosition(sf.fileName, node.getStart(sf), node.kind, node.getEnd(sf));
             if (!tsgoNode) return undefined;
             try {
-                return project.checker.getShorthandAssignmentValueSymbol(tsgoNode);
+                return refineNavSymbol(project.checker.getShorthandAssignmentValueSymbol(tsgoNode));
             } catch { return undefined; }
         },
         getAliasedSymbol(symbol: any): any {
@@ -2616,25 +2670,26 @@ export function createTsgoChecker(program: any): any {
             ensureProject();
             if (!symbol) return symbol;
             const SF = sync.SymbolFlags;
-            if (!(symbol.flags & SF.Alias)) return symbol;
+            if (!(symbol.flags & SF.Alias)) return refineNavSymbol(symbol);
             if (typeof symbol.id !== "number") {
                 const target = symbol.target;
-                return target && target !== symbol ? target : symbol;
+                return refineNavSymbol(target && target !== symbol ? target : symbol);
             }
             try {
-                return project.checker.getImmediateAliasedSymbol(symbol) ?? symbol;
+                return refineNavSymbol(project.checker.getImmediateAliasedSymbol(symbol) ?? symbol);
             } catch {
                 const target = symbol.target;
-                return target && target !== symbol ? target : symbol;
+                return refineNavSymbol(target && target !== symbol ? target : symbol);
             }
         },
         tryGetMemberInModuleExports(memberName: any, moduleSymbol: any): any {
             if (moduleSymbol?.exports) {
-                return moduleSymbol.exports.get(memberName);
+                const sym = moduleSymbol.exports.get(memberName);
+                return sym ? refineNavSymbol(sym) : undefined;
             }
             ensureProject();
             try {
-                return project.checker.tryGetMemberInModuleExports(memberName, moduleSymbol);
+                return refineNavSymbol(project.checker.tryGetMemberInModuleExports(memberName, moduleSymbol));
             } catch { return undefined; }
         },
         resolveExternalModuleSymbol(moduleSymbol: any): any {
@@ -2642,18 +2697,26 @@ export function createTsgoChecker(program: any): any {
             if (moduleSymbol?.exports) {
                 try {
                     const resolved = project.checker.resolveExternalModuleSymbol(moduleSymbol);
-                    if (resolved) return resolved;
+                    if (resolved) return refineNavSymbol(resolved);
                 } catch { /* host-bound module */ }
-                return moduleSymbol;
+                return refineNavSymbol(moduleSymbol);
             }
             try {
-                return project.checker.resolveExternalModuleSymbol(moduleSymbol) ?? moduleSymbol;
-            } catch { return moduleSymbol; }
+                return refineNavSymbol(project.checker.resolveExternalModuleSymbol(moduleSymbol) ?? moduleSymbol);
+            } catch { return refineNavSymbol(moduleSymbol); }
         },
         // Merging is a TS-specific concern; tsgo symbols are already merged.
         getMergedSymbol: (s: any) => s,
         getRootSymbols(symbol: any): any[] {
-            return symbol ? [symbol] : [];
+            if (!symbol) return [];
+            const immediate = getImmediateRootSymbolsForNavigation(symbol);
+            if (immediate?.length) {
+                return immediate.flatMap(s => adapter.getRootSymbols(s));
+            }
+            return [refineNavSymbol(symbol)];
+        },
+        getDefinitionSpanForDeclaration(declaration: any): { start: number; length: number } | undefined {
+            return tnbHostExportDefinitionTextSpan(declaration);
         },
         // Emit resolver — the lint path doesn't emit; return a minimal
         // stub if code reads properties off it.
@@ -2675,10 +2738,11 @@ export function createTsgoChecker(program: any): any {
             }
             try {
                 const sym = project.checker.resolveName(name, meaning, tsgoLocation, excludeGlobals);
-                return sym ? refineNavSymbol(sym) : undefined;
+                if (sym) return refineNavSymbol(sym);
             } catch {
-                return undefined;
+                // fall through to host-bound AST
             }
+            return refineNavSymbol(resolveNameOnHostBoundAst(name, location) ?? undefined);
         },
 
         // ── Counts (for getProgramDiagnostics etc.) ──

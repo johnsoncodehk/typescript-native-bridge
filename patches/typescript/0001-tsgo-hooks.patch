@@ -79,10 +79,10 @@ index b44a155f0..c631f17df 100644
  
      function emit(
 diff --git a/src/services/goToDefinition.ts b/src/services/goToDefinition.ts
-index 0a45cc3e3..f04f3a707 100644
+index 0a45cc3e3..50309c248 100644
 --- a/src/services/goToDefinition.ts
 +++ b/src/services/goToDefinition.ts
-@@ -115,12 +115,14 @@ import {
+@@ -115,12 +115,15 @@ import {
      TypeFlags,
      TypeReference,
      unescapeLeadingUnderscores,
@@ -92,18 +92,32 @@ index 0a45cc3e3..f04f3a707 100644
  
  /** @internal */
  export function getDefinitionAtPosition(program: Program, sourceFile: SourceFile, position: number, searchOtherFilesOnly?: boolean, stopAtAlias?: boolean): readonly DefinitionInfo[] | undefined {
++    const typeChecker = program.getTypeChecker();
      const resolvedRef = getReferenceAtPosition(sourceFile, position, program);
 -    const fileReferenceDefinition = resolvedRef && [getDefinitionInfoForFileReference(resolvedRef.reference.fileName, resolvedRef.fileName, resolvedRef.unverified)] || emptyArray;
-+    const fileReferenceDefinition = resolvedRef && [getDefinitionInfoForFileReference(resolvedRef.reference.fileName, resolvedRef.fileName, resolvedRef.unverified, resolvedRef.file)] || emptyArray;
++    const fileReferenceDefinition = resolvedRef && [getDefinitionInfoForFileReference(resolvedRef.reference.fileName, resolvedRef.fileName, resolvedRef.unverified, resolvedRef.file, typeChecker)] || emptyArray;
      if (resolvedRef?.file) {
          // If `file` is missing, do a symbol-based lookup as well
          return fileReferenceDefinition;
-@@ -205,13 +207,15 @@ export function getDefinitionAtPosition(program: Program, sourceFile: SourceFile
+@@ -132,7 +135,6 @@ export function getDefinitionAtPosition(program: Program, sourceFile: SourceFile
+     }
+ 
+     const { parent } = node;
+-    const typeChecker = program.getTypeChecker();
+ 
+     if (node.kind === SyntaxKind.OverrideKeyword || (isIdentifier(node) && isJSDocOverrideTag(parent) && parent.tagName === node)) {
+         const def = getDefinitionFromOverriddenMember(typeChecker, node);
+@@ -205,13 +207,20 @@ export function getDefinitionAtPosition(program: Program, sourceFile: SourceFile
          // be that module resolution succeeded but the target was not a module.
          const ref = program.getResolvedModuleFromModuleSpecifier(fallbackNode, sourceFile)?.resolvedModule;
          if (ref) {
 +            const targetFile = program.getSourceFile(ref.resolvedFileName);
-+            const hostSpan = targetFile && tnbDefinitionSpanForHostFileReference(targetFile);
++            const getSpan = (typeChecker as any).getDefinitionSpanForDeclaration;
++            const hostSpan = targetFile && (
++                typeof getSpan === "function"
++                    ? getSpan(targetFile)
++                    : tnbDefinitionSpanForHostFileReference(targetFile)
++            );
              return [{
                  name: fallbackNode.text,
                  fileName: ref.resolvedFileName,
@@ -115,7 +129,7 @@ index 0a45cc3e3..f04f3a707 100644
                  failedAliasResolution,
                  isAmbient: isDeclarationFileName(ref.resolvedFileName),
                  unverified: fallbackNode !== node,
-@@ -392,19 +396,34 @@ export function getReferenceAtPosition(sourceFile: SourceFile, position: number,
+@@ -392,19 +401,34 @@ export function getReferenceAtPosition(sourceFile: SourceFile, position: number,
      if (sourceFile.imports.length || sourceFile.moduleAugmentations.length) {
          const node = getTouchingToken(sourceFile, position);
          let resolution: ResolvedModuleWithFailedLookupLocations | undefined;
@@ -162,13 +176,16 @@ index 0a45cc3e3..f04f3a707 100644
          }
      }
  
-@@ -633,7 +652,28 @@ function getDefinitionFromSymbol(typeChecker: TypeChecker, symbol: Symbol, node:
+@@ -633,7 +657,31 @@ function getDefinitionFromSymbol(typeChecker: TypeChecker, symbol: Symbol, node:
      }
      const withoutExpandos = filter(filteredDeclarations, d => !isExpandoDeclaration(d));
      const results = some(withoutExpandos) ? withoutExpandos : filteredDeclarations;
 -    return map(results, declaration => createDefinitionInfo(declaration, typeChecker, symbol, node, /*unverified*/ false, failedAliasResolution));
 +    return map(results, declaration => {
-+        const hostSpan = tnbHostExportDefinitionTextSpan(declaration);
++        const getHostSpan = (typeChecker as any).getDefinitionSpanForDeclaration;
++        const hostSpan = typeof getHostSpan === "function"
++            ? getHostSpan(declaration)
++            : tnbHostExportDefinitionTextSpan(declaration);
 +        if (hostSpan) {
 +            let symbolKind = ScriptElementKind.scriptElement;
 +            try {
@@ -192,13 +209,19 @@ index 0a45cc3e3..f04f3a707 100644
  
      function getConstructSignatureDefinition(): DefinitionInfo[] | undefined {
          // Applicable only if we are in a new expression, or we are on a constructor declaration
-@@ -761,10 +801,11 @@ function findReferenceInPosition(refs: readonly FileReference[], pos: number): F
+@@ -761,10 +809,17 @@ function findReferenceInPosition(refs: readonly FileReference[], pos: number): F
      return find(refs, ref => textRangeContainsPositionInclusive(ref, pos));
  }
  
 -function getDefinitionInfoForFileReference(name: string, targetFileName: string, unverified: boolean): DefinitionInfo {
-+function getDefinitionInfoForFileReference(name: string, targetFileName: string, unverified: boolean, targetFile?: SourceFile): DefinitionInfo {
-+    const hostSpan = targetFile && tnbDefinitionSpanForHostFileReference(targetFile);
++function getDefinitionInfoForFileReference(name: string, targetFileName: string, unverified: boolean, targetFile?: SourceFile, typeChecker?: TypeChecker): DefinitionInfo {
++    let hostSpan: TextSpan | undefined;
++    if (targetFile) {
++        const getSpan = typeChecker && (typeChecker as any).getDefinitionSpanForDeclaration;
++        hostSpan = typeof getSpan === "function"
++            ? getSpan(targetFile)
++            : tnbDefinitionSpanForHostFileReference(targetFile);
++    }
      return {
          fileName: targetFileName,
 -        textSpan: createTextSpanFromBounds(0, 0),
