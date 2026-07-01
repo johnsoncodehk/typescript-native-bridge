@@ -402,9 +402,66 @@ function resolveHostExportDefaultSymbol(symbol: any, getHostSf: (fileName: strin
     if (exp?.symbol) return exp.symbol;
     return symbol;
 }
+function declarationNeedsHostRemap(decl: any): boolean {
+    const sf = decl?.getSourceFile?.();
+    return !!(sf && !sf.__tnbHostBound);
+}
+/** Deepest host-bound AST node containing `pos` (Language Service snapshot coords). */
+function findHostNodeAtPosition(sf: any, pos: number): any | undefined {
+    if (!sf?.__tnbHostBound || typeof pos !== "number") return undefined;
+    let best: any;
+    function visit(node: any): void {
+        if (pos < node.getStart(sf) || pos >= node.getEnd(sf)) return;
+        best = node;
+        ts.forEachChild(node, visit);
+    }
+    visit(sf);
+    return best;
+}
+function remapDeclarationToHost(decl: any, getHostSf: (fileName: string) => any | undefined): any {
+    if (!decl || !declarationNeedsHostRemap(decl)) return decl;
+    if (decl.kind === SyntaxKind.SourceFile) {
+        const fileName = decl.fileName;
+        return getHostSf(fileName) ?? decl;
+    }
+    const remoteSf = decl.getSourceFile?.();
+    const fileName = remoteSf?.fileName;
+    if (!fileName) return decl;
+    const hostSf = getHostSf(fileName);
+    if (!hostSf) return decl;
+    const pos = decl.getStart?.(remoteSf);
+    const hostNode = typeof pos === "number" ? findHostNodeAtPosition(hostSf, pos) : undefined;
+    if (!hostNode) return decl;
+    if (hostNode.kind === SyntaxKind.Identifier && hostNode.parent?.symbol?.declarations) {
+        const parent = hostNode.parent;
+        if (parent.name === hostNode || parent.propertyName === hostNode) {
+            return parent;
+        }
+    }
+    return hostNode;
+}
+/** tsgo RemoteSourceFile declarations → host bindSourceFile nodes for LS navigation. */
+function remapSymbolDeclarationsToHost(symbol: any, getHostSf: (fileName: string) => any | undefined): any {
+    if (!symbol?.declarations?.length) return symbol;
+    let changed = false;
+    const mapped = symbol.declarations.map((decl: any) => {
+        const next = remapDeclarationToHost(decl, getHostSf);
+        if (next !== decl) changed = true;
+        return next;
+    });
+    if (!changed) return symbol;
+    try {
+        symbol.declarations = mapped;
+    } catch {
+        // tsgo symbol objects may be read-only; best-effort only.
+    }
+    return symbol;
+}
 function refineHostNavigationSymbol(symbol: any, getHostSf: (fileName: string) => any | undefined): any {
     if (!symbol) return symbol;
-    return resolveHostExportDefaultSymbol(symbol, getHostSf);
+    let refined = resolveHostExportDefaultSymbol(symbol, getHostSf);
+    refined = remapSymbolDeclarationsToHost(refined, getHostSf);
+    return refined;
 }
 function isCrossFileImportExportName(node: any): boolean {
     const parent = node?.parent;
@@ -2601,8 +2658,28 @@ export function createTsgoChecker(program: any): any {
         // Emit resolver — the lint path doesn't emit; return a minimal
         // stub if code reads properties off it.
         getEmitResolver: () => ({ getExternalModuleIndicator: () => false }),
-        // resolveName needs scope walking; not available via tsgo position RPC.
-        resolveName: () => undefined,
+        resolveName(name: string, location: any, meaning: number, excludeGlobals?: boolean): any {
+            ensureProject();
+            let tsgoLocation: any = location;
+            if (location && typeof location.getStart === "function") {
+                const sf = location.getSourceFile?.();
+                if (sf?.fileName) {
+                    const tsgoNode = findTsgoNodeAtPosition(
+                        sf.fileName,
+                        location.getStart(sf),
+                        location.kind,
+                        location.getEnd(sf),
+                    );
+                    if (tsgoNode) tsgoLocation = tsgoNode;
+                }
+            }
+            try {
+                const sym = project.checker.resolveName(name, meaning, tsgoLocation, excludeGlobals);
+                return sym ? refineNavSymbol(sym) : undefined;
+            } catch {
+                return undefined;
+            }
+        },
 
         // ── Counts (for getProgramDiagnostics etc.) ──
         getNodeCount: () => 0,
