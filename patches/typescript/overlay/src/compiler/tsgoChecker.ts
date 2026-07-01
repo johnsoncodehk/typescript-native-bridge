@@ -182,6 +182,38 @@ function fileExistsOnDisk(fileName: string): boolean {
     }
     return exists;
 }
+/** Collect absolute paths for all open LS files — incl. client-only roots not in getScriptFileNames. */
+function collectTsgoOpenFileNames(syncHost: any, extra?: Iterable<string>): string[] {
+    const names = new Set<string>();
+    const add = (fn: string) => {
+        if (typeof fn === "string" && fn.length) names.add(resolveHostFileName(fn, syncHost));
+    };
+    if (extra) {
+        for (const fn of extra) add(fn);
+    }
+    const scriptNames = syncHost?.getScriptFileNames?.();
+    if (scriptNames) {
+        for (const fn of scriptNames) add(fn);
+    }
+    const ps = syncHost?.projectService;
+    if (ps?.openFiles?.forEach && syncHost.projectService === ps) {
+        // tsserver Project — include open client tabs not listed in config roots.
+        ps.openFiles.forEach((_root: string, path: string) => {
+            const info = ps.getScriptInfoForPath(path);
+            if (!info?.isScriptOpen()) return;
+            const inProject = info.containingProjects?.includes?.(syncHost);
+            const hasSnapshot = !!syncHost.getScriptSnapshot?.(info.fileName);
+            if (!inProject && !hasSnapshot) return;
+            add(info.fileName);
+        });
+    }
+    return [...names];
+}
+
+/** @internal Extend createProgram rootNames with open client files (e.g. unsaved foo.ts). */
+export function tnbCollectOpenRootFileNames(host: any): string[] {
+    return collectTsgoOpenFileNames(host);
+}
 function readDiskText(fileName: string): string | undefined {
     try {
         const fs = require("fs") as typeof import("fs");
@@ -693,15 +725,13 @@ export function createTsgoProgram(
     const overlays: any[] = [];
     const trackedHostFiles = new Set<string>();
     const names = new Set<string>();
+    const lsHost = _languageServiceHost ?? host;
     {
         for (const fn of rootNames) {
             if (typeof fn === "string") names.add(fn);
         }
-        const scriptNames = host?.getScriptFileNames?.();
-        if (scriptNames) {
-            for (const fn of scriptNames) {
-                if (typeof fn === "string") names.add(fn);
-            }
+        for (const resolvedFn of collectTsgoOpenFileNames(lsHost)) {
+            names.add(resolvedFn);
         }
         for (const fn of names) {
             trackedHostFiles.add(fn);
@@ -950,7 +980,7 @@ export function createTsgoProgram(
     const tsgoFileArg = (fileName: string | undefined) => fileName ? toTsgoFileName(fileName) : fileName;
 
     const thinProgram: any = {
-        getRootFileNames: () => rootNames as readonly string[],
+        getRootFileNames: () => collectTsgoOpenFileNames(_languageServiceHost ?? host, rootNames as string[]),
         getCompilerOptions: () => options,
         getSourceFileNames,
         getSourceFile: (fileName: string) => getOrCreateSourceFile(fileName),
@@ -958,7 +988,16 @@ export function createTsgoProgram(
         // fileInfos / dependency state. It only needs source-file metadata
         // there, not the AST. Returning a light stub avoids eager
         // RemoteSourceFile materialisation for every program file.
-        getSourceFileByPath: (path: any) => getOrCreateLightSourceFile(String(path)),
+        // Host-overlay / open files must use the full SourceFile so
+        // toLineColumnOffset (go-to-definition span conversion) sees real line maps.
+        getSourceFileByPath: (path: any) => {
+            const pathStr = String(path);
+            const hostFileName = toHostFileName(pathStr);
+            if (fileHasHostSourceContent(pathStr, hostFileName)) {
+                return getOrCreateSourceFile(pathStr);
+            }
+            return getOrCreateLightSourceFile(pathStr);
+        },
         getSourceFiles: () => {
             const names = getSourceFileNames();
             const result: any[] = [];
@@ -1396,8 +1435,11 @@ export function createTsgoChecker(program: any): any {
         _pendingExtraFileExtensions = undefined;
         if (extraFileExtensions) _lastExtraFileExtensions = extraFileExtensions;
 
+        const syncHost = hostForOverlaySync() ?? _overlayHostCtx?.host;
+        const openFiles = syncHost ? collectTsgoOpenFileNames(syncHost) : [];
         const snapshot: any = _api.updateSnapshot({
             openProject: configFilePath!,
+            ...(openFiles.length > 0 ? { openFiles } : {}),
             ...(openFilesWithContent.length > 0 ? { openFilesWithContent } : {}),
             ...(extraFileExtensions ? { extraFileExtensions } : {}),
         });
@@ -1512,30 +1554,23 @@ export function createTsgoChecker(program: any): any {
         const syncHost = hostForOverlaySync();
         if (!syncHost) return;
 
-        const names = new Set<string>();
-        const scriptNames = syncHost.getScriptFileNames?.();
-        if (scriptNames) {
-            for (const fn of scriptNames) {
-                if (typeof fn === "string") names.add(fn);
-            }
-        }
-        if (requestedFileName) names.add(requestedFileName);
-
+        const openFiles = collectTsgoOpenFileNames(syncHost, requestedFileName ? [requestedFileName] : undefined);
         const openFilesWithContent: { fileName: string; content: string; scriptKind: number }[] = [];
-        for (const fn of names) {
-            const hostFileName = resolveHostFileName(fn, syncHost);
+        for (const hostFileName of openFiles) {
             if (!isOverlayCandidatePath(hostFileName)) continue;
             const content = getHostScriptContent(syncHost, hostFileName, ctx.options);
             if (!content?.text) continue;
+            const hostOnly = !fileExistsOnDisk(hostFileName);
             const inTsgo = !!project?.program?.getSourceFile?.(toTsgoFileName(hostFileName));
-            if (inTsgo && !shouldSendHostOverlay(hostFileName, content.text)) continue;
-            if (_syncedOverlayContentByFile.get(hostFileName) === content.text) continue;
+            if (!hostOnly && inTsgo && !shouldSendHostOverlay(hostFileName, content.text)) continue;
+            if (!hostOnly && _syncedOverlayContentByFile.get(hostFileName) === content.text) continue;
             openFilesWithContent.push({ fileName: hostFileName, content: content.text, scriptKind: content.scriptKind });
         }
-        if (!openFilesWithContent.length) return;
+        if (!openFiles.length && !openFilesWithContent.length) return;
 
         const snapshot: any = _api.updateSnapshot({
             openProject: ctx.configFilePath,
+            ...(openFiles.length > 0 ? { openFiles } : {}),
             openFilesWithContent,
             ...(_lastExtraFileExtensions ? { extraFileExtensions: _lastExtraFileExtensions } : {}),
         });
@@ -2145,6 +2180,24 @@ export function createTsgoChecker(program: any): any {
             if (!fileCache) {
                 fileCache = new Map();
                 symByPos.set(sf.fileName, fileCache);
+            }
+            const parent = node.parent;
+            const isImportExportName = parent && (
+                (parent.kind === SyntaxKind.ImportSpecifier && parent.name === node)
+                || (parent.kind === SyntaxKind.ExportSpecifier && parent.name === node)
+            );
+            // Local bound decls: host bindSourceFile symbols (accurate spans on .ts).
+            // Cross-file import/export names and .vue virtual TS: tsgo alias resolution.
+            const preferHostSymbol = sf.__tnbHostBound
+                && !isImportExportName
+                && !/\.vue$/i.test(sf.fileName);
+            if (preferHostSymbol) {
+                const hostSym = getHostBoundSymbolAtLocation(node);
+                if (hostSym) {
+                    fileCache.set(cacheKey, hostSym);
+                    fileCache.set(end, hostSym);
+                    return hostSym;
+                }
             }
             const tsgoFile = toTsgoFileName(sf.fileName);
             let sym: any = project.checker.getSymbolAtPosition(tsgoFile, start);
