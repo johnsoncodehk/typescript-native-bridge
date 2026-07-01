@@ -15,6 +15,7 @@
 /* eslint-disable @typescript-eslint/no-explicit-any, @typescript-eslint/no-require-imports */
 
 import * as ts from "./_namespaces/ts.js";
+import { bindSourceFile } from "./binder.js";
 import { createSourceFile } from "./parser.js";
 import { SyntaxKind, type Path } from "./types.js";
 import { installTsgoBackedSourceFileLoader, inferScriptKind, createSkeletonSourceFile, getTsgoBackedSourceFile } from "./tsgoBackedSourceFile.js";
@@ -125,6 +126,10 @@ function getHostScriptContentForOverlay(compilerHost: any, fileName: string, opt
     return fromCompiler;
 }
 
+function hostForOverlaySync(): any {
+    return _languageServiceHost ?? _overlayHostCtx?.host;
+}
+
 // Overlay-path cache: only files missing on disk are fed to tsgo as overlays
 // (typically Volar virtual documents).
 const _overlayDiskExistsCache = new Map<string, boolean>();
@@ -199,22 +204,23 @@ function resolveTsconfigPath(configFilePath: string, host?: { getCurrentDirector
     const cwd = host?.getCurrentDirectory?.() ?? process.cwd();
     return path.normalize(path.resolve(cwd, normalized));
 }
-/** Host script text — prefers getScriptSnapshot (Volar virtual TS, LS-safe) over readFile. */
-function getHostScriptContent(host: any, fileName: string, options: any): { text: string; scriptKind: number; fromHostSourceFile: boolean } | undefined {
+/** Host script text — prefers getScriptSnapshot (host SSOT) over readFile. */
+function getHostScriptContent(host: any, fileName: string, options: any): { text: string; scriptKind: number; fromHost: boolean } | undefined {
     let scriptKind = inferScriptKind(fileName);
     const snap = host?.getScriptSnapshot?.(fileName);
     if (snap) {
         const text = snap.getText(0, snap.getLength());
-        scriptKind = resolveLanguageServiceScriptKind(host, fileName, fileName);
-        return { text, scriptKind, fromHostSourceFile: isVirtualDocumentPath(fileName) };
+        scriptKind = resolveLanguageServiceScriptKind(host, fileName, fileName, /*fromHostSnapshot*/ true);
+        return { text, scriptKind, fromHost: true };
     }
     const sf = host?.getSourceFile?.(fileName, options.target ?? 99);
     if (sf && typeof sf.text === "string") {
         if (typeof sf.scriptKind === "number") scriptKind = sf.scriptKind;
-        return { text: sf.text, scriptKind, fromHostSourceFile: true };
+        else scriptKind = resolveLanguageServiceScriptKind(host, fileName, fileName, /*fromHostSnapshot*/ true);
+        return { text: sf.text, scriptKind, fromHost: true };
     }
     const text = host?.readFile?.(fileName);
-    if (typeof text === "string") return { text, scriptKind, fromHostSourceFile: false };
+    if (typeof text === "string") return { text, scriptKind, fromHost: false };
     return undefined;
 }
 
@@ -224,7 +230,7 @@ function sourceFileFromHostSnapshot(host: any, hostFileName: string, requestFile
     if (!snap) return undefined;
     const text = snap.getText(0, snap.getLength());
     if (!text.length) return undefined;
-    const scriptKind = resolveLanguageServiceScriptKind(host, requestFileName, hostFileName);
+    const scriptKind = resolveLanguageServiceScriptKind(host, requestFileName, hostFileName, /*fromHostSnapshot*/ true);
     const sf = createSourceFile(hostFileName, text, languageTarget, /*setParentNodes*/ true, scriptKind);
     return attachHostSourceFileMetadata(sf, hostFileName);
 }
@@ -242,28 +248,40 @@ function attachHostSourceFileMetadata(sf: any, hostFileName: string): any {
     }
     return sf;
 }
-function isVirtualDocumentPath(fileName: string): boolean {
-    return /\.(vue|mdx|svelte|astro)$/i.test(fileName);
+function hostHasScriptSnapshot(host: any, requestFileName: string, hostFileName: string): boolean {
+    return !!(host?.getScriptSnapshot?.(requestFileName) ?? host?.getScriptSnapshot?.(hostFileName));
 }
-/** ScriptKind for LS parse — virtual docs use Volar embedded TS, not the outer extension. */
-function resolveLanguageServiceScriptKind(host: any, requestFileName: string, hostFileName: string): number {
+/** Bind host-parsed SourceFiles for LS (export map, scope) — tsgo skips the TS binder. */
+function ensureHostSourceFileBound(sf: any, options: any): void {
+    if (!sf || sf.__tnbHostBound) return;
+    if (sf.symbol !== undefined) { sf.__tnbHostBound = true; return; }
+    try { bindSourceFile(sf, options); } catch { /* best-effort */ }
+    sf.__tnbHostBound = true;
+}
+/** ScriptKind for LS parse — host.getScriptKind is SSOT for snapshot overlays. */
+function resolveLanguageServiceScriptKind(
+    host: any,
+    requestFileName: string,
+    hostFileName: string,
+    fromHostSnapshot = false,
+): number {
     const fromHost = host?.getScriptKind?.(requestFileName) ?? host?.getScriptKind?.(hostFileName);
-    if (isVirtualDocumentPath(hostFileName)) {
-        if (fromHost === ts.ScriptKind.TS || fromHost === ts.ScriptKind.TSX) return fromHost;
-        return inferScriptKind(hostFileName);
+    if (fromHost === ts.ScriptKind.TS || fromHost === ts.ScriptKind.TSX
+        || fromHost === ts.ScriptKind.JS || fromHost === ts.ScriptKind.JSX) {
+        return fromHost;
     }
-    return fromHost ?? inferScriptKind(hostFileName);
+    if (fromHostSnapshot) {
+        // Snapshot text is embedded TS; host may report Unknown/Deferred for .vue paths.
+        return ts.ScriptKind.TS;
+    }
+    return inferScriptKind(hostFileName);
 }
-/** Overlay when the host view differs from disk (virtual docs) or the file is absent on disk. */
-function shouldSendHostOverlay(fileName: string, hostText: string, fromHostSourceFile = false): boolean {
+/** Overlay when host snapshot text differs from disk (or file is absent on disk). */
+function shouldSendHostOverlay(fileName: string, hostText: string): boolean {
     if (!isOverlayCandidatePath(fileName)) return false;
     if (!fileExistsOnDisk(fileName)) return true;
     const disk = readDiskText(fileName);
-    if (disk !== hostText) return true;
-    // Volar may not have injected virtual TS at first createProgram; when host
-    // later serves embedded TS for .vue, always overlay so tsgo matches LS text.
-    if (fromHostSourceFile && isVirtualDocumentPath(fileName)) return true;
-    return false;
+    return disk !== hostText;
 }
 function convertTsgoDiagnostic(d: any, getSourceFile: (fileName: string) => any): any {
     return {
@@ -615,7 +633,7 @@ export function createTsgoProgram(
     // host.getSourceFile here — program does not exist yet; Volar injects
     // virtual TS for .vue via getSourceFile). Reused by getOrCreateSourceFile
     // for skeleton text / diagnostic line maps without re-entering getSourceFile.
-    const hostContentByFile = new Map<string, { text: string; scriptKind: number; fromHostSourceFile?: boolean }>();
+    const hostContentByFile = new Map<string, { text: string; scriptKind: number; fromHost?: boolean }>();
     /** Parsed host SourceFiles captured during createProgram (Volar virtual .vue TS). */
     const parsedHostSourceFiles = new Map<string, any>();
 
@@ -640,7 +658,7 @@ export function createTsgoProgram(
         for (const fn of names) {
             trackedHostFiles.add(fn);
             const resolvedFn = resolveHostFileName(fn, host);
-            const snapSf = sourceFileFromHostSnapshot(host, resolvedFn, fn, options.target ?? 99);
+            const snapSf = sourceFileFromHostSnapshot(_languageServiceHost ?? host, resolvedFn, fn, options.target ?? 99);
             if (snapSf?.statements?.length) {
                 parsedHostSourceFiles.set(resolvedFn, snapSf);
             }
@@ -648,14 +666,14 @@ export function createTsgoProgram(
             const content = getHostScriptContentForOverlay(host, fn, options);
             if (!content) continue;
             hostContentByFile.set(resolvedFn, content);
-            if (!shouldSendHostOverlay(resolvedFn, content.text, content.fromHostSourceFile)) continue;
+            if (!shouldSendHostOverlay(resolvedFn, content.text)) continue;
             overlays.push({ fileName: resolvedFn, content: content.text, scriptKind: content.scriptKind });
         }
     }
     _pendingOverlays = overlays.length > 0 ? overlays : undefined;
     _pendingExtraFileExtensions = collectExtraFileExtensions(names, options);
     _lastExtraFileExtensions = _pendingExtraFileExtensions;
-    _overlayHostCtx = { host, options, configFilePath };
+    _overlayHostCtx = { host: _languageServiceHost ?? host, options, configFilePath };
     // Mirror Volar proxyCreateProgram: extra extensions require allowArbitraryExtensions
     // for module resolution / auto-import in .vue virtual TS.
     if (_pendingExtraFileExtensions?.length && options.allowArbitraryExtensions !== false) {
@@ -704,23 +722,28 @@ export function createTsgoProgram(
     // need path/resolvedPath/version on source files.
     const sfCache = new Map<string, any>();
 
+    const hostForLs = () => _languageServiceHost ?? host;
+
     /** Host-parsed AST for Language Service — never tsgo RemoteSourceFile. */
     const getLanguageServiceSourceFile = (hostFileName: string, requestFileName: string): any | undefined => {
+        const ls = hostForLs();
         const parsed = parsedHostSourceFiles.get(hostFileName);
         if (parsed?.statements?.length) {
             return attachHostSourceFileMetadata(parsed, hostFileName);
         }
 
-        const fromSnap = sourceFileFromHostSnapshot(host, hostFileName, requestFileName, options.target ?? 99);
+        const fromSnap = sourceFileFromHostSnapshot(ls, hostFileName, requestFileName, options.target ?? 99);
         if (fromSnap) return fromSnap;
 
+        const hasSnapshot = hostHasScriptSnapshot(ls, requestFileName, hostFileName);
         const content = hostContentByFile.get(hostFileName);
-        if (content?.text && (!isVirtualDocumentPath(hostFileName) || content.fromHostSourceFile)) {
-            const sf = createSourceFile(hostFileName, content.text, options.target ?? 99, /*setParentNodes*/ true, content.scriptKind);
+        if (content?.text && (!hasSnapshot || content.fromHost)) {
+            const scriptKind = resolveLanguageServiceScriptKind(ls, requestFileName, hostFileName, hasSnapshot);
+            const sf = createSourceFile(hostFileName, content.text, options.target ?? 99, /*setParentNodes*/ true, scriptKind);
             return attachHostSourceFileMetadata(sf, hostFileName);
         }
 
-        if (!isVirtualDocumentPath(hostFileName)) {
+        if (!hasSnapshot) {
             const disk = host?.readFile?.(hostFileName);
             if (typeof disk === "string" && disk.length) {
                 const sf = createSourceFile(hostFileName, disk, options.target ?? 99, /*setParentNodes*/ true, inferScriptKind(hostFileName));
@@ -742,15 +765,23 @@ export function createTsgoProgram(
         // Language Service token walks need real TS AST (getChildren + parent).
         // tsgo RemoteSourceFile is for checker RPC only — never expose it here.
         if (!isHostLibFile(hostFileName)) {
+            const ls = hostForLs();
             const hostSf = getLanguageServiceSourceFile(hostFileName, fileName);
             if (hostSf) {
+                if (!hostHasScriptSnapshot(ls, fileName, hostFileName)) {
+                    ensureHostSourceFileBound(hostSf, options);
+                }
                 sfCache.set(cacheKey, hostSf);
                 return hostSf;
             }
-            if (isVirtualDocumentPath(hostFileName)) {
-                const text = hostContentByFile.get(hostFileName)?.text ?? "";
+            if (hostHasScriptSnapshot(ls, fileName, hostFileName)) {
+                const snap = ls?.getScriptSnapshot?.(fileName) ?? ls?.getScriptSnapshot?.(hostFileName);
+                const text = snap
+                    ? snap.getText(0, snap.getLength())
+                    : (hostContentByFile.get(hostFileName)?.text ?? "");
+                const scriptKind = resolveLanguageServiceScriptKind(ls, fileName, hostFileName, /*fromHostSnapshot*/ true);
                 const sf = attachHostSourceFileMetadata(
-                    createSkeletonSourceFile(hostFileName, text, options.target ?? 99, inferScriptKind(hostFileName)),
+                    createSkeletonSourceFile(hostFileName, text, options.target ?? 99, scriptKind),
                     hostFileName,
                 );
                 sfCache.set(cacheKey, sf);
@@ -1339,17 +1370,15 @@ export function createTsgoChecker(program: any): any {
     // getTypeAtLocation / getSymbolAtLocation queries per file.
     const nodeIndexCache = new Map<string, Map<number, any[]>>();
 
-    /** Push host virtual TS into tsgo when a file is open in LS but absent from the tsgo program. */
+    /** Push host content into tsgo when a file is open in LS but absent from the tsgo program. */
     function syncMissingHostFileToTsgo(hostFileName: string): void {
         ensureProject();
         if (project?.program?.getSourceFile?.(toTsgoFileName(hostFileName))) return;
         const ctx = _overlayHostCtx;
         if (!ctx || !_api || !isOverlayCandidatePath(hostFileName)) return;
-        const requestName = hostFileName;
-        const content = getHostScriptContent(ctx.host, requestName, ctx.options);
+        const content = getHostScriptContent(hostForOverlaySync(), hostFileName, ctx.options);
         if (!content) return;
-        if (!shouldSendHostOverlay(hostFileName, content.text, content.fromHostSourceFile)
-            && !isVirtualDocumentPath(hostFileName)) return;
+        if (!shouldSendHostOverlay(hostFileName, content.text)) return;
         const snapshot: any = _api.updateSnapshot({
             openProject: ctx.configFilePath,
             openFilesWithContent: [{ fileName: hostFileName, content: content.text, scriptKind: content.scriptKind }],
@@ -1548,7 +1577,8 @@ export function createTsgoChecker(program: any): any {
         if (!proto.getCallSignatures) {
             proto.getCallSignatures = function () {
                 if (typeof this.flags === "number" && (this.flags & noSigMask) !== 0) return [];
-                return getSignaturesCached(this, SK.Call);
+                const sigs = getSignaturesCached(this, SK.Call);
+                return sigs ?? [];
             };
         }
         if (!proto.getConstructSignatures) {
@@ -1597,7 +1627,7 @@ export function createTsgoChecker(program: any): any {
                 if (!proj) return this;
                 const t = proj.checker.getNonNullableType(this);
                 if (t) fixupType(t);
-                return t;
+                return t ?? this;
             };
         }
         if (!proto.getNonOptionalType) {
@@ -1976,10 +2006,19 @@ export function createTsgoChecker(program: any): any {
             const sf = location.getSourceFile?.();
             if (!sf) return undefined;
             const tsgoNode = findTsgoNodeAtPosition(sf.fileName, location.getStart(sf), location.kind, location.getEnd(sf));
-            if (!tsgoNode) return undefined;
-            const t = project.checker.getTypeOfSymbolAtLocation(symbol, tsgoNode);
-            if (t) fixupType(t);
-            return t;
+            if (tsgoNode) {
+                const t = project.checker.getTypeOfSymbolAtLocation(symbol, tsgoNode);
+                if (t) fixupType(t);
+                return t;
+            }
+            // Auto-import completion entries may query export symbols at virtual-doc
+            // locations where the host AST node has no tsgo mirror yet.
+            if (symbol?.id != null && typeof project.checker.getTypeOfSymbol === "function") {
+                const t = project.checker.getTypeOfSymbol(symbol);
+                if (t) fixupType(t);
+                return t;
+            }
+            return undefined;
         },
         getContextualType(node: any): any {
             ensureProject();
@@ -2149,10 +2188,55 @@ export function createTsgoChecker(program: any): any {
                 return project.checker.getShorthandAssignmentValueSymbol(tsgoNode);
             } catch { return undefined; }
         },
-        getAliasedSymbol: () => undefined,
-        getImmediateAliasedSymbol: () => undefined,
+        getAliasedSymbol(symbol: any): any {
+            ensureProject();
+            if (!symbol) return symbol;
+            const SF = sync.SymbolFlags;
+            if (!(symbol.flags & SF.Alias)) return symbol;
+            if (typeof symbol.id !== "number") return symbol;
+            try {
+                return project.checker.getAliasedSymbol(symbol) ?? symbol;
+            } catch {
+                return symbol;
+            }
+        },
+        getImmediateAliasedSymbol(symbol: any): any {
+            ensureProject();
+            if (!symbol) return symbol;
+            if (typeof symbol.id !== "number") return symbol;
+            try {
+                return project.checker.getImmediateAliasedSymbol(symbol) ?? symbol;
+            } catch {
+                return symbol;
+            }
+        },
+        tryGetMemberInModuleExports(memberName: any, moduleSymbol: any): any {
+            if (moduleSymbol?.exports) {
+                return moduleSymbol.exports.get(memberName);
+            }
+            ensureProject();
+            try {
+                return project.checker.tryGetMemberInModuleExports(memberName, moduleSymbol);
+            } catch { return undefined; }
+        },
+        resolveExternalModuleSymbol(moduleSymbol: any): any {
+            ensureProject();
+            if (moduleSymbol?.exports) {
+                try {
+                    const resolved = project.checker.resolveExternalModuleSymbol(moduleSymbol);
+                    if (resolved) return resolved;
+                } catch { /* host-bound module */ }
+                return moduleSymbol;
+            }
+            try {
+                return project.checker.resolveExternalModuleSymbol(moduleSymbol) ?? moduleSymbol;
+            } catch { return moduleSymbol; }
+        },
         // Merging is a TS-specific concern; tsgo symbols are already merged.
         getMergedSymbol: (s: any) => s,
+        getRootSymbols(symbol: any): any[] {
+            return symbol ? [symbol] : [];
+        },
         // Emit resolver — the lint path doesn't emit; return a minimal
         // stub if code reads properties off it.
         getEmitResolver: () => ({ getExternalModuleIndicator: () => false }),
