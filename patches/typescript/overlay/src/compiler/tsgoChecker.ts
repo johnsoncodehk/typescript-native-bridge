@@ -28,6 +28,8 @@ import { getTnbPackageRoot, isBundledLibPath, isHostLibFile, resolveHostFileName
 let _koffi: any;
 let _sync: any;
 let _bridgeFns: any;
+/** Thin program from createTsgoProgram — wired after getOrCreateSourceFile exists. */
+let _hostProgramRef: { getSourceFile?: (fileName: string) => any | undefined } | undefined;
 
 /** Vendored @typescript/native-preview at vendor/native-preview/. */
 function getNativePreviewDir(): string {
@@ -314,6 +316,124 @@ function resolveHostAliasedSymbol(symbol: any): any {
     }
     return current ?? symbol;
 }
+function symbolDeclarationsAreFileLevelOnly(symbol: any): boolean {
+    const decls = symbol?.declarations;
+    if (!decls?.length) return false;
+    return decls.every((d: any) => d.kind === SyntaxKind.SourceFile || d.kind === SyntaxKind.ModuleDeclaration);
+}
+function findHostExportDefaultStatement(sf: any): any | undefined {
+    if (!sf?.__tnbHostBound) return undefined;
+    for (const stmt of sf.statements ?? []) {
+        if (stmt.kind === SyntaxKind.ExportAssignment && !stmt.isExportEquals) {
+            return stmt;
+        }
+    }
+    return undefined;
+}
+function findHostVlsExportDeclaration(sf: any): any | undefined {
+    if (!sf?.__tnbHostBound) return undefined;
+    for (const stmt of sf.statements ?? []) {
+        if (stmt.kind !== SyntaxKind.VariableStatement) continue;
+        for (const decl of stmt.declarationList?.declarations ?? []) {
+            const name = decl.name?.escapedName ?? decl.name?.text;
+            if (name === "__VLS_export") return decl;
+        }
+    }
+    return undefined;
+}
+function isExportDefaultStubExpression(expr: any): boolean {
+    return expr?.kind === SyntaxKind.AsExpression
+        && expr.expression?.kind === SyntaxKind.ObjectLiteralExpression;
+}
+/** Anchor node for default export in host-bound virtual snapshot (codegen const or ExportAssignment). */
+function findHostDefaultExportAnchor(sf: any): any | undefined {
+    const vlsDecl = findHostVlsExportDeclaration(sf);
+    if (vlsDecl?.initializer) return vlsDecl.initializer;
+    const exp = findHostExportDefaultStatement(sf);
+    if (exp) {
+        const expr = exp.expression ?? exp;
+        if (!isExportDefaultStubExpression(expr)) return expr;
+    }
+    return undefined;
+}
+function spanFromHostNode(sf: any, node: any): { start: number; length: number } | undefined {
+    if (!node || !sf) return undefined;
+    const start = node.getStart?.(sf);
+    const end = node.getEnd?.(sf);
+    if (typeof start === "number" && typeof end === "number" && end > start) {
+        return { start, length: end - start };
+    }
+    return undefined;
+}
+function hostDefaultExportDefinitionSpan(sf: any): { start: number; length: number } | undefined {
+    if (!sf?.__tnbHostBound) return undefined;
+    const vlsDecl = findHostVlsExportDeclaration(sf);
+    const exp = findHostExportDefaultStatement(sf);
+    if (vlsDecl?.initializer && exp) {
+        const start = exp.getStart?.(sf);
+        let end = vlsDecl.initializer.getEnd?.(sf);
+        const stmt = vlsDecl.parent?.parent;
+        if (stmt?.kind === SyntaxKind.VariableStatement) {
+            end = Math.max(end ?? 0, stmt.getEnd?.(sf) ?? 0);
+        }
+        const text = sf.text ?? "";
+        while (typeof end === "number" && end < text.length && /[\t \n\r]/.test(text[end])) {
+            end++;
+        }
+        if (typeof start === "number" && typeof end === "number" && end > start) {
+            return { start, length: end - start };
+        }
+    }
+    const anchor = findHostDefaultExportAnchor(sf);
+    if (anchor) return spanFromHostNode(sf, anchor);
+    if (exp) return spanFromHostNode(sf, exp);
+    return undefined;
+}
+/** tsgo module/file symbols → host bindSourceFile default-export symbol. */
+function resolveHostExportDefaultSymbol(symbol: any, getHostSf: (fileName: string) => any | undefined): any {
+    if (!symbol || !symbolDeclarationsAreFileLevelOnly(symbol)) return symbol;
+    const fileName = symbol.declarations?.[0]?.getSourceFile?.()?.fileName;
+    if (!fileName) return symbol;
+    const sf = getHostSf(fileName);
+    if (!sf) return symbol;
+    const vlsDecl = findHostVlsExportDeclaration(sf);
+    if (vlsDecl?.symbol) return vlsDecl.symbol;
+    const exp = findHostExportDefaultStatement(sf);
+    if (exp?.symbol) return exp.symbol;
+    return symbol;
+}
+function refineHostNavigationSymbol(symbol: any, getHostSf: (fileName: string) => any | undefined): any {
+    if (!symbol) return symbol;
+    return resolveHostExportDefaultSymbol(symbol, getHostSf);
+}
+function isCrossFileImportExportName(node: any): boolean {
+    const parent = node?.parent;
+    if (!parent) return false;
+    return (
+        (parent.kind === SyntaxKind.ImportSpecifier && parent.name === node)
+        || (parent.kind === SyntaxKind.ExportSpecifier && parent.name === node)
+        || (parent.kind === SyntaxKind.ImportClause && parent.name === node)
+    );
+}
+/** Host file-reference definitions: span in virtual snapshot for Volar position mappers. */
+export function tnbDefinitionSpanForHostFileReference(targetFile: any): { start: number; length: number } | undefined {
+    return hostDefaultExportDefinitionSpan(targetFile);
+}
+/** Host-bound declaration → virtual snapshot span (e.g. __VLS_export initializer). */
+export function tnbHostExportDefinitionTextSpan(declaration: any): { start: number; length: number } | undefined {
+    if (!declaration) return undefined;
+    const sf = declaration.getSourceFile?.();
+    if (!sf?.__tnbHostBound) return undefined;
+    const combined = hostDefaultExportDefinitionSpan(sf);
+    if (combined) return combined;
+    if (declaration.kind === SyntaxKind.SourceFile) {
+        return tnbDefinitionSpanForHostFileReference(sf);
+    }
+    if (declaration.kind === SyntaxKind.ExportAssignment && !declaration.isExportEquals) {
+        return spanFromHostNode(sf, declaration);
+    }
+    return undefined;
+}
 /** Symbol from host-bound AST when tsgo position RPC misses (LS path). */
 function getHostBoundSymbolAtLocation(node: any): any | undefined {
     const sf = node?.getSourceFile?.();
@@ -323,6 +443,7 @@ function getHostBoundSymbolAtLocation(node: any): any | undefined {
         switch (parent.kind) {
             case SyntaxKind.ImportSpecifier:
             case SyntaxKind.ExportSpecifier:
+            case SyntaxKind.ImportClause:
             case SyntaxKind.BindingElement:
             case SyntaxKind.VariableDeclaration:
             case SyntaxKind.FunctionDeclaration:
@@ -1109,6 +1230,8 @@ export function createTsgoProgram(
         forEachResolvedTypeReferenceDirective: (_callback: any) => {},
         getAutomaticTypeDirectiveResolutions: () => new Map(),
     };
+
+    _hostProgramRef = thinProgram;
 
     return new Proxy(thinProgram, {
         get(target: any, prop: string | symbol, receiver: any) {
@@ -2143,6 +2266,14 @@ export function createTsgoChecker(program: any): any {
     }
 
     // ── Build adapter object ─────────────────────────────────────────
+    const getHostBoundSf = (fileName: string): any | undefined => {
+        const getSourceFile = _hostProgramRef?.getSourceFile ?? program.getSourceFile;
+        const sf = getSourceFile?.(fileName);
+        if (!sf?.__tnbHostBound) return undefined;
+        return sf;
+    };
+    const refineNavSymbol = (sym: any) => refineHostNavigationSymbol(sym, getHostBoundSf);
+
     const adapter: any = {
         // ── Node-based hot queries (find tsgo node → use tsgo's own API) ──
         getTypeAtLocation(node: any): any {
@@ -2181,16 +2312,8 @@ export function createTsgoChecker(program: any): any {
                 fileCache = new Map();
                 symByPos.set(sf.fileName, fileCache);
             }
-            const parent = node.parent;
-            const isImportExportName = parent && (
-                (parent.kind === SyntaxKind.ImportSpecifier && parent.name === node)
-                || (parent.kind === SyntaxKind.ExportSpecifier && parent.name === node)
-            );
-            // Local bound decls: host bindSourceFile symbols (accurate spans on .ts).
-            // Cross-file import/export names and .vue virtual TS: tsgo alias resolution.
-            const preferHostSymbol = sf.__tnbHostBound
-                && !isImportExportName
-                && !/\.vue$/i.test(sf.fileName);
+            const isImportExportName = isCrossFileImportExportName(node);
+            const preferHostSymbol = sf.__tnbHostBound && !isImportExportName;
             if (preferHostSymbol) {
                 const hostSym = getHostBoundSymbolAtLocation(node);
                 if (hostSym) {
@@ -2213,6 +2336,7 @@ export function createTsgoChecker(program: any): any {
             if (!sym) {
                 sym = getHostBoundSymbolAtLocation(node);
             }
+            sym = refineNavSymbol(sym);
             fileCache.set(cacheKey, sym);
             fileCache.set(end, sym);
             if (process.env.TSGO_PROFILE === "1") {
@@ -2417,14 +2541,18 @@ export function createTsgoChecker(program: any): any {
             ensureProject();
             if (!symbol) return symbol;
             const SF = sync.SymbolFlags;
-            if (!(symbol.flags & SF.Alias)) return symbol;
+            if (!(symbol.flags & SF.Alias)) {
+                return refineNavSymbol(symbol);
+            }
             if (typeof symbol.id !== "number") {
-                return resolveHostAliasedSymbol(symbol);
+                return refineNavSymbol(resolveHostAliasedSymbol(symbol));
             }
             try {
-                return project.checker.getAliasedSymbol(symbol) ?? symbol;
+                return refineNavSymbol(
+                    resolveHostAliasedSymbol(project.checker.getAliasedSymbol(symbol) ?? symbol),
+                );
             } catch {
-                return resolveHostAliasedSymbol(symbol);
+                return refineNavSymbol(resolveHostAliasedSymbol(symbol));
             }
         },
         getImmediateAliasedSymbol(symbol: any): any {
