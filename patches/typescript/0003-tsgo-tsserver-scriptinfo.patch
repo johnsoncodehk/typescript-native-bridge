@@ -1,8 +1,27 @@
 diff --git a/src/server/project.ts b/src/server/project.ts
-index 88fa23c1b..47a03927e 100644
+index 88fa23c1b..45031fdb7 100644
 --- a/src/server/project.ts
 +++ b/src/server/project.ts
-@@ -1213,10 +1213,10 @@ export abstract class Project implements LanguageServiceHost, ModuleResolutionHo
+@@ -1129,8 +1129,16 @@ export abstract class Project implements LanguageServiceHost, ModuleResolutionHo
+         this.cleanupProgram();
+         // Release external files
+         forEach(this.externalFiles, externalFile => this.detachScriptInfoIfNotRoot(externalFile));
+-        // Always remove root files from the project
+-        this.rootFilesMap.forEach(root => root.info?.detachFromProject(this));
++        // Drop this project from every ScriptInfo.containingProjects. rootFilesMap
++        // alone misses files that were removed as roots during project reassignment
++        // (removeRoot clears the map entry without detachFromProject), leaving a
++        // closed project pointer that assignProjectToOpenedScriptInfo later walks
++        // via updateProjectIfDirty → updateGraph on a torn-down resolutionCache.
++        this.projectService.filenameToScriptInfo.forEach(info => {
++            if (info.isAttached(this)) {
++                info.detachFromProject(this);
++            }
++        });
+         this.projectService.pendingEnsureProjectForOpenFiles = true;
+ 
+         this.rootFilesMap = undefined!;
+@@ -1213,10 +1221,10 @@ export abstract class Project implements LanguageServiceHost, ModuleResolutionHo
              // if language service is not enabled - return just root files
              return this.getRootScriptInfos();
          }

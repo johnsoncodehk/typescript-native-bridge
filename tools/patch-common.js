@@ -93,6 +93,11 @@ function saveOverlay(subDir, overlayDir) {
 	fs.rmSync(overlayDir, { recursive: true, force: true });
 	for (const rel of files) {
 		const src = path.join(subDir, rel);
+		// Skip symlinks (e.g. native/, vendor/ build artifacts): they are not
+		// overlay source and copyFileSync on a socket/symlink target throws ENOTSUP.
+		let st;
+		try { st = fs.lstatSync(src); } catch { continue; }
+		if (st.isSymbolicLink()) continue;
 		const dest = path.join(overlayDir, rel);
 		fs.mkdirSync(path.dirname(dest), { recursive: true });
 		fs.copyFileSync(src, dest);

@@ -1333,6 +1333,12 @@ export function createTsgoProgram(
     const tsgoFileArg = (fileName: string | undefined) => fileName ? toTsgoFileName(fileName) : fileName;
 
     const thinProgram: any = {
+        // Marks this as a tsgo-backed program: its SourceFiles come straight from
+        // tsgo and are never acquired via the LanguageService document registry.
+        // LanguageService.cleanupSemanticCache uses this to skip the (otherwise
+        // mandatory) releaseDocumentWithKey pass, which would fault on the missing
+        // registry bucket and abort ConfiguredProject.close mid-teardown.
+        isTsgoBackedProgram: true,
         getRootFileNames: () => collectTsgoOpenFileNames(_languageServiceHost ?? host, rootNames as string[]),
         getCompilerOptions: () => options,
         getSourceFileNames,

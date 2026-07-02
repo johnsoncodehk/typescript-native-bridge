@@ -78,6 +78,82 @@ index b44a155f0..c631f17df 100644
      }
  
      function emit(
+diff --git a/src/server/editorServices.ts b/src/server/editorServices.ts
+index aa578c7ed..b8fda3805 100644
+--- a/src/server/editorServices.ts
++++ b/src/server/editorServices.ts
+@@ -2191,7 +2191,47 @@ export class ProjectService {
+         this.logger.info("`remove Project::");
+         project.print(/*writeProjectFileNames*/ true, /*writeFileExplaination*/ true, /*writeFileVersionAndText*/ false);
+ 
+-        project.close();
++        // Unlink before close(): close() clears rootFilesMap/resolutionCache (isClosed)
++        // while the project can still be listed in inferredProjects until this returns.
++        // ensureProjectForOpenFiles / assignProjectToOpenedScriptInfo walk those lists
++        // synchronously during updateOpen; a listed-but-closed project faults in updateGraph.
++        this.pendingProjectUpdates.delete(project.getProjectName());
++
++        switch (project.projectKind) {
++            case ProjectKind.External:
++                unorderedRemoveItem(this.externalProjects, project as ExternalProject);
++                this.projectToSizeMap.delete(project.getProjectName());
++                break;
++            case ProjectKind.Configured:
++                this.configuredProjects.delete((project as ConfiguredProject).canonicalConfigFilePath);
++                this.projectToSizeMap.delete((project as ConfiguredProject).canonicalConfigFilePath);
++                break;
++            case ProjectKind.Inferred:
++                unorderedRemoveItem(this.inferredProjects, project as InferredProject);
++                break;
++        }
++
++        try {
++            project.close();
++        }
++        finally {
++            // If close() throws after unlinking, the project must not remain in any list.
++            this.pendingProjectUpdates.delete(project.getProjectName());
++            switch (project.projectKind) {
++                case ProjectKind.External:
++                    unorderedRemoveItem(this.externalProjects, project as ExternalProject);
++                    this.projectToSizeMap.delete(project.getProjectName());
++                    break;
++                case ProjectKind.Configured:
++                    this.configuredProjects.delete((project as ConfiguredProject).canonicalConfigFilePath);
++                    this.projectToSizeMap.delete((project as ConfiguredProject).canonicalConfigFilePath);
++                    break;
++                case ProjectKind.Inferred:
++                    unorderedRemoveItem(this.inferredProjects, project as InferredProject);
++                    break;
++            }
++        }
++
+         if (Debug.shouldAssert(AssertionLevel.Normal)) {
+             this.filenameToScriptInfo.forEach(info =>
+                 Debug.assert(
+@@ -2219,22 +2259,6 @@ export class ProjectService {
+                 )
+             );
+         }
+-        // Remove the project from pending project updates
+-        this.pendingProjectUpdates.delete(project.getProjectName());
+-
+-        switch (project.projectKind) {
+-            case ProjectKind.External:
+-                unorderedRemoveItem(this.externalProjects, project as ExternalProject);
+-                this.projectToSizeMap.delete(project.getProjectName());
+-                break;
+-            case ProjectKind.Configured:
+-                this.configuredProjects.delete((project as ConfiguredProject).canonicalConfigFilePath);
+-                this.projectToSizeMap.delete((project as ConfiguredProject).canonicalConfigFilePath);
+-                break;
+-            case ProjectKind.Inferred:
+-                unorderedRemoveItem(this.inferredProjects, project as InferredProject);
+-                break;
+-        }
+     }
+ 
+     /** @internal */
 diff --git a/src/services/goToDefinition.ts b/src/services/goToDefinition.ts
 index 0a45cc3e3..50309c248 100644
 --- a/src/services/goToDefinition.ts
@@ -230,7 +306,7 @@ index 0a45cc3e3..50309c248 100644
          name,
          containerName: undefined!,
 diff --git a/src/services/services.ts b/src/services/services.ts
-index 9885093ed..0490da994 100644
+index 9885093ed..38185c95e 100644
 --- a/src/services/services.ts
 +++ b/src/services/services.ts
 @@ -330,6 +330,8 @@ import {
@@ -260,3 +336,22 @@ index 9885093ed..0490da994 100644
          let compilerHost: CompilerHost | undefined = {
              getSourceFile: getOrCreateSourceFile,
              getSourceFileByPath: getOrCreateSourceFileByPath,
+@@ -2034,9 +2040,15 @@ export function createLanguageService(
+ 
+     function cleanupSemanticCache(): void {
+         if (program) {
+-            // Use paths to ensure we are using correct key and paths as document registry could be created with different current directory than host
+-            const key = documentRegistry.getKeyForCompilationSettings(program.getCompilerOptions());
+-            forEach(program.getSourceFiles(), f => documentRegistry.releaseDocumentWithKey(f.resolvedPath, key, f.scriptKind, f.impliedNodeFormat));
++            // tsgo-backed programs (the fork's default) never acquire their source
++            // files through the document registry, so there is nothing to release.
++            // Running the release pass would fault on the absent registry bucket and
++            // abort ConfiguredProject.close mid-teardown, leaking a half-closed project.
++            if (!(program as any).isTsgoBackedProgram) {
++                // Use paths to ensure we are using correct key and paths as document registry could be created with different current directory than host
++                const key = documentRegistry.getKeyForCompilationSettings(program.getCompilerOptions());
++                forEach(program.getSourceFiles(), f => documentRegistry.releaseDocumentWithKey(f.resolvedPath, key, f.scriptKind, f.impliedNodeFormat));
++            }
+             program = undefined!; // TODO: GH#18217
+         }
+     }
