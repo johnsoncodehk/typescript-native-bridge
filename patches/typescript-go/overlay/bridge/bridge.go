@@ -30,6 +30,8 @@ import "C"
 import (
 	"context"
 	"encoding/base64"
+	"os"
+	"strconv"
 	"sync"
 	"unsafe"
 
@@ -106,6 +108,19 @@ func ensureBinBuf(need C.size_t) {
 	}
 }
 
+// bridgeCheckerPoolOptions returns checker pool sizing for the in-process bridge.
+// Default MaxCheckers=5 (1 diagnostics + 4 query) aligns with tsgo CLI parallelism.
+// Override with TSGO_CHECKERS (minimum 2).
+func bridgeCheckerPoolOptions() project.CheckerPoolOptions {
+	opts := project.CheckerPoolOptions{MaxCheckers: 5}
+	if v := os.Getenv("TSGO_CHECKERS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 2 {
+			opts.MaxCheckers = n
+		}
+	}
+	return opts
+}
+
 // BridgeNewSession creates a project session + api session rooted at cwd.
 // Returns a JSON envelope. On success, env.data is the session handle (number).
 //
@@ -122,6 +137,7 @@ func BridgeNewSession(cwd *C.char) *C.char {
 			CurrentDirectory:   cwdStr,
 			DefaultLibraryPath: bundled.LibPath(),
 			PositionEncoding:   lsproto.PositionEncodingKindUTF8,
+			CheckerPoolOptions: bridgeCheckerPoolOptions(),
 		},
 	})
 

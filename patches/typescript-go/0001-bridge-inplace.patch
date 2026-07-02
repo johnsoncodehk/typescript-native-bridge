@@ -1049,7 +1049,7 @@ index 952b572a6..47e643127 100644
  type GetProjectDiagnosticsParams struct {
  	Snapshot SnapshotID `json:"snapshot"`
 diff --git a/internal/api/session.go b/internal/api/session.go
-index b350c6334..a7e77dbc7 100644
+index b350c6334..75f36a052 100644
 --- a/internal/api/session.go
 +++ b/internal/api/session.go
 @@ -154,6 +154,19 @@ func (sd *snapshotData) newSymbolResponse(symbol *ast.Symbol) *SymbolResponse {
@@ -1297,7 +1297,15 @@ index b350c6334..a7e77dbc7 100644
  func (s *Session) handleGetSymbolOfType(_ context.Context, params *GetTypePropertyParams) (*SymbolResponse, error) {
  	return s.resolveSymbolPropertyOfType(params, (*checker.Type).Symbol)
  }
-@@ -2888,6 +3077,53 @@ func (s *Session) handleGetSemanticDiagnostics(ctx context.Context, params *GetD
+@@ -2868,7 +3057,6 @@ func (s *Session) handleGetBindDiagnostics(ctx context.Context, params *GetDiagn
+ 
+ // handleGetSemanticDiagnostics returns semantic diagnostics for a file or all files.
+ func (s *Session) handleGetSemanticDiagnostics(ctx context.Context, params *GetDiagnosticsParams) ([]*DiagnosticResponse, error) {
+-	ctx = core.WithCheckerLifetime(ctx, core.CheckerLifetimeDiagnostics)
+ 	sd, err := s.getSnapshotData(params.Snapshot)
+ 	if err != nil {
+ 		return nil, err
+@@ -2888,6 +3076,53 @@ func (s *Session) handleGetSemanticDiagnostics(ctx context.Context, params *GetD
  	return NewDiagnosticResponses(diags), nil
  }
  
@@ -1351,7 +1359,15 @@ index b350c6334..a7e77dbc7 100644
  // handleGetSuggestionDiagnostics returns suggestion diagnostics for a file or all files.
  func (s *Session) handleGetSuggestionDiagnostics(ctx context.Context, params *GetDiagnosticsParams) ([]*DiagnosticResponse, error) {
  	ctx = core.WithCheckerLifetime(ctx, core.CheckerLifetimeDiagnostics)
-@@ -3184,3 +3420,24 @@ func (s *Session) handleGetReferencedSymbolsForNode(ctx context.Context, params
+@@ -2966,7 +3201,6 @@ func (s *Session) handleGetProgramDiagnostics(ctx context.Context, params *GetPr
+ 
+ // handleGetGlobalDiagnostics returns global (non-file-specific) semantic diagnostics.
+ func (s *Session) handleGetGlobalDiagnostics(ctx context.Context, params *GetProjectDiagnosticsParams) ([]*DiagnosticResponse, error) {
+-	ctx = core.WithCheckerLifetime(ctx, core.CheckerLifetimeDiagnostics)
+ 	sd, err := s.getSnapshotData(params.Snapshot)
+ 	if err != nil {
+ 		return nil, err
+@@ -3184,3 +3418,24 @@ func (s *Session) handleGetReferencedSymbolsForNode(ctx context.Context, params
  	}
  	return result, nil
  }
@@ -1613,7 +1629,7 @@ index 4659530ff..64a4c905b 100644
  		assert.Assert(t, result.Changed.Has(testURI1), "close then open should mark as changed")
  		// Should have the new content
 diff --git a/internal/project/projectcollectionbuilder.go b/internal/project/projectcollectionbuilder.go
-index 4096e30f3..207fe560f 100644
+index 4096e30f3..0a16d434c 100644
 --- a/internal/project/projectcollectionbuilder.go
 +++ b/internal/project/projectcollectionbuilder.go
 @@ -62,6 +62,7 @@ func newProjectCollectionBuilder(
@@ -1663,6 +1679,19 @@ index 4096e30f3..207fe560f 100644
  		path := b.toPath(fileName)
  		openFileResult := b.ensureConfiguredProjectAndAncestorsForFile(fileName, path, logger)
  		b.cleanupConfiguredProjects(&openFileResult.retain, logger)
+@@ -1135,7 +1144,11 @@ func (b *ProjectCollectionBuilder) updateProgram(entry dirty.Value[*Project], lo
+ 				project.host = newCompilerHost(project.currentDirectory, project, b, logger.Fork("CompilerHost"))
+ 				result := project.CreateProgram()
+ 				project.Program = result.Program
+-				project.checkerPool = result.Program.GetCheckerPool().(*checkerPool)
++				if cpp, ok := result.Program.GetCheckerPool().(*checkerPool); ok {
++					project.checkerPool = cpp
++				} else {
++					project.checkerPool = nil
++				}
+ 				project.ProgramUpdateKind = result.UpdateKind
+ 				project.ProgramLastUpdate = b.newSnapshotID
+ 				if result.UpdateKind == ProgramUpdateKindCloned {
 diff --git a/internal/project/session.go b/internal/project/session.go
 index a5c7fefd4..a717cf2d6 100644
 --- a/internal/project/session.go
