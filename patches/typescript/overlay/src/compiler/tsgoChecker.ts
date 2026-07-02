@@ -317,6 +317,15 @@ function exportMemberKey(symbol: any): string | undefined {
     const key = (symbol?.escapedName ?? symbol?.name) as string | undefined;
     return key && !isReservedExportMemberName(key) ? key : undefined;
 }
+function collectNamedExportsFromModuleSymbol(moduleSymbol: any): any[] {
+    if (!moduleSymbol?.exports) return [];
+    const result: any[] = [];
+    moduleSymbol.exports.forEach((exported: any, key: string) => {
+        if (!key || isReservedExportMemberName(key)) return;
+        result.push(exported);
+    });
+    return result;
+}
 function moduleSymbolSourceFileName(moduleSymbol: any): string | undefined {
     return moduleSymbol?.declarations?.[0]?.getSourceFile?.()?.fileName;
 }
@@ -1921,6 +1930,17 @@ export function createTsgoChecker(program: any): any {
         return moduleSymbol;
     }
 
+    function resolveHostModuleNamedExports(hostFileName: string): any[] {
+        const host = hostForOverlaySync() ?? _overlayHostCtx?.host;
+        const options = _overlayHostCtx?.options;
+        if (!host || !options || !isOverlayCandidatePath(hostFileName)) return [];
+        pushHostOverlayToTsgo(hostFileName);
+        const snapSf = sourceFileFromHostSnapshot(host, hostFileName, hostFileName, options.target ?? 99);
+        if (!snapSf) return [];
+        ensureHostSourceFileBound(snapSf, options);
+        return collectNamedExportsFromModuleSymbol(snapSf.symbol);
+    }
+
     function resolveModuleSymbolForExports(moduleSymbol: any): any {
         if (moduleSymbol?.exports) return moduleSymbol;
         const hostFileName = moduleSymbolSourceFileName(moduleSymbol);
@@ -1928,13 +1948,19 @@ export function createTsgoChecker(program: any): any {
     }
 
     function forEachNamedExport(tsgoChecker: any, moduleSymbol: any, cb: (symbol: any, key: string) => void): void {
-        if (moduleSymbol?.exports) {
-            moduleSymbol.exports.forEach((exported: any, key: string) => {
-                if (!key || isReservedExportMemberName(key)) return;
-                cb(exported, key);
-            });
+        let fromExports = collectNamedExportsFromModuleSymbol(moduleSymbol);
+        if (!fromExports.length) {
+            const hostFileName = moduleSymbolSourceFileName(moduleSymbol);
+            if (hostFileName) fromExports = resolveHostModuleNamedExports(hostFileName);
+        }
+        if (fromExports.length) {
+            for (const exported of fromExports) {
+                const key = exportMemberKey(exported);
+                if (key) cb(exported, key);
+            }
             return;
         }
+        if (typeof moduleSymbol?.id !== "number" || moduleSymbol.id === 0) return;
         if (typeof tsgoChecker.getExportsOfModule !== "function") return;
         for (const sym of tsgoChecker.getExportsOfModule(moduleSymbol) ?? []) {
             const key = exportMemberKey(sym);
@@ -2616,6 +2642,20 @@ export function createTsgoChecker(program: any): any {
             ensureProject();
             const sf = node.getSourceFile?.();
             if (!sf) return undefined;
+            // component-meta: getSymbolAtLocation(sourceFile) must return the
+            // file's module symbol (sf.symbol), not a tsgo position hit on the
+            // first statement (e.g. __VLS_export) which lacks the default export.
+            if (node.kind === SyntaxKind.SourceFile && sf.symbol) {
+                // Return the module symbol directly. Do NOT write symByPos here:
+                // this whole-file symbol has no single span, and caching it under
+                // position 0 would poison lookups for any real node at pos 0.
+                // This branch already short-circuits every SourceFile query, so a
+                // cache is unnecessary anyway.
+                // Do not refineNavSymbol here — resolveHostExportDefaultSymbol would
+                // replace the module symbol with the __VLS_export const, breaking
+                // getExportsOfModule (component-meta needs the module + default export).
+                return sf.symbol;
+            }
             const t0 = process.env.TSGO_PROFILE === "1" ? Date.now() : 0;
             const start = typeof node.pos === "number" ? node.pos : node.getStart(sf);
             const end = typeof node.end === "number" ? node.end : node.getEnd(sf);
@@ -2716,7 +2756,9 @@ export function createTsgoChecker(program: any): any {
             }
             // Auto-import completion entries may query export symbols at virtual-doc
             // locations where the host AST node has no tsgo mirror yet.
-            if (symbol?.id != null && typeof project.checker.getTypeOfSymbol === "function") {
+            // Require a real tsgo handle (id > 0): host-bound symbols have id 0/undefined
+            // and would fault server-side with "empty symbol handle".
+            if (typeof symbol?.id === "number" && symbol.id > 0 && typeof project.checker.getTypeOfSymbol === "function") {
                 const t = project.checker.getTypeOfSymbol(symbol);
                 if (t) fixupType(t);
                 return t;
@@ -2853,6 +2895,31 @@ export function createTsgoChecker(program: any): any {
         },
         forEachExportAndPropertyOfModule(moduleSymbol: any, cb: (symbol: any, key: string) => void): void {
             forEachExportAndPropertyOfModuleWorker(moduleSymbol, cb);
+        },
+        getExportsOfModule(moduleSymbol: any): readonly any[] {
+            if (!moduleSymbol) return [];
+            let hostExports = collectNamedExportsFromModuleSymbol(moduleSymbol);
+            if (!hostExports.length) {
+                const hostFileName = moduleSymbolSourceFileName(moduleSymbol);
+                if (hostFileName) hostExports = resolveHostModuleNamedExports(hostFileName);
+            }
+            if (hostExports.length) {
+                return hostExports;
+            }
+            ensureProject();
+            const mod = resolveModuleSymbolForExports(moduleSymbol);
+            const resolvedExports = collectNamedExportsFromModuleSymbol(mod);
+            if (resolvedExports.length) {
+                return resolvedExports;
+            }
+            if (typeof mod?.id === "number" && mod.id !== 0) {
+                try {
+                    return project.checker.getExportsOfModule(mod) ?? [];
+                } catch {
+                    return [];
+                }
+            }
+            return [];
         },
 
         // ── Diagnostics — empty for PoC ──
