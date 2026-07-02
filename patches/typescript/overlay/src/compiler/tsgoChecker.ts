@@ -17,7 +17,7 @@
 import * as ts from "./_namespaces/ts.js";
 import { bindSourceFile } from "./binder.js";
 import { createSourceFile } from "./parser.js";
-import { SyntaxKind, SymbolFlags, NodeFlags, type Path } from "./types.js";
+import { SyntaxKind, SymbolFlags, NodeFlags, JSDocParsingMode, type Path } from "./types.js";
 import { installTsgoBackedSourceFileLoader, inferScriptKind, createSkeletonSourceFile, getTsgoBackedSourceFile } from "./tsgoBackedSourceFile.js";
 import { getTnbPackageRoot, isBundledLibPath, isHostLibFile, resolveHostFileName, toHostFileName, toTsgoFileName } from "./tsgoLibPaths.js";
 
@@ -112,6 +112,15 @@ let _lastExtraFileExtensions: any[] | undefined;
 /** Host context for incremental overlay sync (Volar virtual TS after createProgram). */
 let _overlayHostCtx: { host: any; options: any; configFilePath: string } | undefined;
 let _languageServiceHost: any | undefined;
+/**
+ * True once any host-bound SourceFile has been bound via ensureHostSourceFileBound.
+ * Host-bound navigation refinement (resolveHostExportDefaultSymbol /
+ * remapSymbolDeclarationsToHost) only changes behavior for host-bound symbols, so
+ * when no host-bound file exists (e.g. pure-TS lint via tsslint CLI, where tsgo
+ * RemoteSourceFiles are never host-bound) the per-call refinement can be skipped
+ * entirely — it would just iterate declarations and bail at getHostSf.
+ */
+let _hasHostBoundFiles = false;
 
 /** @internal */
 export function tnbSetLanguageServiceHost(host: any): void {
@@ -258,6 +267,15 @@ function getHostScriptContent(host: any, fileName: string, options: any): { text
     return undefined;
 }
 
+/** Match tsc / LS default: skip full JSDoc parse in .ts unless needed for type errors. */
+function resolveJsDocParsingMode(host: any): JSDocParsingMode {
+    return host?.jsDocParsingMode ?? JSDocParsingMode.ParseForTypeErrors;
+}
+
+function hostSourceFileOptions(languageVersion: number, host: any) {
+    return { languageVersion, jsDocParsingMode: resolveJsDocParsingMode(host) };
+}
+
 /** Parse host snapshot into a full TS SourceFile for Language Service (safe during LS). */
 function sourceFileFromHostSnapshot(host: any, hostFileName: string, requestFileName: string, languageTarget: number): any | undefined {
     const snap = host?.getScriptSnapshot?.(requestFileName) ?? host?.getScriptSnapshot?.(hostFileName);
@@ -265,7 +283,7 @@ function sourceFileFromHostSnapshot(host: any, hostFileName: string, requestFile
     const text = snap.getText(0, snap.getLength());
     if (!text.length) return undefined;
     const scriptKind = resolveLanguageServiceScriptKind(host, requestFileName, hostFileName, /*fromHostSnapshot*/ true);
-    const sf = createSourceFile(hostFileName, text, languageTarget, /*setParentNodes*/ true, scriptKind);
+    const sf = createSourceFile(hostFileName, text, hostSourceFileOptions(languageTarget, host), /*setParentNodes*/ true, scriptKind);
     return attachHostSourceFileMetadata(sf, hostFileName);
 }
 
@@ -1079,6 +1097,9 @@ export function createTsgoProgram(
     _pendingExtraFileExtensions = collectExtraFileExtensions(names, options);
     _lastExtraFileExtensions = _pendingExtraFileExtensions;
     _overlayHostCtx = { host: _languageServiceHost ?? host, options, configFilePath };
+    if (overlays.length > 0 || parsedHostSourceFiles.size > 0) {
+        _hasHostBoundFiles = true;
+    }
     // Mirror Volar proxyCreateProgram: extra extensions require allowArbitraryExtensions
     // for module resolution / auto-import in .vue virtual TS.
     if (_pendingExtraFileExtensions?.length && options.allowArbitraryExtensions !== false) {
@@ -1151,14 +1172,14 @@ export function createTsgoProgram(
         const content = hostContentByFile.get(hostFileName);
         if (content?.text && (!hasSnapshot || content.fromHost)) {
             const scriptKind = resolveLanguageServiceScriptKind(ls, requestFileName, hostFileName, hasSnapshot);
-            const sf = createSourceFile(hostFileName, content.text, options.target ?? 99, /*setParentNodes*/ true, scriptKind);
+            const sf = createSourceFile(hostFileName, content.text, hostSourceFileOptions(options.target ?? 99, ls), /*setParentNodes*/ true, scriptKind);
             return attachHostSourceFileMetadata(sf, hostFileName);
         }
 
         if (!hasSnapshot) {
             const disk = ls?.readFile?.(hostFileName);
             if (typeof disk === "string" && disk.length) {
-                const sf = createSourceFile(hostFileName, disk, options.target ?? 99, /*setParentNodes*/ true, inferScriptKind(hostFileName));
+                const sf = createSourceFile(hostFileName, disk, hostSourceFileOptions(options.target ?? 99, ls), /*setParentNodes*/ true, inferScriptKind(hostFileName));
                 return attachHostSourceFileMetadata(sf, hostFileName);
             }
         }
@@ -1171,7 +1192,7 @@ export function createTsgoProgram(
         const ls = hostForLs();
         const scriptKind = resolveLanguageServiceScriptKind(ls, requestFileName, hostFileName, /*fromHostSnapshot*/ true);
         const sf = attachHostSourceFileMetadata(
-            createSourceFile(hostFileName, text, options.target ?? 99, /*setParentNodes*/ true, scriptKind),
+            createSourceFile(hostFileName, text, hostSourceFileOptions(options.target ?? 99, ls), /*setParentNodes*/ true, scriptKind),
             hostFileName,
         );
         ensureHostSourceFileBound(sf, options);
@@ -1806,6 +1827,12 @@ export function createTsgoChecker(program: any): any {
     // scope-manager identifier queries without touching the node index.
     const symByPos = new Map<string, Map<number, any>>();
     const symPrefetched = new Set<string>();
+    // refineNavSymbol memo: the same symbol is refined once even when queried
+    // from many reference sites (e.g. 100 refs to `foo`). Keyed by symbol
+    // object identity (tsgo symbols are id-keyed singletons via objectRegistry;
+    // host-bound symbols are real TS symbol objects). Cleared on snapshot
+    // refresh alongside symByPos.
+    const refinedSymBySym = new WeakMap<any, any>();
     // Files where prefetchResolvedReferences ran — skip expensive node-tree
     // fallback on cache miss; prefetch + getSymbolAtPosition is enough.
     const symPrefetchPopulated = new Set<string>();
@@ -1912,12 +1939,19 @@ export function createTsgoChecker(program: any): any {
         for (const f of openFilesWithContent) {
             _syncedOverlayContentByFile.set(f.fileName, f.content);
             tsgoSfCache.delete(f.fileName);
-            symPrefetched.delete(f.fileName);
-            symPrefetchPopulated.delete(f.fileName);
             nodeIndexCache.delete(f.fileName);
             nodeAtPosCache.delete(f.fileName);
         }
         symByPos.clear();
+        symPrefetched.clear();
+        symPrefetchPopulated.clear();
+        nodeTypeCache.clear();
+        typeOfSymbolCache.clear();
+        propertiesCache.clear();
+        propertyByNameCache.clear();
+        propertyBulkLoaded.clear();
+        signaturesByKindCache.clear();
+        baseTypesCache.clear();
     }
 
     function getTsgoSourceFile(fileName: string): any {
@@ -1970,7 +2004,7 @@ export function createTsgoChecker(program: any): any {
         const t0 = process.env.TSGO_PROFILE === "1" ? Date.now() : 0;
         let byPos: Map<number, any>;
         if (typeof activeProject?.checker?.prefetchResolvedReferences === "function") {
-            byPos = activeProject.checker.prefetchResolvedReferences(toTsgoFileName(fileName));
+            byPos = activeProject.checker.prefetchResolvedReferences(toTsgoFileName(fileName), "identifiers");
         } else {
             return;
         }
@@ -2083,8 +2117,10 @@ export function createTsgoChecker(program: any): any {
             Object.defineProperty(proto, "types", {
                 configurable: true,
                 get() {
+                    if (this.__tsgoTypesMemo !== undefined) return this.__tsgoTypesMemo;
                     const types = this.getTypes ? this.getTypes() : undefined;
                     if (types) for (const c of types) fixupType(c);
+                    this.__tsgoTypesMemo = types;
                     return types;
                 },
             });
@@ -2122,16 +2158,7 @@ export function createTsgoChecker(program: any): any {
         }
         if (!proto.getProperty) {
             proto.getProperty = function (name: string) {
-                const proj = _currentProjectRef.project;
-                if (!proj) return undefined;
-                // Share the adapter's (type,name) cache so getProperty() and
-                // checker.getPropertyOfType() dedupe across both call paths.
-                let byName = propertyByNameCache.get(this);
-                if (!byName) { byName = new Map<string, any>(); propertyByNameCache.set(this, byName); }
-                if (byName.has(name)) return byName.get(name);
-                const r = proj.checker.getPropertyOfType(this, name);
-                byName.set(name, r);
-                return r;
+                return resolvePropertyOfType(this, name);
             };
         }
         if (!proto.getApparentProperties) {
@@ -2374,12 +2401,37 @@ export function createTsgoChecker(program: any): any {
     // Per-type base-types cache. Unifies proto (type.getBaseTypes) and adapter
     // (checker.getBaseTypes) onto one RPC per type.
     const baseTypesCache = new Map<any, readonly any[]>();
+    // Types for which getPropertiesOfType was used to bulk-fill propertyByNameCache.
+    const propertyBulkLoaded = new Set<any>();
 
     const memoGet = <K, V>(cache: Map<K, V>, key: K, compute: () => V): V => {
         if (cache.has(key)) return cache.get(key)!;
         const v = compute();
         cache.set(key, v);
         return v;
+    };
+
+    const resolvePropertyOfType = (type: any, name: string): any => {
+        const proj = _currentProjectRef.project;
+        if (!proj || !type) return undefined;
+        let byName = propertyByNameCache.get(type);
+        if (!byName) {
+            byName = new Map<string, any>();
+            propertyByNameCache.set(type, byName);
+        }
+        if (byName.has(name)) return byName.get(name);
+        // One getPropertiesOfType RPC per type replaces many getPropertyOfType RPCs.
+        if (!propertyBulkLoaded.has(type)) {
+            propertyBulkLoaded.add(type);
+            const props = memoGet(propertiesCache, type, () => proj.checker.getPropertiesOfType(type) ?? []);
+            for (const p of props) {
+                if (p?.name) byName.set(p.name, p);
+            }
+            if (byName.has(name)) return byName.get(name);
+        }
+        const direct = proj.checker.getPropertyOfType(type, name);
+        byName.set(name, direct);
+        return direct;
     };
 
     const getSignaturesCached = (type: any, kind: number): readonly any[] => {
@@ -2478,7 +2530,15 @@ export function createTsgoChecker(program: any): any {
         if (!sf?.__tnbHostBound) return undefined;
         return sf;
     };
-    const refineNavSymbol = (sym: any) => refineHostNavigationSymbol(sym, getHostBoundSf);
+    const refineNavSymbol = (sym: any) => {
+        if (!sym) return sym;
+        if (!_hasHostBoundFiles) return sym;
+        const cached = refinedSymBySym.get(sym);
+        if (cached !== undefined) return cached;
+        const refined = refineHostNavigationSymbol(sym, getHostBoundSf);
+        refinedSymBySym.set(sym, refined);
+        return refined;
+    };
 
     const adapter: any = {
         // ── Node-based hot queries (find tsgo node → use tsgo's own API) ──
@@ -2499,7 +2559,6 @@ export function createTsgoChecker(program: any): any {
             ensureProject();
             const sf = node.getSourceFile?.();
             if (!sf) return undefined;
-            ensureFileSymbolsPrefetched(sf.fileName);
             const t0 = process.env.TSGO_PROFILE === "1" ? Date.now() : 0;
             const start = node.getStart(sf);
             const end = node.getEnd(sf);
@@ -2514,18 +2573,63 @@ export function createTsgoChecker(program: any): any {
                 }
                 return fileCache.get(cacheKey);
             }
+            if (fileCache?.has(end)) {
+                const hit = fileCache.get(end);
+                fileCache.set(cacheKey, hit);
+                if (process.env.TSGO_PROFILE === "1") {
+                    const d = Date.now() - t0;
+                    _stats.getSymCount++;
+                    _stats.getSymMs += d;
+                    _stats.getSymHitCount++;
+                }
+                return hit;
+            }
+            // Cache miss: lazily batch-prefetch this file's symbols (one RPC),
+            // then re-check the cache before falling back to per-position RPC.
+            ensureFileSymbolsPrefetched(sf.fileName);
+            fileCache = symByPos.get(sf.fileName);
+            if (fileCache?.has(cacheKey)) {
+                if (process.env.TSGO_PROFILE === "1") {
+                    const d = Date.now() - t0;
+                    _stats.getSymCount++;
+                    _stats.getSymMs += d;
+                    _stats.getSymHitCount++;
+                }
+                return fileCache.get(cacheKey);
+            }
+            if (fileCache?.has(end)) {
+                const hit = fileCache.get(end);
+                fileCache.set(cacheKey, hit);
+                if (process.env.TSGO_PROFILE === "1") {
+                    const d = Date.now() - t0;
+                    _stats.getSymCount++;
+                    _stats.getSymMs += d;
+                    _stats.getSymHitCount++;
+                }
+                return hit;
+            }
             if (!fileCache) {
                 fileCache = new Map();
                 symByPos.set(sf.fileName, fileCache);
             }
-            const isImportExportName = isCrossFileImportExportName(node);
-            const preferHostSymbol = sf.__tnbHostBound && !isImportExportName;
-            if (preferHostSymbol) {
-                const hostSym = getHostBoundSymbolAtLocation(node);
-                if (hostSym) {
-                    fileCache.set(cacheKey, hostSym);
-                    fileCache.set(end, hostSym);
-                    return hostSym;
+            // Host-bound fast path only applies when host-bound files exist
+            // (Volar LS); pure-TS lint never enters this branch.
+            if (_hasHostBoundFiles) {
+                const isImportExportName = isCrossFileImportExportName(node);
+                const preferHostSymbol = sf.__tnbHostBound && !isImportExportName;
+                if (preferHostSymbol) {
+                    const hostSym = getHostBoundSymbolAtLocation(node);
+                    if (hostSym) {
+                        const refined = refineNavSymbol(hostSym);
+                        fileCache.set(cacheKey, refined);
+                        fileCache.set(end, refined);
+                        if (process.env.TSGO_PROFILE === "1") {
+                            const d = Date.now() - t0;
+                            _stats.getSymCount++;
+                            _stats.getSymMs += d;
+                        }
+                        return refined;
+                    }
                 }
             }
             const tsgoFile = toTsgoFileName(sf.fileName);
@@ -2539,7 +2643,7 @@ export function createTsgoChecker(program: any): any {
                     sym = project.checker.getSymbolAtLocation(tsgoNode);
                 }
             }
-            if (!sym) {
+            if (!sym && _hasHostBoundFiles) {
                 sym = getHostBoundSymbolAtLocation(node);
             }
             sym = refineNavSymbol(sym);
@@ -2629,18 +2733,7 @@ export function createTsgoChecker(program: any): any {
         },
         getPropertyOfType(type: any, name: string): any {
             ensureProject();
-            if (!type) return undefined;
-            // Direct (type, name) → result cache. The first call for each
-            // (type, name) pair pays the RPC; repeats are pure JS lookups.
-            let byName = propertyByNameCache.get(type);
-            if (!byName) {
-                byName = new Map<string, any>();
-                propertyByNameCache.set(type, byName);
-            }
-            if (byName.has(name)) return byName.get(name);
-            const direct = project.checker.getPropertyOfType(type, name);
-            byName.set(name, direct);
-            return direct;
+            return resolvePropertyOfType(type, name);
         },
         getSignaturesOfType(type: any, kind: number): readonly any[] {
             ensureProject();
