@@ -1832,6 +1832,37 @@ export function createTsgoChecker(program: any): any {
     // scope-manager identifier queries without touching the node index.
     const symByPos = new Map<string, Map<number, any>>();
     const symPrefetched = new Set<string>();
+    const symCacheFileName = (fileName: string): string => {
+        const h = _overlayHostCtx?.host ?? _languageServiceHost;
+        return resolveHostFileName(fileName, h);
+    };
+    const getSymFileCache = (fileName: string, create = false): Map<number, any> | undefined => {
+        const key = symCacheFileName(fileName);
+        let fc = symByPos.get(key);
+        if (!fc && create) {
+            fc = new Map();
+            symByPos.set(key, fc);
+        }
+        return fc;
+    };
+    const probeSymCache = (fileName: string, start: number, end: number): { found: boolean; sym: any } => {
+        const fc = getSymFileCache(fileName);
+        if (!fc) return { found: false, sym: undefined };
+        if (fc.has(start)) return { found: true, sym: fc.get(start) };
+        if (fc.has(end)) return { found: true, sym: fc.get(end) };
+        if (end > start && fc.has(end - 1)) return { found: true, sym: fc.get(end - 1) };
+        return { found: false, sym: undefined };
+    };
+    const isIdentifierLikeNode = (node: any): boolean => {
+        const k = node.kind;
+        return k === SyntaxKind.Identifier || k === SyntaxKind.PrivateIdentifier;
+    };
+    const storeSymCache = (fileName: string, start: number, end: number, sym: any): void => {
+        const fc = getSymFileCache(fileName, true)!;
+        fc.set(start, sym);
+        if (end !== start) fc.set(end, sym);
+        if (end > start) fc.set(end - 1, sym);
+    };
     // refineNavSymbol memo: the same symbol is refined once even when queried
     // from many reference sites (e.g. 100 refs to `foo`). Keyed by symbol
     // object identity (tsgo symbols are id-keyed singletons via objectRegistry;
@@ -1947,6 +1978,10 @@ export function createTsgoChecker(program: any): any {
             nodeIndexCache.delete(f.fileName);
             nodeAtPosCache.delete(f.fileName);
         }
+        // Only invalidate symbol/type caches when host content actually changed.
+        // openFiles-only snapshot bumps (disk lint prefetch) must not wipe
+        // symByPos between per-file batch prefetches.
+        if (openFilesWithContent.length === 0) return;
         symByPos.clear();
         symPrefetched.clear();
         symPrefetchPopulated.clear();
@@ -1992,16 +2027,12 @@ export function createTsgoChecker(program: any): any {
     }
 
     function ensureFileSymbolsPrefetched(fileName: string): void {
-        if (symPrefetched.has(fileName)) return;
-        // Batch-prefetch every identifier symbol in the file in one RPC. Skip
-        // lib / node_modules files: the scope manager only queries user-file
-        // identifiers, but BuilderState.getReferencedFiles walks ALL program
-        // files (incl. lib.d.ts) calling getSymbolAtLocation on imports —
-        // which would prefetch all 1158 files (440k refs) instead of the ~45
-        // user files (34k refs). Gate to user files to keep ~1.2x
-        // over-enumeration (well above break-even).
-        if (fileName.includes("/node_modules/") || /\/lib\.[^/]*\.d\.ts$/.test(fileName)) {
-            symPrefetched.add(fileName);
+        const cacheName = symCacheFileName(fileName);
+        if (symPrefetched.has(cacheName)) return;
+        // Skip node_modules only — lib.d.ts sites are lazy-prefetched on first
+        // query so batch RPC replaces many per-position getSymbolAtPosition calls.
+        if (cacheName.includes("/node_modules/")) {
+            symPrefetched.add(cacheName);
             return;
         }
         pushHostOverlayToTsgo(fileName);
@@ -2009,20 +2040,16 @@ export function createTsgoChecker(program: any): any {
         const t0 = process.env.TSGO_PROFILE === "1" ? Date.now() : 0;
         let byPos: Map<number, any>;
         if (typeof activeProject?.checker?.prefetchResolvedReferences === "function") {
-            byPos = activeProject.checker.prefetchResolvedReferences(toTsgoFileName(fileName), "identifiers");
+            byPos = activeProject.checker.prefetchResolvedReferences(toTsgoFileName(fileName), "allIdentifiers");
         } else {
             return;
         }
-        symPrefetched.add(fileName);
-        let fileCache = symByPos.get(fileName);
-        if (!fileCache) {
-            fileCache = new Map();
-            symByPos.set(fileName, fileCache);
-        }
+        symPrefetched.add(cacheName);
+        const fileCache = getSymFileCache(cacheName, true)!;
         for (const [pos, sym] of byPos) {
             fileCache.set(pos, sym);
         }
-        symPrefetchPopulated.add(fileName);
+        symPrefetchPopulated.add(cacheName);
         if (process.env.TSGO_PROFILE === "1") {
             _stats.symPrefetchFiles++;
             _stats.symPrefetchRefs += byPos.size;
@@ -2565,57 +2592,37 @@ export function createTsgoChecker(program: any): any {
             const sf = node.getSourceFile?.();
             if (!sf) return undefined;
             const t0 = process.env.TSGO_PROFILE === "1" ? Date.now() : 0;
-            const start = node.getStart(sf);
-            const end = node.getEnd(sf);
-            let fileCache = symByPos.get(sf.fileName);
+            const start = typeof node.pos === "number" ? node.pos : node.getStart(sf);
+            const end = typeof node.end === "number" ? node.end : node.getEnd(sf);
+            const cacheName = symCacheFileName(sf.fileName);
             const cacheKey = start;
-            if (fileCache?.has(cacheKey)) {
+            const recordHit = () => {
                 if (process.env.TSGO_PROFILE === "1") {
                     const d = Date.now() - t0;
                     _stats.getSymCount++;
                     _stats.getSymMs += d;
                     _stats.getSymHitCount++;
                 }
-                return fileCache.get(cacheKey);
-            }
-            if (fileCache?.has(end)) {
-                const hit = fileCache.get(end);
-                fileCache.set(cacheKey, hit);
-                if (process.env.TSGO_PROFILE === "1") {
-                    const d = Date.now() - t0;
-                    _stats.getSymCount++;
-                    _stats.getSymMs += d;
-                    _stats.getSymHitCount++;
-                }
-                return hit;
+            };
+            let cached = probeSymCache(cacheName, start, end);
+            if (cached.found) {
+                recordHit();
+                return cached.sym;
             }
             // Cache miss: lazily batch-prefetch this file's symbols (one RPC),
             // then re-check the cache before falling back to per-position RPC.
             ensureFileSymbolsPrefetched(sf.fileName);
-            fileCache = symByPos.get(sf.fileName);
-            if (fileCache?.has(cacheKey)) {
-                if (process.env.TSGO_PROFILE === "1") {
-                    const d = Date.now() - t0;
-                    _stats.getSymCount++;
-                    _stats.getSymMs += d;
-                    _stats.getSymHitCount++;
-                }
-                return fileCache.get(cacheKey);
+            cached = probeSymCache(cacheName, start, end);
+            if (cached.found) {
+                recordHit();
+                return cached.sym;
             }
-            if (fileCache?.has(end)) {
-                const hit = fileCache.get(end);
-                fileCache.set(cacheKey, hit);
-                if (process.env.TSGO_PROFILE === "1") {
-                    const d = Date.now() - t0;
-                    _stats.getSymCount++;
-                    _stats.getSymMs += d;
-                    _stats.getSymHitCount++;
-                }
-                return hit;
-            }
-            if (!fileCache) {
-                fileCache = new Map();
-                symByPos.set(sf.fileName, fileCache);
+            // allIdentifiers prefetch is exhaustive for Identifier / PrivateIdentifier
+            // sites with a resolved symbol; absent from the map means no symbol.
+            if (symPrefetchPopulated.has(cacheName) && isIdentifierLikeNode(node)) {
+                storeSymCache(cacheName, start, end, undefined);
+                recordHit();
+                return undefined;
             }
             // Host-bound fast path only applies when host-bound files exist
             // (Volar LS); pure-TS lint never enters this branch.
@@ -2626,8 +2633,7 @@ export function createTsgoChecker(program: any): any {
                     const hostSym = getHostBoundSymbolAtLocation(node);
                     if (hostSym) {
                         const refined = refineNavSymbol(hostSym);
-                        fileCache.set(cacheKey, refined);
-                        fileCache.set(end, refined);
+                        storeSymCache(cacheName, start, end, refined);
                         if (process.env.TSGO_PROFILE === "1") {
                             const d = Date.now() - t0;
                             _stats.getSymCount++;
@@ -2642,7 +2648,7 @@ export function createTsgoChecker(program: any): any {
             if (!sym && end > start) {
                 sym = project.checker.getSymbolAtPosition(tsgoFile, end - 1);
             }
-            if (!sym && !symPrefetchPopulated.has(sf.fileName)) {
+            if (!sym && !symPrefetchPopulated.has(cacheName)) {
                 const tsgoNode = findTsgoNodeAtPosition(sf.fileName, start, node.kind, end);
                 if (tsgoNode) {
                     sym = project.checker.getSymbolAtLocation(tsgoNode);
@@ -2652,8 +2658,7 @@ export function createTsgoChecker(program: any): any {
                 sym = getHostBoundSymbolAtLocation(node);
             }
             sym = refineNavSymbol(sym);
-            fileCache.set(cacheKey, sym);
-            fileCache.set(end, sym);
+            storeSymCache(cacheName, start, end, sym);
             if (process.env.TSGO_PROFILE === "1") {
                 const d = Date.now() - t0;
                 _stats.getSymCount++;

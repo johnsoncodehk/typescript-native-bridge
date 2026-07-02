@@ -357,7 +357,7 @@ index 656f7cc4e..474bf83a1 100644
      id: number;
      flags: number;
 diff --git a/_packages/native-preview/src/api/sync/api.ts b/_packages/native-preview/src/api/sync/api.ts
-index 9381d5122..c7468be03 100644
+index 9381d5122..15f528f22 100644
 --- a/_packages/native-preview/src/api/sync/api.ts
 +++ b/_packages/native-preview/src/api/sync/api.ts
 @@ -57,6 +57,7 @@ import type {
@@ -456,7 +456,7 @@ index 9381d5122..c7468be03 100644
 +    /** Batch-resolves symbols at every Identifier in a file (one RPC). Light symbol payloads. */
 +    getResolvedReferencesInFile(
 +        file: DocumentIdentifier,
-+        scope?: "declarationNames" | "identifiers",
++        scope?: "declarationNames" | "identifiers" | "allIdentifiers",
 +    ): GetResolvedReferencesInFileResponse {
 +        const data = this.client.apiRequest<GetResolvedReferencesInFileResponse>("getResolvedReferencesInFile", {
 +            snapshot: this.snapshotId,
@@ -470,14 +470,14 @@ index 9381d5122..c7468be03 100644
 +    /** Register light symbols and return position → Symbol map for batch prefetch. */
 +    prefetchResolvedReferences(
 +        file: DocumentIdentifier,
-+        scope?: "declarationNames" | "identifiers",
++        scope?: "declarationNames" | "identifiers" | "allIdentifiers",
 +    ): Map<number, Symbol | undefined> {
 +        return this.prefetchResolvedReferencesWithScope(file, scope ?? "declarationNames");
 +    }
 +
 +    private prefetchResolvedReferencesWithScope(
 +        file: DocumentIdentifier,
-+        scope: "declarationNames" | "identifiers",
++        scope: "declarationNames" | "identifiers" | "allIdentifiers",
 +    ): Map<number, Symbol | undefined> {
 +        const data = this.getResolvedReferencesInFile(file, scope);
 +        const byId = new Map<number, Symbol>();
@@ -873,7 +873,7 @@ index a76d52a54..d90e35c6b 100644
  
  export function isBindingPattern(node: Node): node is BindingPattern {
 diff --git a/internal/api/proto.go b/internal/api/proto.go
-index 952b572a6..40eeeb033 100644
+index 952b572a6..47e643127 100644
 --- a/internal/api/proto.go
 +++ b/internal/api/proto.go
 @@ -63,7 +63,8 @@ const (
@@ -964,7 +964,7 @@ index 952b572a6..40eeeb033 100644
  	MethodGetProgramDiagnostics:             unmarshallerFor[GetProjectDiagnosticsParams],
  	MethodGetGlobalDiagnostics:              unmarshallerFor[GetProjectDiagnosticsParams],
  	MethodGetConfigFileParsingDiagnostics:   unmarshallerFor[GetProjectDiagnosticsParams],
-@@ -509,6 +544,35 @@ type GetSymbolAtPositionParams struct {
+@@ -509,6 +544,36 @@ type GetSymbolAtPositionParams struct {
  	Position uint32             `json:"position"`
  }
  
@@ -972,8 +972,9 @@ index 952b572a6..40eeeb033 100644
 +	Snapshot SnapshotID         `json:"snapshot"`
 +	Project  ProjectID          `json:"project"`
 +	File     DocumentIdentifier `json:"file"`
-+	// Scope selects which identifier sites to resolve: "declarationNames" (default)
-+	// or "identifiers" (all non-member-name Identifier / PrivateIdentifier nodes).
++	// Scope selects which identifier sites to resolve: "declarationNames" (default),
++	// "identifiers" (non-member-name Identifier / PrivateIdentifier), or
++	// "allIdentifiers" (every Identifier / PrivateIdentifier including member names).
 +	Scope string `json:"scope,omitempty"`
 +}
 +
@@ -1000,7 +1001,7 @@ index 952b572a6..40eeeb033 100644
  type GetSymbolsAtPositionsParams struct {
  	Snapshot  SnapshotID         `json:"snapshot"`
  	Project   ProjectID          `json:"project"`
-@@ -775,6 +839,13 @@ type GetSymbolPropertyParams struct {
+@@ -775,6 +840,13 @@ type GetSymbolPropertyParams struct {
  	Symbol   SymbolID   `json:"objectId"`
  }
  
@@ -1014,7 +1015,7 @@ index 952b572a6..40eeeb033 100644
  // GetSignaturePropertyParams is used for all signature sub-property endpoints.
  type GetSignaturePropertyParams struct {
  	Snapshot  SnapshotID  `json:"snapshot"`
-@@ -1070,6 +1141,32 @@ type GetDiagnosticsParams struct {
+@@ -1070,6 +1142,32 @@ type GetDiagnosticsParams struct {
  	File     *DocumentIdentifier `json:"file,omitempty"`
  }
  
@@ -1048,7 +1049,7 @@ index 952b572a6..40eeeb033 100644
  type GetProjectDiagnosticsParams struct {
  	Snapshot SnapshotID `json:"snapshot"`
 diff --git a/internal/api/session.go b/internal/api/session.go
-index b350c6334..bf447e7a2 100644
+index b350c6334..b64c1baba 100644
 --- a/internal/api/session.go
 +++ b/internal/api/session.go
 @@ -154,6 +154,19 @@ func (sd *snapshotData) newSymbolResponse(symbol *ast.Symbol) *SymbolResponse {
@@ -1167,7 +1168,7 @@ index b350c6334..bf447e7a2 100644
  	// Even when nothing is opened or closed, APIUpdate ensures all projects and
  	// files opened by the API are up to date. For an API connected to an LSP server,
  	// this brings the API state up to date with the LSP state and ensures projects
-@@ -1109,6 +1183,81 @@ func (s *Session) handleGetSymbolsAtPositions(ctx context.Context, params *GetSy
+@@ -1109,6 +1183,83 @@ func (s *Session) handleGetSymbolsAtPositions(ctx context.Context, params *GetSy
  	return results, nil
  }
  
@@ -1194,7 +1195,7 @@ index b350c6334..bf447e7a2 100644
 +	if scope == "" {
 +		scope = ResolvedReferencesScopeDeclarationNames
 +	}
-+	if scope != ResolvedReferencesScopeDeclarationNames && scope != ResolvedReferencesScopeIdentifiers {
++	if scope != ResolvedReferencesScopeDeclarationNames && scope != ResolvedReferencesScopeIdentifiers && scope != ResolvedReferencesScopeAllIdentifiers {
 +		return nil, fmt.Errorf("%w: unknown getResolvedReferencesInFile scope %q", ErrClientError, scope)
 +	}
 +
@@ -1205,6 +1206,8 @@ index b350c6334..bf447e7a2 100644
 +		}
 +		var shouldResolve bool
 +		switch scope {
++		case ResolvedReferencesScopeAllIdentifiers:
++			shouldResolve = ast.IsIdentifier(node) || node.Kind == ast.KindPrivateIdentifier
 +		case ResolvedReferencesScopeIdentifiers:
 +			shouldResolve = isNonMemberIdentifier(node)
 +		case ResolvedReferencesScopeDeclarationNames:
@@ -1249,7 +1252,7 @@ index b350c6334..bf447e7a2 100644
  // handleGetSymbolAtLocation returns the symbol at a node location.
  func (s *Session) handleGetSymbolAtLocation(ctx context.Context, params *GetSymbolAtLocationParams) (*SymbolResponse, error) {
  	setup, err := s.setupChecker(ctx, params.Snapshot, params.Project)
-@@ -1432,6 +1581,44 @@ func (s *Session) handleGetExportSymbolOfSymbol(_ context.Context, params *GetSy
+@@ -1432,6 +1583,44 @@ func (s *Session) handleGetExportSymbolOfSymbol(_ context.Context, params *GetSy
  	return s.resolveSymbolPropertyOfSymbol(params, func(sym *ast.Symbol) *ast.Symbol { return sym.ExportSymbol })
  }
  
@@ -1294,7 +1297,7 @@ index b350c6334..bf447e7a2 100644
  func (s *Session) handleGetSymbolOfType(_ context.Context, params *GetTypePropertyParams) (*SymbolResponse, error) {
  	return s.resolveSymbolPropertyOfType(params, (*checker.Type).Symbol)
  }
-@@ -2888,6 +3075,53 @@ func (s *Session) handleGetSemanticDiagnostics(ctx context.Context, params *GetD
+@@ -2888,6 +3077,53 @@ func (s *Session) handleGetSemanticDiagnostics(ctx context.Context, params *GetD
  	return NewDiagnosticResponses(diags), nil
  }
  
@@ -1348,7 +1351,7 @@ index b350c6334..bf447e7a2 100644
  // handleGetSuggestionDiagnostics returns suggestion diagnostics for a file or all files.
  func (s *Session) handleGetSuggestionDiagnostics(ctx context.Context, params *GetDiagnosticsParams) ([]*DiagnosticResponse, error) {
  	ctx = core.WithCheckerLifetime(ctx, core.CheckerLifetimeDiagnostics)
-@@ -3184,3 +3418,24 @@ func (s *Session) handleGetReferencedSymbolsForNode(ctx context.Context, params
+@@ -3184,3 +3420,24 @@ func (s *Session) handleGetReferencedSymbolsForNode(ctx context.Context, params
  	}
  	return result, nil
  }

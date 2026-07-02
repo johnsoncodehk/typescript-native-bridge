@@ -8,6 +8,10 @@ const (
 	// positions (PropertyAccessExpression.Name, QualifiedName.Right). Member names
 	// require type-directed resolution; other identifiers use binder/cheap paths.
 	ResolvedReferencesScopeIdentifiers = "identifiers"
+	// AllIdentifiers resolves every Identifier / PrivateIdentifier including member
+	// names. Used for batch prefetch where type-directed member resolution is
+	// amortized across one checker acquisition per file.
+	ResolvedReferencesScopeAllIdentifiers = "allIdentifiers"
 )
 
 // isNonMemberIdentifier returns true for identifier nodes that are not the
