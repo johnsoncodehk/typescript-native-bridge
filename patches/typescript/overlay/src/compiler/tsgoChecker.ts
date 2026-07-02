@@ -1832,6 +1832,12 @@ export function createTsgoChecker(program: any): any {
     // scope-manager identifier queries without touching the node index.
     const symByPos = new Map<string, Map<number, any>>();
     const symPrefetched = new Set<string>();
+    /** Per-file cache misses before batch prefetch — sparse files stay on direct RPC. */
+    const symMissCountByFile = new Map<string, number>();
+    const symPrefetchMissThreshold = (() => {
+        const n = Number(process.env.TSGO_SYM_PREFETCH_THRESHOLD ?? "32");
+        return Number.isFinite(n) && n > 0 ? Math.floor(n) : 32;
+    })();
     const symCacheFileName = (fileName: string): string => {
         const h = _overlayHostCtx?.host ?? _languageServiceHost;
         return resolveHostFileName(fileName, h);
@@ -1857,6 +1863,22 @@ export function createTsgoChecker(program: any): any {
         const k = node.kind;
         return k === SyntaxKind.Identifier || k === SyntaxKind.PrivateIdentifier;
     };
+    const isModuleSpecifierStringLiteral = (node: any): boolean => {
+        if (node?.kind !== SyntaxKind.StringLiteral) return false;
+        const p = node.parent;
+        if (!p) return false;
+        switch (p.kind) {
+            case SyntaxKind.ImportDeclaration:
+            case SyntaxKind.ExportDeclaration:
+                return p.moduleSpecifier === node;
+            case SyntaxKind.ExternalModuleReference:
+                return p.expression === node;
+            default:
+                return false;
+        }
+    };
+    const isPrefetchCoveredNode = (node: any): boolean =>
+        isIdentifierLikeNode(node) || isModuleSpecifierStringLiteral(node);
     const storeSymCache = (fileName: string, start: number, end: number, sym: any): void => {
         const fc = getSymFileCache(fileName, true)!;
         fc.set(start, sym);
@@ -1985,6 +2007,7 @@ export function createTsgoChecker(program: any): any {
         symByPos.clear();
         symPrefetched.clear();
         symPrefetchPopulated.clear();
+        symMissCountByFile.clear();
         nodeTypeCache.clear();
         typeOfSymbolCache.clear();
         propertiesCache.clear();
@@ -2029,12 +2052,6 @@ export function createTsgoChecker(program: any): any {
     function ensureFileSymbolsPrefetched(fileName: string): void {
         const cacheName = symCacheFileName(fileName);
         if (symPrefetched.has(cacheName)) return;
-        // Skip node_modules only — lib.d.ts sites are lazy-prefetched on first
-        // query so batch RPC replaces many per-position getSymbolAtPosition calls.
-        if (cacheName.includes("/node_modules/")) {
-            symPrefetched.add(cacheName);
-            return;
-        }
         pushHostOverlayToTsgo(fileName);
         const activeProject = _currentProjectRef.project ?? project;
         const t0 = process.env.TSGO_PROFILE === "1" ? Date.now() : 0;
@@ -2595,7 +2612,6 @@ export function createTsgoChecker(program: any): any {
             const start = typeof node.pos === "number" ? node.pos : node.getStart(sf);
             const end = typeof node.end === "number" ? node.end : node.getEnd(sf);
             const cacheName = symCacheFileName(sf.fileName);
-            const cacheKey = start;
             const recordHit = () => {
                 if (process.env.TSGO_PROFILE === "1") {
                     const d = Date.now() - t0;
@@ -2604,22 +2620,57 @@ export function createTsgoChecker(program: any): any {
                     _stats.getSymHitCount++;
                 }
             };
+            const recordRpc = () => {
+                if (process.env.TSGO_PROFILE === "1") {
+                    const d = Date.now() - t0;
+                    _stats.getSymCount++;
+                    _stats.getSymMs += d;
+                    _stats.getSymRpcCount++;
+                }
+            };
+            const resolveSymbolRpc = (): any => {
+                const tsgoFile = toTsgoFileName(sf.fileName);
+                let sym: any = project.checker.getSymbolAtPosition(tsgoFile, start);
+                if (!sym && end > start) {
+                    sym = project.checker.getSymbolAtPosition(tsgoFile, end - 1);
+                }
+                if (!sym && !symPrefetchPopulated.has(cacheName)) {
+                    const tsgoNode = findTsgoNodeAtPosition(sf.fileName, start, node.kind, end);
+                    if (tsgoNode) {
+                        sym = project.checker.getSymbolAtLocation(tsgoNode);
+                    }
+                }
+                if (!sym && _hasHostBoundFiles) {
+                    sym = getHostBoundSymbolAtLocation(node);
+                }
+                sym = refineNavSymbol(sym);
+                storeSymCache(cacheName, start, end, sym);
+                recordRpc();
+                return sym;
+            };
             let cached = probeSymCache(cacheName, start, end);
             if (cached.found) {
                 recordHit();
                 return cached.sym;
             }
-            // Cache miss: lazily batch-prefetch this file's symbols (one RPC),
-            // then re-check the cache before falling back to per-position RPC.
-            ensureFileSymbolsPrefetched(sf.fileName);
+            const missCount = (symMissCountByFile.get(cacheName) ?? 0) + 1;
+            symMissCountByFile.set(cacheName, missCount);
+            // Sparse files: direct per-position RPC until miss density justifies
+            // one whole-file prefetch (break-even ~32 × 12µs vs one batch walk).
+            if (!symPrefetched.has(cacheName) && missCount < symPrefetchMissThreshold) {
+                return resolveSymbolRpc();
+            }
+            if (!symPrefetched.has(cacheName)) {
+                ensureFileSymbolsPrefetched(sf.fileName);
+            }
             cached = probeSymCache(cacheName, start, end);
             if (cached.found) {
                 recordHit();
                 return cached.sym;
             }
-            // allIdentifiers prefetch is exhaustive for Identifier / PrivateIdentifier
-            // sites with a resolved symbol; absent from the map means no symbol.
-            if (symPrefetchPopulated.has(cacheName) && isIdentifierLikeNode(node)) {
+            // allIdentifiers prefetch is exhaustive for covered sites with a
+            // resolved symbol; absent from the map means no symbol.
+            if (symPrefetchPopulated.has(cacheName) && isPrefetchCoveredNode(node)) {
                 storeSymCache(cacheName, start, end, undefined);
                 recordHit();
                 return undefined;
@@ -2643,29 +2694,7 @@ export function createTsgoChecker(program: any): any {
                     }
                 }
             }
-            const tsgoFile = toTsgoFileName(sf.fileName);
-            let sym: any = project.checker.getSymbolAtPosition(tsgoFile, start);
-            if (!sym && end > start) {
-                sym = project.checker.getSymbolAtPosition(tsgoFile, end - 1);
-            }
-            if (!sym && !symPrefetchPopulated.has(cacheName)) {
-                const tsgoNode = findTsgoNodeAtPosition(sf.fileName, start, node.kind, end);
-                if (tsgoNode) {
-                    sym = project.checker.getSymbolAtLocation(tsgoNode);
-                }
-            }
-            if (!sym && _hasHostBoundFiles) {
-                sym = getHostBoundSymbolAtLocation(node);
-            }
-            sym = refineNavSymbol(sym);
-            storeSymCache(cacheName, start, end, sym);
-            if (process.env.TSGO_PROFILE === "1") {
-                const d = Date.now() - t0;
-                _stats.getSymCount++;
-                _stats.getSymMs += d;
-                _stats.getSymRpcCount++;
-            }
-            return sym;
+            return resolveSymbolRpc();
         },
         getTypeOfSymbolAtLocation(symbol: any, location: any): any {
             ensureProject();

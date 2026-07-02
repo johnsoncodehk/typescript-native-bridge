@@ -1049,7 +1049,7 @@ index 952b572a6..47e643127 100644
  type GetProjectDiagnosticsParams struct {
  	Snapshot SnapshotID `json:"snapshot"`
 diff --git a/internal/api/session.go b/internal/api/session.go
-index b350c6334..b64c1baba 100644
+index b350c6334..a7e77dbc7 100644
 --- a/internal/api/session.go
 +++ b/internal/api/session.go
 @@ -154,6 +154,19 @@ func (sd *snapshotData) newSymbolResponse(symbol *ast.Symbol) *SymbolResponse {
@@ -1207,7 +1207,7 @@ index b350c6334..b64c1baba 100644
 +		var shouldResolve bool
 +		switch scope {
 +		case ResolvedReferencesScopeAllIdentifiers:
-+			shouldResolve = ast.IsIdentifier(node) || node.Kind == ast.KindPrivateIdentifier
++			shouldResolve = isAllIdentifiersPrefetchSite(node)
 +		case ResolvedReferencesScopeIdentifiers:
 +			shouldResolve = isNonMemberIdentifier(node)
 +		case ResolvedReferencesScopeDeclarationNames:

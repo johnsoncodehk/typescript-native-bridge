@@ -9,10 +9,32 @@ const (
 	// require type-directed resolution; other identifiers use binder/cheap paths.
 	ResolvedReferencesScopeIdentifiers = "identifiers"
 	// AllIdentifiers resolves every Identifier / PrivateIdentifier including member
-	// names. Used for batch prefetch where type-directed member resolution is
-	// amortized across one checker acquisition per file.
+	// names, plus import/export module-specifier StringLiterals. Used for batch
+	// prefetch where type-directed member resolution is amortized across one
+	// checker acquisition per file.
 	ResolvedReferencesScopeAllIdentifiers = "allIdentifiers"
 )
+
+// isModuleSpecifierStringLiteral returns true when node is the module path
+// literal of an import/export declaration or external module reference.
+func isModuleSpecifierStringLiteral(node *ast.Node) bool {
+	if node == nil || node.Kind != ast.KindStringLiteral {
+		return false
+	}
+	return ast.TryGetImportFromModuleSpecifier(node) != nil
+}
+
+// isAllIdentifiersPrefetchSite returns true for nodes covered by the
+// allIdentifiers batch-prefetch scope.
+func isAllIdentifiersPrefetchSite(node *ast.Node) bool {
+	if node == nil {
+		return false
+	}
+	if ast.IsIdentifier(node) || node.Kind == ast.KindPrivateIdentifier {
+		return true
+	}
+	return isModuleSpecifierStringLiteral(node)
+}
 
 // isNonMemberIdentifier returns true for identifier nodes that are not the
 // member-name slot of a property access or qualified name.
