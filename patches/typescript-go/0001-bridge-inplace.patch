@@ -1480,6 +1480,53 @@ index cad204f5b..c8966680b 100644
  		if extensions&extensionsDeclaration != 0 && !tspath.IsDeclarationFileName(extensionless+originalExtension) {
  			if resolved := r.tryExtension(".d"+originalExtension+".ts", extensionless, false); !resolved.shouldContinueSearching() {
  				return resolved
+diff --git a/internal/parser/parser.go b/internal/parser/parser.go
+index a8cd3a6f3..48d6105e9 100644
+--- a/internal/parser/parser.go
++++ b/internal/parser/parser.go
+@@ -289,7 +289,9 @@ func ParseIsolatedEntityName(text string) *ast.EntityName {
+ 
+ func (p *Parser) initializeState(opts ast.SourceFileParseOptions, sourceText string, scriptKind core.ScriptKind) {
+ 	if scriptKind == core.ScriptKindUnknown {
+-		panic("ScriptKind must be specified when parsing source file: " + opts.FileName)
++		// Align with stock TS ensureScriptKind: unknown extensions fall back to TS
++		// rather than crashing the server (e.g. .vue via extraFileExtensions).
++		scriptKind = core.ScriptKindTS
+ 	}
+ 
+ 	if p.scanner == nil {
+diff --git a/internal/project/compilerhost.go b/internal/project/compilerhost.go
+index 212601d4b..a34452b36 100644
+--- a/internal/project/compilerhost.go
++++ b/internal/project/compilerhost.go
+@@ -3,6 +3,7 @@ package project
+ import (
+ 	"github.com/microsoft/typescript-go/internal/ast"
+ 	"github.com/microsoft/typescript-go/internal/compiler"
++	"github.com/microsoft/typescript-go/internal/core"
+ 	"github.com/microsoft/typescript-go/internal/diagnostics"
+ 	"github.com/microsoft/typescript-go/internal/locale"
+ 	"github.com/microsoft/typescript-go/internal/project/logging"
+@@ -96,7 +97,18 @@ func (c *compilerHost) GetResolvedProjectReference(fileName string, path tspath.
+ func (c *compilerHost) GetSourceFile(opts ast.SourceFileParseOptions) *ast.SourceFile {
+ 	c.ensureAlive()
+ 	if fh := c.sourceFS.GetFileByPath(opts.FileName, opts.Path); fh != nil {
+-		key := NewParseCacheKey(opts, fh.Hash(), fh.Kind())
++		scriptKind := fh.Kind()
++		if scriptKind == core.ScriptKindUnknown {
++			var extras []tsoptions.FileExtensionInfo
++			if cmd := c.project.getCommandLineWithTypingsFiles(); cmd != nil {
++				extras = cmd.ExtraFileExtensions()
++			}
++			scriptKind = tsoptions.GetScriptKindForFileName(opts.FileName, extras)
++			if scriptKind == core.ScriptKindUnknown {
++				scriptKind = core.ScriptKindTS
++			}
++		}
++		key := NewParseCacheKey(opts, fh.Hash(), scriptKind)
+ 		return c.builder.parseCache.Acquire(key, fh)
+ 	}
+ 	return nil
 diff --git a/internal/project/configfileregistrybuilder.go b/internal/project/configfileregistrybuilder.go
 index cd4a2f618..e501ffe0a 100644
 --- a/internal/project/configfileregistrybuilder.go
@@ -1814,10 +1861,10 @@ index b8629b15d..abc42a7c3 100644
  		}
  	}
 diff --git a/internal/tsoptions/parsedcommandline.go b/internal/tsoptions/parsedcommandline.go
-index ab93e527f..ad3a1fb48 100644
+index ab93e527f..b25a5fcc9 100644
 --- a/internal/tsoptions/parsedcommandline.go
 +++ b/internal/tsoptions/parsedcommandline.go
-@@ -89,6 +89,13 @@ func (p *ParsedCommandLine) ConfigName() string {
+@@ -89,6 +89,31 @@ func (p *ParsedCommandLine) ConfigName() string {
  	return p.ConfigFile.SourceFile.FileName()
  }
  
@@ -1826,6 +1873,24 @@ index ab93e527f..ad3a1fb48 100644
 +		return nil
 +	}
 +	return p.extraFileExtensions
++}
++
++// GetScriptKindForFileName returns the script kind for a file name, consulting
++// built-in extension rules first, then extra file extensions from tsconfig/API.
++func GetScriptKindForFileName(fileName string, extraFileExtensions []FileExtensionInfo) core.ScriptKind {
++	if sk := core.GetScriptKindFromFileName(fileName); sk != core.ScriptKindUnknown {
++		return sk
++	}
++	ext := tspath.TryGetExtensionFromPath(fileName)
++	if ext == "" {
++		return core.ScriptKindUnknown
++	}
++	for _, info := range extraFileExtensions {
++		if info.Extension == ext {
++			return info.ScriptKind
++		}
++	}
++	return core.ScriptKindUnknown
 +}
 +
  func (p *ParsedCommandLine) SourceToProjectReference() map[tspath.Path]*SourceOutputAndProjectReference {

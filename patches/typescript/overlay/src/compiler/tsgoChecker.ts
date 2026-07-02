@@ -2589,6 +2589,8 @@ export function createTsgoChecker(program: any): any {
         return refined;
     };
 
+    let checkerProxyRef: any;
+
     const adapter: any = {
         // ── Node-based hot queries (find tsgo node → use tsgo's own API) ──
         getTypeAtLocation(node: any): any {
@@ -2996,6 +2998,12 @@ export function createTsgoChecker(program: any): any {
         getTypeCount: () => 0,
         getInstantiationCount: () => 0,
         getRelationCacheSizes: () => ({ assignable: 0, identity: 0, subtype: 0, strictSubtype: 0 }),
+
+        // Stock TypeChecker: callback receives the checker proxy (see checker.ts).
+        // Vue references → getQuickInfoAtPosition → SymbolDisplay uses this API.
+        runWithCancellationToken(_token: any, callback: (checker: any) => any): any {
+            return callback(checkerProxyRef);
+        },
     };
 
     // Proxy: unknown methods → lazily forward to tsgo checker if it has them,
@@ -3017,7 +3025,7 @@ export function createTsgoChecker(program: any): any {
         }) as T;
     };
 
-    return new Proxy(adapter, {
+    checkerProxyRef = new Proxy(adapter, {
         get(target: any, prop: string | symbol, receiver: any) {
             if (prop in target) {
                 const val = Reflect.get(target, prop, receiver);
@@ -3036,4 +3044,5 @@ export function createTsgoChecker(program: any): any {
         },
         has(target: any, p) { return p in target; },
     });
+    return checkerProxyRef;
 }
