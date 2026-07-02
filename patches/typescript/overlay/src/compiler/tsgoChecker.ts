@@ -1081,25 +1081,29 @@ export function createTsgoProgram(
         for (const fn of names) {
             trackedHostFiles.add(fn);
             const resolvedFn = resolveHostFileName(fn, host);
-            const snapSf = sourceFileFromHostSnapshot(_languageServiceHost ?? host, resolvedFn, fn, options.target ?? 99);
-            if (snapSf?.statements?.length) {
-                parsedHostSourceFiles.set(resolvedFn, snapSf);
-            }
             if (!isOverlayCandidatePath(fn)) continue;
             const content = getHostScriptContentForOverlay(resolvedFn, options, host);
             if (!content) continue;
             hostContentByFile.set(resolvedFn, content);
+            // Only parse host AST for true overlays (content differs from disk —
+            // Volar virtual .vue TS, unsaved edits). Pure disk lint skips this
+            // and uses tsgo-backed single-parse instead.
             if (!shouldSendHostOverlay(resolvedFn, content.text)) continue;
+            const snapSf = sourceFileFromHostSnapshot(_languageServiceHost ?? host, resolvedFn, fn, options.target ?? 99);
+            if (snapSf?.statements?.length) {
+                parsedHostSourceFiles.set(resolvedFn, snapSf);
+            }
             overlays.push({ fileName: resolvedFn, content: content.text, scriptKind: content.scriptKind });
         }
     }
+    const preferHostSourceFiles = overlays.length > 0
+        || parsedHostSourceFiles.size > 0
+        || !!(lsHost as any)?.projectService;
     _pendingOverlays = overlays.length > 0 ? overlays : undefined;
     _pendingExtraFileExtensions = collectExtraFileExtensions(names, options);
     _lastExtraFileExtensions = _pendingExtraFileExtensions;
     _overlayHostCtx = { host: _languageServiceHost ?? host, options, configFilePath };
-    if (overlays.length > 0 || parsedHostSourceFiles.size > 0) {
-        _hasHostBoundFiles = true;
-    }
+    _hasHostBoundFiles = preferHostSourceFiles;
     // Mirror Volar proxyCreateProgram: extra extensions require allowArbitraryExtensions
     // for module resolution / auto-import in .vue virtual TS.
     if (_pendingExtraFileExtensions?.length && options.allowArbitraryExtensions !== false) {
@@ -1209,7 +1213,8 @@ export function createTsgoProgram(
 
         // Language Service token walks need real TS AST (getChildren + parent).
         // tsgo RemoteSourceFile is for checker RPC only — never expose it here.
-        if (!isHostLibFile(hostFileName)) {
+        // Pure disk lint (no overlay, no tsserver) uses tsgo-backed skeletons below.
+        if (preferHostSourceFiles && !isHostLibFile(hostFileName)) {
             const ls = hostForLs();
             const hostSf = getLanguageServiceSourceFile(hostFileName, fileName);
             if (hostSf) {
