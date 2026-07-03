@@ -2770,72 +2770,12 @@ export function createTsgoChecker(program: any): any {
         return memoGet(baseTypesCache, type, () => proj.checker.getBaseTypes(type) ?? []);
     };
 
-    // ── Node-based type computation (port from tsgo-backend.js) ──────
-    // Handles assertion expressions, call expressions, and property access
-    // specially — these are the cases where getTypeAtPosition diverges from
-    // getTypeAtLocation(tsgoNode).
+    // Faithful forward: tsgo GetTypeAtLocation (checker getTypeOfNode) handles
+    // assertion, call, property/element access, and non-null expressions the
+    // same way stock does. The former per-kind dispatch here compensated for
+    // the position-based getTypeAtPosition era of the bridge and is obsolete
+    // now that the node-based RPC exists.
     function computeGetTypeAtLocation(tsgoNode: any): any {
-        const k = tsgoNode.kind;
-        // AsExpression / TypeAssertion / Satisfies — return the asserted type
-        // from the type annotation, not the inner expression type.
-        if ((k === SyntaxKind.AsExpression
-            || k === SyntaxKind.TypeAssertionExpression
-            || k === SyntaxKind.SatisfiesExpression)
-            && tsgoNode.type) {
-            const t = project.checker.getTypeFromTypeNode(tsgoNode.type);
-            if (t) fixupType(t);
-            return t;
-        }
-        // CallExpression / NewExpression — resolve signature → return type,
-        // with fallbacks to getTypeAtLocation + getSignaturesOfType.
-        if (k === SyntaxKind.CallExpression || k === SyntaxKind.NewExpression) {
-            try {
-                const sig = project.checker.getResolvedSignature(tsgoNode);
-                if (sig) {
-                    const t = project.checker.getReturnTypeOfSignature(sig);
-                    if (t) { fixupType(t); return t; }
-                }
-            } catch { /* fall through */ }
-            try {
-                const funcType = project.checker.getTypeAtLocation(tsgoNode);
-                if (funcType) {
-                    fixupType(funcType);
-                    const sigs = project.checker.getSignaturesOfType(funcType, sync.SignatureKind.Call);
-                    if (sigs && sigs.length > 0) {
-                        const t = project.checker.getReturnTypeOfSignature(sigs[0]);
-                        if (t) { fixupType(t); return t; }
-                    }
-                }
-            } catch { /* fall through */ }
-        }
-        // PropertyAccessExpression — use getTypeAtPosition at the node END (not
-        // start) for correct resolution; the end lands on the property name so
-        // the type resolves correctly.
-        //
-        // ElementAccessExpression deliberately falls through to the default
-        // node-based getTypeAtLocation below: its END position is the `]`
-        // token, where getTypeAtPosition resolves to `any` (or the wrong
-        // contextual type), dropping the `| undefined` that
-        // noUncheckedIndexedAccess adds to indexed element access. That made
-        // `arr[i]!` non-null assertions look unnecessary (false-positive
-        // no-unnecessary-type-assertion). getTypeAtLocation(node) resolves the
-        // indexed-access element type (incl. `| undefined`) correctly.
-        if (k === SyntaxKind.PropertyAccessExpression) {
-            const sfPath = tsgoNode.getSourceFile?.()?.fileName;
-            if (sfPath) {
-                const t = project.checker.getTypeAtPosition(toTsgoFileName(sfPath), tsgoNode.end);
-                if (t) { fixupType(t); return t; }
-            }
-        }
-        // NonNullExpression — inner type with non-nullable wrapper.
-        if (k === SyntaxKind.NonNullExpression) {
-            const inner = tsgoNode.expression;
-            if (inner) {
-                const innerT = computeGetTypeAtLocation(inner);
-                if (innerT) return project.checker.getNonNullableType(innerT);
-            }
-        }
-        // Default — node-based getTypeAtLocation.
         const t = project.checker.getTypeAtLocation(tsgoNode);
         if (t) fixupType(t);
         return t;
@@ -3020,7 +2960,6 @@ export function createTsgoChecker(program: any): any {
             if (!tsgoNode) return undefined;
             return project.checker.getResolvedSignature(tsgoNode);
         },
-        // Needed by computeGetTypeAtLocation for AsExpression handling.
         getTypeFromTypeNode(typeNode: any): any {
             ensureProject();
             const t = project.checker.getTypeFromTypeNode(typeNode);
