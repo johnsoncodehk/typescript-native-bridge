@@ -59,6 +59,25 @@ function jsDocTagsFromDeclarations(decls: readonly any[] | undefined): any[] {
     return _jsDocProvider?.getTags(decls) ?? [];
 }
 
+/** Per-Program host/overlay state — avoids module-level last-writer-wins when tsserver holds multiple projects. */
+interface TnbProgramContext {
+    lsHost: any;
+    overlayHostCtx: { host: any; options: any; configFilePath: string };
+    pendingOverlays?: any[];
+    pendingExtraFileExtensions?: any[];
+    pendingReferencedProjects?: string[];
+}
+const _programContextByProgram = new WeakMap<object, TnbProgramContext>();
+
+function registerProgramContext(program: object, ctx: TnbProgramContext): TnbProgramContext {
+    _programContextByProgram.set(program, ctx);
+    return ctx;
+}
+
+function getProgramContext(program: object): TnbProgramContext | undefined {
+    return _programContextByProgram.get(program);
+}
+
 // ── Module-level bridge deps (shared across all createTsgoChecker calls) ──
 // koffi.struct() registers type names globally, so the struct definition must
 // happen exactly once even when multiple Program instances each create a tsgo
@@ -191,6 +210,19 @@ let _tsgoUseCaseSensitive = true;
 // currently-active project (scope manager reads `declaration.getSourceFile()`
 // on tsgo NodeHandles, which need the project to resolve).
 const _currentProjectRef: { project: any } = { project: undefined };
+
+/** Saved _currentProjectRef.project values during nested checker calls. */
+const _activeProjectStack: any[] = [];
+
+function pushActiveProject(p: any): void {
+    _activeProjectStack.push(_currentProjectRef.project);
+    _currentProjectRef.project = p;
+}
+
+function popActiveProject(): void {
+    _currentProjectRef.project = _activeProjectStack.pop();
+}
+
 let _nodeHandlePatched = false;
 
 // ── Profiling (active only when TSGO_PROFILE=1) ──
@@ -1154,6 +1186,10 @@ export function createTsgoProgram(
     const trackedHostFiles = new Set<string>();
     const names = new Set<string>();
     const lsHost = _languageServiceHost ?? host;
+    const programCtx: TnbProgramContext = {
+        lsHost,
+        overlayHostCtx: { host: lsHost, options, configFilePath },
+    };
     {
         for (const fn of rootNames) {
             if (typeof fn === "string") names.add(fn);
@@ -1172,7 +1208,7 @@ export function createTsgoProgram(
             // Volar virtual .vue TS, unsaved edits). Pure disk lint skips this
             // and uses tsgo-backed single-parse instead.
             if (!shouldSendHostOverlay(resolvedFn, content.text)) continue;
-            const snapSf = sourceFileFromHostSnapshot(_languageServiceHost ?? host, resolvedFn, fn, options.target ?? 99);
+            const snapSf = sourceFileFromHostSnapshot(programCtx.lsHost, resolvedFn, fn, options.target ?? 99);
             if (snapSf?.statements?.length) {
                 parsedHostSourceFiles.set(resolvedFn, snapSf);
             }
@@ -1182,14 +1218,13 @@ export function createTsgoProgram(
     const preferHostSourceFiles = overlays.length > 0
         || parsedHostSourceFiles.size > 0
         || !!(lsHost as any)?.projectService;
-    _pendingOverlays = overlays.length > 0 ? overlays : undefined;
-    _pendingExtraFileExtensions = collectExtraFileExtensions(names, options);
-    _lastExtraFileExtensions = _pendingExtraFileExtensions;
-    _overlayHostCtx = { host: _languageServiceHost ?? host, options, configFilePath };
+    programCtx.pendingOverlays = overlays.length > 0 ? overlays : undefined;
+    programCtx.pendingExtraFileExtensions = collectExtraFileExtensions(names, options);
+    _lastExtraFileExtensions = programCtx.pendingExtraFileExtensions;
     _hasHostBoundFiles = preferHostSourceFiles;
     // Mirror Volar proxyCreateProgram: extra extensions require allowArbitraryExtensions
     // for module resolution / auto-import in .vue virtual TS.
-    if (_pendingExtraFileExtensions?.length && options.allowArbitraryExtensions !== false) {
+    if (programCtx.pendingExtraFileExtensions?.length && options.allowArbitraryExtensions !== false) {
         options.allowArbitraryExtensions = true;
     }
 
@@ -1198,11 +1233,11 @@ export function createTsgoProgram(
     // across project boundaries (the full TS createProgram does this via
     // projectReferences; the thin path uses tsgo's openProjects).
     if (projectReferences && projectReferences.length > 0) {
-        _pendingReferencedProjects = projectReferences
+        programCtx.pendingReferencedProjects = projectReferences
             .map((ref: any) => resolveTsconfigPath(ref.path as string, host))
             .filter((p: string) => typeof p === "string" && p.length > 0);
     } else {
-        _pendingReferencedProjects = undefined;
+        programCtx.pendingReferencedProjects = undefined;
     }
 
     // Eagerly create the tsgo project (shared bridge client, kind remap, etc.)
@@ -1213,6 +1248,7 @@ export function createTsgoProgram(
         getCompilerOptions: () => options,
         getSourceFiles: () => [] as any[],
     };
+    registerProgramContext(thinProgramForChecker, programCtx);
 
     // tsserver/Volar open files incrementally (e.g. foo.vue before fixture.vue).
     // Always refresh the tsgo snapshot so overlays match the latest host content.
@@ -1235,7 +1271,7 @@ export function createTsgoProgram(
     // need path/resolvedPath/version on source files.
     const sfCache = new Map<string, any>();
 
-    const hostForLs = () => _languageServiceHost ?? host;
+    const hostForLs = () => programCtx.lsHost;
 
     const fileHasHostSourceContent = (name: string, hostFileName: string): boolean => {
         const ls = hostForLs();
@@ -1422,7 +1458,7 @@ export function createTsgoProgram(
         // mandatory) releaseDocumentWithKey pass, which would fault on the missing
         // registry bucket and abort ConfiguredProject.close mid-teardown.
         isTsgoBackedProgram: true,
-        getRootFileNames: () => collectTsgoOpenFileNames(_languageServiceHost ?? host, rootNames as string[]),
+        getRootFileNames: () => collectTsgoOpenFileNames(programCtx.lsHost, rootNames as string[]),
         getCompilerOptions: () => options,
         getSourceFileNames,
         getSourceFile: (fileName: string) => getOrCreateSourceFile(fileName),
@@ -1552,6 +1588,7 @@ export function createTsgoProgram(
         getAutomaticTypeDirectiveResolutions: () => new Map(),
     };
 
+    registerProgramContext(thinProgram, programCtx);
     _hostProgramRef = thinProgram;
 
     return new Proxy(thinProgram, {
@@ -1695,6 +1732,10 @@ function installNodeHandleHooks(s: any): void {
 
 /* @internal */
 export function createTsgoChecker(program: any): any {
+    const programCtx = getProgramContext(program);
+    const hostForOverlaySyncLocal = (): any =>
+        programCtx?.lsHost ?? programCtx?.overlayHostCtx?.host ?? hostForOverlaySync();
+
     const options = program.getCompilerOptions();
     let configFilePath = options.configFilePath as string | undefined;
     if (!configFilePath) {
@@ -1876,16 +1917,16 @@ export function createTsgoChecker(program: any): any {
         // _pendingOverlays is pre-collected from the host by createTsgoProgram
         // (only files missing on disk — typically Volar virtual documents).
         const openFilesWithContent: any[] = [];
-        if (_pendingOverlays) {
-            openFilesWithContent.push(..._pendingOverlays);
-            _pendingOverlays = undefined;
+        if (programCtx?.pendingOverlays) {
+            openFilesWithContent.push(...programCtx.pendingOverlays);
+            programCtx.pendingOverlays = undefined;
         }
 
-        const extraFileExtensions = _pendingExtraFileExtensions;
-        _pendingExtraFileExtensions = undefined;
+        const extraFileExtensions = programCtx?.pendingExtraFileExtensions;
+        if (programCtx) programCtx.pendingExtraFileExtensions = undefined;
         if (extraFileExtensions) _lastExtraFileExtensions = extraFileExtensions;
 
-        const syncHost = hostForOverlaySync() ?? _overlayHostCtx?.host;
+        const syncHost = hostForOverlaySyncLocal();
         const openFiles = syncHost ? collectTsgoOpenFileNames(syncHost) : [];
         const snapshot: any = _api.updateSnapshot({
             openProject: configFilePath!,
@@ -1893,7 +1934,7 @@ export function createTsgoChecker(program: any): any {
             ...(openFilesWithContent.length > 0 ? { openFilesWithContent } : {}),
             ...(extraFileExtensions ? { extraFileExtensions } : {}),
         });
-        _pendingReferencedProjects = undefined;
+        if (programCtx) programCtx.pendingReferencedProjects = undefined;
         project = snapshot.getProject(configFilePath!);
         if (!project) {
             throw new Error(`tsgoChecker: project not found for ${configFilePath}`);
@@ -1934,7 +1975,7 @@ export function createTsgoChecker(program: any): any {
         return Number.isFinite(n) && n > 0 ? Math.floor(n) : 32;
     })();
     const symCacheFileName = (fileName: string): string => {
-        const h = _overlayHostCtx?.host ?? _languageServiceHost;
+        const h = hostForOverlaySyncLocal();
         return resolveHostFileName(fileName, h);
     };
     const getSymFileCache = (fileName: string, create = false): Map<number, any> | undefined => {
@@ -2011,8 +2052,9 @@ export function createTsgoChecker(program: any): any {
     }
 
     function resolveHostModuleNamedExports(hostFileName: string): any[] {
-        const host = hostForOverlaySync() ?? _overlayHostCtx?.host;
-        const options = _overlayHostCtx?.options;
+        const overlayCtx = programCtx?.overlayHostCtx;
+        const host = hostForOverlaySyncLocal();
+        const options = overlayCtx?.options;
         if (!host || !options || !isOverlayCandidatePath(hostFileName)) return [];
         pushHostOverlayToTsgo(hostFileName);
         const snapSf = sourceFileFromHostSnapshot(host, hostFileName, hostFileName, options.target ?? 99);
@@ -2075,9 +2117,9 @@ export function createTsgoChecker(program: any): any {
     function pushHostOverlayToTsgo(requestedFileName?: string): void {
         if (_checkerQueryDepth > 0) return;
         ensureProject();
-        const ctx = _overlayHostCtx;
+        const ctx = programCtx?.overlayHostCtx;
         if (!ctx || !_api) return;
-        const syncHost = hostForOverlaySync();
+        const syncHost = hostForOverlaySyncLocal();
         if (!syncHost) return;
 
         const openFiles = collectTsgoOpenFileNames(syncHost, requestedFileName ? [requestedFileName] : undefined);
@@ -3316,9 +3358,11 @@ export function createTsgoChecker(program: any): any {
     const wrapCheckerCall = <T extends (...args: any[]) => any>(fn: T): T => {
         return ((...args: any[]) => {
             _checkerQueryDepth++;
+            pushActiveProject(project);
             try {
                 return fn(...args);
             } finally {
+                popActiveProject();
                 _checkerQueryDepth--;
             }
         }) as T;
