@@ -3102,7 +3102,21 @@ export function createTsgoChecker(program: any): any {
                 // Stock signature printing expands a trailing rest-tuple parameter
                 // into individual parameters (checker getExpandedParameters):
                 // `...args: [SubmitPayload]` prints as `args_0: SubmitPayload`.
-                if (isRest && i === sigParams.length - 1 && paramType?.isTupleType?.()) {
+                // Tuple flag lives on the tuple *target*, not on the reference the
+                // parameter type is; mirror stock isTupleType (Reference + target.Tuple).
+                const isTupleParam = (t: any): boolean => {
+                    if (!t) return false;
+                    try {
+                        if (t.isTupleType?.()) return true;
+                        fixupType(t);
+                        const OFl = (ts as any).ObjectFlags;
+                        return (t.objectFlags & OFl.Reference) !== 0 && ((t.target?.objectFlags ?? 0) & OFl.Tuple) !== 0;
+                    }
+                    catch {
+                        return false;
+                    }
+                };
+                if (isRest && i === sigParams.length - 1 && isTupleParam(paramType)) {
                     try {
                         fixupType(paramType);
                         const elementTypes: any[] = checker.getTypeArguments?.(paramType) ?? [];

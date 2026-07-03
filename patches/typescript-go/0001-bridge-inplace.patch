@@ -128,10 +128,10 @@ index 27b3ad932..1e23bc164 100644
      getTypeOfSymbol(symbols: readonly Symbol[]): Promise<(Type | undefined)[]>;
      async getTypeOfSymbol(symbolOrSymbols: Symbol | readonly Symbol[]): Promise<Type | (Type | undefined)[] | undefined> {
 diff --git a/_packages/native-preview/src/api/node/node.generated.ts b/_packages/native-preview/src/api/node/node.generated.ts
-index ff74677b3..ef70dfedd 100644
+index ff74677b3..a7684f764 100644
 --- a/_packages/native-preview/src/api/node/node.generated.ts
 +++ b/_packages/native-preview/src/api/node/node.generated.ts
-@@ -36,6 +36,12 @@ import {
+@@ -36,8 +36,14 @@ import {
  } from "./protocol.ts";
  
  export class RemoteNodeList extends Array<RemoteNode> implements NodeArray<RemoteNode> {
@@ -142,9 +142,74 @@ index ff74677b3..ef70dfedd 100644
 +    static get [Symbol.species](): ArrayConstructor { return Array; }
 +
      parent: RemoteNode;
-     hasTrailingComma?: boolean;
+-    hasTrailingComma?: boolean;
++    private _hasTrailingCommaMemo?: boolean;
      transformFlags: number = 0;
-@@ -197,7 +203,7 @@ export class RemoteNode extends RemoteNodeBase implements Node {
+     protected view: DataView;
+     protected index: number;
+@@ -55,6 +61,61 @@ export class RemoteNodeList extends Array<RemoteNode> implements NodeArray<Remot
+         return this.view.getUint32(this._byteIndex + NODE_OFFSET_NEXT, true);
+     }
+ 
++    // The wire format doesn't carry hasTrailingComma, but the list range covers
++    // the delimiter after the last element, so it can be recovered from source
++    // text: the first non-trivia character in [lastElement.end, list.end) is
++    // either "," or nothing. Consumers like the fork printer rely on it to
++    // faithfully re-emit parse-tree lists (e.g. object literal defaults).
++    get hasTrailingComma(): boolean {
++        if (this._hasTrailingCommaMemo === undefined) {
++            this._hasTrailingCommaMemo = this.computeHasTrailingComma();
++        }
++        return this._hasTrailingCommaMemo;
++    }
++
++    set hasTrailingComma(value: boolean | undefined) {
++        this._hasTrailingCommaMemo = value;
++    }
++
++    private computeHasTrailingComma(): boolean {
++        const len = this.length;
++        if (len === 0) return false;
++        const last = this.at(len - 1);
++        const start = last?.end;
++        const end = this.end;
++        if (typeof start !== "number" || start < 0 || end <= start) return false;
++        let fullText: string | undefined;
++        try {
++            fullText = (this.parent as any)?.getSourceFile?.()?.text;
++        }
++        catch {
++            return false;
++        }
++        if (typeof fullText !== "string" || end > fullText.length) return false;
++        const text = fullText.substring(start, end);
++        // Scan past trivia (whitespace + comments); the only token that can
++        // appear before the close bracket is the trailing delimiter.
++        for (let i = 0; i < text.length; i++) {
++            const ch = text[i];
++            if (ch === ",") return true;
++            if (ch === " " || ch === "\t" || ch === "\r" || ch === "\n") continue;
++            if (ch === "/" && text[i + 1] === "/") {
++                const nl = text.indexOf("\n", i + 2);
++                if (nl === -1) return false;
++                i = nl;
++                continue;
++            }
++            if (ch === "/" && text[i + 1] === "*") {
++                const close = text.indexOf("*/", i + 2);
++                if (close === -1) return false;
++                i = close + 1;
++                continue;
++            }
++            return false;
++        }
++        return false;
++    }
++
+     private get data(): number {
+         return this.view.getUint32(this._byteIndex + NODE_OFFSET_DATA, true);
+     }
+@@ -197,7 +258,7 @@ export class RemoteNode extends RemoteNodeBase implements Node {
      }
      protected _sourceFile: SourceFileInfo;
      get id(): string {
@@ -153,7 +218,7 @@ index ff74677b3..ef70dfedd 100644
      }
  
      constructor(view: DataView, index: number, parent: RemoteNode, sourceFile: SourceFileInfo, offsetNodes: number) {
-@@ -222,7 +228,7 @@ export class RemoteNode extends RemoteNodeBase implements Node {
+@@ -222,7 +283,7 @@ export class RemoteNode extends RemoteNodeBase implements Node {
                          return result;
                      }
                  }
@@ -162,7 +227,7 @@ index ff74677b3..ef70dfedd 100644
                      const result = visitNode(child);
                      if (result) {
                          return result;
-@@ -242,7 +248,7 @@ export class RemoteNode extends RemoteNodeBase implements Node {
+@@ -242,7 +303,7 @@ export class RemoteNode extends RemoteNodeBase implements Node {
          let next = this.index + 1;
          do {
              const child = this.getOrCreateChildAtNodeIndex(next);
@@ -171,7 +236,7 @@ index ff74677b3..ef70dfedd 100644
                  (result ??= []).push(child);
              }
              next = child.next;
-@@ -322,7 +328,7 @@ export class RemoteNode extends RemoteNodeBase implements Node {
+@@ -322,7 +383,7 @@ export class RemoteNode extends RemoteNodeBase implements Node {
      private getNamedChild(propertyName: string): RemoteNode | RemoteNodeList | undefined {
          // JSDocPropertyTag and JSDocParameterTag have runtime-dependent child order based on isNameFirst.
          // Handle them before the general childProperties lookup.
@@ -180,7 +245,7 @@ index ff74677b3..ef70dfedd 100644
          if (kind === SyntaxKind.JSDocPropertyTag) {
              let order: number;
              switch (propertyName) {
-@@ -418,7 +424,7 @@ export class RemoteNode extends RemoteNodeBase implements Node {
+@@ -418,7 +479,7 @@ export class RemoteNode extends RemoteNodeBase implements Node {
          const result = [];
          result.push(`index: ${this.index}`);
          result.push(`byteIndex: ${this._byteIndex}`);
@@ -189,7 +254,7 @@ index ff74677b3..ef70dfedd 100644
          result.push(`pos: ${this.pos}`);
          result.push(`end: ${this.end}`);
          result.push(`next: ${this.next}`);
-@@ -430,7 +436,7 @@ export class RemoteNode extends RemoteNodeBase implements Node {
+@@ -430,7 +491,7 @@ export class RemoteNode extends RemoteNodeBase implements Node {
          result.push(`dataType: ${dataType}`);
          if (this.dataType === NODE_DATA_TYPE_CHILDREN) {
              result.push(`childMask: ${this.childMask.toString(2).padStart(8, "0")}`);
@@ -198,7 +263,7 @@ index ff74677b3..ef70dfedd 100644
          }
          return result.join("\n");
      }
-@@ -494,21 +500,21 @@ export class RemoteNode extends RemoteNodeBase implements Node {
+@@ -494,21 +555,21 @@ export class RemoteNode extends RemoteNodeBase implements Node {
      // ═══ Generated SyntaxKind union property getters ═══
  
      get keyword(): SyntaxKind | undefined {
@@ -223,7 +288,7 @@ index ff74677b3..ef70dfedd 100644
              case SyntaxKind.PrefixUnaryExpression: {
                  const idx = (this.data >> 24) & 0x7;
                  if (idx === 1) return SyntaxKind.MinusToken;
-@@ -530,7 +536,7 @@ export class RemoteNode extends RemoteNodeBase implements Node {
+@@ -530,7 +591,7 @@ export class RemoteNode extends RemoteNodeBase implements Node {
      }
  
      get phaseModifier(): SyntaxKind | undefined {
@@ -232,7 +297,7 @@ index ff74677b3..ef70dfedd 100644
              case SyntaxKind.ImportClause: {
                  const idx = (this.data >> 24) & 0x3;
                  if (idx === 0) return undefined;
-@@ -540,7 +546,7 @@ export class RemoteNode extends RemoteNodeBase implements Node {
+@@ -540,7 +601,7 @@ export class RemoteNode extends RemoteNodeBase implements Node {
      }
  
      get token(): SyntaxKind | undefined {
@@ -241,7 +306,7 @@ index ff74677b3..ef70dfedd 100644
              case SyntaxKind.HeritageClause:
                  return (this.data >> 24) & 0x1 ? SyntaxKind.ImplementsKeyword : SyntaxKind.ExtendsKeyword;
              case SyntaxKind.ImportAttributes:
-@@ -549,7 +555,7 @@ export class RemoteNode extends RemoteNodeBase implements Node {
+@@ -549,7 +610,7 @@ export class RemoteNode extends RemoteNodeBase implements Node {
      }
  
      get templateFlags(): number | undefined {
@@ -250,7 +315,7 @@ index ff74677b3..ef70dfedd 100644
              case SyntaxKind.TemplateHead:
              case SyntaxKind.TemplateMiddle:
              case SyntaxKind.TemplateTail:
-@@ -559,7 +565,7 @@ export class RemoteNode extends RemoteNodeBase implements Node {
+@@ -559,7 +620,7 @@ export class RemoteNode extends RemoteNodeBase implements Node {
      }
  
      get tokenFlags(): number {
@@ -259,7 +324,7 @@ index ff74677b3..ef70dfedd 100644
              case SyntaxKind.StringLiteral:
              case SyntaxKind.NumericLiteral:
              case SyntaxKind.BigIntLiteral:
-@@ -865,7 +871,7 @@ export class RemoteNode extends RemoteNodeBase implements Node {
+@@ -865,7 +926,7 @@ export class RemoteNode extends RemoteNodeBase implements Node {
      // ═══ Generated string property getters ═══
  
      get text(): string | undefined {
@@ -268,7 +333,7 @@ index ff74677b3..ef70dfedd 100644
              case SyntaxKind.Identifier:
              case SyntaxKind.PrivateIdentifier:
              case SyntaxKind.JsxText:
-@@ -893,7 +899,7 @@ export class RemoteNode extends RemoteNodeBase implements Node {
+@@ -893,7 +954,7 @@ export class RemoteNode extends RemoteNodeBase implements Node {
      }
  
      get rawText(): string | undefined {
@@ -277,7 +342,7 @@ index ff74677b3..ef70dfedd 100644
              case SyntaxKind.TemplateHead:
              case SyntaxKind.TemplateMiddle:
              case SyntaxKind.TemplateTail:
-@@ -911,12 +917,19 @@ export class RemoteNode extends RemoteNodeBase implements Node {
+@@ -911,12 +972,19 @@ export class RemoteNode extends RemoteNodeBase implements Node {
          return this.view.getUint32(this._byteIndex + NODE_OFFSET_FLAGS, true);
      }
  
@@ -1049,10 +1114,18 @@ index 952b572a6..47e643127 100644
  type GetProjectDiagnosticsParams struct {
  	Snapshot SnapshotID `json:"snapshot"`
 diff --git a/internal/api/session.go b/internal/api/session.go
-index b350c6334..75f36a052 100644
+index b350c6334..94cccd89d 100644
 --- a/internal/api/session.go
 +++ b/internal/api/session.go
-@@ -154,6 +154,19 @@ func (sd *snapshotData) newSymbolResponse(symbol *ast.Symbol) *SymbolResponse {
+@@ -18,6 +18,7 @@ import (
+ 	"github.com/microsoft/typescript-go/internal/core"
+ 	"github.com/microsoft/typescript-go/internal/json"
+ 	"github.com/microsoft/typescript-go/internal/ls"
++	"github.com/microsoft/typescript-go/internal/ls/lsconv"
+ 	"github.com/microsoft/typescript-go/internal/lsp/lsproto"
+ 	"github.com/microsoft/typescript-go/internal/nodebuilder"
+ 	"github.com/microsoft/typescript-go/internal/pprof"
+@@ -154,6 +155,19 @@ func (sd *snapshotData) newSymbolResponse(symbol *ast.Symbol) *SymbolResponse {
  	return resp
  }
  
@@ -1072,7 +1145,7 @@ index b350c6334..75f36a052 100644
  func (sd *snapshotData) registerSymbol(symbol *ast.Symbol) SymbolID {
  	if symbol == nil {
  		return 0
-@@ -535,6 +548,8 @@ func (s *Session) HandleRequest(ctx context.Context, method string, params json.
+@@ -535,6 +549,8 @@ func (s *Session) HandleRequest(ctx context.Context, method string, params json.
  		return s.handleGetSymbolAtLocation(ctx, parsed.(*GetSymbolAtLocationParams))
  	case string(MethodGetSymbolsAtLocations):
  		return s.handleGetSymbolsAtLocations(ctx, parsed.(*GetSymbolsAtLocationsParams))
@@ -1081,7 +1154,7 @@ index b350c6334..75f36a052 100644
  	case string(MethodGetTypeOfSymbol):
  		return s.handleGetTypeOfSymbol(ctx, parsed.(*GetTypeOfSymbolParams))
  	case string(MethodGetTypesOfSymbols):
-@@ -563,6 +578,10 @@ func (s *Session) HandleRequest(ctx context.Context, method string, params json.
+@@ -563,6 +579,10 @@ func (s *Session) HandleRequest(ctx context.Context, method string, params json.
  		return s.handleGetExportsOfSymbol(ctx, parsed.(*GetSymbolPropertyParams))
  	case string(MethodGetExportSymbolOfSymbol):
  		return s.handleGetExportSymbolOfSymbol(ctx, parsed.(*GetSymbolPropertyParams))
@@ -1092,7 +1165,7 @@ index b350c6334..75f36a052 100644
  	case string(MethodGetSymbolOfType):
  		return s.handleGetSymbolOfType(ctx, parsed.(*GetTypePropertyParams))
  	case string(MethodGetTargetOfType):
-@@ -709,6 +728,8 @@ func (s *Session) HandleRequest(ctx context.Context, method string, params json.
+@@ -709,6 +729,8 @@ func (s *Session) HandleRequest(ctx context.Context, method string, params json.
  		return s.handleGetBindDiagnostics(ctx, parsed.(*GetDiagnosticsParams))
  	case string(MethodGetSemanticDiagnostics):
  		return s.handleGetSemanticDiagnostics(ctx, parsed.(*GetDiagnosticsParams))
@@ -1101,7 +1174,7 @@ index b350c6334..75f36a052 100644
  	case string(MethodGetSuggestionDiagnostics):
  		return s.handleGetSuggestionDiagnostics(ctx, parsed.(*GetDiagnosticsParams))
  	case string(MethodGetDeclarationDiagnostics):
-@@ -793,6 +814,17 @@ func (s *Session) handleUpdateSnapshot(ctx context.Context, params *UpdateSnapsh
+@@ -793,6 +815,17 @@ func (s *Session) handleUpdateSnapshot(ctx context.Context, params *UpdateSnapsh
  	s.updateMu.Lock()
  	defer s.updateMu.Unlock()
  
@@ -1119,7 +1192,7 @@ index b350c6334..75f36a052 100644
  	fileChanges := s.toFileChangeSummary(params.FileChanges)
  
  	apiRequest := &project.APISnapshotRequest{}
-@@ -856,6 +888,48 @@ func (s *Session) handleUpdateSnapshot(ctx context.Context, params *UpdateSnapsh
+@@ -856,6 +889,50 @@ func (s *Session) handleUpdateSnapshot(ctx context.Context, params *UpdateSnapsh
  		closedFiles = append(closedFiles, path)
  	}
  
@@ -1138,7 +1211,9 @@ index b350c6334..75f36a052 100644
 +		if !strings.HasPrefix(fileName, "/") {
 +			fileName = cwd + "/" + fileName
 +		}
-+		uri := lsproto.DocumentUri("file://" + fileName)
++		// Escape properly (e.g. '#' in path segments) — raw "file://"+fileName
++		// would parse the rest as a URI fragment and open the wrong path.
++		uri := lsconv.FileNameToDocumentURI(fileName)
 +		path := s.toPath(fileName)
 +		// Register as API-open so the file is assigned to a configured project
 +		// (same as textDocument/didOpen). Overlays alone do not add root files
@@ -1168,7 +1243,7 @@ index b350c6334..75f36a052 100644
  	// Even when nothing is opened or closed, APIUpdate ensures all projects and
  	// files opened by the API are up to date. For an API connected to an LSP server,
  	// this brings the API state up to date with the LSP state and ensures projects
-@@ -1109,6 +1183,83 @@ func (s *Session) handleGetSymbolsAtPositions(ctx context.Context, params *GetSy
+@@ -1109,6 +1186,83 @@ func (s *Session) handleGetSymbolsAtPositions(ctx context.Context, params *GetSy
  	return results, nil
  }
  
@@ -1252,7 +1327,7 @@ index b350c6334..75f36a052 100644
  // handleGetSymbolAtLocation returns the symbol at a node location.
  func (s *Session) handleGetSymbolAtLocation(ctx context.Context, params *GetSymbolAtLocationParams) (*SymbolResponse, error) {
  	setup, err := s.setupChecker(ctx, params.Snapshot, params.Project)
-@@ -1432,6 +1583,44 @@ func (s *Session) handleGetExportSymbolOfSymbol(_ context.Context, params *GetSy
+@@ -1432,6 +1586,44 @@ func (s *Session) handleGetExportSymbolOfSymbol(_ context.Context, params *GetSy
  	return s.resolveSymbolPropertyOfSymbol(params, func(sym *ast.Symbol) *ast.Symbol { return sym.ExportSymbol })
  }
  
@@ -1297,7 +1372,7 @@ index b350c6334..75f36a052 100644
  func (s *Session) handleGetSymbolOfType(_ context.Context, params *GetTypePropertyParams) (*SymbolResponse, error) {
  	return s.resolveSymbolPropertyOfType(params, (*checker.Type).Symbol)
  }
-@@ -2868,7 +3057,6 @@ func (s *Session) handleGetBindDiagnostics(ctx context.Context, params *GetDiagn
+@@ -2868,7 +3060,6 @@ func (s *Session) handleGetBindDiagnostics(ctx context.Context, params *GetDiagn
  
  // handleGetSemanticDiagnostics returns semantic diagnostics for a file or all files.
  func (s *Session) handleGetSemanticDiagnostics(ctx context.Context, params *GetDiagnosticsParams) ([]*DiagnosticResponse, error) {
@@ -1305,7 +1380,7 @@ index b350c6334..75f36a052 100644
  	sd, err := s.getSnapshotData(params.Snapshot)
  	if err != nil {
  		return nil, err
-@@ -2888,6 +3076,53 @@ func (s *Session) handleGetSemanticDiagnostics(ctx context.Context, params *GetD
+@@ -2888,6 +3079,53 @@ func (s *Session) handleGetSemanticDiagnostics(ctx context.Context, params *GetD
  	return NewDiagnosticResponses(diags), nil
  }
  
@@ -1359,7 +1434,7 @@ index b350c6334..75f36a052 100644
  // handleGetSuggestionDiagnostics returns suggestion diagnostics for a file or all files.
  func (s *Session) handleGetSuggestionDiagnostics(ctx context.Context, params *GetDiagnosticsParams) ([]*DiagnosticResponse, error) {
  	ctx = core.WithCheckerLifetime(ctx, core.CheckerLifetimeDiagnostics)
-@@ -2966,7 +3201,6 @@ func (s *Session) handleGetProgramDiagnostics(ctx context.Context, params *GetPr
+@@ -2966,7 +3204,6 @@ func (s *Session) handleGetProgramDiagnostics(ctx context.Context, params *GetPr
  
  // handleGetGlobalDiagnostics returns global (non-file-specific) semantic diagnostics.
  func (s *Session) handleGetGlobalDiagnostics(ctx context.Context, params *GetProjectDiagnosticsParams) ([]*DiagnosticResponse, error) {
@@ -1367,7 +1442,7 @@ index b350c6334..75f36a052 100644
  	sd, err := s.getSnapshotData(params.Snapshot)
  	if err != nil {
  		return nil, err
-@@ -3184,3 +3418,24 @@ func (s *Session) handleGetReferencedSymbolsForNode(ctx context.Context, params
+@@ -3184,3 +3421,24 @@ func (s *Session) handleGetReferencedSymbolsForNode(ctx context.Context, params
  	}
  	return result, nil
  }
