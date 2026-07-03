@@ -306,19 +306,20 @@ index 0a45cc3e3..50309c248 100644
          name,
          containerName: undefined!,
 diff --git a/src/services/services.ts b/src/services/services.ts
-index 9885093ed..38185c95e 100644
+index 9885093ed..0cbb4021a 100644
 --- a/src/services/services.ts
 +++ b/src/services/services.ts
-@@ -330,6 +330,8 @@ import {
+@@ -330,6 +330,9 @@ import {
      timestamp,
      TodoComment,
      TodoCommentDescriptor,
++    tnbSetJsDocProvider,
 +    tnbSetLanguageServiceHost,
 +    tnbCollectOpenRootFileNames,
      Token,
      toPath,
      tracing,
-@@ -1723,6 +1725,9 @@ export function createLanguageService(
+@@ -1723,6 +1726,9 @@ export function createLanguageService(
          // so we need to make a copy in case the host mutates the underlying array - otherwise it would look
          // like every program always has the host's current list of root files.
          const rootFileNames = host.getScriptFileNames().slice();
@@ -328,15 +329,25 @@ index 9885093ed..38185c95e 100644
  
          // Get a fresh cache of the host information
          const newSettings = host.getCompilationSettings() || getDefaultCompilerOptions();
-@@ -1733,6 +1738,7 @@ export function createLanguageService(
+@@ -1733,6 +1739,17 @@ export function createLanguageService(
          let parsedCommandLines: Map<Path, ParsedCommandLine | false> | undefined;
  
          // Now create a new compiler
++        // Inject the stock JSDoc parsers into tsgoChecker from the services bundle.
++        // tsgoChecker must not import services/jsDoc itself (that pulls services
++        // into the compiler bundle and breaks the eager `sys` init vue-tsc relies
++        // on), so the dependency is supplied here at Language Service init.
++        // No checker is passed: JSDoc text extraction must not depend on the
++        // (tsgo-backed) checker. See tnbSetJsDocProvider in tsgoChecker.ts.
++        tnbSetJsDocProvider({
++            getComments: decls => JsDoc.getJsDocCommentsFromDeclarations(decls),
++            getTags: decls => JsDoc.getJsDocTagsFromDeclarations(decls as Declaration[] | undefined),
++        });
 +        tnbSetLanguageServiceHost(host);
          let compilerHost: CompilerHost | undefined = {
              getSourceFile: getOrCreateSourceFile,
              getSourceFileByPath: getOrCreateSourceFileByPath,
-@@ -2034,9 +2040,15 @@ export function createLanguageService(
+@@ -2034,9 +2051,15 @@ export function createLanguageService(
  
      function cleanupSemanticCache(): void {
          if (program) {

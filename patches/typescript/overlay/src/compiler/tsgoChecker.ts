@@ -21,6 +21,44 @@ import { SyntaxKind, SymbolFlags, NodeFlags, JSDocParsingMode, type Path } from 
 import { installTsgoBackedSourceFileLoader, inferScriptKind, createSkeletonSourceFile, getTsgoBackedSourceFile } from "./tsgoBackedSourceFile.js";
 import { getTnbPackageRoot, isBundledLibPath, isHostLibFile, resolveHostFileName, toHostFileName, toTsgoFileName } from "./tsgoLibPaths.js";
 
+// ── JSDoc provider injection ──
+// getDocumentationComment / getJsDocTags need the stock JSDoc parsers in
+// services/jsDoc.ts. tsgoChecker is compiled into BOTH the compiler bundle
+// (_tsc.js) and the services bundle (typescript.js). If this file imported or
+// require()'d services/jsDoc, esbuild would pull the entire services layer into
+// _tsc.js, forming a cross-layer import cycle that flips the bundle from a flat
+// eager form to lazy __esm wrappers — which makes `sys` lazy and breaks
+// consumers (e.g. vue-tsc) that read `sys` at module load. Instead, the services
+// bundle injects the parsers at init via tnbSetJsDocProvider; the compiler
+// bundle simply never sets one (getDocumentationComment is a Language Service
+// feature and is unused on the plain `tsc` path).
+//
+// No `checker` is threaded into these parsers by design. In stock jsDoc the
+// checker is used solely by buildLinkParts to turn a resolvable `{@link X}`
+// into a *navigable* link; JSDoc *text* extraction never touches it. Feeding
+// the tsgo shim checker into that path buys nothing for our consumers (they
+// stringify the parts) while being the one place a partial checker could throw
+// and, via a catch, blank an otherwise-valid comment. Omitting it makes
+// `{@link X}` render as plain text (fully preserved) and removes the failure
+// mode structurally — JSDoc text fidelity no longer depends on the checker.
+interface TnbJsDocProvider {
+    getComments(decls: readonly any[]): any[];
+    getTags(decls: readonly any[] | undefined): any[];
+}
+let _jsDocProvider: TnbJsDocProvider | undefined;
+
+/** @internal Registered from services.ts so the compiler bundle stays services-free. */
+export function tnbSetJsDocProvider(provider: TnbJsDocProvider): void {
+    _jsDocProvider = provider;
+}
+
+function jsDocCommentsFromDeclarations(decls: readonly any[]): any[] {
+    return _jsDocProvider?.getComments(decls) ?? [];
+}
+function jsDocTagsFromDeclarations(decls: readonly any[] | undefined): any[] {
+    return _jsDocProvider?.getTags(decls) ?? [];
+}
+
 // ── Module-level bridge deps (shared across all createTsgoChecker calls) ──
 // koffi.struct() registers type names globally, so the struct definition must
 // happen exactly once even when multiple Program instances each create a tsgo
@@ -267,13 +305,12 @@ function getHostScriptContent(host: any, fileName: string, options: any): { text
     return undefined;
 }
 
-/** Match tsc / LS default: skip full JSDoc parse in .ts unless needed for type errors. */
-function resolveJsDocParsingMode(host: any): JSDocParsingMode {
-    return host?.jsDocParsingMode ?? JSDocParsingMode.ParseForTypeErrors;
-}
-
-function hostSourceFileOptions(languageVersion: number, host: any) {
-    return { languageVersion, jsDocParsingMode: resolveJsDocParsingMode(host) };
+function hostSourceFileOptions(languageVersion: number, _host: any) {
+    // Host-parsed AST is only built for Language Service paths (Volar virtual
+    // files, component-meta docs, hover/quickinfo). ParseForTypeErrors strips
+    // description JSDoc from .ts files (only keeps @see/@link), which makes
+    // getJSDocCommentsAndTags / getDocumentationComment return empty.
+    return { languageVersion, jsDocParsingMode: JSDocParsingMode.ParseAll };
 }
 
 /** Parse host snapshot into a full TS SourceFile for Language Service (safe during LS). */
@@ -309,6 +346,43 @@ function ensureHostSourceFileBound(sf: any, options: any): void {
     if (sf.symbol !== undefined) { sf.__tnbHostBound = true; return; }
     try { bindSourceFile(sf, options); } catch { /* best-effort */ }
     sf.__tnbHostBound = true;
+}
+// A genuine host AST node (stock-parsed + bound) vs a tsgo NodeHandle. Both
+// carry a numeric `kind` and a `getSourceFile()` (installNodeHandleHooks patches
+// the latter onto NodeHandle.prototype), so presence of those is NOT a reliable
+// discriminator. The distinguishing fact is that only host SourceFiles carry the
+// `__tnbHostBound` brand (set in ensureHostSourceFileBound); a NodeHandle's
+// getSourceFile() returns the tsgo RemoteSourceFile, which is never host-bound.
+function isHostSyntaxNode(node: any): boolean {
+    if (!node || typeof node.kind !== "number" || typeof node.getSourceFile !== "function") return false;
+    try {
+        return !!node.getSourceFile()?.__tnbHostBound;
+    }
+    catch {
+        return false;
+    }
+}
+/** Resolve a signature/symbol declaration (host node or tsgo NodeHandle) for JSDoc reads. */
+function resolveDocDeclaration(decl: any): any | undefined {
+    if (!decl) return undefined;
+    if (isHostSyntaxNode(decl)) return decl;
+    // tsgo NodeHandle: resolve to a full RemoteNode which exposes .jsDoc/.parent/.kind.
+    if (typeof decl.resolve === "function") {
+        const project = _currentProjectRef.project;
+        try {
+            const resolved = project ? decl.resolve(project) : undefined;
+            if (resolved) return resolved;
+        }
+        catch { /* best-effort */ }
+    }
+    return undefined;
+}
+// stock getDocumentationComment returns SymbolDisplayPart[]; component-meta only
+// concatenates .text via displayPartsToString, so a single "text" part is loss-
+// less there. Use the canonical "text" kind (not "") so other consumers that
+// switch on part.kind still classify it correctly.
+function displayPartsFromDocText(text: string): any[] {
+    return text ? [{ kind: "text", text }] : [];
 }
 function isReservedExportMemberName(name: string): boolean {
     return name.length >= 2 && name.charCodeAt(0) === 95 /* _ */ && name.charCodeAt(1) === 95 && name.charCodeAt(2) !== 95;
@@ -1581,6 +1655,12 @@ function installNodeHandleHooks(s: any): void {
         "trueType", "tryBlock", "tupleNameSource", "type", "typeArguments", "typeExpression",
         "typeName", "typeParameter", "typeParameters", "types", "value", "variableDeclaration",
         "whenFalse", "whenTrue",
+        // JSDoc nodes attached to a declaration. Needed so stock jsDoc helpers
+        // (getJSDocCommentsAndTags / hasJSDocNodes) work when callers pass a bare
+        // declaration handle — e.g. vue-component-meta's getDescription reads
+        // ts.getJSDocCommentsAndTags(componentNode) where componentNode is a
+        // symbol.valueDeclaration handle under a tsconfig-backed project.
+        "jsDoc",
         // Scalar fields rules read directly off declaration nodes.
         "text", "flags", "modifierFlags", "operator", "keywordToken", "isExportEquals",
     ];
@@ -2358,6 +2438,36 @@ export function createTsgoChecker(program: any): any {
         if (!proto.getDeclaration) {
             proto.getDeclaration = function () { return this.declaration; };
         }
+        // vue-component-meta reads signature docs via getDocumentationComment(checker)
+        // and getJsDocTags(checker). tsgo's Signature class omits both; stock TS
+        // resolves them from signature.declaration JSDoc.
+        // tsgo has no signature-level doc RPC, so the only source is the JSDoc on
+        // signature.declaration. Memoise only non-empty results: a transient empty
+        // read (e.g. declaration not yet resolvable) must not be cached permanently.
+        proto.getDocumentationComment = function (_checker: any) {
+            if (this.__tnbDocComment) return this.__tnbDocComment;
+            const decl = resolveDocDeclaration(this.declaration);
+            if (!decl) return [];
+            let parts: any[] = [];
+            try {
+                parts = jsDocCommentsFromDeclarations([decl]) ?? [];
+            }
+            catch { parts = []; }
+            if (parts.length) this.__tnbDocComment = parts;
+            return parts;
+        };
+        proto.getJsDocTags = function (_checker: any) {
+            if (this.__tnbJsDocTags) return this.__tnbJsDocTags;
+            const decl = resolveDocDeclaration(this.declaration);
+            if (!decl) return [];
+            let tags: any[] = [];
+            try {
+                tags = jsDocTagsFromDeclarations([decl]) ?? [];
+            }
+            catch { tags = []; }
+            if (tags.length) this.__tnbJsDocTags = tags;
+            return tags;
+        };
     }
 
     function patchSymbolProto(s: any): void {
@@ -2373,6 +2483,69 @@ export function createTsgoChecker(program: any): any {
         if (!Object.getOwnPropertyDescriptor(proto, "escapedName")) {
             Object.defineProperty(proto, "escapedName", { configurable: true, get() { return this.name; } });
         }
+        // tsgo Symbol.getDocumentationComment returns plain text from RPC; stock TS
+        // and vue-component-meta expect SymbolDisplayPart[] via displayPartsToString.
+        // Resolution order: (1) genuine host AST declarations -> stock JSDoc parser
+        // (authoritative for host/.vue virtual symbols); (2) tsgo-backed symbol
+        // (id>0) -> native checker RPC (authoritative for tsgo symbols); (3) last
+        // resort, resolve a tsgo declaration handle and parse its JSDoc. Each step
+        // only "wins" on a non-empty result so a barren host node still falls
+        // through to the RPC for hybrid symbols carrying both.
+        proto.getDocumentationComment = function (checker: any) {
+            const decls = this.declarations ?? (this.valueDeclaration ? [this.valueDeclaration] : undefined);
+            if (decls?.length && isHostSyntaxNode(decls[0])) {
+                try {
+                    const parts = jsDocCommentsFromDeclarations(decls) ?? [];
+                    if (parts.length) return parts;
+                }
+                catch { /* fall through */ }
+            }
+            if (typeof this.id === "number" && this.id > 0 && checker?.getDocumentationCommentOfSymbol) {
+                try {
+                    const text = checker.getDocumentationCommentOfSymbol(this);
+                    const parts = displayPartsFromDocText(typeof text === "string" ? text : "");
+                    if (parts.length) return parts;
+                }
+                catch { /* fall through */ }
+            }
+            if (decls?.length) {
+                const decl = resolveDocDeclaration(decls[0]);
+                if (decl) {
+                    try {
+                        return jsDocCommentsFromDeclarations([decl]) ?? [];
+                    }
+                    catch { /* empty */ }
+                }
+            }
+            return [];
+        };
+        proto.getJsDocTags = function (checker: any) {
+            const decls = this.declarations ?? (this.valueDeclaration ? [this.valueDeclaration] : undefined);
+            if (decls?.length && isHostSyntaxNode(decls[0])) {
+                try {
+                    const tags = jsDocTagsFromDeclarations(decls) ?? [];
+                    if (tags.length) return tags;
+                }
+                catch { /* fall through */ }
+            }
+            if (typeof this.id === "number" && this.id > 0 && checker?.getJsDocTagsOfSymbol) {
+                try {
+                    const tags = checker.getJsDocTagsOfSymbol(this) ?? [];
+                    if (tags.length) return tags;
+                }
+                catch { /* fall through */ }
+            }
+            if (decls?.length) {
+                const decl = resolveDocDeclaration(decls[0]);
+                if (decl) {
+                    try {
+                        return jsDocTagsFromDeclarations([decl]) ?? [];
+                    }
+                    catch { /* empty */ }
+                }
+            }
+            return [];
+        };
     }
 
     // Resolve raw type-ID properties on TypeObject to full TypeObject
@@ -2814,6 +2987,59 @@ export function createTsgoChecker(program: any): any {
         typeToString(type: any, _enclosing?: any, flags?: number): string {
             ensureProject();
             return project.checker.typeToString(type, undefined, flags);
+        },
+        getDocumentationCommentOfSymbol(symbol: any): string {
+            if (!symbol || typeof symbol.id !== "number" || symbol.id === 0) return "";
+            ensureProject();
+            try {
+                return project.checker.getDocumentationCommentOfSymbol(symbol) ?? "";
+            }
+            catch {
+                return "";
+            }
+        },
+        getJsDocTagsOfSymbol(symbol: any): readonly any[] {
+            if (!symbol || typeof symbol.id !== "number" || symbol.id === 0) return [];
+            ensureProject();
+            try {
+                return project.checker.getJsDocTagsOfSymbol(symbol) ?? [];
+            }
+            catch {
+                return [];
+            }
+        },
+        // tsgo's native Checker exposes no signatureToString RPC, so reconstruct the
+        // stock format `(p0: T0, p1?: T1, ...rest: TR): Ret` from typed parts.
+        // component-meta feeds this straight into event snapshots, so parameter
+        // names, optional/rest markers and return type must all be present.
+        signatureToString(signature: any, _enclosingDeclaration?: any, flags?: number): string {
+            ensureProject();
+            const checker = project.checker;
+            const sigParams: any[] = signature?.parameters ?? [];
+            const parts: string[] = [];
+            for (let i = 0; i < sigParams.length; i++) {
+                const p = sigParams[i];
+                const name = p?.getName?.() ?? p?.name ?? `arg_${i}`;
+                const decl = resolveDocDeclaration(p?.valueDeclaration ?? p?.declarations?.[0]);
+                const isRest = !!decl?.dotDotDotToken || (i === sigParams.length - 1 && !!signature?.hasRestParameter);
+                const isOptional = !isRest && (!!decl?.questionToken || !!decl?.initializer);
+                let typeStr = "any";
+                try {
+                    const t = typeof checker.getTypeOfSymbol === "function" ? checker.getTypeOfSymbol(p) : undefined;
+                    if (t) typeStr = checker.typeToString(t, undefined, flags) ?? "any";
+                }
+                catch { /* keep any */ }
+                parts.push(`${isRest ? "..." : ""}${name}${isOptional ? "?" : ""}: ${typeStr}`);
+            }
+            let retStr = "any";
+            try {
+                const rt = typeof checker.getReturnTypeOfSignature === "function"
+                    ? checker.getReturnTypeOfSignature(signature)
+                    : undefined;
+                if (rt) retStr = checker.typeToString(rt, undefined, flags) ?? "any";
+            }
+            catch { /* keep any */ }
+            return `(${parts.join(", ")}): ${retStr}`;
         },
         getPropertiesOfType(type: any): readonly any[] {
             ensureProject();
