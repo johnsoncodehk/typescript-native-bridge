@@ -2430,22 +2430,9 @@ export function createTsgoChecker(program: any): any {
             proto.getNonOptionalType = function () {
                 const proj = _currentProjectRef.project;
                 if (!proj) return this;
-                const checker = proj.checker;
-                if (typeof checker.getNonOptionalType === "function") {
-                    const t = checker.getNonOptionalType(this);
-                    if (t) fixupType(t);
-                    return t ?? this;
-                }
-                // tsgo bridge lacks getNonOptionalType RPC; under strictNullChecks this
-                // strips undefined from optional-chain types (removeOptionalTypeMarker).
-                if (typeof checker.getNonNullableType === "function") {
-                    const t = checker.getNonNullableType(this);
-                    if (t) {
-                        fixupType(t);
-                        return t;
-                    }
-                }
-                return this;
+                const t = proj.checker.getNonOptionalType(this);
+                if (t) fixupType(t);
+                return t ?? this;
             };
         }
         // getConstraint — delegate to checker.getConstraintOfTypeParameter for
@@ -3198,13 +3185,7 @@ export function createTsgoChecker(program: any): any {
         getNonOptionalType(type: any): any {
             ensureProject();
             if (!type) return type;
-            const checker = project.checker;
-            if (typeof checker.getNonOptionalType === "function") {
-                const t = checker.getNonOptionalType(type);
-                if (t) fixupType(t);
-                return t ?? type;
-            }
-            const t = checker.getNonNullableType(type);
+            const t = project.checker.getNonOptionalType(type);
             if (t) fixupType(t);
             return t ?? type;
         },
