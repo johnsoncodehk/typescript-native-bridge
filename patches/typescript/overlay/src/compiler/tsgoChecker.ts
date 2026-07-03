@@ -555,28 +555,6 @@ function resolveHostExportDefaultSymbol(symbol: any, getHostSf: (fileName: strin
     }
     return symbol;
 }
-function tryGetTargetSymbol(symbol: any): any | undefined {
-    if (!symbol) return undefined;
-    let target: any;
-    let next = symbol;
-    const seen = new Set<any>();
-    while (next && !seen.has(next)) {
-        seen.add(next);
-        const t = next.target;
-        if (!t || t === next) break;
-        target = t;
-        next = t;
-    }
-    return target;
-}
-function getImmediateRootSymbolsForNavigation(symbol: any): any[] | undefined {
-    if (!symbol) return undefined;
-    if (symbol.flags & SymbolFlags.Transient) {
-        const target = tryGetTargetSymbol(symbol);
-        return target ? [target] : undefined;
-    }
-    return undefined;
-}
 function resolveNameOnHostBoundAst(name: string, location: any): any | undefined {
     if (!location || typeof location.getStart !== "function") return undefined;
     const sf = location.getSourceFile?.();
@@ -3379,11 +3357,14 @@ export function createTsgoChecker(program: any): any {
         getMergedSymbol: (s: any) => s,
         getRootSymbols(symbol: any): any[] {
             if (!symbol) return [];
-            const immediate = getImmediateRootSymbolsForNavigation(symbol);
-            if (immediate?.length) {
-                return immediate.flatMap(s => adapter.getRootSymbols(s));
+            // Host-binder symbols (Volar virtual files) have no tsgo handle; they
+            // are their own roots.
+            if (typeof symbol.id !== "number" || symbol.id === 0) {
+                return [refineNavSymbol(symbol)];
             }
-            return [refineNavSymbol(symbol)];
+            ensureProject();
+            const roots = project.checker.getRootSymbols(symbol) ?? [];
+            return (roots.length ? roots : [symbol]).map(refineNavSymbol);
         },
         getDefinitionSpanForDeclaration(declaration: any): { start: number; length: number } | undefined {
             return tnbHostExportDefinitionTextSpan(declaration);

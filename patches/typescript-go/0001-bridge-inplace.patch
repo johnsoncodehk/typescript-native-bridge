@@ -1,5 +1,5 @@
 diff --git a/_packages/native-preview/src/api/async/api.ts b/_packages/native-preview/src/api/async/api.ts
-index 27b3ad932..feea49dc8 100644
+index 27b3ad932..c639540c3 100644
 --- a/_packages/native-preview/src/api/async/api.ts
 +++ b/_packages/native-preview/src/api/async/api.ts
 @@ -51,6 +51,7 @@ import type {
@@ -142,6 +142,22 @@ index 27b3ad932..feea49dc8 100644
 +
      async getTypeFromTypeNode(node: TypeNode): Promise<Type | undefined> {
          const data = await this.client.apiRequest<TypeResponse | null>("getTypeFromTypeNode", {
+             snapshot: this.snapshotId,
+@@ -1281,6 +1373,15 @@ export class Checker {
+         return data ? data.map(d => this.objectRegistry.getOrCreateSymbol(d)) : [];
+     }
+ 
++    async getRootSymbols(symbol: Symbol): Promise<readonly Symbol[]> {
++        const data = await this.client.apiRequest<SymbolResponse[] | null>("getRootSymbols", {
++            snapshot: this.snapshotId,
++            project: this.projectId,
++            symbol: symbol.id,
++        });
++        return data ? data.map(d => this.objectRegistry.getOrCreateSymbol(d)) : [];
++    }
++
+     async getMemberInModuleExports(symbol: Symbol, name: string): Promise<Symbol | undefined> {
+         const data = await this.client.apiRequest<SymbolResponse | null>("getMemberInModuleExports", {
              snapshot: this.snapshotId,
 diff --git a/_packages/native-preview/src/api/node/node.generated.ts b/_packages/native-preview/src/api/node/node.generated.ts
 index ff74677b3..a7684f764 100644
@@ -438,7 +454,7 @@ index 656f7cc4e..474bf83a1 100644
      id: number;
      flags: number;
 diff --git a/_packages/native-preview/src/api/sync/api.ts b/_packages/native-preview/src/api/sync/api.ts
-index 9381d5122..2b0e8cc28 100644
+index 9381d5122..4db6ad09d 100644
 --- a/_packages/native-preview/src/api/sync/api.ts
 +++ b/_packages/native-preview/src/api/sync/api.ts
 @@ -57,6 +57,7 @@ import type {
@@ -596,7 +612,23 @@ index 9381d5122..2b0e8cc28 100644
      getTypeFromTypeNode(node: TypeNode): Type | undefined {
          const data = this.client.apiRequest<TypeResponse | null>("getTypeFromTypeNode", {
              snapshot: this.snapshotId,
-@@ -1352,6 +1458,25 @@ export class Emitter {
+@@ -1289,6 +1395,15 @@ export class Checker {
+         return data ? data.map(d => this.objectRegistry.getOrCreateSymbol(d)) : [];
+     }
+ 
++    getRootSymbols(symbol: Symbol): readonly Symbol[] {
++        const data = this.client.apiRequest<SymbolResponse[] | null>("getRootSymbols", {
++            snapshot: this.snapshotId,
++            project: this.projectId,
++            symbol: symbol.id,
++        });
++        return data ? data.map(d => this.objectRegistry.getOrCreateSymbol(d)) : [];
++    }
++
+     getMemberInModuleExports(symbol: Symbol, name: string): Symbol | undefined {
+         const data = this.client.apiRequest<SymbolResponse | null>("getMemberInModuleExports", {
+             snapshot: this.snapshotId,
+@@ -1352,6 +1467,25 @@ export class Emitter {
      }
  }
  
@@ -622,7 +654,7 @@ index 9381d5122..2b0e8cc28 100644
  export class NodeHandle {
      readonly index: number;
      readonly kind: SyntaxKind;
-@@ -1360,7 +1485,7 @@ export class NodeHandle {
+@@ -1360,7 +1494,7 @@ export class NodeHandle {
      constructor(handle: string) {
          const parsed = parseNodeHandle(handle);
          this.index = parsed.index;
@@ -631,7 +663,7 @@ index 9381d5122..2b0e8cc28 100644
          this.path = parsed.path;
      }
  
-@@ -1402,11 +1527,20 @@ export class Symbol {
+@@ -1402,11 +1536,20 @@ export class Symbol {
      readonly name: string;
      readonly flags: SymbolFlags;
      readonly checkFlags: number;
@@ -654,7 +686,7 @@ index 9381d5122..2b0e8cc28 100644
      constructor(data: SymbolResponse, objectRegistry: SnapshotObjectRegistry) {
          this.objectRegistry = objectRegistry;
  
-@@ -1414,13 +1548,60 @@ export class Symbol {
+@@ -1414,13 +1557,60 @@ export class Symbol {
          this.name = data.name;
          this.flags = data.flags;
          this.checkFlags = data.checkFlags;
@@ -717,7 +749,7 @@ index 9381d5122..2b0e8cc28 100644
      getParent(): Symbol | undefined {
          return this.objectRegistry.fetchSymbol(this, "getParentOfSymbol", this.parent);
      }
-@@ -1750,27 +1931,42 @@ export class Signature {
+@@ -1750,27 +1940,42 @@ export class Signature {
      readonly id: number;
      readonly declaration?: NodeHandle | undefined;
      readonly typeParameters?: readonly number[] | undefined;
@@ -970,7 +1002,7 @@ index a76d52a54..d90e35c6b 100644
  
  export function isBindingPattern(node: Node): node is BindingPattern {
 diff --git a/internal/api/proto.go b/internal/api/proto.go
-index 952b572a6..e0d525d8a 100644
+index 952b572a6..4ee13ef24 100644
 --- a/internal/api/proto.go
 +++ b/internal/api/proto.go
 @@ -63,7 +63,8 @@ const (
@@ -1004,7 +1036,15 @@ index 952b572a6..e0d525d8a 100644
  	MethodGetTypeFromTypeNode               Method = "getTypeFromTypeNode"
  	MethodGetWidenedType                    Method = "getWidenedType"
  	MethodGetParameterType                  Method = "getParameterType"
-@@ -167,6 +175,7 @@ const (
+@@ -141,6 +149,7 @@ const (
+ 	MethodGetAliasedSymbol                  Method = "getAliasedSymbol"
+ 	MethodGetImmediateAliasedSymbol         Method = "getImmediateAliasedSymbol"
+ 	MethodGetExportsOfModule                Method = "getExportsOfModule"
++	MethodGetRootSymbols                    Method = "getRootSymbols"
+ 	MethodGetMemberInModuleExports          Method = "getMemberInModuleExports"
+ 	MethodGetJSDocTags                      Method = "getJsDocTags"
+ 	MethodGetDocumentationComment           Method = "getDocumentationComment"
+@@ -167,6 +176,7 @@ const (
  
  	// Emitter methods
  	MethodPrintNode Method = "printNode"
@@ -1012,7 +1052,7 @@ index 952b572a6..e0d525d8a 100644
  
  	// Intrinsic type getters
  	MethodGetAnyType       Method = "getAnyType"
-@@ -309,6 +318,29 @@ type UpdateSnapshotParams struct {
+@@ -309,6 +319,29 @@ type UpdateSnapshotParams struct {
  	// CloseFiles lists files to release in the new snapshot. A file is only fully
  	// closed once every API client that opened it closes it.
  	CloseFiles []DocumentIdentifier `json:"closeFiles,omitempty"`
@@ -1042,7 +1082,7 @@ index 952b572a6..e0d525d8a 100644
  }
  
  // ProjectFileChanges describes what source files changed within a single project.
-@@ -353,7 +385,8 @@ var unmarshalers = map[Method]func([]byte) (any, error){
+@@ -353,7 +386,8 @@ var unmarshalers = map[Method]func([]byte) (any, error){
  	MethodGetSymbolAtPosition:      unmarshallerFor[GetSymbolAtPositionParams],
  	MethodGetSymbolsAtPositions:    unmarshallerFor[GetSymbolsAtPositionsParams],
  	MethodGetSymbolAtLocation:      unmarshallerFor[GetSymbolAtLocationParams],
@@ -1052,7 +1092,7 @@ index 952b572a6..e0d525d8a 100644
  	MethodGetTypeOfSymbol:          unmarshallerFor[GetTypeOfSymbolParams],
  	MethodGetTypesOfSymbols:        unmarshallerFor[GetTypesOfSymbolsParams],
  	MethodGetDeclaredTypeOfSymbol:  unmarshallerFor[GetTypeOfSymbolParams],
-@@ -369,6 +402,8 @@ var unmarshalers = map[Method]func([]byte) (any, error){
+@@ -369,6 +403,8 @@ var unmarshalers = map[Method]func([]byte) (any, error){
  	MethodGetMembersOfSymbol:      unmarshallerFor[GetSymbolPropertyParams],
  	MethodGetExportsOfSymbol:      unmarshallerFor[GetSymbolPropertyParams],
  	MethodGetExportSymbolOfSymbol: unmarshallerFor[GetSymbolPropertyParams],
@@ -1061,7 +1101,7 @@ index 952b572a6..e0d525d8a 100644
  
  	MethodGetSymbolOfType:               unmarshallerFor[GetTypePropertyParams],
  	MethodGetTargetOfType:               unmarshallerFor[GetTypePropertyParams],
-@@ -397,6 +432,7 @@ var unmarshalers = map[Method]func([]byte) (any, error){
+@@ -397,6 +433,7 @@ var unmarshalers = map[Method]func([]byte) (any, error){
  	MethodGetContextualType:                 unmarshallerFor[GetContextualTypeParams],
  	MethodGetBaseTypeOfLiteralType:          unmarshallerFor[GetBaseTypeOfLiteralTypeParams],
  	MethodGetNonNullableType:                unmarshallerFor[GetNonNullableTypeParams],
@@ -1069,7 +1109,15 @@ index 952b572a6..e0d525d8a 100644
  	MethodGetTypeFromTypeNode:               unmarshallerFor[GetTypeFromTypeNodeParams],
  	MethodGetWidenedType:                    unmarshallerFor[GetWidenedTypeParams],
  	MethodGetParameterType:                  unmarshallerFor[GetParameterTypeParams],
-@@ -451,6 +487,7 @@ var unmarshalers = map[Method]func([]byte) (any, error){
+@@ -425,6 +462,7 @@ var unmarshalers = map[Method]func([]byte) (any, error){
+ 	MethodGetAliasedSymbol:                  unmarshallerFor[CheckerSymbolParams],
+ 	MethodGetImmediateAliasedSymbol:         unmarshallerFor[CheckerSymbolParams],
+ 	MethodGetExportsOfModule:                unmarshallerFor[CheckerSymbolParams],
++	MethodGetRootSymbols:                    unmarshallerFor[CheckerSymbolParams],
+ 	MethodGetMemberInModuleExports:          unmarshallerFor[GetMemberInModuleExportsParams],
+ 	MethodGetJSDocTags:                      unmarshallerFor[CheckerSymbolParams],
+ 	MethodGetDocumentationComment:           unmarshallerFor[CheckerSymbolParams],
+@@ -451,6 +489,7 @@ var unmarshalers = map[Method]func([]byte) (any, error){
  	MethodGetSemanticDiagnostics:            unmarshallerFor[GetDiagnosticsParams],
  	MethodGetSuggestionDiagnostics:          unmarshallerFor[GetDiagnosticsParams],
  	MethodGetDeclarationDiagnostics:         unmarshallerFor[GetDiagnosticsParams],
@@ -1077,7 +1125,7 @@ index 952b572a6..e0d525d8a 100644
  	MethodGetProgramDiagnostics:             unmarshallerFor[GetProjectDiagnosticsParams],
  	MethodGetGlobalDiagnostics:              unmarshallerFor[GetProjectDiagnosticsParams],
  	MethodGetConfigFileParsingDiagnostics:   unmarshallerFor[GetProjectDiagnosticsParams],
-@@ -509,6 +546,36 @@ type GetSymbolAtPositionParams struct {
+@@ -509,6 +548,36 @@ type GetSymbolAtPositionParams struct {
  	Position uint32             `json:"position"`
  }
  
@@ -1114,7 +1162,7 @@ index 952b572a6..e0d525d8a 100644
  type GetSymbolsAtPositionsParams struct {
  	Snapshot  SnapshotID         `json:"snapshot"`
  	Project   ProjectID          `json:"project"`
-@@ -775,6 +842,13 @@ type GetSymbolPropertyParams struct {
+@@ -775,6 +844,13 @@ type GetSymbolPropertyParams struct {
  	Symbol   SymbolID   `json:"objectId"`
  }
  
@@ -1128,7 +1176,7 @@ index 952b572a6..e0d525d8a 100644
  // GetSignaturePropertyParams is used for all signature sub-property endpoints.
  type GetSignaturePropertyParams struct {
  	Snapshot  SnapshotID  `json:"snapshot"`
-@@ -887,6 +961,13 @@ type GetNonNullableTypeParams struct {
+@@ -887,6 +963,13 @@ type GetNonNullableTypeParams struct {
  	Type     TypeID     `json:"type"`
  }
  
@@ -1142,7 +1190,7 @@ index 952b572a6..e0d525d8a 100644
  // GetTypeFromTypeNodeParams are the parameters for the getTypeFromTypeNode method.
  type GetTypeFromTypeNodeParams struct {
  	Snapshot SnapshotID `json:"snapshot"`
-@@ -1070,6 +1151,32 @@ type GetDiagnosticsParams struct {
+@@ -1070,6 +1153,32 @@ type GetDiagnosticsParams struct {
  	File     *DocumentIdentifier `json:"file,omitempty"`
  }
  
@@ -1176,7 +1224,7 @@ index 952b572a6..e0d525d8a 100644
  type GetProjectDiagnosticsParams struct {
  	Snapshot SnapshotID `json:"snapshot"`
 diff --git a/internal/api/session.go b/internal/api/session.go
-index b350c6334..49d05bae1 100644
+index b350c6334..561500cff 100644
 --- a/internal/api/session.go
 +++ b/internal/api/session.go
 @@ -18,6 +18,7 @@ import (
@@ -1236,7 +1284,16 @@ index b350c6334..49d05bae1 100644
  	case string(MethodGetTypeFromTypeNode):
  		return s.handleGetTypeFromTypeNode(ctx, parsed.(*GetTypeFromTypeNodeParams))
  	case string(MethodGetWidenedType):
-@@ -709,6 +731,8 @@ func (s *Session) HandleRequest(ctx context.Context, method string, params json.
+@@ -671,6 +693,8 @@ func (s *Session) HandleRequest(ctx context.Context, method string, params json.
+ 		return s.handleGetImmediateAliasedSymbol(ctx, parsed.(*CheckerSymbolParams))
+ 	case string(MethodGetExportsOfModule):
+ 		return s.handleGetExportsOfModule(ctx, parsed.(*CheckerSymbolParams))
++	case string(MethodGetRootSymbols):
++		return s.handleGetRootSymbols(ctx, parsed.(*CheckerSymbolParams))
+ 	case string(MethodGetMemberInModuleExports):
+ 		return s.handleGetMemberInModuleExports(ctx, parsed.(*GetMemberInModuleExportsParams))
+ 	case string(MethodGetJSDocTags):
+@@ -709,6 +733,8 @@ func (s *Session) HandleRequest(ctx context.Context, method string, params json.
  		return s.handleGetBindDiagnostics(ctx, parsed.(*GetDiagnosticsParams))
  	case string(MethodGetSemanticDiagnostics):
  		return s.handleGetSemanticDiagnostics(ctx, parsed.(*GetDiagnosticsParams))
@@ -1245,7 +1302,7 @@ index b350c6334..49d05bae1 100644
  	case string(MethodGetSuggestionDiagnostics):
  		return s.handleGetSuggestionDiagnostics(ctx, parsed.(*GetDiagnosticsParams))
  	case string(MethodGetDeclarationDiagnostics):
-@@ -793,6 +817,17 @@ func (s *Session) handleUpdateSnapshot(ctx context.Context, params *UpdateSnapsh
+@@ -793,6 +819,17 @@ func (s *Session) handleUpdateSnapshot(ctx context.Context, params *UpdateSnapsh
  	s.updateMu.Lock()
  	defer s.updateMu.Unlock()
  
@@ -1263,7 +1320,7 @@ index b350c6334..49d05bae1 100644
  	fileChanges := s.toFileChangeSummary(params.FileChanges)
  
  	apiRequest := &project.APISnapshotRequest{}
-@@ -856,6 +891,50 @@ func (s *Session) handleUpdateSnapshot(ctx context.Context, params *UpdateSnapsh
+@@ -856,6 +893,50 @@ func (s *Session) handleUpdateSnapshot(ctx context.Context, params *UpdateSnapsh
  		closedFiles = append(closedFiles, path)
  	}
  
@@ -1314,7 +1371,7 @@ index b350c6334..49d05bae1 100644
  	// Even when nothing is opened or closed, APIUpdate ensures all projects and
  	// files opened by the API are up to date. For an API connected to an LSP server,
  	// this brings the API state up to date with the LSP state and ensures projects
-@@ -1109,6 +1188,83 @@ func (s *Session) handleGetSymbolsAtPositions(ctx context.Context, params *GetSy
+@@ -1109,6 +1190,83 @@ func (s *Session) handleGetSymbolsAtPositions(ctx context.Context, params *GetSy
  	return results, nil
  }
  
@@ -1398,7 +1455,7 @@ index b350c6334..49d05bae1 100644
  // handleGetSymbolAtLocation returns the symbol at a node location.
  func (s *Session) handleGetSymbolAtLocation(ctx context.Context, params *GetSymbolAtLocationParams) (*SymbolResponse, error) {
  	setup, err := s.setupChecker(ctx, params.Snapshot, params.Project)
-@@ -1432,6 +1588,44 @@ func (s *Session) handleGetExportSymbolOfSymbol(_ context.Context, params *GetSy
+@@ -1432,6 +1590,44 @@ func (s *Session) handleGetExportSymbolOfSymbol(_ context.Context, params *GetSy
  	return s.resolveSymbolPropertyOfSymbol(params, func(sym *ast.Symbol) *ast.Symbol { return sym.ExportSymbol })
  }
  
@@ -1443,7 +1500,7 @@ index b350c6334..49d05bae1 100644
  func (s *Session) handleGetSymbolOfType(_ context.Context, params *GetTypePropertyParams) (*SymbolResponse, error) {
  	return s.resolveSymbolPropertyOfType(params, (*checker.Type).Symbol)
  }
-@@ -1449,7 +1643,7 @@ func (s *Session) handleGetRegularTypeOfType(_ context.Context, params *GetTypeP
+@@ -1449,7 +1645,7 @@ func (s *Session) handleGetRegularTypeOfType(_ context.Context, params *GetTypeP
  }
  
  func (s *Session) handleGetTypesOfType(_ context.Context, params *GetTypePropertyParams) ([]*TypeResponse, error) {
@@ -1452,7 +1509,7 @@ index b350c6334..49d05bae1 100644
  }
  
  func (s *Session) handleGetTypeParametersOfType(_ context.Context, params *GetTypePropertyParams) ([]*TypeResponse, error) {
-@@ -1778,6 +1972,28 @@ func (s *Session) handleGetNonNullableType(ctx context.Context, params *GetNonNu
+@@ -1778,6 +1974,28 @@ func (s *Session) handleGetNonNullableType(ctx context.Context, params *GetNonNu
  	return setup.newTypeResponse(result), nil
  }
  
@@ -1481,7 +1538,40 @@ index b350c6334..49d05bae1 100644
  // handleGetTypeFromTypeNode returns the type for a type node.
  func (s *Session) handleGetTypeFromTypeNode(ctx context.Context, params *GetTypeFromTypeNodeParams) (*TypeResponse, error) {
  	setup, err := s.setupChecker(ctx, params.Snapshot, params.Project)
-@@ -2868,7 +3084,6 @@ func (s *Session) handleGetBindDiagnostics(ctx context.Context, params *GetDiagn
+@@ -2517,6 +2735,32 @@ func (s *Session) handleGetExportsOfModule(ctx context.Context, params *CheckerS
+ 	return results, nil
+ }
+ 
++// handleGetRootSymbols returns the root symbols of a symbol (unwrapping
++// synthetic union/intersection properties, spreads, and instantiation targets).
++func (s *Session) handleGetRootSymbols(ctx context.Context, params *CheckerSymbolParams) ([]*SymbolResponse, error) {
++	setup, err := s.setupChecker(ctx, params.Snapshot, params.Project)
++	if err != nil {
++		return nil, err
++	}
++	defer setup.done()
++
++	symbol, err := setup.resolveSymbolHandle(params.Symbol)
++	if err != nil {
++		return nil, err
++	}
++	if symbol == nil {
++		return nil, nil
++	}
++
++	roots := setup.checker.GetRootSymbols(symbol)
++	results := make([]*SymbolResponse, len(roots))
++	for i, root := range roots {
++		results[i] = setup.newSymbolResponse(root)
++	}
++
++	return results, nil
++}
++
+ // handleGetMemberInModuleExports returns an export by name from a module symbol.
+ func (s *Session) handleGetMemberInModuleExports(ctx context.Context, params *GetMemberInModuleExportsParams) (*SymbolResponse, error) {
+ 	setup, err := s.setupChecker(ctx, params.Snapshot, params.Project)
+@@ -2868,7 +3112,6 @@ func (s *Session) handleGetBindDiagnostics(ctx context.Context, params *GetDiagn
  
  // handleGetSemanticDiagnostics returns semantic diagnostics for a file or all files.
  func (s *Session) handleGetSemanticDiagnostics(ctx context.Context, params *GetDiagnosticsParams) ([]*DiagnosticResponse, error) {
@@ -1489,7 +1579,7 @@ index b350c6334..49d05bae1 100644
  	sd, err := s.getSnapshotData(params.Snapshot)
  	if err != nil {
  		return nil, err
-@@ -2888,6 +3103,53 @@ func (s *Session) handleGetSemanticDiagnostics(ctx context.Context, params *GetD
+@@ -2888,6 +3131,53 @@ func (s *Session) handleGetSemanticDiagnostics(ctx context.Context, params *GetD
  	return NewDiagnosticResponses(diags), nil
  }
  
@@ -1543,7 +1633,7 @@ index b350c6334..49d05bae1 100644
  // handleGetSuggestionDiagnostics returns suggestion diagnostics for a file or all files.
  func (s *Session) handleGetSuggestionDiagnostics(ctx context.Context, params *GetDiagnosticsParams) ([]*DiagnosticResponse, error) {
  	ctx = core.WithCheckerLifetime(ctx, core.CheckerLifetimeDiagnostics)
-@@ -2966,7 +3228,6 @@ func (s *Session) handleGetProgramDiagnostics(ctx context.Context, params *GetPr
+@@ -2966,7 +3256,6 @@ func (s *Session) handleGetProgramDiagnostics(ctx context.Context, params *GetPr
  
  // handleGetGlobalDiagnostics returns global (non-file-specific) semantic diagnostics.
  func (s *Session) handleGetGlobalDiagnostics(ctx context.Context, params *GetProjectDiagnosticsParams) ([]*DiagnosticResponse, error) {
@@ -1551,7 +1641,7 @@ index b350c6334..49d05bae1 100644
  	sd, err := s.getSnapshotData(params.Snapshot)
  	if err != nil {
  		return nil, err
-@@ -3184,3 +3445,24 @@ func (s *Session) handleGetReferencedSymbolsForNode(ctx context.Context, params
+@@ -3184,3 +3473,24 @@ func (s *Session) handleGetReferencedSymbolsForNode(ctx context.Context, params
  	}
  	return result, nil
  }
