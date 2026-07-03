@@ -1,0 +1,4 @@
+{
+	"maxGetSourceFileRpc": 240,
+	"note": "vue-tsc full build (packages/tsc). Observed getSourceFile RPC ≈220. A skeleton/light-stub regression that eagerly materializes tsgo-backed SourceFiles for every program file shows up as an RPC spike here. Increase only if the light-stub path is intentionally changed. component-meta is NOT usable — it only produces `host` SourceFiles and never exercises the split."
+}
