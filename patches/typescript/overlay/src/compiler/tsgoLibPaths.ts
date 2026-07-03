@@ -11,8 +11,7 @@ export function getTnbPackageRoot(): string {
 }
 
 export function isBundledLibPath(fileName: string): boolean {
-    // Defensive: callers may pass synthetic declarations with a missing fileName.
-    return typeof fileName === "string" && fileName.startsWith(BUNDLED_LIB_PREFIX);
+    return fileName.startsWith(BUNDLED_LIB_PREFIX);
 }
 
 export function bundledLibPathToHostPath(bundledPath: string): string {
@@ -37,14 +36,12 @@ export function hostPathToBundledLibPath(fileName: string): string | undefined {
 }
 
 export function toHostFileName(fileName: string): string {
-    if (typeof fileName !== "string") return fileName;
     return isBundledLibPath(fileName) ? bundledLibPathToHostPath(fileName) : fileName;
 }
 
 /** Normalize host file paths — tsserver may use cwd-relative paths for project files. */
 export function resolveHostFileName(fileName: string, host?: { getCurrentDirectory?: () => string }): string {
     const mapped = toHostFileName(fileName);
-    if (typeof mapped !== "string" || !mapped) return mapped;
     const path = require("path") as typeof import("path");
     const normalized = mapped.replace(/\\/g, "/");
     if (path.isAbsolute(normalized)) {

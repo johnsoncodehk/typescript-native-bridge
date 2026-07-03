@@ -695,12 +695,7 @@ function getHostSymbolsInScope(location: any, meaning: number): any[] {
 function remapDeclarationToHost(decl: any, getHostSf: (fileName: string) => any | undefined): any {
     if (!decl || !declarationNeedsHostRemap(decl)) return decl;
     if (decl.kind === SyntaxKind.SourceFile) {
-        // tsgo module symbols may carry a bare remote SourceFile stub ({ index,
-        // kind, path }) with no own `fileName`; resolve it via getSourceFile()
-        // (or `path`) before remapping, and bail rather than pass undefined on.
-        const fileName = decl.fileName ?? decl.getSourceFile?.()?.fileName ?? decl.path;
-        if (typeof fileName !== "string" || !fileName) return decl;
-        return getHostSf(fileName) ?? decl;
+        return getHostSf(decl.fileName) ?? decl;
     }
     const remoteSf = decl.getSourceFile?.();
     const fileName = remoteSf?.fileName;
@@ -1666,6 +1661,21 @@ function installNodeHandleHooks(s: any): void {
             if (!project) return undefined;
             return project.program.getSourceFile(this.path);
         };
+    }
+    // NodeHandle.fileName — a bare handle ({index, kind, path}) has no own
+    // fileName. In the TS AST only SourceFile nodes carry `fileName`, so expose
+    // it for SourceFile handles (resolve the real cased name, else fall back to
+    // the always-present `path`) and undefined otherwise. This restores the AST
+    // contract so downstream (remapDeclarationToHost, tsgoLibPaths) always sees
+    // a string for SourceFile declarations instead of undefined.
+    if (!Object.getOwnPropertyDescriptor(proto, "fileName")) {
+        Object.defineProperty(proto, "fileName", {
+            configurable: true,
+            get() {
+                if (this.kind !== SyntaxKind.SourceFile) return undefined;
+                return this.getSourceFile()?.fileName ?? this.path;
+            },
+        });
     }
     // NodeHandle.parent — rule code reads `.parent` on declarations. Resolve
     // the handle to a full tsgo Node, then read its parent.
