@@ -3077,78 +3077,12 @@ export function createTsgoChecker(program: any): any {
                 return [];
             }
         },
-        // tsgo's native Checker exposes no signatureToString RPC, so reconstruct the
-        // stock format `(p0: T0, p1?: T1, ...rest: TR): Ret` from typed parts.
-        // component-meta feeds this straight into event snapshots, so parameter
-        // names, optional/rest markers and return type must all be present.
         signatureToString(signature: any, _enclosingDeclaration?: any, flags?: number): string {
             ensureProject();
-            const checker = project.checker;
-            const sigParams: any[] = signature?.parameters ?? [];
-            const parts: string[] = [];
-            const typeStringOf = (t: any): string => {
-                try {
-                    return (t ? checker.typeToString(t, undefined, flags) : undefined) ?? "any";
-                }
-                catch {
-                    return "any";
-                }
-            };
-            for (let i = 0; i < sigParams.length; i++) {
-                const p = sigParams[i];
-                const name = p?.getName?.() ?? p?.name ?? `arg_${i}`;
-                const decl = resolveDocDeclaration(p?.valueDeclaration ?? p?.declarations?.[0]);
-                const isRest = !!decl?.dotDotDotToken || (i === sigParams.length - 1 && !!signature?.hasRestParameter);
-                const isOptional = !isRest && (!!decl?.questionToken || !!decl?.initializer);
-                let paramType: any;
-                try {
-                    paramType = typeof checker.getTypeOfSymbol === "function" ? checker.getTypeOfSymbol(p) : undefined;
-                }
-                catch { /* keep undefined */ }
-                // Stock signature printing expands a trailing rest-tuple parameter
-                // into individual parameters (checker getExpandedParameters):
-                // `...args: [SubmitPayload]` prints as `args_0: SubmitPayload`.
-                // Tuple flag lives on the tuple *target*, not on the reference the
-                // parameter type is; mirror stock isTupleType (Reference + target.Tuple).
-                const isTupleParam = (t: any): boolean => {
-                    if (!t) return false;
-                    try {
-                        if (t.isTupleType?.()) return true;
-                        fixupType(t);
-                        const OFl = (ts as any).ObjectFlags;
-                        return (t.objectFlags & OFl.Reference) !== 0 && ((t.target?.objectFlags ?? 0) & OFl.Tuple) !== 0;
-                    }
-                    catch {
-                        return false;
-                    }
-                };
-                if (isRest && i === sigParams.length - 1 && isTupleParam(paramType)) {
-                    try {
-                        fixupType(paramType);
-                        const elementTypes: any[] = checker.getTypeArguments?.(paramType) ?? [];
-                        const elementFlags: number[] = paramType.target?.elementFlags ?? paramType.elementFlags ?? [];
-                        const EF = (ts as any).ElementFlags ?? { Optional: 2, Rest: 4, Variadic: 8 };
-                        for (let j = 0; j < elementTypes.length; j++) {
-                            const ef = elementFlags[j] ?? 0;
-                            const elemRest = (ef & (EF.Rest | EF.Variadic)) !== 0;
-                            const elemOptional = !elemRest && (ef & EF.Optional) !== 0;
-                            parts.push(`${elemRest ? "..." : ""}${name}_${j}${elemOptional ? "?" : ""}: ${typeStringOf(elementTypes[j])}`);
-                        }
-                        continue;
-                    }
-                    catch { /* fall through to unexpanded form */ }
-                }
-                parts.push(`${isRest ? "..." : ""}${name}${isOptional ? "?" : ""}: ${typeStringOf(paramType)}`);
-            }
-            let retStr = "any";
-            try {
-                const rt = typeof checker.getReturnTypeOfSignature === "function"
-                    ? checker.getReturnTypeOfSignature(signature)
-                    : undefined;
-                if (rt) retStr = checker.typeToString(rt, undefined, flags) ?? "any";
-            }
-            catch { /* keep any */ }
-            return `(${parts.join(", ")}): ${retStr}`;
+            if (!signature || typeof signature.id !== "number") return "";
+            // The enclosing declaration is a host node with no tsgo handle; tsgo's
+            // printer resolves scope from the signature declaration itself.
+            return project.checker.signatureToString(signature, undefined, flags) ?? "";
         },
         getPropertiesOfType(type: any): readonly any[] {
             ensureProject();
