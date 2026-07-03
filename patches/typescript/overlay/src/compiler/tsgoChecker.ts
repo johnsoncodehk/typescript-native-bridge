@@ -2305,8 +2305,16 @@ export function createTsgoChecker(program: any): any {
         if (!target.isIntersection) target.isIntersection = has(TF.Intersection);
         if (!target.isUnionOrIntersection) target.isUnionOrIntersection = has(TF.UnionOrIntersection ?? (TF.Union | TF.Intersection));
         if (!target.isTypeParameter) target.isTypeParameter = has(TF.TypeParameter);
-        if (!target.isClassOrInterface) target.isClassOrInterface = () => false;
-        if (!target.isClass) target.isClass = () => false;
+        // Mirror stock Type.isClassOrInterface/isClass: read ObjectFlags off
+        // Object-flagged types. Class/Interface live in the low bits, which are
+        // identical between the tsgo and fork ObjectFlags layouts, so this is
+        // safe whether or not the instance's objectFlags were remapped yet.
+        const OF = (ts as any).ObjectFlags;
+        const objectFlagsOf = function (t: any): number {
+            return (t.flags & TF.Object) !== 0 && typeof t.objectFlags === "number" ? t.objectFlags : 0;
+        };
+        if (!target.isClassOrInterface) target.isClassOrInterface = function (this: any) { return (objectFlagsOf(this) & (OF.Class | OF.Interface)) !== 0; };
+        if (!target.isClass) target.isClass = function (this: any) { return (objectFlagsOf(this) & OF.Class) !== 0; };
         if (!target.isIndexType) target.isIndexType = has(TF.Index);
         if (!target.getFlags) target.getFlags = function () { return this.flags; };
         if (!target.isNullableType) target.isNullableType = has((TF.Null ?? 0) | (TF.Undefined ?? 0));
@@ -3048,7 +3056,16 @@ export function createTsgoChecker(program: any): any {
             if (!symbol || typeof symbol.id !== "number" || symbol.id === 0) return [];
             ensureProject();
             try {
-                return project.checker.getJsDocTagsOfSymbol(symbol) ?? [];
+                const tags = project.checker.getJsDocTagsOfSymbol(symbol) ?? [];
+                // tsgo's JSDocTagInfo renders `text` as a plain string; stock TS uses
+                // SymbolDisplayPart[]. Consumers (displayPartsToString, tsserver
+                // protocol mapping) iterate the parts, so a raw string silently
+                // flattens to "". Convert at the RPC boundary.
+                return tags.map((t: any) =>
+                    typeof t?.text === "string"
+                        ? { name: t.name, text: t.text.length ? displayPartsFromDocText(t.text) : undefined }
+                        : t
+                );
             }
             catch {
                 return [];
@@ -3063,19 +3080,45 @@ export function createTsgoChecker(program: any): any {
             const checker = project.checker;
             const sigParams: any[] = signature?.parameters ?? [];
             const parts: string[] = [];
+            const typeStringOf = (t: any): string => {
+                try {
+                    return (t ? checker.typeToString(t, undefined, flags) : undefined) ?? "any";
+                }
+                catch {
+                    return "any";
+                }
+            };
             for (let i = 0; i < sigParams.length; i++) {
                 const p = sigParams[i];
                 const name = p?.getName?.() ?? p?.name ?? `arg_${i}`;
                 const decl = resolveDocDeclaration(p?.valueDeclaration ?? p?.declarations?.[0]);
                 const isRest = !!decl?.dotDotDotToken || (i === sigParams.length - 1 && !!signature?.hasRestParameter);
                 const isOptional = !isRest && (!!decl?.questionToken || !!decl?.initializer);
-                let typeStr = "any";
+                let paramType: any;
                 try {
-                    const t = typeof checker.getTypeOfSymbol === "function" ? checker.getTypeOfSymbol(p) : undefined;
-                    if (t) typeStr = checker.typeToString(t, undefined, flags) ?? "any";
+                    paramType = typeof checker.getTypeOfSymbol === "function" ? checker.getTypeOfSymbol(p) : undefined;
                 }
-                catch { /* keep any */ }
-                parts.push(`${isRest ? "..." : ""}${name}${isOptional ? "?" : ""}: ${typeStr}`);
+                catch { /* keep undefined */ }
+                // Stock signature printing expands a trailing rest-tuple parameter
+                // into individual parameters (checker getExpandedParameters):
+                // `...args: [SubmitPayload]` prints as `args_0: SubmitPayload`.
+                if (isRest && i === sigParams.length - 1 && paramType?.isTupleType?.()) {
+                    try {
+                        fixupType(paramType);
+                        const elementTypes: any[] = checker.getTypeArguments?.(paramType) ?? [];
+                        const elementFlags: number[] = paramType.target?.elementFlags ?? paramType.elementFlags ?? [];
+                        const EF = (ts as any).ElementFlags ?? { Optional: 2, Rest: 4, Variadic: 8 };
+                        for (let j = 0; j < elementTypes.length; j++) {
+                            const ef = elementFlags[j] ?? 0;
+                            const elemRest = (ef & (EF.Rest | EF.Variadic)) !== 0;
+                            const elemOptional = !elemRest && (ef & EF.Optional) !== 0;
+                            parts.push(`${elemRest ? "..." : ""}${name}_${j}${elemOptional ? "?" : ""}: ${typeStringOf(elementTypes[j])}`);
+                        }
+                        continue;
+                    }
+                    catch { /* fall through to unexpanded form */ }
+                }
+                parts.push(`${isRest ? "..." : ""}${name}${isOptional ? "?" : ""}: ${typeStringOf(paramType)}`);
             }
             let retStr = "any";
             try {
