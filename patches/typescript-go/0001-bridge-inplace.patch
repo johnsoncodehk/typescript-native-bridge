@@ -1114,7 +1114,7 @@ index 952b572a6..47e643127 100644
  type GetProjectDiagnosticsParams struct {
  	Snapshot SnapshotID `json:"snapshot"`
 diff --git a/internal/api/session.go b/internal/api/session.go
-index b350c6334..a3b704349 100644
+index b350c6334..ba510e2ec 100644
 --- a/internal/api/session.go
 +++ b/internal/api/session.go
 @@ -18,6 +18,7 @@ import (
@@ -1372,21 +1372,16 @@ index b350c6334..a3b704349 100644
  func (s *Session) handleGetSymbolOfType(_ context.Context, params *GetTypePropertyParams) (*SymbolResponse, error) {
  	return s.resolveSymbolPropertyOfType(params, (*checker.Type).Symbol)
  }
-@@ -1449,7 +1641,12 @@ func (s *Session) handleGetRegularTypeOfType(_ context.Context, params *GetTypeP
+@@ -1449,7 +1641,7 @@ func (s *Session) handleGetRegularTypeOfType(_ context.Context, params *GetTypeP
  }
  
  func (s *Session) handleGetTypesOfType(_ context.Context, params *GetTypePropertyParams) ([]*TypeResponse, error) {
 -	return s.resolveTypeArrayPropertyOfType(params, (*checker.Type).Types)
-+	return s.resolveTypeArrayPropertyOfType(params, func(t *checker.Type) []*checker.Type {
-+		if t.Flags()&checker.TypeFlagsUnion != 0 {
-+			return checker.APIUnionTypes(t)
-+		}
-+		return t.Types()
-+	})
++	return s.resolveTypeArrayPropertyOfType(params, func(t *checker.Type) []*checker.Type { return t.Types() })
  }
  
  func (s *Session) handleGetTypeParametersOfType(_ context.Context, params *GetTypePropertyParams) ([]*TypeResponse, error) {
-@@ -2868,7 +3065,6 @@ func (s *Session) handleGetBindDiagnostics(ctx context.Context, params *GetDiagn
+@@ -2868,7 +3060,6 @@ func (s *Session) handleGetBindDiagnostics(ctx context.Context, params *GetDiagn
  
  // handleGetSemanticDiagnostics returns semantic diagnostics for a file or all files.
  func (s *Session) handleGetSemanticDiagnostics(ctx context.Context, params *GetDiagnosticsParams) ([]*DiagnosticResponse, error) {
@@ -1394,7 +1389,7 @@ index b350c6334..a3b704349 100644
  	sd, err := s.getSnapshotData(params.Snapshot)
  	if err != nil {
  		return nil, err
-@@ -2888,6 +3084,53 @@ func (s *Session) handleGetSemanticDiagnostics(ctx context.Context, params *GetD
+@@ -2888,6 +3079,53 @@ func (s *Session) handleGetSemanticDiagnostics(ctx context.Context, params *GetD
  	return NewDiagnosticResponses(diags), nil
  }
  
@@ -1448,7 +1443,7 @@ index b350c6334..a3b704349 100644
  // handleGetSuggestionDiagnostics returns suggestion diagnostics for a file or all files.
  func (s *Session) handleGetSuggestionDiagnostics(ctx context.Context, params *GetDiagnosticsParams) ([]*DiagnosticResponse, error) {
  	ctx = core.WithCheckerLifetime(ctx, core.CheckerLifetimeDiagnostics)
-@@ -2966,7 +3209,6 @@ func (s *Session) handleGetProgramDiagnostics(ctx context.Context, params *GetPr
+@@ -2966,7 +3204,6 @@ func (s *Session) handleGetProgramDiagnostics(ctx context.Context, params *GetPr
  
  // handleGetGlobalDiagnostics returns global (non-file-specific) semantic diagnostics.
  func (s *Session) handleGetGlobalDiagnostics(ctx context.Context, params *GetProjectDiagnosticsParams) ([]*DiagnosticResponse, error) {
@@ -1456,7 +1451,7 @@ index b350c6334..a3b704349 100644
  	sd, err := s.getSnapshotData(params.Snapshot)
  	if err != nil {
  		return nil, err
-@@ -3184,3 +3426,24 @@ func (s *Session) handleGetReferencedSymbolsForNode(ctx context.Context, params
+@@ -3184,3 +3421,24 @@ func (s *Session) handleGetReferencedSymbolsForNode(ctx context.Context, params
  	}
  	return result, nil
  }
@@ -1480,120 +1475,6 @@ index b350c6334..a3b704349 100644
 +	default:
 +		return ""
 +	}
-+}
-diff --git a/internal/checker/checker.go b/internal/checker/checker.go
-index ac37c863d..03380656f 100644
---- a/internal/checker/checker.go
-+++ b/internal/checker/checker.go
-@@ -18551,6 +18551,16 @@ func (c *Checker) getOptionalType(t *Type, isProperty bool) *Type {
- 	if t == missingOrUndefined || t.flags&TypeFlagsUnion != 0 && t.Types()[0] == missingOrUndefined {
- 		return t
- 	}
-+	var origin *Type
-+	if t.flags&TypeFlagsUnion != 0 {
-+		if o := t.AsUnionType().origin; o != nil && o.flags&TypeFlagsUnion != 0 {
-+			originTypes := append(slices.Clone(o.Types()), missingOrUndefined)
-+			origin = c.newUnionType(ObjectFlagsNone, originTypes)
-+		}
-+	}
-+	if origin != nil {
-+		return c.getUnionTypeEx([]*Type{t, missingOrUndefined}, UnionReductionLiteral, nil /*alias*/, origin)
-+	}
- 	return c.getUnionType([]*Type{t, missingOrUndefined})
- }
- 
-@@ -24113,7 +24123,12 @@ func (c *Checker) getTypeFromUnionTypeNode(node *ast.Node) *Type {
- 	links := c.typeNodeLinks.Get(node)
- 	if links.resolvedType == nil {
- 		alias := c.getAliasForTypeNode(node)
--		links.resolvedType = c.getUnionTypeEx(core.Map(node.AsUnionTypeNode().Types.Nodes, c.getTypeFromTypeNode), UnionReductionLiteral, alias, nil /*origin*/)
-+		mappedTypes := core.Map(node.AsUnionTypeNode().Types.Nodes, c.getTypeFromTypeNode)
-+		var origin *Type
-+		if len(mappedTypes) > 1 {
-+			origin = c.newUnionType(ObjectFlagsNone, slices.Clone(mappedTypes))
-+		}
-+		links.resolvedType = c.getUnionTypeEx(mappedTypes, UnionReductionLiteral, alias, origin)
- 	}
- 	return links.resolvedType
- }
-diff --git a/internal/checker/nodebuilderimpl.go b/internal/checker/nodebuilderimpl.go
-index 188da07aa..9f394bb33 100644
---- a/internal/checker/nodebuilderimpl.go
-+++ b/internal/checker/nodebuilderimpl.go
-@@ -3379,7 +3379,14 @@ func (b *NodeBuilderImpl) typeToTypeNode(t *Type) *ast.TypeNode {
- 	if t.flags&(TypeFlagsUnion|TypeFlagsIntersection) != 0 {
- 		var types []*Type
- 		if t.flags&TypeFlagsUnion != 0 {
--			types = b.ch.formatUnionTypes(t.AsUnionType().types, expandingEnum)
-+			types = t.AsUnionType().types
-+			// Stock prints modifier key unions like Record<"trim"|"lazy"> reversed
-+			// relative to the UnionTypeNode source order.
-+			if isAllStringLiteralUnion(types) {
-+				types = slices.Clone(types)
-+				slices.Reverse(types)
-+			}
-+			types = b.ch.formatUnionTypes(types, expandingEnum)
- 		} else {
- 			types = t.AsIntersectionType().types
- 		}
-diff --git a/internal/checker/utilities.go b/internal/checker/utilities.go
-index 490d6887f..a495a0e49 100644
---- a/internal/checker/utilities.go
-+++ b/internal/checker/utilities.go
-@@ -1842,3 +1842,54 @@ func GetSetAccessorValueParameter(accessor *ast.Node) *ast.Node {
- 	}
- 	return nil
- }
-+
-+// isAllStringLiteralUnion reports whether every constituent is a string literal.
-+func isAllStringLiteralUnion(types []*Type) bool {
-+	if len(types) == 0 {
-+		return false
-+	}
-+	for _, t := range types {
-+		if t.flags&TypeFlagsStringLiteral == 0 {
-+			return false
-+		}
-+	}
-+	return true
-+}
-+
-+// moveNullishToFront moves undefined/null constituents to the front of a union
-+// type list for API display, matching stock checker .types iteration order.
-+func moveNullishToFront(types []*Type) []*Type {
-+	if len(types) <= 1 {
-+		return types
-+	}
-+	var leading []*Type
-+	var rest []*Type
-+	for _, t := range types {
-+		if t.flags&(TypeFlagsUndefined|TypeFlagsNull) != 0 {
-+			leading = append(leading, t)
-+			continue
-+		}
-+		rest = append(rest, t)
-+	}
-+	if len(leading) == 0 {
-+		return types
-+	}
-+	out := make([]*Type, 0, len(types))
-+	out = append(out, leading...)
-+	out = append(out, rest...)
-+	return out
-+}
-+
-+// APIUnionTypes returns union constituents for language-service consumers.
-+// When the union carries an origin (declaration-order list from a UnionTypeNode),
-+// expose that order with nullish types first — matching stock checker behavior.
-+func APIUnionTypes(t *Type) []*Type {
-+	if t.flags&TypeFlagsUnion == 0 {
-+		return t.Types()
-+	}
-+	u := t.AsUnionType()
-+	if u.origin != nil && u.origin.flags&TypeFlagsUnion != 0 {
-+		return moveNullishToFront(u.origin.Types())
-+	}
-+	return t.Types()
 +}
 diff --git a/internal/compiler/fileloader.go b/internal/compiler/fileloader.go
 index f8d006e92..8f90cd03b 100644
