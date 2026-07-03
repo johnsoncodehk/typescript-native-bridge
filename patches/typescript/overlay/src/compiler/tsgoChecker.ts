@@ -154,6 +154,144 @@ let _api: any;
 let _sourceFileCache: any;
 const _projectCache = new Map<string, any>();
 
+function toCStr(s: string): Buffer {
+    return Buffer.from(s + "\0", "utf8");
+}
+
+function parseBridgeEnvelope(str: string | null): any {
+    if (str == null) throw new Error("tsgoChecker: bridge returned null");
+    const env = JSON.parse(str);
+    if (!env.ok) throw new Error(env.error || "tsgoChecker: unknown bridge error");
+    return env.data ?? null;
+}
+
+class BridgeClient {
+    private handle: number;
+    private handleBigInt: bigint;
+    private methodCStr = new Map<string, Buffer>();
+    private scratch = Buffer.alloc(256);
+
+    constructor(cwd: string) {
+        this.handle = Number(parseBridgeEnvelope(_bridgeFns.BridgeNewSession(toCStr(cwd))));
+        this.handleBigInt = BigInt(this.handle);
+    }
+
+    private toCStrScratch(s: string): Buffer {
+        const need = Buffer.byteLength(s, "utf8") + 1;
+        if (need > this.scratch.length) {
+            this.scratch = Buffer.alloc(need * 2);
+        }
+        const written = this.scratch.write(s, 0, "utf8");
+        this.scratch[written] = 0;
+        return this.scratch.subarray(0, need);
+    }
+
+    apiRequest(method: string, params: any): any {
+        const t0 = process.env.TSGO_PROFILE === "1" ? Date.now() : 0;
+        const paramsJson = params == null ? null : JSON.stringify(params);
+        let mc = this.methodCStr.get(method);
+        if (!mc) { mc = toCStr(method); this.methodCStr.set(method, mc); }
+        const str = _bridgeFns.BridgeCall(
+            this.handleBigInt, mc,
+            paramsJson == null ? null : this.toCStrScratch(paramsJson),
+        );
+        const result = parseBridgeEnvelope(str);
+        if (process.env.TSGO_PROFILE === "1") _profRpc(method, Date.now() - t0);
+        return result;
+    }
+
+    apiRequestBinary(method: string, params: any): Uint8Array | undefined {
+        const t0 = process.env.TSGO_PROFILE === "1" ? Date.now() : 0;
+        if (method === "getSourceFile") noteGetSourceFileRpc();
+        const paramsJson = params == null ? null : JSON.stringify(params);
+        let mc = this.methodCStr.get(method);
+        if (!mc) { mc = toCStr(method); this.methodCStr.set(method, mc); }
+        const res = _bridgeFns.BridgeCallBinary(
+            this.handleBigInt, mc,
+            paramsJson == null ? null : this.toCStrScratch(paramsJson),
+        );
+        if (process.env.TSGO_PROFILE === "1") _profRpc(method, Date.now() - t0);
+        const len = Number(res.len);
+        if (len <= 0 || res.data == null) return undefined;
+        return _koffi.decode(res.data, _koffi.array("uint8_t", len, "Typed")) as Uint8Array;
+    }
+
+    close(): void {
+        try { _bridgeFns.BridgeDisposeSession(BigInt(this.handle)); } catch { /* best-effort */ }
+    }
+}
+
+class MiniSourceFileCache {
+    private bySnap = new Map<any, Map<any, Map<string, any>>>();
+    private paths = new Set<string>();
+
+    getRetained(p: string, snapshotId: any, projectId: any): any {
+        const byProj = this.bySnap.get(snapshotId);
+        if (!byProj) return undefined;
+        const byPath = byProj.get(projectId);
+        if (!byPath) return undefined;
+        return byPath.get(p);
+    }
+    set(p: string, file: any, _key: any, _hash: any, snapshotId: any, projectId: any): any {
+        let byProj = this.bySnap.get(snapshotId);
+        if (!byProj) { byProj = new Map(); this.bySnap.set(snapshotId, byProj); }
+        let byPath = byProj.get(projectId);
+        if (!byPath) { byPath = new Map(); byProj.set(projectId, byPath); }
+        if (!byPath.has(p)) { byPath.set(p, file); this.paths.add(p); }
+        return byPath.get(p);
+    }
+    retainForSnapshot() {}
+    releaseSnapshot() {}
+    clear() { this.bySnap.clear(); this.paths.clear(); }
+    has(p: string) { return this.paths.has(p); }
+}
+
+/**
+ * Initialize the shared bridge session once per process. Sets _tsgoUseCaseSensitive
+ * from bridge initialize() — the authoritative source, because tsgo keys fileInfos
+ * with this rule. Must run before any SourceFile path is canonicalized.
+ */
+function ensureBridgeSession(): void {
+    if (_client) return;
+    loadBridgeDeps();
+    const cwd = process.cwd();
+    _client = new BridgeClient(cwd);
+    const init = _client.apiRequest("initialize", null) || {};
+    if (!_tnbDebugAnnounced) {
+        _tnbDebugAnnounced = true;
+        const tty = !!(process.stderr as any).isTTY;
+        const c = tty ? "\u001b[32m" : "";
+        const off = tty ? "\u001b[0m" : "";
+        const text = "\u2705  TNB ACTIVE \u2014 \`typescript\` is the tsgo-backed fork";
+        const inner = 57;
+        const top = "\u250c" + "\u2500".repeat(inner) + "\u2510";
+        const bottom = "\u2514" + "\u2500".repeat(inner) + "\u2518";
+        process.stderr.write(
+            `\n${c}${top}${off}\n`
+            + `${c}\u2502${off}  ${text}  ${c}\u2502${off}\n`
+            + `${c}${bottom}${off}\n\n`,
+        );
+    }
+    const useCaseSensitive = !!init.useCaseSensitiveFileNames;
+    _tsgoUseCaseSensitive = useCaseSensitive;
+    const toPath = (f: string) => useCaseSensitive ? f : f.toLowerCase();
+    _sourceFileCache = new MiniSourceFileCache();
+    _api = {
+        updateSnapshot(params: any) {
+            const { openProject, openProjects, ...rest } = params || {};
+            const merged = openProject != null ? [openProject, ...(openProjects || [])] : openProjects;
+            const wireParams = { ...rest, ...(merged != null ? { openProjects: merged } : {}) };
+            const data = _client.apiRequest("updateSnapshot", wireParams);
+            const onDispose = () => {};
+            return new _sync.Snapshot(data, _client, _sourceFileCache, toPath, onDispose);
+        },
+        close() {
+            try { _client.close(); } catch {}
+            _sourceFileCache.clear();
+        },
+    };
+}
+
 // One-shot banner, printed the first time the tsgo bridge is engaged, so users
 // can always tell their tooling is running on the fork. No banner means stock
 // `typescript` is in use (the override didn't take effect).
@@ -201,10 +339,9 @@ const _syncedOverlayContentByFile = new Map<string, string>();
 // Overlay-path cache: only files missing on disk are fed to tsgo as overlays
 // (typically Volar virtual documents).
 const _overlayDiskExistsCache = new Map<string, boolean>();
-// tsgo's case-sensitivity flag — skeleton SFs must use the same path format
-// (lowercased on case-insensitive FS) as tsgo RemoteSourceFiles, otherwise
-// BuilderState's fileInfos keys (from getSourceFiles skeletons) won't match
-// updateShapeSignature's lookup (from getSourceFile tsgo-backed SFs).
+// Set once by ensureBridgeSession() from bridge initialize() — the authoritative
+// source, because tsgo keys fileInfos with this rule. ensureBridgeSession() runs
+// at createTsgoProgram entry, before any SourceFile path is canonicalized.
 let _tsgoUseCaseSensitive = true;
 // Refs set by ensureProject so NodeHandle prototype hooks can route to the
 // currently-active project (scope manager reads `declaration.getSourceFile()`
@@ -358,10 +495,11 @@ function sourceFileFromHostSnapshot(host: any, hostFileName: string, requestFile
 
 /** Ensure host SourceFiles expose stable path metadata for LS + module path completion. */
 function attachHostSourceFileMetadata(sf: any, hostFileName: string): any {
+    const canon = canonicalSourceFilePath(hostFileName);
     sf.fileName = hostFileName;
     sf.originalFileName = hostFileName;
-    sf.path = hostFileName as Path;
-    sf.resolvedPath = hostFileName as Path;
+    sf.path = canon as Path;
+    sf.resolvedPath = canon as Path;
     if (!sf.imports) sf.imports = [];
     if (!sf.moduleAugmentations) sf.moduleAugmentations = [];
     if (!("version" in sf)) {
@@ -865,6 +1003,7 @@ function _maybePrintStats(): void {
         ` symHit=${_stats.getSymHitCount} symRpc=${_stats.getSymRpcCount}` +
         ` indexBuild=${_stats.indexBuildCount}/${_stats.indexBuildMs.toFixed(0)}ms` +
         ` rpc=${_stats.rpcCount}/${_stats.rpcMs.toFixed(0)}ms` +
+        ` getSourceFileRpc=${_guardStats.getSourceFileRpcCount}` +
         (topRpc ? ` topRpc={${topRpc}}` : "") +
         `\n`,
     );
@@ -876,6 +1015,68 @@ if (process.env.TSGO_PROFILE === "1") {
 /** @internal — read profiling counters for fork-perf-bench harness. */
 export function getTsgoProfileStats(): Readonly<typeof _stats> {
     return _stats;
+}
+
+// ── getSourceFile RPC regression guard + tsgo toPath canonicalization ──
+// A single logical file can be materialized several ways (host / light /
+// diagnostic / full / tsgo-backed). They must agree on the canonical program
+// path key, because BuilderState fileInfos is keyed by it. We guarantee that
+// structurally rather than by runtime cross-checking: every materialization is
+// fed the same resolveHostFileName-normalized host name, and its path is derived
+// through canonicalSourceFilePath (which mirrors tsgo's toPath EXACTLY). See the
+// _tsgoUseCaseSensitive comment above for why the key rule must match tsgo.
+//
+// The one thing worth guarding at runtime is the getSourceFile RPC count: the
+// light-stub path exists to avoid eagerly materializing tsgo-backed SFs for
+// every program file, so a regression there shows up as an RPC spike. CI checks
+// it against a baseline (tools/check-sourcefile-guard.mjs).
+
+const _guardStats = {
+    getSourceFileRpcCount: 0,
+};
+
+/**
+ * Canonical program path key — mirrors tsgo client `toPath` from initialize()
+ * EXACTLY: case-fold only when the host is case-insensitive, no normalization.
+ * tsgo keys MiniSourceFileCache / fileInfos with this rule; adding normalize()
+ * here would diverge from tsgo. Callers MUST pass a resolveHostFileName-
+ * normalized (absolute, forward-slash) host name so the key is format-stable
+ * across every materialization of the same logical file.
+ */
+function canonicalSourceFilePath(filePath: string): string {
+    return _tsgoUseCaseSensitive ? filePath : filePath.toLowerCase();
+}
+
+function noteGetSourceFileRpc(): void {
+    _guardStats.getSourceFileRpcCount++;
+    scheduleGuardStatsFlush();
+}
+
+function maybeWriteGuardStatsFile(): void {
+    const out = process.env.TNB_GUARD_STATS_FILE;
+    if (!out) return;
+    try {
+        const fs = require("fs") as typeof import("fs");
+        fs.writeFileSync(out, JSON.stringify({
+            getSourceFileRpcCount: _guardStats.getSourceFileRpcCount,
+        }));
+    }
+    catch { /* best-effort */ }
+}
+
+let _guardStatsFlushScheduled = false;
+function scheduleGuardStatsFlush(): void {
+    if (!process.env.TNB_GUARD_STATS_FILE || _guardStatsFlushScheduled) return;
+    _guardStatsFlushScheduled = true;
+    setImmediate(() => {
+        _guardStatsFlushScheduled = false;
+        maybeWriteGuardStatsFile();
+    });
+}
+
+if (process.env.TNB_GUARD_STATS_FILE) {
+    process.on("exit", maybeWriteGuardStatsFile);
+    process.on("beforeExit", maybeWriteGuardStatsFile);
 }
 
 // ── Enum remapping: tsgo enum values → fork enum values, generated BY NAME ──
@@ -1150,6 +1351,9 @@ export function createTsgoProgram(
     options.configFilePath = configFilePath;
     const configDiags = configFileParsingDiagnostics ?? [];
 
+    // Bridge initialize() sets _tsgoUseCaseSensitive before any path below is canonicalized.
+    ensureBridgeSession();
+
     // Host script text captured once at createProgram time (safe to call
     // host.getSourceFile here — program does not exist yet; Volar injects
     // virtual TS for .vue via getSourceFile). Reused by getOrCreateSourceFile
@@ -1266,7 +1470,7 @@ export function createTsgoProgram(
         const ls = hostForLs();
         const parsed = parsedHostSourceFiles.get(hostFileName);
         if (parsed?.statements?.length) {
-            return attachHostSourceFileMetadata(parsed, hostFileName);
+            return parsed;
         }
 
         const fromSnap = sourceFileFromHostSnapshot(ls, hostFileName, requestFileName, options.target ?? 99);
@@ -1346,7 +1550,10 @@ export function createTsgoProgram(
         const text = hostContent?.text ?? host?.readFile?.(hostFileName) ?? "";
         const scriptKind = hostContent?.scriptKind ?? inferScriptKind(hostFileName);
         const sf = createSkeletonSourceFile(hostFileName, text, options.target ?? 99, scriptKind);
+        const canon = canonicalSourceFilePath(hostFileName);
         const anySf = sf as any;
+        anySf.path = canon;
+        anySf.resolvedPath = canon;
         anySf.version = "1";
         const backed = getTsgoBackedSourceFile(anySf);
         const result = backed ?? anySf;
@@ -1371,12 +1578,21 @@ export function createTsgoProgram(
     // diagnostic.file.text during span remapping; tsgo RemoteSourceFile.text is read-only.
     const diagnosticSfCache = new Map<string, any>();
     const getDiagnosticSourceFile = (fileName: string): any => {
-        if (diagnosticSfCache.has(fileName)) return diagnosticSfCache.get(fileName);
-        const hostContent = hostContentByFile.get(fileName);
+        // Normalize identity to the same key as host/full/light so a diagnostic
+        // file matches the program SourceFile Volar remaps against, and so the
+        // canonical path lines up across materializations (Axis C). Text lookup
+        // stays on the raw fileName to preserve existing host-content hits.
+        const hostFileName = resolveHostFileName(fileName, host);
+        if (diagnosticSfCache.has(hostFileName)) return diagnosticSfCache.get(hostFileName);
+        const hostContent = hostContentByFile.get(fileName) ?? hostContentByFile.get(hostFileName);
         const text = hostContent?.text ?? host?.readFile?.(fileName) ?? "";
-        const scriptKind = hostContent?.scriptKind ?? inferScriptKind(fileName);
-        const sf = createSkeletonSourceFile(fileName, text, options.target ?? 99, scriptKind);
-        diagnosticSfCache.set(fileName, sf);
+        const scriptKind = hostContent?.scriptKind ?? inferScriptKind(hostFileName);
+        const sf = createSkeletonSourceFile(hostFileName, text, options.target ?? 99, scriptKind);
+        const canon = canonicalSourceFilePath(hostFileName);
+        const anyDiagSf = sf as any;
+        anyDiagSf.path = canon;
+        anyDiagSf.resolvedPath = canon;
+        diagnosticSfCache.set(hostFileName, sf);
         return sf;
     };
 
@@ -1387,14 +1603,19 @@ export function createTsgoProgram(
     // the files actually linted pay the RPC via getSourceFile(fileName).
     const lightSfCache = new Map<string, any>();
     const getOrCreateLightSourceFile = (fileName: string): any => {
-        const hostFileName = toHostFileName(fileName);
+        // Use the SAME host-name normalization as getOrCreateSourceFile
+        // (resolveHostFileName), not the weaker toHostFileName. Otherwise a
+        // relative / backslash / un-normalized input would give the light stub a
+        // different fileName+path than the full/host SF for the same logical
+        // file, silently drifting the BuilderState fileInfos key (Axis C).
+        const hostFileName = resolveHostFileName(fileName, host);
         if (lightSfCache.has(hostFileName)) return lightSfCache.get(hostFileName);
         // Metadata-only SourceFile stub: no host.readFile, no computeLineStarts,
         // no AST. BuilderProgram state creation only needs these fields to key
         // fileInfos and to ask for referenced/imported files (empty here).
         // tsserver getScriptInfos() requires ScriptInfo for every returned file;
         // default libs are not opened as ScriptInfo — exclude them here.
-        const tsgoPath = hostFileName;
+        const tsgoPath = canonicalSourceFilePath(hostFileName);
         const sf: any = {
             kind: SyntaxKind.SourceFile,
             fileName: hostFileName,
@@ -1776,106 +1997,6 @@ export function createTsgoChecker(program: any): any {
     let bridgeFns = _bridgeFns;
     let project: any;
 
-    // ── NAPI bridge client ───────────────────────────────────────────
-
-    function toCStr(s: string): Buffer {
-        return Buffer.from(s + "\0", "utf8");
-    }
-
-    function parseEnvelope(str: string | null): any {
-        if (str == null) throw new Error("tsgoChecker: bridge returned null");
-        const env = JSON.parse(str);
-        if (!env.ok) throw new Error(env.error || "tsgoChecker: unknown bridge error");
-        return env.data ?? null;
-    }
-
-    class BridgeClient {
-        private handle: number;
-        private handleBigInt: bigint;
-        private methodCStr = new Map<string, Buffer>();
-        private scratch = Buffer.alloc(256);
-
-        constructor(cwd: string) {
-            this.handle = Number(parseEnvelope(bridgeFns.BridgeNewSession(toCStr(cwd))));
-            this.handleBigInt = BigInt(this.handle);
-        }
-
-        private toCStrScratch(s: string): Buffer {
-            const need = Buffer.byteLength(s, "utf8") + 1;
-            if (need > this.scratch.length) {
-                this.scratch = Buffer.alloc(need * 2);
-            }
-            const written = this.scratch.write(s, 0, "utf8");
-            this.scratch[written] = 0;
-            return this.scratch.subarray(0, need);
-        }
-
-        apiRequest(method: string, params: any): any {
-            const t0 = process.env.TSGO_PROFILE === "1" ? Date.now() : 0;
-            const paramsJson = params == null ? null : JSON.stringify(params);
-            let mc = this.methodCStr.get(method);
-            if (!mc) { mc = toCStr(method); this.methodCStr.set(method, mc); }
-            const str = bridgeFns.BridgeCall(
-                this.handleBigInt, mc,
-                paramsJson == null ? null : this.toCStrScratch(paramsJson),
-            );
-            const result = parseEnvelope(str);
-            if (process.env.TSGO_PROFILE === "1") _profRpc(method, Date.now() - t0);
-            return result;
-        }
-
-        apiRequestBinary(method: string, params: any): Uint8Array | undefined {
-            const t0 = process.env.TSGO_PROFILE === "1" ? Date.now() : 0;
-            const paramsJson = params == null ? null : JSON.stringify(params);
-            let mc = this.methodCStr.get(method);
-            if (!mc) { mc = toCStr(method); this.methodCStr.set(method, mc); }
-            const res = bridgeFns.BridgeCallBinary(
-                this.handleBigInt, mc,
-                paramsJson == null ? null : this.toCStrScratch(paramsJson),
-            );
-            if (process.env.TSGO_PROFILE === "1") _profRpc(method, Date.now() - t0);
-            const len = Number(res.len);
-            if (len <= 0 || res.data == null) return undefined;
-            // Decode straight into a Uint8Array (single copy out of the reused C
-            // buffer). The default disposition materialises a len-element JS
-            // Array of numbers and then needs a second Buffer.from copy — the
-            // JS-Array boxing dominates for large AST blobs (full source text +
-            // node table). "Typed" skips it (~3-4x faster decode on dify/web:
-            // getSourceFile copy ~200ms -> ~55ms).
-            return koffi.decode(res.data, koffi.array("uint8_t", len, "Typed")) as Uint8Array;
-        }
-
-        close(): void {
-            try { bridgeFns.BridgeDisposeSession(BigInt(this.handle)); } catch { /* best-effort */ }
-        }
-    }
-
-    // ── Mini source-file cache (nested-map port from napi-client.js) ──
-    class MiniSourceFileCache {
-        private bySnap = new Map<any, Map<any, Map<string, any>>>();
-        private paths = new Set<string>();
-
-        getRetained(p: string, snapshotId: any, projectId: any): any {
-            const byProj = this.bySnap.get(snapshotId);
-            if (!byProj) return undefined;
-            const byPath = byProj.get(projectId);
-            if (!byPath) return undefined;
-            return byPath.get(p);
-        }
-        set(p: string, file: any, _key: any, _hash: any, snapshotId: any, projectId: any): any {
-            let byProj = this.bySnap.get(snapshotId);
-            if (!byProj) { byProj = new Map(); this.bySnap.set(snapshotId, byProj); }
-            let byPath = byProj.get(projectId);
-            if (!byPath) { byPath = new Map(); byProj.set(projectId, byPath); }
-            if (!byPath.has(p)) { byPath.set(p, file); this.paths.add(p); }
-            return byPath.get(p);
-        }
-        retainForSnapshot() {}
-        releaseSnapshot() {}
-        clear() { this.bySnap.clear(); this.paths.clear(); }
-        has(p: string) { return this.paths.has(p); }
-    }
-
     function ensureProject(): any {
         if (project) return project;
 
@@ -1891,50 +2012,9 @@ export function createTsgoChecker(program: any): any {
             return project;
         }
 
-        loadBridgeDeps();
-        koffi = _koffi; sync = _sync; bridgeFns = _bridgeFns;
         if (process.env.TSGO_PROFILE === "1") _tsgoLoadStart = Date.now();
-
-        // Create the shared bridge session + API once per process.
-        if (!_client) {
-            const cwd = process.cwd();
-            _client = new BridgeClient(cwd);
-            const init = _client.apiRequest("initialize", null) || {};
-            if (!_tnbDebugAnnounced) {
-                _tnbDebugAnnounced = true;
-                const tty = !!(process.stderr as any).isTTY;
-                const c = tty ? "\u001b[32m" : ""; // green foreground, no background
-                const off = tty ? "\u001b[0m" : "";
-                const text = "\u2705  TNB ACTIVE \u2014 \`typescript\` is the tsgo-backed fork";
-                const inner = 57; // 2 left pad + 53 text cols (✅ = 2) + 2 right pad
-                const top = "\u250c" + "\u2500".repeat(inner) + "\u2510";
-                const bottom = "\u2514" + "\u2500".repeat(inner) + "\u2518";
-                process.stderr.write(
-                    `\n${c}${top}${off}\n`
-                    + `${c}\u2502${off}  ${text}  ${c}\u2502${off}\n`
-                    + `${c}${bottom}${off}\n\n`,
-                );
-            }
-            const useCaseSensitive = !!init.useCaseSensitiveFileNames;
-            _tsgoUseCaseSensitive = useCaseSensitive;
-            const toPath = (f: string) => useCaseSensitive ? f : f.toLowerCase();
-            _sourceFileCache = new MiniSourceFileCache();
-
-            _api = {
-                updateSnapshot(params: any) {
-                    const { openProject, openProjects, ...rest } = params || {};
-                    const merged = openProject != null ? [openProject, ...(openProjects || [])] : openProjects;
-                    const wireParams = { ...rest, ...(merged != null ? { openProjects: merged } : {}) };
-                    const data = _client.apiRequest("updateSnapshot", wireParams);
-                    const onDispose = () => {};
-                    return new sync.Snapshot(data, _client, _sourceFileCache, toPath, onDispose);
-                },
-                close() {
-                    try { _client.close(); } catch {}
-                    _sourceFileCache.clear();
-                },
-            };
-        }
+        ensureBridgeSession();
+        koffi = _koffi; sync = _sync; bridgeFns = _bridgeFns;
 
         // Collect host file content to feed as tsgo overlays — makes the fork
         // host the single source of truth (avoids tsgo double disk read, and
