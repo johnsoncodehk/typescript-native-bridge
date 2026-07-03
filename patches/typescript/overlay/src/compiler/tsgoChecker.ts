@@ -640,7 +640,11 @@ function copyScopeSymbolsFromTable(table: any, meaning: number, out: Map<string,
         for (const sym of table.values()) add(sym);
     }
 }
-/** bindSourceFile locals/exports walk — tsgo has no getSymbolsInScope RPC yet. */
+/**
+ * bindSourceFile locals/exports walk for Volar host-only virtual files
+ * (__tnbHostBound), which tsgo has no mirror of. Real files go through the
+ * getSymbolsInScope RPC instead.
+ */
 function getHostSymbolsInScope(location: any, meaning: number): any[] {
     if (!location?.getSourceFile?.()?.__tnbHostBound) return [];
     if (location.flags & NodeFlags.InWithStatement) return [];
@@ -3195,20 +3199,16 @@ export function createTsgoChecker(program: any): any {
         getSymbolsInScope(location: any, meaning: number): any[] {
             if (!location) return [];
             const sf = location.getSourceFile?.();
+            // Volar host-only virtual files have no tsgo mirror; the binder scope
+            // walk over host locals/exports is genuine host-only bridging.
             if (sf?.__tnbHostBound) {
                 return getHostSymbolsInScope(location, meaning).map(refineNavSymbol);
             }
+            if (!sf) return [];
             ensureProject();
-            const tsgoNode = sf
-                ? findTsgoNodeAtPosition(sf.fileName, location.getStart(sf), location.kind, location.getEnd(sf))
-                : undefined;
-            const tsgoGet = project.checker.getSymbolsInScope;
-            if (tsgoNode && typeof tsgoGet === "function") {
-                try {
-                    return (tsgoGet.call(project.checker, tsgoNode, meaning) ?? []).map(refineNavSymbol);
-                } catch { /* host-only */ }
-            }
-            return [];
+            const tsgoNode = findTsgoNodeAtPosition(sf.fileName, location.getStart(sf), location.kind, location.getEnd(sf));
+            if (!tsgoNode) return [];
+            return (project.checker.getSymbolsInScope(tsgoNode, meaning) ?? []).map(refineNavSymbol);
         },
         getExportSpecifierLocalTargetSymbol(node: any): any {
             ensureProject();
