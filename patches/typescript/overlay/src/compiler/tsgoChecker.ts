@@ -1455,6 +1455,28 @@ export function createTsgoProgram(
 
     const tsgoFileArg = (fileName: string | undefined) => fileName ? toTsgoFileName(fileName) : fileName;
 
+    // Program membership check — stock Program.getSourceFile returns undefined
+    // for files outside the program, and hosts rely on that (Volar
+    // component-meta probes getSourceFile and re-roots the file via
+    // getScriptFileNames when it is missing, e.g. component.tsx that the
+    // tsconfig's wildcard extension priority skipped in favor of component.ts).
+    // Fabricating a SourceFile here would mask the miss and later checker RPCs
+    // would fail with "source file not found". Names are cached per tsgo
+    // project object (the project is replaced on every snapshot refresh).
+    let programFileNamesCache: { proj: any; names: Set<string> } | undefined;
+    const programContainsFile = (fileName: string): boolean => {
+        const proj = project;
+        if (!proj?.program) return true; // project not ready yet — stay permissive
+        if (!programFileNamesCache || programFileNamesCache.proj !== proj) {
+            const names = new Set<string>();
+            for (const n of proj.program.getSourceFileNames?.() ?? []) {
+                names.add(toHostFileName(n));
+            }
+            programFileNamesCache = { proj, names };
+        }
+        return programFileNamesCache.names.has(toHostFileName(fileName));
+    };
+
     const thinProgram: any = {
         // Marks this as a tsgo-backed program: its SourceFiles come straight from
         // tsgo and are never acquired via the LanguageService document registry.
@@ -1465,7 +1487,16 @@ export function createTsgoProgram(
         getRootFileNames: () => collectTsgoOpenFileNames(programCtx.lsHost, rootNames as string[]),
         getCompilerOptions: () => options,
         getSourceFileNames,
-        getSourceFile: (fileName: string) => getOrCreateSourceFile(fileName),
+        getSourceFile: (fileName: string) => {
+            // Mirror stock Program.getSourceFile: undefined for non-members so
+            // hosts (Volar component-meta) can detect the miss and re-root the
+            // file. Lib files keep the permissive path (host lib paths differ
+            // from tsgo's bundled libs).
+            if (!isHostLibFile(toHostFileName(fileName)) && !programContainsFile(fileName)) {
+                return undefined;
+            }
+            return getOrCreateSourceFile(fileName);
+        },
         // BuilderProgram mostly calls getSourceFileByPath while constructing
         // fileInfos / dependency state. It only needs source-file metadata
         // there, not the AST. Returning a light stub avoids eager

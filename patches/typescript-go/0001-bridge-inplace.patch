@@ -1564,21 +1564,6 @@ index cad204f5b..c8966680b 100644
  		if extensions&extensionsDeclaration != 0 && !tspath.IsDeclarationFileName(extensionless+originalExtension) {
  			if resolved := r.tryExtension(".d"+originalExtension+".ts", extensionless, false); !resolved.shouldContinueSearching() {
  				return resolved
-diff --git a/internal/parser/parser.go b/internal/parser/parser.go
-index a8cd3a6f3..48d6105e9 100644
---- a/internal/parser/parser.go
-+++ b/internal/parser/parser.go
-@@ -289,7 +289,9 @@ func ParseIsolatedEntityName(text string) *ast.EntityName {
- 
- func (p *Parser) initializeState(opts ast.SourceFileParseOptions, sourceText string, scriptKind core.ScriptKind) {
- 	if scriptKind == core.ScriptKindUnknown {
--		panic("ScriptKind must be specified when parsing source file: " + opts.FileName)
-+		// Align with stock TS ensureScriptKind: unknown extensions fall back to TS
-+		// rather than crashing the server (e.g. .vue via extraFileExtensions).
-+		scriptKind = core.ScriptKindTS
- 	}
- 
- 	if p.scanner == nil {
 diff --git a/internal/project/compilerhost.go b/internal/project/compilerhost.go
 index 212601d4b..a34452b36 100644
 --- a/internal/project/compilerhost.go
@@ -1747,10 +1732,41 @@ index 1b300a013..de14d03a0 100644
  			scriptKind := lsconv.LanguageKindToScriptKind(events.openChange.LanguageKind)
  			if scriptKind == core.ScriptKindUnknown {
 diff --git a/internal/project/overlayfs_test.go b/internal/project/overlayfs_test.go
-index 4659530ff..64a4c905b 100644
+index 4659530ff..dfcd64020 100644
 --- a/internal/project/overlayfs_test.go
 +++ b/internal/project/overlayfs_test.go
-@@ -266,7 +266,7 @@ func TestProcessChanges(t *testing.T) {
+@@ -34,7 +34,9 @@ func TestProcessChanges(t *testing.T) {
+ 		testURI2 = lsproto.DocumentUri("file:///test2.ts")
+ 	)
+ 
+-	t.Run("multiple opens should panic", func(t *testing.T) {
++	// Fork change: batch host-fed overlays allow multiple opens per change set
++	// (upstream panics on more than one open per batch).
++	t.Run("multiple opens are supported", func(t *testing.T) {
+ 		t.Parallel()
+ 		fs := createOverlayFS()
+ 
+@@ -55,15 +57,10 @@ func TestProcessChanges(t *testing.T) {
+ 			},
+ 		}
+ 
+-		assert.Assert(t, func() (panicked bool) {
+-			defer func() {
+-				if r := recover(); r != nil {
+-					panicked = true
+-				}
+-			}()
+-			fs.processChanges(changes)
+-			return false
+-		}())
++		result, overlays := fs.processChanges(changes)
++		assert.Assert(t, result.Opened.Has(testURI1), "first open should be marked as opened")
++		assert.Assert(t, result.Opened.Has(testURI2), "second open should be marked as opened")
++		assert.Equal(t, len(overlays), 2)
+ 	})
+ 
+ 	t.Run("watch create then delete becomes nothing", func(t *testing.T) {
+@@ -266,7 +263,7 @@ func TestProcessChanges(t *testing.T) {
  		})
  
  		// Should not be marked as opened since it was already open
@@ -1759,8 +1775,102 @@ index 4659530ff..64a4c905b 100644
  		// Should also be marked as changed since it was closed and reopened
  		assert.Assert(t, result.Changed.Has(testURI1), "close then open should mark as changed")
  		// Should have the new content
+diff --git a/internal/project/project.go b/internal/project/project.go
+index 39c77aa78..16fb2c8af 100644
+--- a/internal/project/project.go
++++ b/internal/project/project.go
+@@ -85,6 +85,12 @@ type Project struct {
+ 	installedTypingsInfo *ata.TypingsInfo
+ 	// typingsFiles are the root files added by the typings installer.
+ 	typingsFiles []string
++	// apiRootFiles are extra root files added for API-opened files that the
++	// tsconfig's file list misses (e.g. a .tsx root shadowed by a same-name .ts
++	// via wildcard extension priority). Fork-added: mirrors API hosts whose
++	// script file list — not the tsconfig — defines the program root set.
++	// Kept sorted for deterministic comparison.
++	apiRootFiles []string
+ }
+ 
+ var _ ls.Project = (*Project)(nil)
+@@ -264,6 +270,7 @@ func (p *Project) Clone() *Project {
+ 
+ 		installedTypingsInfo: p.installedTypingsInfo,
+ 		typingsFiles:         p.typingsFiles,
++		apiRootFiles:         p.apiRootFiles,
+ 	}
+ }
+ 
+@@ -283,40 +290,46 @@ func (p *Project) SetCommandLine(commandLine *tsoptions.ParsedCommandLine) {
+ 	p.dirtyFilePath = ""
+ }
+ 
+-// getCommandLineWithTypingsFiles returns the command line augmented with typing files if ATA is enabled.
++// getCommandLineWithTypingsFiles returns the command line augmented with typing
++// files if ATA is enabled, and with API-added root files (fork-added).
+ func (p *Project) getCommandLineWithTypingsFiles() *tsoptions.ParsedCommandLine {
+-	if len(p.typingsFiles) == 0 {
+-		return p.CommandLine
++	typingsFiles := p.typingsFiles
++	if len(typingsFiles) > 0 {
++		// Check if ATA is enabled for this project
++		typeAcquisition := p.GetTypeAcquisition()
++		if typeAcquisition == nil || !typeAcquisition.Enable.IsTrue() {
++			typingsFiles = nil
++		}
+ 	}
+-
+-	// Check if ATA is enabled for this project
+-	typeAcquisition := p.GetTypeAcquisition()
+-	if typeAcquisition == nil || !typeAcquisition.Enable.IsTrue() {
++	if len(typingsFiles) == 0 && len(p.apiRootFiles) == 0 {
+ 		return p.CommandLine
+ 	}
+ 
+ 	p.commandLineWithTypingsFilesOnce.Do(func() {
+ 		if p.commandLineWithTypingsFiles == nil {
+-			// Create an augmented command line that includes typing files
+-			originalRootNames := p.CommandLine.FileNames()
+-			newRootNames := make([]string, 0, len(originalRootNames)+len(p.typingsFiles))
+-			newRootNames = append(newRootNames, originalRootNames...)
+-			newRootNames = append(newRootNames, p.typingsFiles...)
+-
+-			// Create a new ParsedCommandLine with the augmented root file names
+-			p.commandLineWithTypingsFiles = tsoptions.NewParsedCommandLine(
+-				p.CommandLine.CompilerOptions(),
+-				newRootNames,
+-				tspath.ComparePathsOptions{
+-					UseCaseSensitiveFileNames: p.host.FS().UseCaseSensitiveFileNames(),
+-					CurrentDirectory:          p.currentDirectory,
+-				},
+-			)
++			extraRootNames := make([]string, 0, len(typingsFiles)+len(p.apiRootFiles))
++			extraRootNames = append(extraRootNames, typingsFiles...)
++			extraRootNames = append(extraRootNames, p.apiRootFiles...)
++			// Clone preserving config metadata (ConfigFile, project references,
++			// extra file extensions) so the augmented program behaves like the
++			// original apart from the added roots.
++			p.commandLineWithTypingsFiles = p.CommandLine.WithAppendedFileNames(extraRootNames)
+ 		}
+ 	})
+ 	return p.commandLineWithTypingsFiles
+ }
+ 
++// setAPIRootFiles replaces the API-added root file set and invalidates the
++// memoized augmented command line so the next program update rebuilds with the
++// new roots. Must be called within a dirty entry Change().
++func (p *Project) setAPIRootFiles(fileNames []string) {
++	p.apiRootFiles = fileNames
++	p.commandLineWithTypingsFiles = nil
++	p.commandLineWithTypingsFilesOnce = sync.Once{}
++	p.dirty = true
++	p.dirtyFilePath = ""
++}
++
+ func (p *Project) setPotentialProjectReference(configFilePath tspath.Path) {
+ 	if p.potentialProjectReferences == nil {
+ 		p.potentialProjectReferences = &collections.Set[tspath.Path]{}
 diff --git a/internal/project/projectcollectionbuilder.go b/internal/project/projectcollectionbuilder.go
-index 4096e30f3..0a16d434c 100644
+index 4096e30f3..e557170ae 100644
 --- a/internal/project/projectcollectionbuilder.go
 +++ b/internal/project/projectcollectionbuilder.go
 @@ -62,6 +62,7 @@ func newProjectCollectionBuilder(
@@ -1780,16 +1890,82 @@ index 4096e30f3..0a16d434c 100644
  		newSnapshotID:                      newSnapshotID,
  		configuredProjects:                 dirty.NewSyncMap(oldProjectCollection.configuredProjects),
  		inferredProject:                    dirty.NewBox(oldProjectCollection.inferredProject),
-@@ -251,7 +252,7 @@ func (b *ProjectCollectionBuilder) HandleAPIRequest(apiRequest *APISnapshotReque
+@@ -212,6 +213,14 @@ func (b *ProjectCollectionBuilder) HandleAPIRequest(apiRequest *APISnapshotReque
+ 		}
+ 	}
+ 
++	// Fork-added: mirror API hosts whose script file list extends the tsconfig
++	// root set. An API-opened file whose nearest config project (also API-opened)
++	// does not include it — e.g. component.tsx shadowed by component.ts through
++	// wildcard extension priority — is added as an extra root of that project,
++	// matching the client LanguageService whose getScriptFileNames() defines the
++	// program roots. LSP-driven projects are unaffected (apiState is API-only).
++	b.updateAPIRootFiles(logger)
++
+ 	for _, overlay := range b.fs.overlays {
+ 		if entry := b.findDefaultConfiguredProject(overlay.FileName(), b.toPath(overlay.FileName())); entry != nil {
+ 			delete(projectsToClose, entry.Value().configFilePath)
+@@ -250,8 +259,58 @@ func (b *ProjectCollectionBuilder) HandleAPIRequest(apiRequest *APISnapshotReque
+ 	return nil
  }
  
++// updateAPIRootFiles computes, for each API-opened configured project, the set
++// of API-opened files that should be added as extra program roots because the
++// tsconfig's file list misses them, and rebuilds programs whose set changed.
++// A file qualifies when its nearest config file is an API-opened project with a
++// non-empty root set (solution-style configs are skipped) and the project's
++// program does not already contain it. Previously added roots are kept while
++// the file stays API-open so the set is stable across snapshots; closing the
++// file removes it.
++func (b *ProjectCollectionBuilder) updateAPIRootFiles(logger *logging.LogTree) {
++	desired := make(map[tspath.Path][]string)
++	if len(b.apiState.openProjects) > 0 {
++		for path, file := range b.apiState.openFiles {
++			configFileName := b.configFileRegistryBuilder.getConfigFileNameForFile(file.fileName, path, logger)
++			if configFileName == "" {
++				continue
++			}
++			configPath := b.toPath(configFileName)
++			if _, isAPIOpen := b.apiState.openProjects[configPath]; !isAPIOpen {
++				continue
++			}
++			entry, ok := b.configuredProjects.Load(configPath)
++			if !ok || entry.Value() == nil {
++				continue
++			}
++			project := entry.Value()
++			if project.CommandLine == nil || len(project.CommandLine.FileNames()) == 0 {
++				continue
++			}
++			if slices.Contains(project.apiRootFiles, file.fileName) || !project.containsFile(path) {
++				desired[configPath] = append(desired[configPath], file.fileName)
++			}
++		}
++	}
++	b.configuredProjects.Range(func(entry *dirty.SyncMapEntry[tspath.Path, *Project]) bool {
++		want := desired[entry.Key()]
++		slices.Sort(want)
++		if slices.Equal(entry.Value().apiRootFiles, want) {
++			return true
++		}
++		if logger != nil {
++			logger.Logf("Updating API root files for project %s: %v", entry.Key(), want)
++		}
++		entry.Change(func(p *Project) {
++			p.setAPIRootFiles(want)
++		})
++		b.updateProgram(entry, logger)
++		return true
++	})
++}
++
  func (b *ProjectCollectionBuilder) DidChangeFiles(summary FileChangeSummary, logger *logging.LogTree) {
 -	b.openFilesChanged = b.openFilesChanged || summary.Opened != "" || summary.Closed.Len() > 0
 +	b.openFilesChanged = b.openFilesChanged || summary.Opened.Len() > 0 || summary.Closed.Len() > 0
  
  	changedFiles := make([]tspath.Path, 0, summary.Changed.Len())
  	for uri := range summary.Changed.Keys() {
-@@ -319,9 +320,17 @@ func (b *ProjectCollectionBuilder) DidChangeFiles(summary FileChangeSummary, log
+@@ -319,9 +378,17 @@ func (b *ProjectCollectionBuilder) DidChangeFiles(summary FileChangeSummary, log
  		return true
  	})
  
@@ -1810,7 +1986,7 @@ index 4096e30f3..0a16d434c 100644
  		path := b.toPath(fileName)
  		openFileResult := b.ensureConfiguredProjectAndAncestorsForFile(fileName, path, logger)
  		b.cleanupConfiguredProjects(&openFileResult.retain, logger)
-@@ -1135,7 +1144,11 @@ func (b *ProjectCollectionBuilder) updateProgram(entry dirty.Value[*Project], lo
+@@ -1135,7 +1202,11 @@ func (b *ProjectCollectionBuilder) updateProgram(entry dirty.Value[*Project], lo
  				project.host = newCompilerHost(project.currentDirectory, project, b, logger.Fork("CompilerHost"))
  				result := project.CreateProgram()
  				project.Program = result.Program
@@ -1945,7 +2121,7 @@ index b8629b15d..abc42a7c3 100644
  		}
  	}
 diff --git a/internal/tsoptions/parsedcommandline.go b/internal/tsoptions/parsedcommandline.go
-index ab93e527f..b25a5fcc9 100644
+index ab93e527f..a36bceaf4 100644
 --- a/internal/tsoptions/parsedcommandline.go
 +++ b/internal/tsoptions/parsedcommandline.go
 @@ -89,6 +89,31 @@ func (p *ParsedCommandLine) ConfigName() string {
@@ -1980,6 +2156,38 @@ index ab93e527f..b25a5fcc9 100644
  func (p *ParsedCommandLine) SourceToProjectReference() map[tspath.Path]*SourceOutputAndProjectReference {
  	return p.sourceToProjectReference
  }
+@@ -390,6 +415,31 @@ func (p *ParsedCommandLine) GetMatchedIncludeSpec(fileName string) (string, bool
+ 	return p.ConfigFile.configFileSpecs.getMatchedIncludeSpec(fileName, p.comparePathsOptions), false
+ }
+ 
++// WithAppendedFileNames returns a copy of this command line with extra root file
++// names appended, preserving config metadata (ConfigFile, project references,
++// extra file extensions, literal file names). Fork-added: used by the project
++// layer to mirror API hosts whose script file list extends the tsconfig root set
++// (e.g. a .tsx root shadowed by a same-name .ts via wildcard extension priority).
++func (p *ParsedCommandLine) WithAppendedFileNames(extraFileNames []string) *ParsedCommandLine {
++	parsedConfig := *p.ParsedConfig
++	fileNames := make([]string, 0, len(p.ParsedConfig.FileNames)+len(extraFileNames))
++	fileNames = append(fileNames, p.ParsedConfig.FileNames...)
++	fileNames = append(fileNames, extraFileNames...)
++	parsedConfig.FileNames = fileNames
++	return &ParsedCommandLine{
++		ParsedConfig:        &parsedConfig,
++		ConfigFile:          p.ConfigFile,
++		Errors:              p.Errors,
++		Raw:                 p.Raw,
++		CompileOnSave:       p.CompileOnSave,
++		comparePathsOptions: p.comparePathsOptions,
++		wildcardDirectories: p.wildcardDirectories,
++		includeGlobs:        p.includeGlobs,
++		extraFileExtensions: p.extraFileExtensions,
++		literalFileNamesLen: p.literalFileNamesLen,
++	}
++}
++
+ func (p *ParsedCommandLine) ReloadFileNamesOfParsedCommandLine(fs vfs.FS) *ParsedCommandLine {
+ 	parsedConfig := *p.ParsedConfig
+ 	fileNames, literalFileNamesLen := getFileNamesFromConfigSpecs(
 diff --git a/internal/tsoptions/tsconfigparsing.go b/internal/tsoptions/tsconfigparsing.go
 index 4f8578275..bc0971d30 100644
 --- a/internal/tsoptions/tsconfigparsing.go
