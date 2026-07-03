@@ -695,7 +695,11 @@ function getHostSymbolsInScope(location: any, meaning: number): any[] {
 function remapDeclarationToHost(decl: any, getHostSf: (fileName: string) => any | undefined): any {
     if (!decl || !declarationNeedsHostRemap(decl)) return decl;
     if (decl.kind === SyntaxKind.SourceFile) {
-        const fileName = decl.fileName;
+        // tsgo module symbols may carry a bare remote SourceFile stub ({ index,
+        // kind, path }) with no own `fileName`; resolve it via getSourceFile()
+        // (or `path`) before remapping, and bail rather than pass undefined on.
+        const fileName = decl.fileName ?? decl.getSourceFile?.()?.fileName ?? decl.path;
+        if (typeof fileName !== "string" || !fileName) return decl;
         return getHostSf(fileName) ?? decl;
     }
     const remoteSf = decl.getSourceFile?.();
