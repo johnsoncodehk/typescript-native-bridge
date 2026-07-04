@@ -1707,6 +1707,23 @@ export function createTsgoProgram(
         return programFileNamesCache.names.has(toHostFileName(fileName));
     };
 
+    // Whole-program diagnostics memo, keyed on the tsgo project object (same
+    // invalidation rule as programFileNamesCache: a snapshot refresh replaces
+    // the project object). A tsgo snapshot is immutable, so these results are
+    // deterministic per project object — this mirrors stock Program semantics,
+    // where diagnostics are stable for the lifetime of a Program instance.
+    //
+    // getGlobalDiagnostics matters most: the tsgo API handler forces a full
+    // semantic pass over the whole program (checker-pool parallel path) on
+    // every call, and the solution builder asks twice per project
+    // (emitFilesAndReportErrors + buildInfo hasSyntaxOrGlobalErrors).
+    // getProgramDiagnostics is called once per source file by the builder's
+    // ensureHasErrorsForState walk (the overlay intentionally surfaces the
+    // whole-program result regardless of the file argument), so one RPC per
+    // project replaces thousands of identical ones.
+    let globalDiagnosticsCache: { proj: any; result: readonly any[] } | undefined;
+    let programDiagnosticsCache: { proj: any; result: readonly any[] } | undefined;
+
     const thinProgram: any = {
         // Marks this as a tsgo-backed program: its SourceFiles come straight from
         // tsgo and are never acquired via the LanguageService document registry.
@@ -1769,7 +1786,14 @@ export function createTsgoProgram(
                 : project?.program?.getSyntacticDiagnostics?.();
             return mapTsgoDiagnostics(raw, getDiagnosticSourceFile);
         },
-        getGlobalDiagnostics: () => mapTsgoDiagnostics(project?.program?.getGlobalDiagnostics?.(), getDiagnosticSourceFile),
+        getGlobalDiagnostics: () => {
+            const proj = project;
+            if (!proj?.program) return [];
+            if (!globalDiagnosticsCache || globalDiagnosticsCache.proj !== proj) {
+                globalDiagnosticsCache = { proj, result: mapTsgoDiagnostics(proj.program.getGlobalDiagnostics?.(), getDiagnosticSourceFile) };
+            }
+            return globalDiagnosticsCache.result;
+        },
         getSuggestionDiagnostics: (sourceFile?: any) => {
             const raw = sourceFile?.fileName
                 ? project?.program?.getSuggestionDiagnostics?.(tsgoFileArg(sourceFile.fileName))
@@ -1795,7 +1819,14 @@ export function createTsgoProgram(
                 ...mapTsgoDiagnostics(semRaw, getDiagnosticSourceFile),
             ];
         },
-        getProgramDiagnostics: () => mapTsgoDiagnostics(project?.program?.getProgramDiagnostics?.(), getDiagnosticSourceFile),
+        getProgramDiagnostics: () => {
+            const proj = project;
+            if (!proj?.program) return [];
+            if (!programDiagnosticsCache || programDiagnosticsCache.proj !== proj) {
+                programDiagnosticsCache = { proj, result: mapTsgoDiagnostics(proj.program.getProgramDiagnostics?.(), getDiagnosticSourceFile) };
+            }
+            return programDiagnosticsCache.result;
+        },
         getMissingFilePaths: () => [],
         getFilesByNameMap: () => new Map(),
         getClassifiableNames: () => new Set(),
