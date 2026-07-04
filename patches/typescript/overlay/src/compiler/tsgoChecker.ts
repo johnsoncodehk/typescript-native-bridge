@@ -147,6 +147,20 @@ function loadBridgeDeps(): void {
     };
 }
 
+/**
+ * True only for symbols materialized from tsgo RPC (native-preview Symbol).
+ * Stock TS SymbolObject also receives a numeric `.id` from getSymbolId during
+ * checker queries (e.g. completion symbol aggregation over globals like
+ * defineProps); those ids are NOT tsgo snapshot-registry handles and must not
+ * be sent over the bridge.
+ */
+function isTsgoBridgeSymbol(symbol: any): boolean {
+    if (!symbol || typeof symbol.id !== "number" || symbol.id === 0) return false;
+    const BridgeSymbol = _sync?.Symbol;
+    if (BridgeSymbol && symbol instanceof BridgeSymbol) return true;
+    return symbol.objectRegistry != null;
+}
+
 // Module-level session pool — one koffi BridgeClient + tsgo API per process,
 // shared across all Programs. Projects are cached per tsconfig path.
 let _client: any;
@@ -553,6 +567,24 @@ function resolveDocDeclaration(decl: any): any | undefined {
 // switch on part.kind still classify it correctly.
 function displayPartsFromDocText(text: string): any[] {
     return text ? [{ kind: "text", text }] : [];
+}
+/** Unescaped display name — uniform over host SymbolObject and bridge Symbol. */
+function symbolDisplayNameOf(symbol: any): string {
+    if (!symbol) return "";
+    const raw = symbol.name ?? symbol.escapedName;
+    if (raw == null) return "";
+    const name = String(raw);
+    return (ts as any).unescapeLeadingUnderscores?.(name) ?? name;
+}
+/** Parent symbol — host symbols hold the object; bridge symbols fetch by handle. */
+function symbolParentOf(symbol: any): any {
+    if (!symbol) return undefined;
+    const parent = symbol.parent;
+    if (parent && typeof parent === "object") return parent;
+    if (parent != null && typeof symbol.getParent === "function") {
+        try { return symbol.getParent(); } catch { return undefined; }
+    }
+    return undefined;
 }
 function isReservedExportMemberName(name: string): boolean {
     return name.length >= 2 && name.charCodeAt(0) === 95 /* _ */ && name.charCodeAt(1) === 95 && name.charCodeAt(2) !== 95;
@@ -2189,7 +2221,7 @@ export function createTsgoChecker(program: any): any {
             }
             return;
         }
-        if (typeof moduleSymbol?.id !== "number" || moduleSymbol.id === 0) return;
+        if (!moduleSymbol) return;
         if (typeof tsgoChecker.getExportsOfModule !== "function") return;
         for (const sym of tsgoChecker.getExportsOfModule(moduleSymbol) ?? []) {
             const key = exportMemberKey(sym);
@@ -2215,7 +2247,7 @@ export function createTsgoChecker(program: any): any {
     function forEachExportAndPropertyOfModuleWorker(moduleSymbol: any, cb: (symbol: any, key: string) => void): void {
         ensureProject();
         const mod = resolveModuleSymbolForExports(moduleSymbol);
-        const tsgoChecker = project.checker;
+        const tsgoChecker = rpc();
         forEachNamedExport(tsgoChecker, mod, cb);
         forEachExportEqualsProperties(tsgoChecker, mod, cb);
     }
@@ -2269,6 +2301,7 @@ export function createTsgoChecker(program: any): any {
         symPrefetched.clear();
         symPrefetchPopulated.clear();
         symMissCountByFile.clear();
+        rpcSymbolCache.clear();
         nodeTypeCache.clear();
         typeOfSymbolCache.clear();
         propertiesCache.clear();
@@ -2377,6 +2410,148 @@ export function createTsgoChecker(program: any): any {
         }
         fileCache.set(cacheKey, result);
         return result;
+    }
+
+    // ── Host↔tsgo symbol RPC boundary ────────────────────────────────
+    // Two kinds of symbols flow through the checker surface:
+    //   1. tsgo bridge symbols (native-preview _sync.Symbol) — their .id is a
+    //      snapshot-registry handle that can cross the bridge.
+    //   2. stock TS SymbolObjects — produced by the JS host's binder for
+    //      host-bound SourceFiles (Volar virtual files, LS navigation) and by
+    //      stock services aggregating symbols during completion. Their .id
+    //      (getSymbolId) is NOT a bridge handle; sending it faults server-side
+    //      ("symbol handle not found in snapshot registry").
+    // Every RPC that can carry a Symbol argument goes through rpc(), a facade
+    // over project.checker that resolves host symbols to their tsgo
+    // counterpart (declaration position → tsgo node → tsgo symbol) before
+    // forwarding. This is the single INBOUND dispatch point; the OUTBOUND
+    // direction (tsgo symbol → host navigation symbol) is refineNavSymbol.
+    // Adapter methods therefore never branch on a symbol's origin.
+
+    /** Host→tsgo resolution memo; cleared with symByPos on overlay refresh. */
+    const rpcSymbolCache = new Map<any, any>();
+
+    function tsgoSymbolForHostDeclaration(decl: any): any {
+        const sf = decl?.getSourceFile?.();
+        if (!sf?.fileName) return undefined;
+        // Anchor on the declaration's name node when present — identifiers sit
+        // at identical offsets in the tsgo AST (host text is the overlay
+        // source of truth for tsgo).
+        const node = decl.kind !== SyntaxKind.SourceFile && decl.name && typeof decl.name.getStart === "function"
+            ? decl.name
+            : decl;
+        let start: number | undefined;
+        let end: number | undefined;
+        try {
+            start = node.getStart(sf);
+            end = node.getEnd(sf);
+        } catch {
+            return undefined;
+        }
+        if (typeof start !== "number") return undefined;
+        const tsgoNode = findTsgoNodeAtPosition(sf.fileName, start, node.kind, end);
+        // findTsgoNodeAtPosition falls back to the innermost node (or the
+        // SourceFile) on a miss; the mapping is only valid when the tsgo node
+        // is the same syntax at the same coordinates.
+        if (!tsgoNode || tsgoNode.kind !== node.kind) return undefined;
+        if (node.kind === SyntaxKind.Identifier || node.kind === SyntaxKind.PrivateIdentifier) {
+            const hostText = node.escapedText ?? node.text;
+            const remoteText = tsgoNode.escapedText ?? tsgoNode.text;
+            if (hostText != null && remoteText != null && String(hostText) !== String(remoteText)) return undefined;
+        }
+        try {
+            return project.checker.getSymbolAtLocation(tsgoNode) ?? undefined;
+        } catch {
+            return undefined;
+        }
+    }
+
+    /**
+     * Resolve any checker-surface symbol to one that can cross the tsgo
+     * bridge. Bridge symbols pass through unchanged; host symbols resolve via
+     * their declaration positions. Returns undefined only when the symbol has
+     * no tsgo counterpart (e.g. declared solely in a host-only virtual file
+     * with no tsgo mirror).
+     */
+    function resolveRpcSymbol(symbol: any): any {
+        if (!symbol) return undefined;
+        if (isTsgoBridgeSymbol(symbol)) return symbol;
+        if (rpcSymbolCache.has(symbol)) return rpcSymbolCache.get(symbol);
+        let resolved: any;
+        const decls = symbol.declarations?.length
+            ? symbol.declarations
+            : symbol.valueDeclaration ? [symbol.valueDeclaration] : [];
+        for (const decl of decls) {
+            resolved = tsgoSymbolForHostDeclaration(decl);
+            if (resolved) break;
+        }
+        rpcSymbolCache.set(symbol, resolved);
+        return resolved;
+    }
+
+    /** A checker Symbol argument (stock SymbolObject or bridge Symbol) — vs Node/Type/Signature. */
+    function isSymbolArg(value: any): boolean {
+        if (!value || typeof value !== "object") return false;
+        if (typeof value.kind === "number") return false; // AST node
+        if (typeof value.escapedName === "string") return true;
+        const BridgeSymbol = _sync?.Symbol;
+        return !!BridgeSymbol && value instanceof BridgeSymbol;
+    }
+
+    const rpcFacadeByChecker = new WeakMap<any, any>();
+    function makeRpcFacade(rawChecker: any): any {
+        const wrappedByProp = new Map<PropertyKey, any>();
+        return new Proxy(rawChecker, {
+            get(target: any, prop: string | symbol) {
+                const cached = wrappedByProp.get(prop);
+                if (cached) return cached;
+                const val = target[prop];
+                if (typeof val !== "function") return val;
+                const fn = (...args: any[]) => {
+                    // original-by-resolved: when the checker echoes a resolved
+                    // symbol back (self-root, non-export= module, …), hand the
+                    // caller its own object so identity comparisons at
+                    // reference sites keep working.
+                    let originalByResolved: Map<any, any> | undefined;
+                    for (let i = 0; i < args.length; i++) {
+                        if (isSymbolArg(args[i])) {
+                            const resolved = resolveRpcSymbol(args[i]);
+                            // A symbol with no tsgo counterpart has no answer
+                            // on this checker; undefined is the RPC "no result".
+                            if (resolved === undefined) return undefined;
+                            if (resolved !== args[i]) {
+                                (originalByResolved ??= new Map()).set(resolved, args[i]);
+                                args[i] = resolved;
+                            }
+                        }
+                    }
+                    const result = val.apply(target, args);
+                    if (!originalByResolved) return result;
+                    if (originalByResolved.has(result)) return originalByResolved.get(result);
+                    if (Array.isArray(result)) {
+                        return result.map(r => originalByResolved!.get(r) ?? r);
+                    }
+                    return result;
+                };
+                wrappedByProp.set(prop, fn);
+                return fn;
+            },
+        });
+    }
+
+    /**
+     * The single RPC-forwarding boundary for symbol-carrying checker calls.
+     * Every adapter (and proxy-forwarded) call that may receive a Symbol
+     * argument MUST go through this facade rather than project.checker.
+     */
+    function rpc(): any {
+        const raw = project.checker;
+        let facade = rpcFacadeByChecker.get(raw);
+        if (!facade) {
+            facade = makeRpcFacade(raw);
+            rpcFacadeByChecker.set(raw, facade);
+        }
+        return facade;
     }
 
     // ── Type / Symbol prototype patches ──────────────────────────────
@@ -2626,6 +2801,20 @@ export function createTsgoChecker(program: any): any {
         if (!proto.getDeclarations) proto.getDeclarations = function () { return this.declarations; };
         if (!Object.getOwnPropertyDescriptor(proto, "escapedName")) {
             Object.defineProperty(proto, "escapedName", { configurable: true, get() { return this.name; } });
+        }
+        // Stock TransientSymbol carries `links.checkFlags`; getCheckFlags reads
+        // it whenever SymbolFlags.Transient is set. tsgo symbols expose raw
+        // `checkFlags` (bit layout audited identical) but no `links` object, so
+        // a Transient-flagged tsgo symbol flowing into stock services
+        // (find-all-refs fromRoot, SymbolDisplay getSymbolKind) would crash on
+        // `links.checkFlags`. Satisfy the contract at the prototype.
+        if (!Object.getOwnPropertyDescriptor(proto, "links")) {
+            Object.defineProperty(proto, "links", {
+                configurable: true,
+                get() {
+                    return this.__tnbLinks ??= { checkFlags: this.checkFlags ?? 0 };
+                },
+            });
         }
         // tsgo Symbol.getDocumentationComment returns plain text from RPC; stock TS
         // and vue-component-meta expect SymbolDisplayPart[] via displayPartsToString.
@@ -3007,16 +3196,14 @@ export function createTsgoChecker(program: any): any {
             if (!sf) return undefined;
             const tsgoNode = findTsgoNodeAtPosition(sf.fileName, location.getStart(sf), location.kind, location.getEnd(sf));
             if (tsgoNode) {
-                const t = project.checker.getTypeOfSymbolAtLocation(symbol, tsgoNode);
-                if (t) fixupType(t);
-                return t;
+                const t = rpc().getTypeOfSymbolAtLocation(symbol, tsgoNode);
+                if (t) { fixupType(t); return t; }
             }
             // Auto-import completion entries may query export symbols at virtual-doc
-            // locations where the host AST node has no tsgo mirror yet.
-            // Require a real tsgo handle (id > 0): host-bound symbols have id 0/undefined
-            // and would fault server-side with "empty symbol handle".
-            if (typeof symbol?.id === "number" && symbol.id > 0 && typeof project.checker.getTypeOfSymbol === "function") {
-                const t = project.checker.getTypeOfSymbol(symbol);
+            // locations where the host AST node has no tsgo mirror yet — fall back
+            // to the location-independent type.
+            if (typeof project.checker.getTypeOfSymbol === "function") {
+                const t = rpc().getTypeOfSymbol(symbol);
                 if (t) fixupType(t);
                 return t;
             }
@@ -3052,7 +3239,7 @@ export function createTsgoChecker(program: any): any {
             if (!symbol) return undefined;
             ensureProject();
             return memoGet(typeOfSymbolCache, symbol, () => {
-                const t = project.checker.getTypeOfSymbol(symbol);
+                const t = rpc().getTypeOfSymbol(symbol);
                 if (t) fixupType(t);
                 return t;
             });
@@ -3060,7 +3247,7 @@ export function createTsgoChecker(program: any): any {
         getDeclaredTypeOfSymbol(symbol: any): any {
             if (!symbol) return undefined;
             ensureProject();
-            const t = project.checker.getDeclaredTypeOfSymbol(symbol);
+            const t = rpc().getDeclaredTypeOfSymbol(symbol);
             if (t) fixupType(t);
             return t;
         },
@@ -3071,21 +3258,42 @@ export function createTsgoChecker(program: any): any {
             ensureProject();
             return project.checker.typeToString(type, undefined, flags);
         },
+        // tsgo has no symbolToString/getFullyQualifiedName RPC. Stock semantics
+        // for the common LS consumers (renameInfo displayName/fullDisplayName,
+        // definition names) reduce to the unescaped symbol name qualified by
+        // the parent chain — both symbol kinds (host SymbolObject and bridge
+        // Symbol) carry name/parent, so this is served uniformly in JS.
+        symbolToString(symbol: any): string {
+            return symbolDisplayNameOf(symbol);
+        },
+        getFullyQualifiedName(symbol: any): string {
+            let name = symbolDisplayNameOf(symbol);
+            const seen = new Set<any>();
+            let parent = symbolParentOf(symbol);
+            while (parent && !seen.has(parent)) {
+                seen.add(parent);
+                const parentName = symbolDisplayNameOf(parent);
+                if (!parentName) break;
+                name = `${parentName}.${name}`;
+                parent = symbolParentOf(parent);
+            }
+            return name;
+        },
         getDocumentationCommentOfSymbol(symbol: any): string {
-            if (!symbol || typeof symbol.id !== "number" || symbol.id === 0) return "";
+            if (!symbol) return "";
             ensureProject();
             try {
-                return project.checker.getDocumentationCommentOfSymbol(symbol) ?? "";
+                return rpc().getDocumentationCommentOfSymbol(symbol) ?? "";
             }
             catch {
                 return "";
             }
         },
         getJsDocTagsOfSymbol(symbol: any): readonly any[] {
-            if (!symbol || typeof symbol.id !== "number" || symbol.id === 0) return [];
+            if (!symbol) return [];
             ensureProject();
             try {
-                const tags = project.checker.getJsDocTagsOfSymbol(symbol) ?? [];
+                const tags = rpc().getJsDocTagsOfSymbol(symbol) ?? [];
                 // tsgo's JSDocTagInfo renders `text` as a plain string; stock TS uses
                 // SymbolDisplayPart[]. Consumers (displayPartsToString, tsserver
                 // protocol mapping) iterate the parts, so a raw string silently
@@ -3198,14 +3406,11 @@ export function createTsgoChecker(program: any): any {
             if (resolvedExports.length) {
                 return resolvedExports;
             }
-            if (typeof mod?.id === "number" && mod.id !== 0) {
-                try {
-                    return project.checker.getExportsOfModule(mod) ?? [];
-                } catch {
-                    return [];
-                }
+            try {
+                return rpc().getExportsOfModule(mod) ?? [];
+            } catch {
+                return [];
             }
-            return [];
         },
 
         // ── Diagnostics — empty for PoC ──
@@ -3256,12 +3461,9 @@ export function createTsgoChecker(program: any): any {
             if (!(symbol.flags & SF.Alias)) {
                 return refineNavSymbol(symbol);
             }
-            if (typeof symbol.id !== "number") {
-                return refineNavSymbol(resolveHostAliasedSymbol(symbol));
-            }
             try {
                 return refineNavSymbol(
-                    resolveHostAliasedSymbol(project.checker.getAliasedSymbol(symbol) ?? symbol),
+                    resolveHostAliasedSymbol(rpc().getAliasedSymbol(symbol) ?? resolveHostAliasedSymbol(symbol)),
                 );
             } catch {
                 return refineNavSymbol(resolveHostAliasedSymbol(symbol));
@@ -3272,16 +3474,12 @@ export function createTsgoChecker(program: any): any {
             if (!symbol) return symbol;
             const SF = sync.SymbolFlags;
             if (!(symbol.flags & SF.Alias)) return refineNavSymbol(symbol);
-            if (typeof symbol.id !== "number") {
-                const target = symbol.target;
-                return refineNavSymbol(target && target !== symbol ? target : symbol);
-            }
             try {
-                return refineNavSymbol(project.checker.getImmediateAliasedSymbol(symbol) ?? symbol);
-            } catch {
-                const target = symbol.target;
-                return refineNavSymbol(target && target !== symbol ? target : symbol);
-            }
+                const target = rpc().getImmediateAliasedSymbol(symbol);
+                if (target) return refineNavSymbol(target);
+            } catch { /* fall through to host binder target */ }
+            const target = symbol.target;
+            return refineNavSymbol(target && target !== symbol ? target : symbol);
         },
         tryGetMemberInModuleExports(memberName: any, moduleSymbol: any): any {
             if (moduleSymbol?.exports) {
@@ -3290,34 +3488,34 @@ export function createTsgoChecker(program: any): any {
             }
             ensureProject();
             try {
-                return refineNavSymbol(project.checker.tryGetMemberInModuleExports(memberName, moduleSymbol));
+                return refineNavSymbol(rpc().tryGetMemberInModuleExports(memberName, moduleSymbol));
             } catch { return undefined; }
         },
         resolveExternalModuleSymbol(moduleSymbol: any): any {
             ensureProject();
             if (moduleSymbol?.exports) {
                 try {
-                    const resolved = project.checker.resolveExternalModuleSymbol(moduleSymbol);
+                    const resolved = rpc().resolveExternalModuleSymbol(moduleSymbol);
                     if (resolved) return refineNavSymbol(resolved);
                 } catch { /* host-bound module */ }
                 return refineNavSymbol(moduleSymbol);
             }
             try {
-                return refineNavSymbol(project.checker.resolveExternalModuleSymbol(moduleSymbol) ?? moduleSymbol);
+                return refineNavSymbol(rpc().resolveExternalModuleSymbol(moduleSymbol) ?? moduleSymbol);
             } catch { return refineNavSymbol(moduleSymbol); }
         },
         // Merging is a TS-specific concern; tsgo symbols are already merged.
         getMergedSymbol: (s: any) => s,
         getRootSymbols(symbol: any): any[] {
             if (!symbol) return [];
-            // Host-binder symbols (Volar virtual files) have no tsgo handle; they
-            // are their own roots.
-            if (typeof symbol.id !== "number" || symbol.id === 0) {
-                return [refineNavSymbol(symbol)];
-            }
             ensureProject();
-            const roots = project.checker.getRootSymbols(symbol) ?? [];
-            return (roots.length ? roots : [symbol]).map(refineNavSymbol);
+            // rpc() maps a resolved echo back to the caller's own symbol, so an
+            // ordinary symbol (host or tsgo) stays its own root by identity.
+            let roots: readonly any[] | undefined;
+            try {
+                roots = rpc().getRootSymbols(symbol);
+            } catch { /* unresolvable → own root */ }
+            return (roots?.length ? [...roots] : [symbol]).map(refineNavSymbol);
         },
         getDefinitionSpanForDeclaration(declaration: any): { start: number; length: number } | undefined {
             return tnbHostExportDefinitionTextSpan(declaration);
@@ -3395,7 +3593,9 @@ export function createTsgoChecker(program: any): any {
             if (typeof prop !== "string") return undefined;
             ensureProject();
             if (typeof project.checker[prop] === "function") {
-                return wrapCheckerCall(project.checker[prop].bind(project.checker));
+                // Forward through the rpc() facade so symbol arguments are
+                // resolved at the single host↔tsgo boundary.
+                return wrapCheckerCall(rpc()[prop]);
             }
             // Unknown method — return a no-op so `checker.foo()` doesn't throw.
             // Most callers feature-detect or iterate; returning undefined from
