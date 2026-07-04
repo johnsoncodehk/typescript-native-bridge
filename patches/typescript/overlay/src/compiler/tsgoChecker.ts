@@ -78,10 +78,41 @@ function getProgramContext(program: object): TnbProgramContext | undefined {
     return _programContextByProgram.get(program);
 }
 
-// ── Module-level bridge deps (shared across all createTsgoChecker calls) ──
-// koffi.struct() registers type names globally, so the struct definition must
-// happen exactly once even when multiple Program instances each create a tsgo
-// checker.
+// ── Bridge deps (process-global — lib/typescript.js and lib/_tsc.js each bundle
+// their own copy of this module, but koffi.struct() names are process-global) ──
+const TNB_BRIDGE_STATE_KEY = Symbol.for("typescript-native-bridge.bridgeState");
+
+type TnbBridgeProcessState = {
+    koffi?: any;
+    sync?: any;
+    bridgeFns?: any;
+    client?: any;
+    api?: any;
+    sourceFileCache?: any;
+    useCaseSensitive?: boolean;
+    version?: string;
+    debugAnnounced?: boolean;
+    /** tsgo Project per resolved tsconfig path. Projects are snapshots of the
+     * process-wide bridge session, so a per-bundle cache would let the two
+     * bundles hold diverging Project snapshots for the same tsconfig. */
+    projectCache?: Map<string, any>;
+    /** Routing target for the NodeHandle/Symbol/Signature prototype hooks.
+     * The native-preview prototypes are process-global (shared require cache),
+     * so the project ref those hooks consult must be process-global too. */
+    currentProjectRef?: { project: any };
+    /** RemoteNode prototype kind getters are wrapped exactly once per process —
+     * a second wrap would remap SyntaxKind values twice. */
+    kindRemapApplied?: boolean;
+    /** Host text last pushed to the (process-wide) tsgo session per file. */
+    syncedOverlayContentByFile?: Map<string, string>;
+};
+
+function tnbBridgeProcessState(): TnbBridgeProcessState {
+    const g = globalThis as any;
+    if (!g[TNB_BRIDGE_STATE_KEY]) g[TNB_BRIDGE_STATE_KEY] = {};
+    return g[TNB_BRIDGE_STATE_KEY];
+}
+
 let _koffi: any;
 let _sync: any;
 let _bridgeFns: any;
@@ -103,8 +134,33 @@ function getNativePreviewDir(): string {
     return dir;
 }
 
+/**
+ * Adopt the process-global bridge instances into this bundle's module locals.
+ * lib/typescript.js and lib/_tsc.js each carry a copy of this module; whichever
+ * copy initializes the bridge first owns the canonical koffi/sync/client, and
+ * every other copy must adopt ALL of them — a partial copy leaves _koffi/_sync/
+ * _bridgeFns undefined in the second bundle, breaking patchSymbolProto,
+ * instanceof checks, and koffi.decode.
+ */
+function hydrateBridgeModuleLocals(proc: TnbBridgeProcessState): void {
+    _koffi = proc.koffi;
+    _sync = proc.sync;
+    _bridgeFns = proc.bridgeFns;
+    if (!proc.client) return;
+    _client = proc.client;
+    _api = proc.api;
+    _sourceFileCache = proc.sourceFileCache;
+    _tsgoUseCaseSensitive = proc.useCaseSensitive!;
+    _tsgoVersion = proc.version;
+    if (proc.debugAnnounced) _tnbDebugAnnounced = true;
+}
+
 function loadBridgeDeps(): void {
-    if (_koffi) return;
+    const proc = tnbBridgeProcessState();
+    if (proc.koffi) {
+        hydrateBridgeModuleLocals(proc);
+        return;
+    }
     const path = require("path") as typeof import("path");
     const fs = require("fs") as typeof import("fs");
     _koffi = require("koffi");
@@ -145,6 +201,9 @@ function loadBridgeDeps(): void {
         BridgeBinary: _koffi.struct("BridgeBinary", { data: "void *", len: "int64_t" }),
         BridgeCallBinary: lib.func("BridgeBinary BridgeCallBinary(int64_t session, char *method, char *paramsJson)"),
     };
+    proc.koffi = _koffi;
+    proc.sync = _sync;
+    proc.bridgeFns = _bridgeFns;
 }
 
 /**
@@ -166,7 +225,9 @@ function isTsgoBridgeSymbol(symbol: any): boolean {
 let _client: any;
 let _api: any;
 let _sourceFileCache: any;
-const _projectCache = new Map<string, any>();
+// Process-global (see TnbBridgeProcessState.projectCache) — both bundles must
+// see the same Project snapshot per tsconfig.
+const _projectCache: Map<string, any> = tnbBridgeProcessState().projectCache ??= new Map();
 
 function toCStr(s: string): Buffer {
     return Buffer.from(s + "\0", "utf8");
@@ -266,13 +327,18 @@ class MiniSourceFileCache {
  * with this rule. Must run before any SourceFile path is canonicalized.
  */
 function ensureBridgeSession(): void {
-    if (_client) return;
+    const proc = tnbBridgeProcessState();
+    if (proc.client) {
+        hydrateBridgeModuleLocals(proc);
+        return;
+    }
     loadBridgeDeps();
     const cwd = process.cwd();
     _client = new BridgeClient(cwd);
     const init = _client.apiRequest("initialize", null) || {};
     if (!_tnbDebugAnnounced) {
         _tnbDebugAnnounced = true;
+        proc.debugAnnounced = true;
         const tty = !!(process.stderr as any).isTTY;
         const c = tty ? "\u001b[32m" : "";
         const off = tty ? "\u001b[0m" : "";
@@ -305,6 +371,11 @@ function ensureBridgeSession(): void {
             _sourceFileCache.clear();
         },
     };
+    proc.client = _client;
+    proc.api = _api;
+    proc.sourceFileCache = _sourceFileCache;
+    proc.useCaseSensitive = _tsgoUseCaseSensitive;
+    proc.version = _tsgoVersion;
 }
 
 // One-shot banner, printed the first time the tsgo bridge is engaged, so users
@@ -348,8 +419,9 @@ function hostForOverlaySync(): any {
 
 /** Active checker query depth — skip updateSnapshot while > 0 (avoids LS reentrancy). */
 let _checkerQueryDepth = 0;
-/** Host text last pushed to tsgo per file — skip redundant updateSnapshot. */
-const _syncedOverlayContentByFile = new Map<string, string>();
+/** Host text last pushed to tsgo per file — skip redundant updateSnapshot.
+ * Process-global: it mirrors the shared tsgo session's overlay state. */
+const _syncedOverlayContentByFile: Map<string, string> = tnbBridgeProcessState().syncedOverlayContentByFile ??= new Map();
 
 // Overlay-path cache: only files missing on disk are fed to tsgo as overlays
 // (typically Volar virtual documents).
@@ -382,8 +454,10 @@ export function tnbGetTsgoBuildInfoVersion(): string | undefined {
 }
 // Refs set by ensureProject so NodeHandle prototype hooks can route to the
 // currently-active project (scope manager reads `declaration.getSourceFile()`
-// on tsgo NodeHandles, which need the project to resolve).
-const _currentProjectRef: { project: any } = { project: undefined };
+// on tsgo NodeHandles, which need the project to resolve). Process-global:
+// the prototype hooks live on shared native-preview prototypes and may have
+// been installed by the other bundle's copy of this module.
+const _currentProjectRef: { project: any } = tnbBridgeProcessState().currentProjectRef ??= { project: undefined };
 
 /** Saved _currentProjectRef.project values during nested checker calls. */
 const _activeProjectStack: any[] = [];
@@ -1235,7 +1309,6 @@ function remapFlagsByPairs(tsgoFlags: number, pairs: ReadonlyArray<readonly [num
 // type-guards compare against fork kind values. The fork has extra kinds that
 // shift later values, so the maps differ by ~200 members — all derived here.
 let _kindRemap: Map<number, number> | undefined;
-let _kindRemapApplied = false;
 
 function buildKindRemap(): Map<number, number> {
     const tsgo = loadTsgoEnums();
@@ -1301,8 +1374,12 @@ function remapObjectFlags(tsgoFlags: number): number {
 }
 
 function patchRemoteNodeKinds(sampleNode: any): void {
-    if (_kindRemapApplied) return;
-    _kindRemapApplied = true;
+    // Process-global flag: the RemoteNode prototypes are shared across bundles
+    // (same require cache), so a second bundle re-wrapping the kind getters
+    // would remap SyntaxKind values twice.
+    const proc = tnbBridgeProcessState();
+    if (proc.kindRemapApplied) return;
+    proc.kindRemapApplied = true;
     _kindRemap = buildKindRemap();
     if (_kindRemap.size === 0 || !sampleNode) return;
 
@@ -2119,15 +2196,19 @@ export function createTsgoChecker(program: any): any {
     function ensureProject(): any {
         if (project) return project;
 
-        // Return cached project for this tsconfig if already created.
+        // Return cached project for this tsconfig if already created. The cache
+        // is process-global, so the project may have been created by the other
+        // bundle's copy of this module — hydrate this bundle's locals first.
         const cached = _projectCache.get(configFilePath!);
         if (cached) {
+            ensureBridgeSession();
             project = cached;
             koffi = _koffi; sync = _sync; bridgeFns = _bridgeFns;
             _currentProjectRef.project = project;
             patchSymbolProto(sync);
             patchSignatureProto(sync);
             installNodeHandleHooks(sync);
+            installTsgoBackedSourceFileLoader(() => project);
             return project;
         }
 
