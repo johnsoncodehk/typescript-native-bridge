@@ -1900,12 +1900,14 @@ export function createTsgoProgram(
             const res = project?.program?.emitBuildInfo?.({ build: !!(options as any).tscBuild });
             const outputs = res?.outputFiles ?? [];
             const write = typeof writeFile === "function" ? writeFile : host?.writeFile?.bind(host);
-            const emittedFiles: string[] = [];
+            // Match stock emitter.ts: only track emittedFiles when listEmittedFiles is set;
+            // watch.ts logs TSFILE from this array, so leaving it undefined avoids spurious output.
+            const emittedFiles: string[] | undefined = options.listEmittedFiles ? [] : undefined;
             for (const o of outputs) {
                 let buildInfo: any;
                 try { buildInfo = JSON.parse(o.text); } catch { /* write text regardless */ }
                 if (write) write(o.fileName, o.text, !!o.writeByteOrderMark, undefined, undefined, buildInfo !== undefined ? { buildInfo } : undefined);
-                emittedFiles.push(o.fileName);
+                emittedFiles?.push(o.fileName);
             }
             return {
                 emitSkipped: res?.emitSkipped ?? true,
