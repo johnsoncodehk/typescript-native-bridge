@@ -1863,7 +1863,7 @@ export function createTsgoProgram(
             // tsgo parses options from the tsconfig on disk and may not see the CLI
             // flag, so gate here on the JS-side compiler options.
             if (options.noEmit && !forceDtsEmit) {
-                return { emitSkipped: true, diagnostics: [], emittedFiles: [], sourceMaps: [] };
+                return { emitSkipped: true, diagnostics: [], emittedFiles: undefined, sourceMaps: undefined };
             }
             // DocumentIdentifier wire format is plain path string or { uri }, not { fileName }.
             const file = targetSourceFile?.fileName ? tsgoFileArg(targetSourceFile.fileName) : undefined;
@@ -1871,11 +1871,12 @@ export function createTsgoProgram(
             const res = project?.program?.emit?.({ file, emitOnly, forceDtsEmit: !!forceDtsEmit });
             const outputs = res?.outputFiles ?? [];
             const write = typeof writeFile === "function" ? writeFile : host?.writeFile?.bind(host);
-            const emittedFiles: string[] = [];
+            // Match stock emitter.ts — see emitBuildInfo comment above.
+            const emittedFiles: string[] | undefined = options.listEmittedFiles ? [] : undefined;
             const sourceFiles = targetSourceFile ? [targetSourceFile] : undefined;
             for (const o of outputs) {
                 if (write) write(o.fileName, o.text, !!o.writeByteOrderMark, undefined, sourceFiles);
-                emittedFiles.push(o.fileName);
+                emittedFiles?.push(o.fileName);
             }
             return {
                 emitSkipped: res?.emitSkipped ?? false,
