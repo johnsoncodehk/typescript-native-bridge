@@ -666,12 +666,20 @@ function resolveDocDeclaration(decl: any): any | undefined {
 function displayPartsFromDocText(text: string): any[] {
     return text ? [{ kind: "text", text }] : [];
 }
+/** Map tsgo internal symbol markers to stock display names (ast.EscapeAllInternalSymbolNames). */
+function unescapeTsgoSymbolName(name: string): string {
+    if (name.length === 0) return name;
+    const lead = name.charCodeAt(0);
+    // tsgo prefixes internal symbols with lone 0xFE; bridge UTF-8 may surface it as U+FFFD.
+    if (lead === 0x00FE || lead === 0xFFFD) return "__" + name.slice(1);
+    return name;
+}
 /** Unescaped display name — uniform over host SymbolObject and bridge Symbol. */
 function symbolDisplayNameOf(symbol: any): string {
     if (!symbol) return "";
     const raw = symbol.name ?? symbol.escapedName;
     if (raw == null) return "";
-    const name = String(raw);
+    const name = unescapeTsgoSymbolName(String(raw));
     return (ts as any).unescapeLeadingUnderscores?.(name) ?? name;
 }
 /** Parent symbol — host symbols hold the object; bridge symbols fetch by handle. */
