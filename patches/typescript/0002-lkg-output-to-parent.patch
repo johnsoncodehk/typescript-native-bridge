@@ -1,5 +1,5 @@
 diff --git a/scripts/produceLKG.mjs b/scripts/produceLKG.mjs
-index 4209a2b9b..c28187eee 100644
+index 4209a2b9b..1573bb044 100644
 --- a/scripts/produceLKG.mjs
 +++ b/scripts/produceLKG.mjs
 @@ -10,7 +10,7 @@ const __dirname = path.dirname(__filename);
@@ -11,3 +11,19 @@ index 4209a2b9b..c28187eee 100644
  
  async function produceLKG() {
      console.log(`Building LKG from ${source} to ${dest}`);
+@@ -73,6 +73,15 @@ async function writeGitAttributes() {
+  */
+ async function copyFromBuiltLocal(fileName) {
+     await fs.promises.copyFile(path.join(source, fileName), path.join(dest, fileName));
++    // esbuild emits sibling .map files; Vite SSR follows //# sourceMappingURL and
++    // errors when the map is missing from lib/.
++    if (fileName.endsWith(".js")) {
++        const mapName = `${fileName}.map`;
++        const mapPath = path.join(source, mapName);
++        if (fs.existsSync(mapPath)) {
++            await fs.promises.copyFile(mapPath, path.join(dest, mapName));
++        }
++    }
+ }
+ 
+ /**
