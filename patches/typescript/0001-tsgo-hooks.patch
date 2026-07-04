@@ -78,6 +78,50 @@ index b44a155f0..c631f17df 100644
      }
  
      function emit(
+diff --git a/src/compiler/tsbuildPublic.ts b/src/compiler/tsbuildPublic.ts
+index 04ca4db0f..e1ed32c9e 100644
+--- a/src/compiler/tsbuildPublic.ts
++++ b/src/compiler/tsbuildPublic.ts
+@@ -112,6 +112,7 @@ import {
+     Status,
+     sys,
+     System,
++    tnbGetTsgoBuildInfoVersion,
+     toPath as ts_toPath,
+     TypeReferenceDirectiveResolutionCache,
+     unorderedRemoveItem,
+@@ -1537,17 +1538,27 @@ function getUpToDateStatusWorker<T extends BuilderProgram>(state: SolutionBuilde
+         };
+     }
+     const incrementalBuildInfo = isIncremental && isIncrementalBuildInfo(buildInfo) ? buildInfo : undefined;
+-    if ((incrementalBuildInfo || !isIncremental) && buildInfo.version !== version) {
++    // On this fork .tsbuildinfo is produced by the tsgo bridge and stamped with
++    // the tsgo engine version, so currency is checked against the engine that
++    // wrote it (tsgo also re-validates the version itself when reading the
++    // buildinfo back for incremental state reuse).
++    if ((incrementalBuildInfo || !isIncremental) && buildInfo.version !== version && buildInfo.version !== tnbGetTsgoBuildInfoVersion()) {
+         return {
+             type: UpToDateStatusType.TsVersionOutputOfDate,
+             version: buildInfo.version,
+         };
+     }
+ 
++    // On this fork the buildinfo is produced by tsgo, which records semantic
++    // errors of non-incremental projects in a dedicated `semanticErrors` field
++    // (`errors` is reserved for errors reported even under --noCheck). Mirror
++    // tsgo's own build orchestrator check (internal/execute/build/buildtask.go)
++    // so error-bearing projects are rebuilt to re-report their errors.
+     if (
+-        !project.options.noCheck &&
+-        ((buildInfo as IncrementalBuildInfo | NonIncrementalBuildInfo).errors || // TODO: syntax errors????
+-            (buildInfo as IncrementalBuildInfo | NonIncrementalBuildInfo).checkPending)
++        (buildInfo as IncrementalBuildInfo | NonIncrementalBuildInfo).errors || // Errors reported irrespective of --noCheck
++        (!project.options.noCheck &&
++            ((buildInfo as { semanticErrors?: boolean; }).semanticErrors ||
++                (buildInfo as IncrementalBuildInfo | NonIncrementalBuildInfo).checkPending))
+     ) {
+         return {
+             type: UpToDateStatusType.OutOfDateBuildInfoWithErrors,
 diff --git a/src/server/editorServices.ts b/src/server/editorServices.ts
 index aa578c7ed..b8fda3805 100644
 --- a/src/server/editorServices.ts

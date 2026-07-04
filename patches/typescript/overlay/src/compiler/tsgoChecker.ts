@@ -288,6 +288,7 @@ function ensureBridgeSession(): void {
     }
     const useCaseSensitive = !!init.useCaseSensitiveFileNames;
     _tsgoUseCaseSensitive = useCaseSensitive;
+    _tsgoVersion = typeof init.version === "string" && init.version ? init.version : undefined;
     const toPath = (f: string) => useCaseSensitive ? f : f.toLowerCase();
     _sourceFileCache = new MiniSourceFileCache();
     _api = {
@@ -357,6 +358,28 @@ const _overlayDiskExistsCache = new Map<string, boolean>();
 // source, because tsgo keys fileInfos with this rule. ensureBridgeSession() runs
 // at createTsgoProgram entry, before any SourceFile path is canonicalized.
 let _tsgoUseCaseSensitive = true;
+// tsgo engine version from bridge initialize(). .tsbuildinfo files are emitted
+// by tsgo and stamped with this version (not ts.version), so buildinfo
+// currency checks must compare against it.
+let _tsgoVersion: string | undefined;
+
+/**
+ * The version stamped into .tsbuildinfo files produced by the tsgo bridge.
+ * Buildinfo is a tsgo artifact on this fork: tsgo serializes it, and tsgo
+ * validates it on read — so the solution builder's up-to-date version check
+ * must accept the engine's version, not just ts.version. Lazily boots the
+ * bridge session (one-time; a build run creates it anyway).
+ *
+ * @internal
+ */
+export function tnbGetTsgoBuildInfoVersion(): string | undefined {
+    try {
+        ensureBridgeSession();
+    } catch {
+        return undefined;
+    }
+    return _tsgoVersion;
+}
 // Refs set by ensureProject so NodeHandle prototype hooks can route to the
 // currently-active project (scope manager reads `declaration.getSourceFile()`
 // on tsgo NodeHandles, which need the project to resolve).
@@ -1835,9 +1858,6 @@ export function createTsgoProgram(
         // Emit via tsgo: the Go emitter produces the output text, which we write
         // through the caller's writeFile (or the host's) so --noEmit, Volar output
         // redirection, and build-mode writeFile wrapping stay in the host's control.
-        // emitBuildInfo returns a well-formed (skipped) result: the `tsc -b` /
-        // `vue-tsc -b` solution builder reads `.emitSkipped` off it, and the Proxy's
-        // no-op fallback would otherwise yield `undefined` and crash.
         emit: (targetSourceFile?: any, writeFile?: any, _ct?: any, emitOnlyDtsFiles?: boolean, _customTransformers?: any, forceDtsEmit?: boolean) => {
             // Respect --noEmit: never produce output during a type-check-only run.
             // tsgo parses options from the tsconfig on disk and may not see the CLI
@@ -1864,12 +1884,45 @@ export function createTsgoProgram(
                 sourceMaps: [],
             };
         },
-        emitBuildInfo: () => ({ emitSkipped: true, diagnostics: [] }),
+        // Buildinfo via tsgo: the Go side serializes its incremental snapshot
+        // (fileInfos/signatures/diagnostics — never reimplemented in JS) and
+        // returns the .tsbuildinfo text as an output file; we write it through
+        // the caller's writeFile so the `tsc -b` / `vue-tsc -b` solution
+        // builder's writeFile wrapping (buildInfoCache/mtime bookkeeping) sees
+        // it, passing the parsed object as `data.buildInfo` like stock
+        // Program.emitBuildInfo does. Like stock, the write is unconditional
+        // at this layer — the JS builder gates on buildInfoEmitPending.
+        emitBuildInfo: (writeFile?: any, _ct?: any) => {
+            // tscBuild is the solution builder's injected build-mode marker
+            // (tsbuildPublic sets it on every project's options); forward it so
+            // tsgo applies build-mode buildinfo rules for non-incremental
+            // projects, exactly like the CLI --build flag it mirrors.
+            const res = project?.program?.emitBuildInfo?.({ build: !!(options as any).tscBuild });
+            const outputs = res?.outputFiles ?? [];
+            const write = typeof writeFile === "function" ? writeFile : host?.writeFile?.bind(host);
+            const emittedFiles: string[] = [];
+            for (const o of outputs) {
+                let buildInfo: any;
+                try { buildInfo = JSON.parse(o.text); } catch { /* write text regardless */ }
+                if (write) write(o.fileName, o.text, !!o.writeByteOrderMark, undefined, undefined, buildInfo !== undefined ? { buildInfo } : undefined);
+                emittedFiles.push(o.fileName);
+            }
+            return {
+                emitSkipped: res?.emitSkipped ?? true,
+                diagnostics: mapTsgoDiagnostics(res?.diagnostics, getDiagnosticSourceFile),
+                emittedFiles,
+                sourceMaps: [],
+            };
+        },
         isSourceFileFromExternalLibrary: () => false,
         isSourceFileDefaultLibrary: (sf: any) => {
             const fn = sf?.fileName ?? "";
             return fn.includes("/lib.") || fn.includes("/node_modules/");
         },
+        // getBuildInfo is stock-overridden by createBuilderProgram (the JS
+        // builder installs its state-based generator on the program object);
+        // the buildinfo actually written comes from emitBuildInfo above, so
+        // this default is only reachable outside builder flows.
         getBuildInfo: () => undefined,
         getSourceFileFromReference: () => undefined,
         getFileIncludeReasons: () => new Map(),
