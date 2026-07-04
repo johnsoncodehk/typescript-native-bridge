@@ -110,6 +110,21 @@ type TnbBridgeProcessState = {
     remoteNodeTraversalPatched?: boolean;
     /** Host text last pushed to the (process-wide) tsgo session per file. */
     syncedOverlayContentByFile?: Map<string, string>;
+    /** Solution-build (tsc -b / vue-tsc -b) active-project tracker. The build
+     * orchestrator finishes each project completely before the next program is
+     * created, so the previously opened tsgo project can be closed when the
+     * next one opens — keeping the tsgo session's open project/file set O(1)
+     * instead of O(#projects built so far). */
+    buildModeRef?: { active?: TnbActiveBuildProject };
+};
+
+/** One solution-build project currently open in the tsgo session. */
+type TnbActiveBuildProject = {
+    configFilePath: string;
+    /** Files opened (with or without content) in tsgo for this project. */
+    openedFiles: Set<string>;
+    /** Snapshots created while this project was active — released on close. */
+    snapshots: any[];
 };
 
 function tnbBridgeProcessState(): TnbBridgeProcessState {
@@ -463,6 +478,58 @@ export function tnbGetTsgoBuildInfoVersion(): string | undefined {
 // the prototype hooks live on shared native-preview prototypes and may have
 // been installed by the other bundle's copy of this module.
 const _currentProjectRef: { project: any } = tnbBridgeProcessState().currentProjectRef ??= { project: undefined };
+
+// Solution-build active-project tracker (see TnbBridgeProcessState.buildModeRef).
+const _buildModeRef: { active?: TnbActiveBuildProject } = tnbBridgeProcessState().buildModeRef ??= {};
+
+/**
+ * Close the previously built project in the same updateSnapshot that opens the
+ * next one (build mode only). tsc -b builds projects strictly sequentially and
+ * never revisits a finished program, so its tsgo project, file refs, overlays,
+ * and snapshots can be released as soon as the next project opens. Without
+ * this, a 200+-project solution accumulates open projects/files in the shared
+ * tsgo session and every subsequent updateSnapshot pays O(#opened so far) for
+ * program re-validation, snapshot diffing, and response marshaling.
+ *
+ * Returns wire params ({ closeProjects, closeFiles }) to merge into the
+ * opening updateSnapshot call, plus the stale snapshots to release once the
+ * new snapshot has been created.
+ */
+function beginBuildProject(configFilePath: string): { closeParams: any; staleSnapshots: any[] | undefined } {
+    const prev = _buildModeRef.active;
+    if (prev && prev.configFilePath === configFilePath) {
+        return { closeParams: undefined, staleSnapshots: undefined };
+    }
+    _buildModeRef.active = { configFilePath, openedFiles: new Set(), snapshots: [] };
+    if (!prev) return { closeParams: undefined, staleSnapshots: undefined };
+    _projectCache.delete(prev.configFilePath);
+    // The overlays are being closed in tsgo — forget the synced-content memo
+    // so a later re-push of identical content is not skipped.
+    for (const f of prev.openedFiles) _syncedOverlayContentByFile.delete(f);
+    return {
+        closeParams: {
+            closeProjects: [prev.configFilePath],
+            ...(prev.openedFiles.size > 0 ? { closeFiles: [...prev.openedFiles] } : {}),
+        },
+        staleSnapshots: prev.snapshots,
+    };
+}
+
+/** Track files/snapshots owned by the active build project (no-op outside build mode). */
+function trackBuildProjectSnapshot(configFilePath: string, snapshot: any, openedFiles: Iterable<string>): void {
+    const active = _buildModeRef.active;
+    if (!active || active.configFilePath !== configFilePath) return;
+    for (const f of openedFiles) active.openedFiles.add(f);
+    active.snapshots.push(snapshot);
+}
+
+/** Release snapshots that belonged to a closed build project. */
+function releaseStaleBuildSnapshots(staleSnapshots: any[] | undefined): void {
+    if (!staleSnapshots) return;
+    for (const s of staleSnapshots) {
+        try { s.dispose(); } catch { /* already released */ }
+    }
+}
 
 /** Saved _currentProjectRef.project values during nested checker calls. */
 const _activeProjectStack: any[] = [];
@@ -1315,11 +1382,18 @@ function mapTsgoDiagnostics(raw: readonly any[] | undefined, getSourceFile: (fil
     if (!raw?.length) return [];
     return raw.map(d => convertTsgoDiagnostic(d, getSourceFile));
 }
+const BUILTIN_SCRIPT_EXTENSIONS = new Set([".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs", ".json"]);
+/** True for files whose extension needs host (Volar) virtual content (.vue, .mdx, …). */
+function isExtraExtensionFileName(fileName: string): boolean {
+    const dot = fileName.lastIndexOf(".");
+    if (dot < 0) return false;
+    return !BUILTIN_SCRIPT_EXTENSIONS.has(fileName.slice(dot).toLowerCase());
+}
 /** Extra extensions for tsgo when the project contains non-TS root files (.vue, …). */
 function collectExtraFileExtensions(fileNames: Iterable<string>, options: any): any[] | undefined {
     // Explicit opt-out in tsconfig must be respected (tsgo mirrors this).
     if (options?.allowArbitraryExtensions === false) return undefined;
-    const builtin = new Set([".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs", ".json"]);
+    const builtin = BUILTIN_SCRIPT_EXTENSIONS;
     const exts = new Set<string>();
     for (const fn of fileNames) {
         if (typeof fn !== "string") continue;
@@ -2081,6 +2155,13 @@ export function createTsgoProgram(
     // project replaces thousands of identical ones.
     let globalDiagnosticsCache: { proj: any; result: readonly any[] } | undefined;
     let programDiagnosticsCache: { proj: any; result: readonly any[] } | undefined;
+    // Declaration diagnostics: the builder asks per file (buildinfo state) and
+    // once whole-program (emitFilesAndReportErrors). One whole-program RPC —
+    // which tsgo computes with per-file concurrency — is memoized and per-file
+    // requests are served by filtering, replacing 2-3 sequential RPCs per
+    // project. Declaration diagnostics always carry their source file, so
+    // filtering by file matches stock per-file semantics.
+    let declarationDiagnosticsCache: { proj: any; result: readonly any[] } | undefined;
 
     const thinProgram: any = {
         // Marks this as a tsgo-backed program: its SourceFiles come straight from
@@ -2159,10 +2240,21 @@ export function createTsgoProgram(
             return mapTsgoDiagnostics(raw, getDiagnosticSourceFile);
         },
         getDeclarationDiagnostics: (sourceFile?: any) => {
-            const raw = sourceFile?.fileName
-                ? project?.program?.getDeclarationDiagnostics?.(tsgoFileArg(sourceFile.fileName))
-                : project?.program?.getDeclarationDiagnostics?.();
-            return mapTsgoDiagnostics(raw, getDiagnosticSourceFile);
+            const proj = project;
+            if (!proj?.program) return [];
+            // Per-file requests stay per-file: a whole-program declaration pass
+            // covers files (shared includes, cross-project sources) whose decl
+            // check the builder never asks for, and measures slower than the
+            // union of the per-file calls on many-small-project solutions.
+            if (sourceFile?.fileName) {
+                return mapTsgoDiagnostics(proj.program.getDeclarationDiagnostics?.(tsgoFileArg(sourceFile.fileName)), getDiagnosticSourceFile);
+            }
+            // Whole-program requests are memoized per tsgo project object
+            // (same invalidation rule as globalDiagnosticsCache).
+            if (!declarationDiagnosticsCache || declarationDiagnosticsCache.proj !== proj) {
+                declarationDiagnosticsCache = { proj, result: mapTsgoDiagnostics(proj.program.getDeclarationDiagnostics?.(), getDiagnosticSourceFile) };
+            }
+            return declarationDiagnosticsCache.result;
         },
         getDiagnostics: () => [],
         getBindAndCheckDiagnostics: (sourceFile?: any) => {
@@ -2495,16 +2587,66 @@ export function createTsgoChecker(program: any): any {
 
         const syncHost = hostForOverlaySyncLocal();
         const openFiles = syncHost ? collectTsgoOpenFileNames(syncHost) : [];
+        // Build mode: close the previous solution-build project in the same
+        // updateSnapshot call that opens this one (see beginBuildProject).
+        const buildClose = (options as any).tscBuild && process.env.TNB_BUILD_CLOSE !== "0"
+            ? beginBuildProject(configFilePath!)
+            : { closeParams: undefined, staleSnapshots: undefined };
         const snapshot: any = _api.updateSnapshot({
             openProject: configFilePath!,
             ...(openFiles.length > 0 ? { openFiles } : {}),
             ...(openFilesWithContent.length > 0 ? { openFilesWithContent } : {}),
             ...(extraFileExtensions ? { extraFileExtensions } : {}),
+            ...(buildClose.closeParams ?? {}),
         });
         if (programCtx) programCtx.pendingReferencedProjects = undefined;
         project = snapshot.getProject(configFilePath!);
         if (!project) {
             throw new Error(`tsgoChecker: project not found for ${configFilePath}`);
+        }
+        trackBuildProjectSnapshot(configFilePath!, snapshot, [
+            ...openFiles,
+            ...openFilesWithContent.map(f => f.fileName),
+        ]);
+        releaseStaleBuildSnapshots(buildClose.staleSnapshots);
+        for (const f of openFilesWithContent) {
+            _syncedOverlayContentByFile.set(f.fileName, f.content);
+        }
+        // Cross-project extra-extension imports (e.g. ../other/foo.vue): the
+        // program can include host-virtual files that were not in this
+        // project's root set, so no overlay was pushed for them and tsgo
+        // parsed their raw on-disk text. Ask the host (Volar getSourceFile
+        // feeds virtual TS for any .vue path) for their content and push it
+        // in a follow-up updateSnapshot — mirroring stock vue-tsc, where
+        // program construction pulls every program file through
+        // host.getSourceFile. Only files not already overlaid are sent.
+        {
+            const sentOverlayFiles = new Set(openFilesWithContent.map(f => f.fileName));
+            const lateOverlays: { fileName: string; content: string; scriptKind: number }[] = [];
+            for (const n of project.program.getSourceFileNames?.() ?? []) {
+                const hostFileName = toHostFileName(n);
+                if (!isExtraExtensionFileName(hostFileName) || !isOverlayCandidatePath(hostFileName)) continue;
+                if (sentOverlayFiles.has(hostFileName) || _syncedOverlayContentByFile.has(hostFileName)) continue;
+                const content = getHostScriptContent(syncHost ?? programCtx?.overlayHostCtx?.host, hostFileName, options);
+                if (!content?.text || !content.fromHost) continue;
+                // Same-as-disk host content adds nothing (tsgo already parsed
+                // the disk text) — only genuine virtual content is pushed.
+                if (!shouldSendHostOverlay(hostFileName, content.text)) continue;
+                lateOverlays.push({ fileName: hostFileName, content: content.text, scriptKind: content.scriptKind });
+            }
+            if (lateOverlays.length > 0) {
+                const lateSnapshot: any = _api.updateSnapshot({
+                    openProject: configFilePath!,
+                    openFilesWithContent: lateOverlays,
+                    ...(extraFileExtensions ? { extraFileExtensions } : {}),
+                });
+                const refreshed = lateSnapshot.getProject(configFilePath!);
+                if (refreshed) {
+                    project = refreshed;
+                    trackBuildProjectSnapshot(configFilePath!, lateSnapshot, lateOverlays.map(f => f.fileName));
+                    for (const f of lateOverlays) _syncedOverlayContentByFile.set(f.fileName, f.content);
+                }
+            }
         }
         _projectCache.set(configFilePath!, project);
         _currentProjectRef.project = project;
@@ -2512,10 +2654,14 @@ export function createTsgoChecker(program: any): any {
         patchSignatureProto(sync);
         installNodeHandleHooks(sync);
         // Patch kind remapping using a sample source file from the tsgo project.
-        const fileNames = project.program.getSourceFileNames?.() ?? [];
-        if (fileNames.length > 0) {
-            const sampleSf = project.program.getSourceFile(fileNames[0]);
-            if (sampleSf) patchRemoteNodeKinds(sampleSf);
+        // One-time per process (kindRemapApplied) — skip the sample-file RPC on
+        // every subsequent project (a solution build creates hundreds).
+        if (!tnbBridgeProcessState().kindRemapApplied) {
+            const fileNames = project.program.getSourceFileNames?.() ?? [];
+            if (fileNames.length > 0) {
+                const sampleSf = project.program.getSourceFile(fileNames[0]);
+                if (sampleSf) patchRemoteNodeKinds(sampleSf);
+            }
         }
         // tsgo supplies the AST via the getSourceFile wrapper (dense nodes carry
         // parent pointers from the blob), so no real-TS parent wiring is needed.
@@ -2709,6 +2855,10 @@ export function createTsgoChecker(program: any): any {
             openFilesWithContent,
             ...(_lastExtraFileExtensions ? { extraFileExtensions: _lastExtraFileExtensions } : {}),
         });
+        trackBuildProjectSnapshot(ctx.configFilePath, snapshot, [
+            ...openFiles,
+            ...openFilesWithContent.map(f => f.fileName),
+        ]);
         const refreshed = snapshot.getProject(ctx.configFilePath);
         if (!refreshed) return;
         project = refreshed;

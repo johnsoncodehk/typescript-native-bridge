@@ -1397,7 +1397,7 @@ index 952b572a6..6843c88d6 100644
  type GetProjectDiagnosticsParams struct {
  	Snapshot SnapshotID `json:"snapshot"`
 diff --git a/internal/api/session.go b/internal/api/session.go
-index b350c6334..b4dc378cc 100644
+index b350c6334..f24385b8f 100644
 --- a/internal/api/session.go
 +++ b/internal/api/session.go
 @@ -16,8 +16,10 @@ import (
@@ -1536,7 +1536,22 @@ index b350c6334..b4dc378cc 100644
  func (sd *snapshotData) registerSymbol(symbol *ast.Symbol) SymbolID {
  	if symbol == nil {
  		return 0
-@@ -535,6 +648,8 @@ func (s *Session) HandleRequest(ctx context.Context, method string, params json.
+@@ -363,6 +476,14 @@ type Session struct {
+ 	openProjects collections.Set[tspath.Path]
+ 	openFiles    collections.Set[tspath.Path]
+ 
++	// overlayOpenFiles tracks files this session opened WITH CONTENT
++	// (openFilesWithContent), i.e. files backed by an fs overlay. A close for
++	// such a file must also enqueue an LSP-style didClose so the overlay is
++	// removed — otherwise the overlay keeps the file's default project alive
++	// (HandleAPIRequest skips closing projects that still own an overlay) and
++	// a solution build accumulates open projects. Guarded by updateMu.
++	overlayOpenFiles map[tspath.Path]lsproto.DocumentUri
++
+ 	// updateMu serializes the whole of handleUpdateSnapshot (and releaseOpenRefs)
+ 	// against other updates. Unlike snapshotsMu it is held across the slow
+ 	// projectSession.APIUpdate call, because building the request from
+@@ -535,6 +656,8 @@ func (s *Session) HandleRequest(ctx context.Context, method string, params json.
  		return s.handleGetSymbolAtLocation(ctx, parsed.(*GetSymbolAtLocationParams))
  	case string(MethodGetSymbolsAtLocations):
  		return s.handleGetSymbolsAtLocations(ctx, parsed.(*GetSymbolsAtLocationsParams))
@@ -1545,7 +1560,7 @@ index b350c6334..b4dc378cc 100644
  	case string(MethodGetTypeOfSymbol):
  		return s.handleGetTypeOfSymbol(ctx, parsed.(*GetTypeOfSymbolParams))
  	case string(MethodGetTypesOfSymbols):
-@@ -543,6 +658,8 @@ func (s *Session) HandleRequest(ctx context.Context, method string, params json.
+@@ -543,6 +666,8 @@ func (s *Session) HandleRequest(ctx context.Context, method string, params json.
  		return s.handleGetDeclaredTypeOfSymbol(ctx, parsed.(*GetTypeOfSymbolParams))
  	case string(MethodResolveName):
  		return s.handleResolveName(ctx, parsed.(*ResolveNameParams))
@@ -1554,7 +1569,7 @@ index b350c6334..b4dc378cc 100644
  	case string(MethodGetSignaturesOfType):
  		return s.handleGetSignaturesOfType(ctx, parsed.(*GetSignaturesOfTypeParams))
  	case string(MethodGetResolvedSignature):
-@@ -563,6 +680,10 @@ func (s *Session) HandleRequest(ctx context.Context, method string, params json.
+@@ -563,6 +688,10 @@ func (s *Session) HandleRequest(ctx context.Context, method string, params json.
  		return s.handleGetExportsOfSymbol(ctx, parsed.(*GetSymbolPropertyParams))
  	case string(MethodGetExportSymbolOfSymbol):
  		return s.handleGetExportSymbolOfSymbol(ctx, parsed.(*GetSymbolPropertyParams))
@@ -1565,7 +1580,7 @@ index b350c6334..b4dc378cc 100644
  	case string(MethodGetSymbolOfType):
  		return s.handleGetSymbolOfType(ctx, parsed.(*GetTypePropertyParams))
  	case string(MethodGetTargetOfType):
-@@ -613,6 +734,8 @@ func (s *Session) HandleRequest(ctx context.Context, method string, params json.
+@@ -613,6 +742,8 @@ func (s *Session) HandleRequest(ctx context.Context, method string, params json.
  		return s.handleGetBaseTypeOfLiteralType(ctx, parsed.(*GetBaseTypeOfLiteralTypeParams))
  	case string(MethodGetNonNullableType):
  		return s.handleGetNonNullableType(ctx, parsed.(*GetNonNullableTypeParams))
@@ -1574,7 +1589,7 @@ index b350c6334..b4dc378cc 100644
  	case string(MethodGetTypeFromTypeNode):
  		return s.handleGetTypeFromTypeNode(ctx, parsed.(*GetTypeFromTypeNodeParams))
  	case string(MethodGetWidenedType):
-@@ -631,6 +754,8 @@ func (s *Session) HandleRequest(ctx context.Context, method string, params json.
+@@ -631,6 +762,8 @@ func (s *Session) HandleRequest(ctx context.Context, method string, params json.
  		return s.handleTypeToTypeNode(ctx, parsed.(*TypeToTypeNodeParams))
  	case string(MethodSignatureToSignatureDeclaration):
  		return s.handleSignatureToSignatureDeclaration(ctx, parsed.(*SignatureToSignatureDeclarationParams))
@@ -1583,7 +1598,7 @@ index b350c6334..b4dc378cc 100644
  	case string(MethodTypeToString):
  		return s.handleTypeToString(ctx, parsed.(*TypeToTypeNodeParams))
  	case string(MethodPrintNode):
-@@ -671,6 +796,8 @@ func (s *Session) HandleRequest(ctx context.Context, method string, params json.
+@@ -671,6 +804,8 @@ func (s *Session) HandleRequest(ctx context.Context, method string, params json.
  		return s.handleGetImmediateAliasedSymbol(ctx, parsed.(*CheckerSymbolParams))
  	case string(MethodGetExportsOfModule):
  		return s.handleGetExportsOfModule(ctx, parsed.(*CheckerSymbolParams))
@@ -1592,7 +1607,7 @@ index b350c6334..b4dc378cc 100644
  	case string(MethodGetMemberInModuleExports):
  		return s.handleGetMemberInModuleExports(ctx, parsed.(*GetMemberInModuleExportsParams))
  	case string(MethodGetJSDocTags):
-@@ -709,6 +836,10 @@ func (s *Session) HandleRequest(ctx context.Context, method string, params json.
+@@ -709,6 +844,10 @@ func (s *Session) HandleRequest(ctx context.Context, method string, params json.
  		return s.handleGetBindDiagnostics(ctx, parsed.(*GetDiagnosticsParams))
  	case string(MethodGetSemanticDiagnostics):
  		return s.handleGetSemanticDiagnostics(ctx, parsed.(*GetDiagnosticsParams))
@@ -1603,7 +1618,7 @@ index b350c6334..b4dc378cc 100644
  	case string(MethodGetSuggestionDiagnostics):
  		return s.handleGetSuggestionDiagnostics(ctx, parsed.(*GetDiagnosticsParams))
  	case string(MethodGetDeclarationDiagnostics):
-@@ -777,6 +908,7 @@ func (s *Session) handleInitialize(ctx context.Context) (*InitializeResponse, er
+@@ -777,6 +916,7 @@ func (s *Session) handleInitialize(ctx context.Context) (*InitializeResponse, er
  	return &InitializeResponse{
  		UseCaseSensitiveFileNames: s.projectSession.FS().UseCaseSensitiveFileNames(),
  		CurrentDirectory:          s.projectSession.GetCurrentDirectory(),
@@ -1611,7 +1626,7 @@ index b350c6334..b4dc378cc 100644
  	}, nil
  }
  
-@@ -793,6 +925,17 @@ func (s *Session) handleUpdateSnapshot(ctx context.Context, params *UpdateSnapsh
+@@ -793,6 +933,17 @@ func (s *Session) handleUpdateSnapshot(ctx context.Context, params *UpdateSnapsh
  	s.updateMu.Lock()
  	defer s.updateMu.Unlock()
  
@@ -1629,10 +1644,29 @@ index b350c6334..b4dc378cc 100644
  	fileChanges := s.toFileChangeSummary(params.FileChanges)
  
  	apiRequest := &project.APISnapshotRequest{}
-@@ -856,6 +999,50 @@ func (s *Session) handleUpdateSnapshot(ctx context.Context, params *UpdateSnapsh
- 		closedFiles = append(closedFiles, path)
- 	}
+@@ -844,6 +995,7 @@ func (s *Session) handleUpdateSnapshot(ctx context.Context, params *UpdateSnapsh
  
+ 	// Close files: only release a ref we currently hold.
+ 	var closedFiles []tspath.Path
++	var closeOverlayChanges []project.FileChange
+ 	for _, f := range params.CloseFiles {
+ 		path := s.toPath(f.ToURI(s.projectSession.GetCurrentDirectory()).FileName())
+ 		if !s.openFiles.Has(path) {
+@@ -854,6 +1006,68 @@ func (s *Session) handleUpdateSnapshot(ctx context.Context, params *UpdateSnapsh
+ 		}
+ 		apiRequest.CloseFiles.Add(path)
+ 		closedFiles = append(closedFiles, path)
++		// The session fed content for this file (fs overlay): enqueue an
++		// LSP-style close so the overlay is removed with this snapshot.
++		if uri, ok := s.overlayOpenFiles[path]; ok {
++			closeOverlayChanges = append(closeOverlayChanges, project.FileChange{
++				Kind: project.FileChangeKindClose,
++				URI:  uri,
++			})
++			delete(s.overlayOpenFiles, path)
++		}
++	}
++
 +	// Open files with content: feed host-provided content as overlays by
 +	// enqueuing pending changes. APIUpdate (called below) will flush them
 +	// all at once and build ONE snapshot with overlays — avoiding N
@@ -1672,15 +1706,22 @@ index b350c6334..b4dc378cc 100644
 +			ContentOverride: contentOverride,
 +			LanguageKind:    languageKind,
 +		})
++		if s.overlayOpenFiles == nil {
++			s.overlayOpenFiles = make(map[tspath.Path]lsproto.DocumentUri)
++		}
++		s.overlayOpenFiles[path] = uri
++	}
++	// Closes first: a file closed (previous project) and reopened (current
++	// project) in the same request must be processed close-then-open.
++	if len(closeOverlayChanges) > 0 {
++		s.projectSession.EnqueueOpenFiles(closeOverlayChanges)
 +	}
 +	if len(openFileChanges) > 0 {
 +		s.projectSession.EnqueueOpenFiles(openFileChanges)
-+	}
-+
+ 	}
+ 
  	// Even when nothing is opened or closed, APIUpdate ensures all projects and
- 	// files opened by the API are up to date. For an API connected to an LSP server,
- 	// this brings the API state up to date with the LSP state and ensures projects
-@@ -1109,6 +1296,83 @@ func (s *Session) handleGetSymbolsAtPositions(ctx context.Context, params *GetSy
+@@ -1109,6 +1323,83 @@ func (s *Session) handleGetSymbolsAtPositions(ctx context.Context, params *GetSy
  	return results, nil
  }
  
@@ -1764,7 +1805,7 @@ index b350c6334..b4dc378cc 100644
  // handleGetSymbolAtLocation returns the symbol at a node location.
  func (s *Session) handleGetSymbolAtLocation(ctx context.Context, params *GetSymbolAtLocationParams) (*SymbolResponse, error) {
  	setup, err := s.setupChecker(ctx, params.Snapshot, params.Project)
-@@ -1264,6 +1528,32 @@ func (s *Session) handleResolveName(ctx context.Context, params *ResolveNamePara
+@@ -1264,6 +1555,32 @@ func (s *Session) handleResolveName(ctx context.Context, params *ResolveNamePara
  	return setup.newSymbolResponse(symbol), nil
  }
  
@@ -1797,7 +1838,7 @@ index b350c6334..b4dc378cc 100644
  // handleGetSignaturesOfType returns the call or construct signatures of a type.
  func (s *Session) handleGetSignaturesOfType(ctx context.Context, params *GetSignaturesOfTypeParams) ([]*SignatureResponse, error) {
  	setup, err := s.setupChecker(ctx, params.Snapshot, params.Project)
-@@ -1432,6 +1722,44 @@ func (s *Session) handleGetExportSymbolOfSymbol(_ context.Context, params *GetSy
+@@ -1432,6 +1749,44 @@ func (s *Session) handleGetExportSymbolOfSymbol(_ context.Context, params *GetSy
  	return s.resolveSymbolPropertyOfSymbol(params, func(sym *ast.Symbol) *ast.Symbol { return sym.ExportSymbol })
  }
  
@@ -1842,7 +1883,7 @@ index b350c6334..b4dc378cc 100644
  func (s *Session) handleGetSymbolOfType(_ context.Context, params *GetTypePropertyParams) (*SymbolResponse, error) {
  	return s.resolveSymbolPropertyOfType(params, (*checker.Type).Symbol)
  }
-@@ -1449,7 +1777,7 @@ func (s *Session) handleGetRegularTypeOfType(_ context.Context, params *GetTypeP
+@@ -1449,7 +1804,7 @@ func (s *Session) handleGetRegularTypeOfType(_ context.Context, params *GetTypeP
  }
  
  func (s *Session) handleGetTypesOfType(_ context.Context, params *GetTypePropertyParams) ([]*TypeResponse, error) {
@@ -1851,7 +1892,7 @@ index b350c6334..b4dc378cc 100644
  }
  
  func (s *Session) handleGetTypeParametersOfType(_ context.Context, params *GetTypePropertyParams) ([]*TypeResponse, error) {
-@@ -1778,6 +2106,28 @@ func (s *Session) handleGetNonNullableType(ctx context.Context, params *GetNonNu
+@@ -1778,6 +2133,28 @@ func (s *Session) handleGetNonNullableType(ctx context.Context, params *GetNonNu
  	return setup.newTypeResponse(result), nil
  }
  
@@ -1880,7 +1921,7 @@ index b350c6334..b4dc378cc 100644
  // handleGetTypeFromTypeNode returns the type for a type node.
  func (s *Session) handleGetTypeFromTypeNode(ctx context.Context, params *GetTypeFromTypeNodeParams) (*TypeResponse, error) {
  	setup, err := s.setupChecker(ctx, params.Snapshot, params.Project)
-@@ -2017,6 +2367,31 @@ func (s *Session) handleSignatureToSignatureDeclaration(ctx context.Context, par
+@@ -2017,6 +2394,31 @@ func (s *Session) handleSignatureToSignatureDeclaration(ctx context.Context, par
  	}, nil
  }
  
@@ -1912,7 +1953,7 @@ index b350c6334..b4dc378cc 100644
  // handleTypeToString converts a Type to its string representation.
  func (s *Session) handleTypeToString(ctx context.Context, params *TypeToTypeNodeParams) (any, error) {
  	setup, err := s.setupChecker(ctx, params.Snapshot, params.Project)
-@@ -2517,6 +2892,32 @@ func (s *Session) handleGetExportsOfModule(ctx context.Context, params *CheckerS
+@@ -2517,6 +2919,32 @@ func (s *Session) handleGetExportsOfModule(ctx context.Context, params *CheckerS
  	return results, nil
  }
  
@@ -1945,7 +1986,7 @@ index b350c6334..b4dc378cc 100644
  // handleGetMemberInModuleExports returns an export by name from a module symbol.
  func (s *Session) handleGetMemberInModuleExports(ctx context.Context, params *GetMemberInModuleExportsParams) (*SymbolResponse, error) {
  	setup, err := s.setupChecker(ctx, params.Snapshot, params.Project)
-@@ -2868,7 +3269,6 @@ func (s *Session) handleGetBindDiagnostics(ctx context.Context, params *GetDiagn
+@@ -2868,7 +3296,6 @@ func (s *Session) handleGetBindDiagnostics(ctx context.Context, params *GetDiagn
  
  // handleGetSemanticDiagnostics returns semantic diagnostics for a file or all files.
  func (s *Session) handleGetSemanticDiagnostics(ctx context.Context, params *GetDiagnosticsParams) ([]*DiagnosticResponse, error) {
@@ -1953,7 +1994,7 @@ index b350c6334..b4dc378cc 100644
  	sd, err := s.getSnapshotData(params.Snapshot)
  	if err != nil {
  		return nil, err
-@@ -2884,10 +3284,150 @@ func (s *Session) handleGetSemanticDiagnostics(ctx context.Context, params *GetD
+@@ -2884,10 +3311,150 @@ func (s *Session) handleGetSemanticDiagnostics(ctx context.Context, params *GetD
  		return nil, err
  	}
  
@@ -2104,7 +2145,7 @@ index b350c6334..b4dc378cc 100644
  // handleGetSuggestionDiagnostics returns suggestion diagnostics for a file or all files.
  func (s *Session) handleGetSuggestionDiagnostics(ctx context.Context, params *GetDiagnosticsParams) ([]*DiagnosticResponse, error) {
  	ctx = core.WithCheckerLifetime(ctx, core.CheckerLifetimeDiagnostics)
-@@ -2966,7 +3506,6 @@ func (s *Session) handleGetProgramDiagnostics(ctx context.Context, params *GetPr
+@@ -2966,7 +3533,6 @@ func (s *Session) handleGetProgramDiagnostics(ctx context.Context, params *GetPr
  
  // handleGetGlobalDiagnostics returns global (non-file-specific) semantic diagnostics.
  func (s *Session) handleGetGlobalDiagnostics(ctx context.Context, params *GetProjectDiagnosticsParams) ([]*DiagnosticResponse, error) {
@@ -2112,7 +2153,7 @@ index b350c6334..b4dc378cc 100644
  	sd, err := s.getSnapshotData(params.Snapshot)
  	if err != nil {
  		return nil, err
-@@ -2983,11 +3522,27 @@ func (s *Session) handleGetGlobalDiagnostics(ctx context.Context, params *GetPro
+@@ -2983,11 +3549,27 @@ func (s *Session) handleGetGlobalDiagnostics(ctx context.Context, params *GetPro
  	}
  
  	// Global diagnostics are accumulated lazily by the project's checker pool as
@@ -2145,7 +2186,7 @@ index b350c6334..b4dc378cc 100644
  
  	diags := core.Filter(proj.GetProjectDiagnostics(ctx), func(d *ast.Diagnostic) bool {
  		return d.File() == nil
-@@ -3184,3 +3739,24 @@ func (s *Session) handleGetReferencedSymbolsForNode(ctx context.Context, params
+@@ -3184,3 +3766,24 @@ func (s *Session) handleGetReferencedSymbolsForNode(ctx context.Context, params
  	}
  	return result, nil
  }
@@ -2170,6 +2211,50 @@ index b350c6334..b4dc378cc 100644
 +		return ""
 +	}
 +}
+diff --git a/internal/checker/checker.go b/internal/checker/checker.go
+index ac37c863d..0ac9fbb6e 100644
+--- a/internal/checker/checker.go
++++ b/internal/checker/checker.go
+@@ -7258,7 +7258,9 @@ func importClauseFromImported(node *ast.Node) *ast.Node {
+ func (c *Checker) checkUnusedInferTypeParameter(node *ast.Node) {
+ 	typeParameter := node.AsInferTypeNode().TypeParameter
+ 	if c.isUnreferencedTypeParameter(typeParameter) {
+-		c.reportUnused(node, UnusedKindParameter, NewDiagnosticForNode(typeParameter.Name(), diagnostics.X_0_is_declared_but_never_used, typeParameter.Name().Text()))
++		// Fork parity: stock checkUnusedInferTypeParameter reports TS6133 on the
++		// whole `infer T` node, not TS6196 on the name (checker.ts).
++		c.reportUnused(node, UnusedKindParameter, NewDiagnosticForNode(node, diagnostics.X_0_is_declared_but_its_value_is_never_read, typeParameter.Name().Text()))
+ 	}
+ }
+ 
+@@ -7270,14 +7272,25 @@ func (c *Checker) checkUnusedTypeParameters(node *ast.Node) {
+ 	if typeParameterList == nil {
+ 		return
+ 	}
+-	if len(typeParameterList.Nodes) > 1 && core.Every(typeParameterList.Nodes, c.isUnreferencedTypeParameter) {
++	// Fork parity with stock checkUnusedTypeParameters (checker.ts): when the
++	// whole list is unused, one diagnostic covers the `<...>` range — TS6133
++	// naming the parameter when there is exactly one, TS6205 otherwise; when
++	// only some parameters are unused, each gets TS6133 on its declaration.
++	// (Upstream tsgo reports TS6196 for type parameters instead; tools that
++	// filter by stock's codes — e.g. Volar's doNotReportTs6133 — would see
++	// diverging diagnostics.)
++	if len(typeParameterList.Nodes) > 0 && core.Every(typeParameterList.Nodes, c.isUnreferencedTypeParameter) {
+ 		file := ast.GetSourceFileOfNode(node)
+ 		loc := rangeOfTypeParameters(file, typeParameterList)
+-		c.reportUnused(node, UnusedKindParameter, ast.NewDiagnostic(file, loc, diagnostics.All_type_parameters_are_unused))
++		if len(typeParameterList.Nodes) == 1 {
++			c.reportUnused(node, UnusedKindParameter, ast.NewDiagnostic(file, loc, diagnostics.X_0_is_declared_but_its_value_is_never_read, typeParameterList.Nodes[0].Name().Text()))
++		} else {
++			c.reportUnused(node, UnusedKindParameter, ast.NewDiagnostic(file, loc, diagnostics.All_type_parameters_are_unused))
++		}
+ 	} else {
+ 		for _, typeParameter := range typeParameterList.Nodes {
+ 			if c.isUnreferencedTypeParameter(typeParameter) {
+-				c.reportUnused(node, UnusedKindParameter, NewDiagnosticForNode(typeParameter, diagnostics.X_0_is_declared_but_never_used, typeParameter.Name().Text()))
++				c.reportUnused(node, UnusedKindParameter, NewDiagnosticForNode(typeParameter, diagnostics.X_0_is_declared_but_its_value_is_never_read, typeParameter.Name().Text()))
+ 			}
+ 		}
+ 	}
 diff --git a/internal/compiler/fileloader.go b/internal/compiler/fileloader.go
 index f8d006e92..8f90cd03b 100644
 --- a/internal/compiler/fileloader.go
