@@ -153,11 +153,31 @@ export function getTsgoBackedSourceFile(realSf: any): any | undefined {
     }
     if (!tsgoSf) return undefined;
 
-    // RemoteSourceFile already quacks like ts.SourceFile (named child getters).
+    // RemoteSourceFile has forEachChild but not getChildren — Language Service
+    // token walks (findAllReferences/rename → getTouchingPropertyName) require it.
     const shell = tsgoSf;
     patchLineHelpers(shell, realSf);
+    installGetChildrenForLanguageService(shell, realSf);
     _backedCache.set(fileName, shell);
     return shell;
+}
+
+/** findAllReferences/rename call node.getChildren(sourceFile); RemoteSourceFile lacks it. */
+function installGetChildrenForLanguageService(shell: any, skeletonSf?: any): void {
+    if (typeof shell.getChildren === "function") return;
+    if (skeletonSf && typeof skeletonSf.getChildren === "function") {
+        shell.getChildren = (sourceFile?: any) => skeletonSf.getChildren(sourceFile ?? shell);
+        return;
+    }
+    if (typeof shell.forEachChild === "function") {
+        shell.getChildren = function (this: any) {
+            const children: any[] = [];
+            this.forEachChild((child: any) => children.push(child));
+            return children;
+        };
+        return;
+    }
+    shell.getChildren = () => [];
 }
 
 export function clearTsgoBackedSourceFileCache(): void {

@@ -106,6 +106,8 @@ type TnbBridgeProcessState = {
     /** NodeHandle.prototype hooks are installed exactly once per process —
      * the prototype is shared across lib/typescript.js and lib/_tsc.js bundles. */
     nodeHandlePatched?: boolean;
+    /** RemoteNode.prototype getChildren for LS token walks (findAllReferences/rename). */
+    remoteNodeTraversalPatched?: boolean;
     /** Host text last pushed to the (process-wide) tsgo session per file. */
     syncedOverlayContentByFile?: Map<string, string>;
 };
@@ -499,6 +501,91 @@ const _stats = {
     printed: false,
 };
 let _tsgoLoadStart = 0;
+const _traceSymEnabled = process.env.TSGO_TRACE_SYM === "1";
+const _traceSymFile = process.env.TSGO_TRACE_SYM_FILE;
+function traceSym(message: string): void {
+    if (!_traceSymEnabled) return;
+    const line = `[TSGO_TRACE_SYM] ${message}\n`;
+    try {
+        if (_traceSymFile) {
+            const fs = require("fs") as typeof import("fs");
+            fs.appendFileSync(_traceSymFile, line, "utf8");
+            return;
+        }
+        process.stderr.write(line);
+    } catch {
+        // ignore tracing IO errors
+    }
+}
+function traceSymKind(kind: number | undefined): string {
+    if (typeof kind !== "number") return "n/a";
+    const kindTable = (ts as any)?.["SyntaxKind"];
+    const name = kindTable?.[kind];
+    return typeof name === "string" ? name : String(kind);
+}
+function traceSymNodeText(node: any, sf?: any): string {
+    try {
+        const raw = typeof node?.getText === "function"
+            ? node.getText(sf)
+            : node?.escapedText ?? node?.text ?? "";
+        const text = String(raw).replace(/\s+/g, " ").trim();
+        return text.length > 120 ? `${text.slice(0, 120)}...` : text;
+    } catch {
+        return "";
+    }
+}
+function traceSymSymbol(sym: any): string {
+    if (!sym) return "undefined";
+    const name = symbolDisplayNameOf(sym) || String(sym?.escapedName ?? sym?.name ?? "");
+    const flags = typeof sym?.flags === "number" ? String(sym.flags) : "n/a";
+    const id = typeof sym?.id === "number" ? String(sym.id) : "n/a";
+    return `${name || "(anonymous)"} flags=${flags} id=${id}`;
+}
+function ensureSymbolContextualDocCompat(sym: any): any {
+    if (!sym || typeof sym !== "object") return sym;
+    const hasContextualDoc = typeof sym.getContextualDocumentationComment === "function";
+    const hasContextualTags = typeof sym.getContextualJsDocTags === "function";
+    if (hasContextualDoc && hasContextualTags) return sym;
+    try {
+        if (!hasContextualDoc) {
+            Object.defineProperty(sym, "getContextualDocumentationComment", {
+                configurable: true,
+                writable: true,
+                value(this: any, context: any) {
+                    try {
+                        if (typeof this.getDocumentationComment === "function") {
+                            const parts = this.getDocumentationComment(context);
+                            if (Array.isArray(parts)) return parts;
+                        }
+                    } catch {
+                        // fall through
+                    }
+                    return [];
+                },
+            });
+        }
+        if (!hasContextualTags) {
+            Object.defineProperty(sym, "getContextualJsDocTags", {
+                configurable: true,
+                writable: true,
+                value(this: any, context: any) {
+                    try {
+                        if (typeof this.getJsDocTags === "function") {
+                            const tags = this.getJsDocTags(context);
+                            if (Array.isArray(tags)) return tags;
+                        }
+                    } catch {
+                        // fall through
+                    }
+                    return [];
+                },
+            });
+        }
+    } catch {
+        // non-extensible symbol object; best-effort only
+    }
+    return sym;
+}
 function fileExistsOnDisk(fileName: string): boolean {
     let exists = _overlayDiskExistsCache.get(fileName);
     if (exists === undefined) {
@@ -709,18 +796,37 @@ function collectNamedExportsFromModuleSymbol(moduleSymbol: any): any[] {
     return result;
 }
 function moduleSymbolSourceFileName(moduleSymbol: any): string | undefined {
-    return moduleSymbol?.declarations?.[0]?.getSourceFile?.()?.fileName;
+    const decl = moduleSymbol?.declarations?.[0];
+    // Only a real module symbol (SourceFile/ModuleDeclaration container) marks its
+    // "default" member as the module default export. Any other parent (interface,
+    // type literal, object) means the member merely happens to be named "default".
+    if (decl?.kind !== SyntaxKind.SourceFile && decl?.kind !== SyntaxKind.ModuleDeclaration) return undefined;
+    return decl.getSourceFile?.()?.fileName;
 }
 function isModuleDefaultExportMemberName(name: string | undefined): boolean {
     return name === "default" || name === "export=";
 }
+function moduleDefaultExportDeclarationFileName(symbol: any): string | undefined {
+    // Fallback when symbol.parent is absent: only ExportAssignment/ExportSpecifier
+    // declarations identify a module default export.
+    for (const decl of symbol?.declarations ?? []) {
+        if (decl.kind === SyntaxKind.ExportAssignment || decl.kind === SyntaxKind.ExportSpecifier) {
+            return decl.getSourceFile?.()?.fileName;
+        }
+    }
+    return undefined;
+}
 function hostDefaultExportSymbolForFile(fileName: string, getHostSf: (fileName: string) => any | undefined): any | undefined {
     const sf = getHostSf(fileName);
     if (!sf) return undefined;
-    const vlsDecl = findHostVlsExportDeclaration(sf);
-    if (vlsDecl?.symbol) return vlsDecl.symbol;
+    // Stock checker identity for a module default export is the ExportAssignment
+    // symbol (escapedName "default", carries the `export` modifier for
+    // getSymbolModifiers). The __VLS_export const is only a span anchor —
+    // definition spans are served by hostDefaultExportDefinitionSpan, not here.
     const exp = findHostExportDefaultStatement(sf);
     if (exp?.symbol) return exp.symbol;
+    const vlsDecl = findHostVlsExportDeclaration(sf);
+    if (vlsDecl?.symbol) return vlsDecl.symbol;
     return undefined;
 }
 /** Resolve alias chain on host-bound symbols (bindSourceFile), before tsgo RPC. */
@@ -823,7 +929,7 @@ function resolveHostExportDefaultSymbol(symbol: any, getHostSf: (fileName: strin
     const memberName = (symbol.escapedName ?? symbol.name) as string | undefined;
     if (isModuleDefaultExportMemberName(memberName)) {
         const fileName = moduleSymbolSourceFileName(symbol.parent)
-            ?? symbol.declarations?.[0]?.getSourceFile?.()?.fileName;
+            ?? moduleDefaultExportDeclarationFileName(symbol);
         if (fileName) {
             const hostSym = hostDefaultExportSymbolForFile(fileName, getHostSf);
             if (hostSym) return hostSym;
@@ -950,6 +1056,56 @@ function getHostSymbolsInScope(location: any, meaning: number): any[] {
     symbols.delete("this");
     return [...symbols.values()];
 }
+/** Lexical resolve on host-bound AST (mirrors checker.resolveEntityName for LS paths). */
+function resolveEntityNameOnHostBoundAst(name: string, location: any, meaning: number): any | undefined {
+    if (!location?.getSourceFile?.()?.__tnbHostBound || !name) return undefined;
+    const escaped = String(name);
+    let fallback: any;
+    for (const sym of getHostSymbolsInScope(location, meaning)) {
+        if (String(sym.escapedName ?? sym.name) !== escaped) continue;
+        const isValueLocal = !!(sym.flags & (SymbolFlags.FunctionScopedVariable | SymbolFlags.BlockScopedVariable));
+        if (isValueLocal) return sym;
+        if (!fallback) fallback = sym;
+    }
+    return fallback;
+}
+function symbolFromHostDeclarationNode(decl: any): any | undefined {
+    if (!decl?.getSourceFile?.()?.__tnbHostBound) return undefined;
+    switch (decl.kind) {
+        case SyntaxKind.VariableDeclaration:
+        case SyntaxKind.FunctionDeclaration:
+        case SyntaxKind.ClassDeclaration:
+        case SyntaxKind.Parameter:
+        case SyntaxKind.PropertyDeclaration:
+        case SyntaxKind.MethodDeclaration:
+        case SyntaxKind.EnumMember:
+        case SyntaxKind.PropertyAssignment:
+        case SyntaxKind.ShorthandPropertyAssignment:
+        case SyntaxKind.BindingElement:
+            return decl.symbol;
+        case SyntaxKind.ImportSpecifier:
+        case SyntaxKind.ExportSpecifier:
+            if (decl.name) return getHostBoundSymbolAtLocation(decl.name);
+            break;
+    }
+    if (decl.name?.kind === SyntaxKind.Identifier) {
+        return getHostBoundSymbolAtLocation(decl.name);
+    }
+    return decl.symbol;
+}
+/** findAllReferences/rename compare symbols with ===; return host binder SymbolObject when possible. */
+function canonicalizeSymbolToHostIdentity(symbol: any, getHostSf: (fileName: string) => any | undefined): any {
+    if (!symbol || !isTsgoBridgeSymbol(symbol)) return symbol;
+    // Property/type symbols keep tsgo identity (rename displayName from checker).
+    const localFlags = SymbolFlags.FunctionScopedVariable | SymbolFlags.BlockScopedVariable | SymbolFlags.Alias;
+    if (!((symbol.flags ?? 0) & localFlags)) return symbol;
+    let decl: any;
+    try { decl = symbol.valueDeclaration ?? symbol.declarations?.[0]; } catch { return symbol; }
+    if (!decl) return symbol;
+    const hostDecl = remapDeclarationToHost(decl, getHostSf);
+    const hostSym = symbolFromHostDeclarationNode(hostDecl);
+    return hostSym ?? symbol;
+}
 function remapDeclarationToHost(decl: any, getHostSf: (fileName: string) => any | undefined): any {
     if (!decl || !declarationNeedsHostRemap(decl)) return decl;
     if (decl.kind === SyntaxKind.SourceFile) {
@@ -981,10 +1137,37 @@ function remapDeclarationToHost(decl: any, getHostSf: (fileName: string) => any 
 }
 /** tsgo RemoteSourceFile declarations → host bindSourceFile nodes for LS navigation. */
 function remapSymbolDeclarationsToHost(symbol: any, getHostSf: (fileName: string) => any | undefined): any {
-    if (!symbol?.declarations?.length) return symbol;
+    if (!symbol) return symbol;
+    // Hydrate bridge symbols; findAllReferences/rename read valueDeclaration on the
+    // shorthand-property fallback path even when declarations[] is empty.
+    let valDecl: any;
+    try { valDecl = symbol.valueDeclaration; } catch { valDecl = undefined; }
+    if (valDecl) {
+        const mappedVal = remapDeclarationToHost(valDecl, getHostSf);
+        if (mappedVal !== valDecl) {
+            try { symbol.valueDeclaration = mappedVal; }
+            catch {
+                try {
+                    Object.defineProperty(symbol, "valueDeclaration", {
+                        configurable: true,
+                        enumerable: true,
+                        get() { return mappedVal; },
+                    });
+                } catch { /* read-only symbol object */ }
+            }
+        }
+    }
+    let decls: readonly any[];
+    try { decls = symbol.declarations; } catch { return symbol; }
+    if (!decls?.length) return symbol;
     let changed = false;
     const mapped = symbol.declarations.map((decl: any) => {
         const next = remapDeclarationToHost(decl, getHostSf);
+        traceSym(
+            `remapSymbolDeclarationsToHost sym=${traceSymSymbol(symbol)} declKind=${traceSymKind(decl?.kind)} `
+            + `declFile=${decl?.getSourceFile?.()?.fileName} mapped=${next !== decl} `
+            + `nextKind=${traceSymKind(next?.kind)} nextHostBound=${!!next?.getSourceFile?.()?.__tnbHostBound}`,
+        );
         if (next !== decl) changed = true;
         return next;
     });
@@ -994,12 +1177,24 @@ function remapSymbolDeclarationsToHost(symbol: any, getHostSf: (fileName: string
     } catch {
         // tsgo symbol objects may be read-only; best-effort only.
     }
+    try {
+        if (symbol.declarations !== mapped) {
+            Object.defineProperty(symbol, "declarations", {
+                configurable: true,
+                enumerable: true,
+                get() { return mapped; },
+            });
+        }
+    } catch {
+        // read-only symbol object; best-effort only.
+    }
     return symbol;
 }
 function refineHostNavigationSymbol(symbol: any, getHostSf: (fileName: string) => any | undefined): any {
     if (!symbol) return symbol;
     let refined = resolveHostExportDefaultSymbol(symbol, getHostSf);
     refined = remapSymbolDeclarationsToHost(refined, getHostSf);
+    refined = canonicalizeSymbolToHostIdentity(refined, getHostSf);
     return refined;
 }
 function isCrossFileImportExportName(node: any): boolean {
@@ -1048,12 +1243,35 @@ function getHostBoundSymbolAtLocation(node: any): any | undefined {
             case SyntaxKind.Parameter:
             case SyntaxKind.PropertyDeclaration:
             case SyntaxKind.MethodDeclaration:
+            case SyntaxKind.PropertyAssignment:
+            case SyntaxKind.ShorthandPropertyAssignment:
+                // BindingElement propertyName (`{ prop: local }`): stock
+                // getSymbolAtLocation resolves the *property* symbol of the
+                // destructured type, not the local binding. The host binder only
+                // has the local (`parent.symbol`); defer to the tsgo RPC path.
+                if (parent.kind === SyntaxKind.BindingElement && parent.propertyName === node) {
+                    traceSym(
+                        `getHostBoundSymbolAtLocation binding-element-propertyName defer-to-rpc `
+                        + `nodeText=${JSON.stringify(traceSymNodeText(node, sf))}`,
+                    );
+                    return undefined;
+                }
+                if (parent.name === node || parent.propertyName === node) {
+                    return ensureSymbolContextualDocCompat(parent.symbol ?? node.symbol);
+                }
+                break;
+            case SyntaxKind.PropertyAccessExpression:
+                if (parent.name === node) return ensureSymbolContextualDocCompat(parent.symbol);
+                break;
+            case SyntaxKind.ElementAccessExpression:
+                if (parent.argumentExpression === node) return ensureSymbolContextualDocCompat(parent.symbol);
+                break;
             case SyntaxKind.EnumMember:
-                if (parent.name === node) return parent.symbol;
+                if (parent.name === node) return ensureSymbolContextualDocCompat(parent.symbol);
                 break;
         }
     }
-    return node.symbol;
+    return ensureSymbolContextualDocCompat(node.symbol);
 }
 /** ScriptKind for LS parse — host.getScriptKind is SSOT for snapshot overlays. */
 function resolveLanguageServiceScriptKind(
@@ -1469,6 +1687,26 @@ function patchRemoteNodeKinds(sampleNode: any): void {
     patchFlagsGetter();
 }
 
+/** RemoteNode/RemoteSourceFile expose forEachChild but not getChildren; LS token walks need both. */
+function installRemoteNodeTraversalHooks(): void {
+    const proc = tnbBridgeProcessState();
+    if (proc.remoteNodeTraversalPatched) return;
+    try {
+        const pathMod = require("path") as typeof import("path");
+        const nodeModule = require(pathMod.join(getNativePreviewDir(), "dist", "api", "node", "node.js"));
+        const RemoteNode = nodeModule.RemoteNode;
+        if (!RemoteNode?.prototype || typeof RemoteNode.prototype.forEachChild !== "function") return;
+        if (typeof RemoteNode.prototype.getChildren !== "function") {
+            RemoteNode.prototype.getChildren = function (this: any, _sourceFile?: any) {
+                const children: any[] = [];
+                this.forEachChild((child: any) => children.push(child));
+                return children;
+            };
+        }
+        proc.remoteNodeTraversalPatched = true;
+    } catch { /* native-preview not built yet */ }
+}
+
 // ── Thin tsgo-backed Program ──
 // Replaces the full TS createProgram pipeline with a lightweight object that
 // delegates source files + type checking to tsgo. Skips file resolution,
@@ -1781,12 +2019,23 @@ export function createTsgoProgram(
             bindDiagnostics: [],
             commentDirectives: [],
             statements: [],
-            endOfFileToken: { kind: SyntaxKind.EndOfFileToken, pos: 0, end: 0 },
+            endOfFileToken: {
+                kind: SyntaxKind.EndOfFileToken,
+                pos: 0,
+                end: 0,
+                getStart: () => 0,
+                getEnd: () => 0,
+                getFullStart: () => 0,
+            },
+            pos: 0,
+            end: 0,
             lineMap: [0],
             getLineStarts: () => [0],
             getLineAndCharacterOfPosition: () => ({ line: 0, character: 0 }),
             getPositionOfLineAndCharacter: () => 0,
             forEachChild: () => undefined,
+            // findAllReferences scans every program file; light stubs must not crash token walks.
+            getChildren: () => [],
         };
         lightSfCache.set(hostFileName, sf);
         return sf;
@@ -2043,6 +2292,7 @@ export function createTsgoProgram(
 }
 
 function installNodeHandleHooks(s: any): void {
+    installRemoteNodeTraversalHooks();
     const proc = tnbBridgeProcessState();
     if (proc.nodeHandlePatched) return;
     // Patch kind remapping using a sample RemoteSourceFile from the project.
@@ -3034,6 +3284,28 @@ export function createTsgoChecker(program: any): any {
             }
             return [];
         };
+        if (!proto.getContextualDocumentationComment) {
+            proto.getContextualDocumentationComment = function (context: any) {
+                try {
+                    const parts = this.getDocumentationComment?.(context?.checker ?? context);
+                    if (Array.isArray(parts)) return parts;
+                } catch {
+                    // fall through
+                }
+                return [];
+            };
+        }
+        if (!proto.getContextualJsDocTags) {
+            proto.getContextualJsDocTags = function (context: any) {
+                try {
+                    const tags = this.getJsDocTags?.(context?.checker ?? context);
+                    if (Array.isArray(tags)) return tags;
+                } catch {
+                    // fall through
+                }
+                return [];
+            };
+        }
         proto.getJsDocTags = function (checker: any) {
             const decls = this.declarations ?? (this.valueDeclaration ? [this.valueDeclaration] : undefined);
             if (decls?.length && isHostSyntaxNode(decls[0])) {
@@ -3241,10 +3513,11 @@ export function createTsgoChecker(program: any): any {
     };
     const refineNavSymbol = (sym: any) => {
         if (!sym) return sym;
-        if (!_hasHostBoundFiles) return sym;
+        if (!_hasHostBoundFiles) return ensureSymbolContextualDocCompat(sym);
         const cached = refinedSymBySym.get(sym);
         if (cached !== undefined) return cached;
-        const refined = refineHostNavigationSymbol(sym, getHostBoundSf);
+        const refined = ensureSymbolContextualDocCompat(refineHostNavigationSymbol(sym, getHostBoundSf));
+        traceSym(`refineNavSymbol in=${traceSymSymbol(sym)} out=${traceSymSymbol(refined)}`);
         refinedSymBySym.set(sym, refined);
         return refined;
     };
@@ -3270,6 +3543,14 @@ export function createTsgoChecker(program: any): any {
             ensureProject();
             const sf = node.getSourceFile?.();
             if (!sf) return undefined;
+            const start = typeof node.pos === "number" ? node.pos : node.getStart(sf);
+            const end = typeof node.end === "number" ? node.end : node.getEnd(sf);
+            const parent = node.parent;
+            traceSym(
+                `getSymbolAtLocation enter file=${sf.fileName} start=${start} end=${end} `
+                + `kind=${traceSymKind(node.kind)} parentKind=${traceSymKind(parent?.kind)} `
+                + `text=${JSON.stringify(traceSymNodeText(node, sf))}`,
+            );
             // component-meta: getSymbolAtLocation(sourceFile) must return the
             // file's module symbol (sf.symbol), not a tsgo position hit on the
             // first statement (e.g. __VLS_export) which lacks the default export.
@@ -3282,11 +3563,10 @@ export function createTsgoChecker(program: any): any {
                 // Do not refineNavSymbol here — resolveHostExportDefaultSymbol would
                 // replace the module symbol with the __VLS_export const, breaking
                 // getExportsOfModule (component-meta needs the module + default export).
+                traceSym(`getSymbolAtLocation return path=sourcefile sym=${traceSymSymbol(sf.symbol)}`);
                 return sf.symbol;
             }
             const t0 = process.env.TSGO_PROFILE === "1" ? Date.now() : 0;
-            const start = typeof node.pos === "number" ? node.pos : node.getStart(sf);
-            const end = typeof node.end === "number" ? node.end : node.getEnd(sf);
             const cacheName = symCacheFileName(sf.fileName);
             const recordHit = () => {
                 if (process.env.TSGO_PROFILE === "1") {
@@ -3304,17 +3584,89 @@ export function createTsgoChecker(program: any): any {
                     _stats.getSymRpcCount++;
                 }
             };
+            // findAllReferences/rename match symbols by object identity
+            // (search.includes → contains). On Volar host-bound virtual files the
+            // binder SymbolObject is the canonical identity; tsgo bridge Symbol
+            // instances for the same site break getRelatedSymbol.
+            if (_hasHostBoundFiles && sf.__tnbHostBound && !isCrossFileImportExportName(node)) {
+                const hostSym = getHostBoundSymbolAtLocation(node);
+                if (hostSym) {
+                    const rpcSym = resolveRpcSymbol(hostSym);
+                    const refined = rpcSym
+                        ? ensureSymbolContextualDocCompat(remapSymbolDeclarationsToHost(rpcSym, getHostBoundSf))
+                        : refineNavSymbol(hostSym);
+                    storeSymCache(cacheName, start, end, refined);
+                    recordHit();
+                    traceSym(
+                        `getSymbolAtLocation return path=host-first source=${rpcSym ? "rpc-canonical" : "host-only"} `
+                        + `sym=${traceSymSymbol(refined)}`,
+                    );
+                    return refined;
+                }
+            }
             const resolveSymbolRpc = (): any => {
                 const tsgoFile = toTsgoFileName(sf.fileName);
-                let sym: any = project.checker.getSymbolAtPosition(tsgoFile, start);
-                if (!sym && end > start) {
-                    sym = project.checker.getSymbolAtPosition(tsgoFile, end - 1);
-                }
-                if (!sym && !symPrefetchPopulated.has(cacheName)) {
-                    const tsgoNode = findTsgoNodeAtPosition(sf.fileName, start, node.kind, end);
-                    if (tsgoNode) {
-                        sym = project.checker.getSymbolAtLocation(tsgoNode);
+                const isHostBound = !!sf.__tnbHostBound;
+                const idText = node.kind === SyntaxKind.Identifier || node.kind === SyntaxKind.PrivateIdentifier
+                    ? String(node.escapedText ?? node.text ?? "")
+                    : "";
+                let tsgoNode = (isHostBound || !symPrefetchPopulated.has(cacheName))
+                    ? findTsgoNodeAtPosition(sf.fileName, start, node.kind, end)
+                    : undefined;
+                if (isHostBound && (!tsgoNode || tsgoNode.kind !== node.kind)) {
+                    const tokenStart = typeof node.getStart === "function" ? node.getStart(sf) : undefined;
+                    if (typeof tokenStart === "number" && tokenStart !== start) {
+                        const retryNode = findTsgoNodeAtPosition(sf.fileName, tokenStart, node.kind, end);
+                        if (retryNode?.kind === node.kind) tsgoNode = retryNode;
                     }
+                    if ((!tsgoNode || tsgoNode.kind !== node.kind) && end > start) {
+                        const tailNode = findTsgoNodeAtPosition(sf.fileName, end - 1, node.kind, end);
+                        if (tailNode?.kind === node.kind) tsgoNode = tailNode;
+                    }
+                }
+                let posSym: any = project.checker.getSymbolAtPosition(tsgoFile, start);
+                if (!posSym && end > start) {
+                    posSym = project.checker.getSymbolAtPosition(tsgoFile, end - 1);
+                }
+                let sym: any = posSym;
+                if (tsgoNode && isHostBound) {
+                    traceSym(
+                        `getSymbolAtLocation rpc-map file=${sf.fileName} virtualPos=${start} `
+                        + `expectedKind=${traceSymKind(node.kind)} expectedEnd=${end} `
+                        + `tsgoKind=${traceSymKind(tsgoNode?.kind)} tsgoParentKind=${traceSymKind(tsgoNode?.parent?.kind)} `
+                        + `tsgoStart=${typeof tsgoNode?.getStart === "function" ? tsgoNode.getStart() : tsgoNode?.pos} `
+                        + `tsgoEnd=${typeof tsgoNode?.getEnd === "function" ? tsgoNode.getEnd() : tsgoNode?.end} `
+                        + `tsgoText=${JSON.stringify(traceSymNodeText(tsgoNode))}`,
+                    );
+                }
+                if (isHostBound && tsgoNode && tsgoNode.kind === node.kind) {
+                    const nodeSym = project.checker.getSymbolAtLocation(tsgoNode);
+                    if (nodeSym) {
+                        sym = nodeSym;
+                        traceSym(
+                            `getSymbolAtLocation rpc-prefer-node file=${sf.fileName} `
+                            + `text=${JSON.stringify(traceSymNodeText(node, sf))} sym=${traceSymSymbol(sym)}`,
+                        );
+                    }
+                }
+                if (isHostBound && posSym && idText) {
+                    const posName = symbolDisplayNameOf(posSym);
+                    if (posName && posName !== idText) {
+                        traceSym(
+                            `getSymbolAtLocation rpc-pos-mismatch-retry file=${sf.fileName} `
+                            + `idText=${JSON.stringify(idText)} posName=${JSON.stringify(posName)} `
+                            + `posSym=${traceSymSymbol(posSym)}`,
+                        );
+                        if (tsgoNode && tsgoNode.kind === node.kind) {
+                            const retrySym = project.checker.getSymbolAtLocation(tsgoNode);
+                            sym = retrySym ?? undefined;
+                        } else if (sym === posSym) {
+                            sym = undefined;
+                        }
+                    }
+                }
+                if (!sym && !symPrefetchPopulated.has(cacheName) && tsgoNode) {
+                    sym = project.checker.getSymbolAtLocation(tsgoNode);
                 }
                 if (!sym && _hasHostBoundFiles) {
                     sym = getHostBoundSymbolAtLocation(node);
@@ -3322,11 +3674,13 @@ export function createTsgoChecker(program: any): any {
                 sym = refineNavSymbol(sym);
                 storeSymCache(cacheName, start, end, sym);
                 recordRpc();
+                traceSym(`getSymbolAtLocation return path=rpc sym=${traceSymSymbol(sym)}`);
                 return sym;
             };
             let cached = probeSymCache(cacheName, start, end);
             if (cached.found) {
                 recordHit();
+                traceSym(`getSymbolAtLocation return path=cache sym=${traceSymSymbol(cached.sym)}`);
                 return cached.sym;
             }
             const missCount = (symMissCountByFile.get(cacheName) ?? 0) + 1;
@@ -3342,33 +3696,17 @@ export function createTsgoChecker(program: any): any {
             cached = probeSymCache(cacheName, start, end);
             if (cached.found) {
                 recordHit();
+                traceSym(`getSymbolAtLocation return path=cache sym=${traceSymSymbol(cached.sym)}`);
                 return cached.sym;
             }
-            // allIdentifiers prefetch is exhaustive for covered sites with a
-            // resolved symbol; absent from the map means no symbol.
-            if (symPrefetchPopulated.has(cacheName) && isPrefetchCoveredNode(node)) {
+            // allIdentifiers prefetch is exhaustive on plain disk files; host-bound
+            // virtual TS (Volar) has binder sites prefetch misses (e.g. PropertyAccess
+            // names on __VLS_intrinsics.*) — keep per-position resolution alive.
+            if (symPrefetchPopulated.has(cacheName) && isPrefetchCoveredNode(node) && !sf.__tnbHostBound) {
                 storeSymCache(cacheName, start, end, undefined);
                 recordHit();
+                traceSym("getSymbolAtLocation return path=prefetch-neg sym=undefined");
                 return undefined;
-            }
-            // Host-bound fast path only applies when host-bound files exist
-            // (Volar LS); pure-TS lint never enters this branch.
-            if (_hasHostBoundFiles) {
-                const isImportExportName = isCrossFileImportExportName(node);
-                const preferHostSymbol = sf.__tnbHostBound && !isImportExportName;
-                if (preferHostSymbol) {
-                    const hostSym = getHostBoundSymbolAtLocation(node);
-                    if (hostSym) {
-                        const refined = refineNavSymbol(hostSym);
-                        storeSymCache(cacheName, start, end, refined);
-                        if (process.env.TSGO_PROFILE === "1") {
-                            const d = Date.now() - t0;
-                            _stats.getSymCount++;
-                            _stats.getSymMs += d;
-                        }
-                        return refined;
-                    }
-                }
             }
             return resolveSymbolRpc();
         },
@@ -3396,6 +3734,7 @@ export function createTsgoChecker(program: any): any {
             const sf = node.getSourceFile?.();
             if (!sf) return undefined;
             const tsgoNode = findTsgoNodeAtPosition(sf.fileName, node.getStart(sf), node.kind, node.getEnd(sf));
+            traceSym(`getContextualType file=${sf.fileName} kind=${node.kind} hit=${!!tsgoNode}`);
             if (!tsgoNode) return undefined;
             const t = project.checker.getContextualType(tsgoNode);
             if (t) fixupType(t);
@@ -3439,6 +3778,28 @@ export function createTsgoChecker(program: any): any {
         typeToString(type: any, _enclosing?: any, flags?: number): string {
             ensureProject();
             return project.checker.typeToString(type, undefined, flags);
+        },
+        // Stock checker exposes writer-based emitters consumed by the services
+        // displayParts builders (typeToDisplayParts/symbolToDisplayParts/
+        // signatureToDisplayParts → quickInfo, references symbolDisplayString).
+        // tsgo has no writer RPC; serialize via the string RPCs and emit a
+        // single text part (flattened by displayPartsToString anyway).
+        writeType(type: any, _enclosing?: any, flags?: number, writer?: any): void {
+            if (!type || !writer) return;
+            ensureProject();
+            const text = project.checker.typeToString(type, undefined, flags) ?? "";
+            if (text) writer.write?.(text);
+        },
+        writeSymbol(symbol: any, _enclosing?: any, _meaning?: number, _flags?: number, writer?: any): void {
+            if (!symbol || !writer) return;
+            const text = symbolDisplayNameOf(symbol);
+            if (text) writer.writeSymbol?.(text, symbol);
+        },
+        writeSignature(signature: any, _enclosing?: any, flags?: number, _kind?: any, writer?: any): void {
+            if (!signature || !writer) return;
+            ensureProject();
+            const text = checkerProxyRef.signatureToString(signature, undefined, flags) ?? "";
+            if (text) writer.write?.(text);
         },
         // tsgo has no symbolToString/getFullyQualifiedName RPC. Stock semantics
         // for the common LS consumers (renameInfo displayName/fullDisplayName,
@@ -3617,6 +3978,7 @@ export function createTsgoChecker(program: any): any {
             return (project.checker.getSymbolsInScope(tsgoNode, meaning) ?? []).map(refineNavSymbol);
         },
         getExportSpecifierLocalTargetSymbol(node: any): any {
+            if (!node) return undefined;
             ensureProject();
             const sf = node.getSourceFile?.();
             if (!sf) return undefined;
@@ -3627,13 +3989,45 @@ export function createTsgoChecker(program: any): any {
             } catch { return undefined; }
         },
         getShorthandAssignmentValueSymbol(node: any): any {
+            if (!node) return undefined;
+            if (node.kind === SyntaxKind.ShorthandPropertyAssignment) {
+                const sf = node.getSourceFile?.();
+                const nameNode = node.name;
+                if (sf?.__tnbHostBound && nameNode) {
+                    const name = String(nameNode.text ?? nameNode.escapedName);
+                    let sym = resolveEntityNameOnHostBoundAst(
+                        name,
+                        node,
+                        SymbolFlags.Value | SymbolFlags.Alias,
+                    );
+                    if (!sym || ((sym.flags & SymbolFlags.Property)
+                        && !(sym.flags & (SymbolFlags.FunctionScopedVariable | SymbolFlags.BlockScopedVariable)))) {
+                        const decl = findHostModuleScopedDeclaration(sf, name);
+                        if (decl?.symbol) sym = decl.symbol;
+                    }
+                    if (sym) {
+                        const rpcSym = resolveRpcSymbol(sym);
+                        const refined = rpcSym
+                            ? ensureSymbolContextualDocCompat(remapSymbolDeclarationsToHost(rpcSym, getHostBoundSf))
+                            : refineNavSymbol(sym);
+                        traceSym(
+                            `getShorthandAssignmentValueSymbol path=host-fast source=${rpcSym ? "rpc-canonical" : "host-only"} `
+                            + `sym=${traceSymSymbol(refined)}`,
+                        );
+                        return refined;
+                    }
+                    traceSym("getShorthandAssignmentValueSymbol path=host-fast sym=undefined");
+                }
+            }
             ensureProject();
             const sf = node.getSourceFile?.();
             if (!sf) return undefined;
             const tsgoNode = findTsgoNodeAtPosition(sf.fileName, node.getStart(sf), node.kind, node.getEnd(sf));
             if (!tsgoNode) return undefined;
             try {
-                return refineNavSymbol(project.checker.getShorthandAssignmentValueSymbol(tsgoNode));
+                const rpcSym = refineNavSymbol(project.checker.getShorthandAssignmentValueSymbol(tsgoNode));
+                traceSym(`getShorthandAssignmentValueSymbol path=rpc sym=${traceSymSymbol(rpcSym)}`);
+                return rpcSym;
             } catch { return undefined; }
         },
         getAliasedSymbol(symbol: any): any {
