@@ -4,9 +4,10 @@
  */
 import * as path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { resolveVolarRoot } from './volar-root.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const volarRoot = process.env.VOLAR_ROOT ?? path.resolve(__dirname, '../../../volar/vue');
+const volarRoot = resolveVolarRoot();
 const harnessEntry = path.join(
 	volarRoot,
 	'packages/language-server/node_modules/@typescript/server-harness/dist/index.js',

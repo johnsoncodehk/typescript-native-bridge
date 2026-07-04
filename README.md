@@ -436,6 +436,10 @@ native/bridge.*
 
 After editing either submodule working tree: `save-ts-patches` or `save-patches` before commit.
 
+`git status` will show `typescript` / `typescript-go` as modified after `patch:ts` /
+`patch:tsgo` — that is expected (patches are applied to the submodule working tree, not
+committed inside the submodule). Re-apply with `npm run refresh` after `git submodule update`.
+
 **Changing enums between TS and Go:** run `npm run check:enums`.
 
 ---
