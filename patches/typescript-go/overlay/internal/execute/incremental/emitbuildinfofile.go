@@ -9,6 +9,7 @@ package incremental
 import (
 	"context"
 
+	"github.com/microsoft/typescript-go/internal/ast"
 	"github.com/microsoft/typescript-go/internal/compiler"
 	"github.com/microsoft/typescript-go/internal/core"
 )
@@ -33,6 +34,23 @@ func NewProgramWithOptions(program *compiler.Program, oldProgram *Program, host 
 // the write when the JS side has already decided one is due.
 func (p *Program) MarkBuildInfoEmitPending() {
 	p.snapshot.buildInfoEmitPending.Store(true)
+}
+
+// SeedSemanticDiagnostics pre-populates the snapshot's per-file semantic
+// diagnostics cache with results already computed on the live program during
+// this run (the API session's whole-program diagnostics pass). The entries are
+// stored in exactly the form collectSemanticDiagnosticsOfAffectedFiles would
+// store them (unfiltered checker diagnostics), including the checkPending
+// bookkeeping, so a subsequent GetSemanticDiagnostics only has to handle
+// affected-files invalidation instead of re-running the full check.
+func (p *Program) SeedSemanticDiagnostics(diagnosticsPerFile map[*ast.SourceFile][]*ast.Diagnostic) {
+	p.panicIfNoProgram("SeedSemanticDiagnostics")
+	for file, diagnostics := range diagnosticsPerFile {
+		p.snapshot.semanticDiagnosticsPerFile.Store(file.Path(), &DiagnosticsOrBuildInfoDiagnosticsWithFileName{diagnostics: diagnostics})
+	}
+	if p.snapshot.semanticDiagnosticsPerFile.Size() == len(p.program.GetSourceFiles()) && p.snapshot.checkPending && !p.snapshot.options.NoCheck.IsTrue() {
+		p.snapshot.checkPending = false
+	}
 }
 
 // EmitBuildInfoFile emits only the .tsbuildinfo for this program, honoring
