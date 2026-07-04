@@ -2541,8 +2541,12 @@ export function createTsgoChecker(program: any): any {
 
     /**
      * The single RPC-forwarding boundary for symbol-carrying checker calls.
-     * Every adapter (and proxy-forwarded) call that may receive a Symbol
-     * argument MUST go through this facade rather than project.checker.
+     * Every adapter call that may receive a Symbol argument MUST go through
+     * this facade rather than project.checker. Symbol-free calls (node/type/
+     * signature queries — the lint hot path) go to project.checker directly
+     * and must not pay the facade's per-call argument scan; the checker proxy
+     * therefore requires every symbol-accepting tsgo method to have an
+     * explicit adapter entry, keeping its unknown-method forward symbol-free.
      */
     function rpc(): any {
         const raw = project.checker;
@@ -3517,6 +3521,17 @@ export function createTsgoChecker(program: any): any {
             } catch { /* unresolvable → own root */ }
             return (roots?.length ? [...roots] : [symbol]).map(refineNavSymbol);
         },
+        // tsgo bridge-specific symbol RPCs (no stock TS counterpart, no host
+        // callers today). Covered explicitly so the unknown-method forward
+        // below stays symbol-free by construction.
+        getReferencesToSymbolInFile(file: any, symbol: any): any[] {
+            ensureProject();
+            try { return rpc().getReferencesToSymbolInFile(file, symbol) ?? []; } catch { return []; }
+        },
+        getMemberInModuleExports(symbol: any, name: string): any {
+            ensureProject();
+            try { return refineNavSymbol(rpc().getMemberInModuleExports(symbol, name)); } catch { return undefined; }
+        },
         getDefinitionSpanForDeclaration(declaration: any): { start: number; length: number } | undefined {
             return tnbHostExportDefinitionTextSpan(declaration);
         },
@@ -3593,9 +3608,13 @@ export function createTsgoChecker(program: any): any {
             if (typeof prop !== "string") return undefined;
             ensureProject();
             if (typeof project.checker[prop] === "function") {
-                // Forward through the rpc() facade so symbol arguments are
-                // resolved at the single host↔tsgo boundary.
-                return wrapCheckerCall(rpc()[prop]);
+                // Direct forward — symbol-free by construction. Every tsgo
+                // checker method that accepts a Symbol argument is covered by
+                // an explicit adapter method above that routes through rpc();
+                // what reaches here are node/type/signature queries, which
+                // must not pay the facade's per-call argument scan (the
+                // checker hot path during whole-program lint).
+                return wrapCheckerCall(project.checker[prop].bind(project.checker));
             }
             // Unknown method — return a no-op so `checker.foo()` doesn't throw.
             // Most callers feature-detect or iterate; returning undefined from
