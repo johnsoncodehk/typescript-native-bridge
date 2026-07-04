@@ -103,6 +103,9 @@ type TnbBridgeProcessState = {
     /** RemoteNode prototype kind getters are wrapped exactly once per process —
      * a second wrap would remap SyntaxKind values twice. */
     kindRemapApplied?: boolean;
+    /** NodeHandle.prototype hooks are installed exactly once per process —
+     * the prototype is shared across lib/typescript.js and lib/_tsc.js bundles. */
+    nodeHandlePatched?: boolean;
     /** Host text last pushed to the (process-wide) tsgo session per file. */
     syncedOverlayContentByFile?: Map<string, string>;
 };
@@ -470,8 +473,6 @@ function pushActiveProject(p: any): void {
 function popActiveProject(): void {
     _currentProjectRef.project = _activeProjectStack.pop();
 }
-
-let _nodeHandlePatched = false;
 
 // ── Profiling (active only when TSGO_PROFILE=1) ──
 const _stats = {
@@ -2034,14 +2035,14 @@ export function createTsgoProgram(
 }
 
 function installNodeHandleHooks(s: any): void {
-    if (_nodeHandlePatched) return;
+    const proc = tnbBridgeProcessState();
+    if (proc.nodeHandlePatched) return;
     // Patch kind remapping using a sample RemoteSourceFile from the project.
     // Done here (not at module load) because we need a tsgo instance to walk
     // the prototype chain — the classes aren't exported by the sync API.
     const NodeHandle = s.NodeHandle;
     if (!NodeHandle?.prototype) return;
     const proto = NodeHandle.prototype;
-    _nodeHandlePatched = true;
     // Resolve the handle to its full tsgo RemoteNode once, caching on the
     // instance so repeat reads skip the resolve() walk.
     const resolveSelf = (self: any): any => {
@@ -2172,6 +2173,7 @@ function installNodeHandleHooks(s: any): void {
     if (typeof s.setNodeHandleKindRemap === "function") {
         s.setNodeHandleKindRemap(remapKind);
     }
+    proc.nodeHandlePatched = true;
 }
 
 /* @internal */
