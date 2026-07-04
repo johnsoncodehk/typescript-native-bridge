@@ -394,6 +394,7 @@ npm run setup    # submodules + vendor JS + native bridge + lib/
 | `build:bridge` | Rebuild Go `native/bridge.{dylib,so,dll}` |
 | `patch:ts` | Apply `patches/typescript/` to submodule |
 | `patch:tsgo` | Apply `patches/typescript-go/` to submodule |
+| `refresh` | Re-apply both patch trees and run `check:lib` |
 | `save-ts-patches` | Save typescript submodule changes → `patches/typescript/` |
 | `save-patches` | Save typescript-go submodule changes → `patches/typescript-go/` |
 | `check:lib-sync` | Verify overlay / submodule / `lib/` are aligned |
