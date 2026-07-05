@@ -319,6 +319,20 @@ class BridgeClient {
 class MiniSourceFileCache {
     private bySnap = new Map<any, Map<any, Map<string, any>>>();
     private paths = new Set<string>();
+    // Cross-(snapshot, project) reuse for disk-stable declaration files
+    // (node_modules + bundled libs), keyed by (path, parse-options key,
+    // content hash). Node ids embed only file path + node index, and identical
+    // content under identical parse options produces an identical encoded
+    // blob, so a decoded RemoteSourceFile is valid in any project that
+    // includes the same file version. Multi-project lint/build sessions
+    // otherwise re-decode (and re-walk) the same large .d.ts once per project.
+    // The hash comes from the just-fetched blob, so a changed file can never
+    // hit a stale entry.
+    private stableByPath = new Map<string, { key: any; hash: any; file: any }>();
+
+    private static isStableDeclarationPath(p: string): boolean {
+        return p.endsWith(".d.ts") && (p.includes("/node_modules/") || p.includes("bundled://") || isBundledLibPath(p));
+    }
 
     getRetained(p: string, snapshotId: any, projectId: any): any {
         const byProj = this.bySnap.get(snapshotId);
@@ -327,7 +341,15 @@ class MiniSourceFileCache {
         if (!byPath) return undefined;
         return byPath.get(p);
     }
-    set(p: string, file: any, _key: any, _hash: any, snapshotId: any, projectId: any): any {
+    set(p: string, file: any, key: any, hash: any, snapshotId: any, projectId: any): any {
+        if (hash != null && MiniSourceFileCache.isStableDeclarationPath(p)) {
+            const stable = this.stableByPath.get(p);
+            if (stable && stable.key === key && stable.hash === hash) {
+                file = stable.file;
+            } else {
+                this.stableByPath.set(p, { key, hash, file });
+            }
+        }
         let byProj = this.bySnap.get(snapshotId);
         if (!byProj) { byProj = new Map(); this.bySnap.set(snapshotId, byProj); }
         let byPath = byProj.get(projectId);
@@ -337,7 +359,7 @@ class MiniSourceFileCache {
     }
     retainForSnapshot() {}
     releaseSnapshot() {}
-    clear() { this.bySnap.clear(); this.paths.clear(); }
+    clear() { this.bySnap.clear(); this.paths.clear(); this.stableByPath.clear(); }
     has(p: string) { return this.paths.has(p); }
 }
 
@@ -426,33 +448,6 @@ let _hasHostBoundFiles = false;
 /** @internal */
 export function tnbSetLanguageServiceHost(host: any): void {
     _languageServiceHost = host;
-}
-
-/**
- * Program-routing policy for the createProgram hook.
- *
- * The thin tsgo-backed program pays a per-project bridge cost (dylib load +
- * initialize once, ensureProject/updateSnapshot per tsconfig) that only
- * amortizes when the checker workload is large relative to program setup:
- *   - batch compilation (tsc/vue-tsc/solution builds) — tsgo replaces the
- *     whole check+emit pipeline, and build-close optimizations depend on it;
- *   - tsserver projects — long-lived, interactive checker queries dominate.
- * A plain programmatic LanguageService (lint runners like tsslint create one
- * per tsconfig for a single pass over on-disk files) is better served by the
- * stock in-process program: its setup is cheaper than a Go-side program
- * build, and the document registry shares parsed files across projects.
- *
- * createLanguageService tags the compiler host it builds in
- * synchronizeHostData with the LanguageServiceHost (tnbLanguageServiceHost).
- * Untagged hosts are compiler/builder hosts — always tsgo. Tagged hosts keep
- * tsgo only when they belong to a tsserver Project (projectService).
- *
- * @internal
- */
-export function tnbUseTsgoProgramForHost(host: any): boolean {
-    const lsHost = host?.tnbLanguageServiceHost;
-    if (!lsHost) return true;
-    return !!lsHost.projectService;
 }
 
 /** Host script content for tsgo overlay — LS host SSOT, compilerHost fallback at createProgram. */
@@ -2787,6 +2782,9 @@ export function createTsgoChecker(program: any): any {
         const k = node.kind;
         return k === SyntaxKind.Identifier || k === SyntaxKind.PrivateIdentifier;
     };
+    // Mirrors Go tryGetImportFromModuleSpecifier coverage (the sites the
+    // allIdentifiers prefetch and SourceFile.imports both include): static
+    // import/export, require()/import() calls, and import-type arguments.
     const isModuleSpecifierStringLiteral = (node: any): boolean => {
         if (node?.kind !== SyntaxKind.StringLiteral) return false;
         const p = node.parent;
@@ -2797,6 +2795,13 @@ export function createTsgoChecker(program: any): any {
                 return p.moduleSpecifier === node;
             case SyntaxKind.ExternalModuleReference:
                 return p.expression === node;
+            case SyntaxKind.CallExpression: {
+                const callee = p.expression;
+                return callee?.kind === SyntaxKind.ImportKeyword
+                    || (callee?.kind === SyntaxKind.Identifier && String(callee.escapedText ?? callee.text ?? "") === "require");
+            }
+            case SyntaxKind.LiteralType:
+                return p.parent?.kind === SyntaxKind.ImportType && p.parent.argument === p;
             default:
                 return false;
         }
@@ -2818,6 +2823,14 @@ export function createTsgoChecker(program: any): any {
     // Files where prefetchResolvedReferences ran — skip expensive node-tree
     // fallback on cache miss; prefetch + getSymbolAtPosition is enough.
     const symPrefetchPopulated = new Set<string>();
+    // Files whose import/export module-specifier symbols were batch-resolved
+    // in one getSymbolsAtLocations RPC over the tsgo SourceFile's `imports`
+    // list (see ensureModuleSpecifierSymbolsPrefetched). Multi-project lint
+    // runners resolve every import literal of every program file (BuilderState
+    // dependency walks, cache hashing); per-literal RPC dominates without this.
+    const moduleSpecPrefetched = new Set<string>();
+    /** getSymbolsInScope memo — keyed (file:start:end:meaning); see adapter. */
+    const symbolsInScopeCache = new Map<string, any[]>();
     // Per-file index: start position → all tsgo nodes that start there.
     // Built once per file via a single AST walk, after which every
     // findTsgoNodeAtPosition call is an O(1) map lookup + a tiny kind/end
@@ -2953,6 +2966,8 @@ export function createTsgoChecker(program: any): any {
         symByPos.clear();
         symPrefetched.clear();
         symPrefetchPopulated.clear();
+        moduleSpecPrefetched.clear();
+        symbolsInScopeCache.clear();
         symMissCountByFile.clear();
         rpcSymbolCache.clear();
         nodeTypeCache.clear();
@@ -3019,6 +3034,42 @@ export function createTsgoChecker(program: any): any {
             _stats.symPrefetchRefs += byPos.size;
             _stats.symPrefetchMs += Date.now() - t0;
         }
+    }
+
+    /**
+     * Batch-resolve the module symbols of every import/export/require/import()
+     * specifier in a file with ONE getSymbolsAtLocations RPC, seeded from the
+     * tsgo SourceFile's `imports` node list (decoded from the binary blob — no
+     * AST walk, no node-index build). Multi-project lint runners (BuilderState
+     * referencedMap, dependency cache hashing) call getSymbolAtLocation on every
+     * import literal of every program file; per-literal positional RPC plus the
+     * node-index fallback dominated lint wall time. Results (including
+     * undefined for unresolved modules) are stored positionally so subsequent
+     * queries hit symByPos. Returns false when the file has no tsgo mirror.
+     */
+    function ensureModuleSpecifierSymbolsPrefetched(fileName: string): boolean {
+        const cacheName = symCacheFileName(fileName);
+        if (moduleSpecPrefetched.has(cacheName)) return true;
+        const sf = getTsgoSourceFile(fileName);
+        if (!sf) return false;
+        moduleSpecPrefetched.add(cacheName);
+        const importNodes: readonly any[] = sf.imports ?? [];
+        if (!importNodes.length) return true;
+        let syms: readonly any[];
+        try {
+            syms = project.checker.getSymbolAtLocation(importNodes as any[]) ?? [];
+        } catch {
+            moduleSpecPrefetched.delete(cacheName);
+            return false;
+        }
+        for (let i = 0; i < importNodes.length; i++) {
+            const n = importNodes[i];
+            const pos = typeof n.pos === "number" ? n.pos : undefined;
+            const end = typeof n.end === "number" ? n.end : undefined;
+            if (pos === undefined || end === undefined) continue;
+            storeSymCache(cacheName, pos, end, refineNavSymbol(syms[i]));
+        }
+        return true;
     }
 
     function findTsgoNodeAtPosition(fileName: string, pos: number, expectedKind?: number, expectedEnd?: number): any {
@@ -3835,7 +3886,12 @@ export function createTsgoChecker(program: any): any {
                 const idText = node.kind === SyntaxKind.Identifier || node.kind === SyntaxKind.PrivateIdentifier
                     ? String(node.escapedText ?? node.text ?? "")
                     : "";
-                let tsgoNode = (isHostBound || !symPrefetchPopulated.has(cacheName))
+                // Host-bound files need the node mapping up front (virtual-doc
+                // position remapping below). Plain disk files resolve
+                // positionally; the node-index walk is deferred until the
+                // positional RPC comes back empty — building the whole-file
+                // index eagerly dominated lint on large .d.ts files.
+                let tsgoNode = isHostBound
                     ? findTsgoNodeAtPosition(sf.fileName, start, node.kind, end)
                     : undefined;
                 if (isHostBound && (!tsgoNode || tsgoNode.kind !== node.kind)) {
@@ -3849,9 +3905,17 @@ export function createTsgoChecker(program: any): any {
                         if (tailNode?.kind === node.kind) tsgoNode = tailNode;
                     }
                 }
-                let posSym: any = project.checker.getSymbolAtPosition(tsgoFile, start);
-                if (!posSym && end > start) {
-                    posSym = project.checker.getSymbolAtPosition(tsgoFile, end - 1);
+                // Query the token interior first: `start` is the node's full
+                // start, which can sit in leading trivia and miss the token —
+                // end-1 is always inside a width>0 token, so the common case
+                // resolves in one RPC. `start` stays as the fallback for
+                // zero-width nodes and position-shifted host docs.
+                let posSym: any = end > start
+                    ? project.checker.getSymbolAtPosition(tsgoFile, end - 1)
+                    : undefined;
+                if (!posSym) {
+                    const startSym = project.checker.getSymbolAtPosition(tsgoFile, start);
+                    if (startSym) posSym = startSym;
                 }
                 let sym: any = posSym;
                 if (tsgoNode && isHostBound) {
@@ -3890,8 +3954,14 @@ export function createTsgoChecker(program: any): any {
                         }
                     }
                 }
-                if (!sym && !symPrefetchPopulated.has(cacheName) && tsgoNode) {
-                    sym = project.checker.getSymbolAtLocation(tsgoNode);
+                if (!sym && !symPrefetchPopulated.has(cacheName)) {
+                    // Deferred node-index fallback for plain disk files —
+                    // reached only when the positional query resolved nothing
+                    // (e.g. non-token nodes whose interior token has no symbol).
+                    tsgoNode ??= findTsgoNodeAtPosition(sf.fileName, start, node.kind, end);
+                    if (tsgoNode) {
+                        sym = project.checker.getSymbolAtLocation(tsgoNode);
+                    }
                 }
                 if (!sym && _hasHostBoundFiles) {
                     sym = getHostBoundSymbolAtLocation(node);
@@ -3907,6 +3977,21 @@ export function createTsgoChecker(program: any): any {
                 recordHit();
                 traceSym(`getSymbolAtLocation return path=cache sym=${traceSymSymbol(cached.sym)}`);
                 return cached.sym;
+            }
+            // Module-specifier literals: batch-resolve every module reference
+            // of the file in one RPC on first miss (import literals are the
+            // dominant cross-file query in multi-project lint). If the literal
+            // wasn't in the file's imports list (rare — e.g. require() text in
+            // a non-module position), fall through to the per-node path.
+            if (!sf.__tnbHostBound && !moduleSpecPrefetched.has(cacheName) && isModuleSpecifierStringLiteral(node)) {
+                if (ensureModuleSpecifierSymbolsPrefetched(sf.fileName)) {
+                    cached = probeSymCache(cacheName, start, end);
+                    if (cached.found) {
+                        recordHit();
+                        traceSym(`getSymbolAtLocation return path=import-prefetch sym=${traceSymSymbol(cached.sym)}`);
+                        return cached.sym;
+                    }
+                }
             }
             const missCount = (symMissCountByFile.get(cacheName) ?? 0) + 1;
             symMissCountByFile.set(cacheName, missCount);
@@ -4198,9 +4283,20 @@ export function createTsgoChecker(program: any): any {
             }
             if (!sf) return [];
             ensureProject();
-            const tsgoNode = findTsgoNodeAtPosition(sf.fileName, location.getStart(sf), location.kind, location.getEnd(sf));
+            // Memoized per (location, meaning): the response marshals every
+            // visible symbol (globals included — hundreds), and scope-manager
+            // callers re-ask at the same location (e.g. once per constructor
+            // parameter property). Snapshot-stable; cleared on overlay refresh.
+            const start = location.getStart(sf);
+            const end = location.getEnd(sf);
+            const scopeKey = `${symCacheFileName(sf.fileName)}:${start}:${end}:${meaning}`;
+            const memo = symbolsInScopeCache.get(scopeKey);
+            if (memo) return memo;
+            const tsgoNode = findTsgoNodeAtPosition(sf.fileName, start, location.kind, end);
             if (!tsgoNode) return [];
-            return (project.checker.getSymbolsInScope(tsgoNode, meaning) ?? []).map(refineNavSymbol);
+            const result = (project.checker.getSymbolsInScope(tsgoNode, meaning) ?? []).map(refineNavSymbol);
+            symbolsInScopeCache.set(scopeKey, result);
+            return result;
         },
         getExportSpecifierLocalTargetSymbol(node: any): any {
             if (!node) return undefined;

@@ -29,20 +29,18 @@ index 68133ac5f..3effa07d2 100644
      return fn === undefined ? undefined : fn(node, cbNode, cbNodes);
  }
 diff --git a/src/compiler/program.ts b/src/compiler/program.ts
-index b44a155f0..3a44b20da 100644
+index b44a155f0..c631f17df 100644
 --- a/src/compiler/program.ts
 +++ b/src/compiler/program.ts
-@@ -48,7 +48,9 @@ import {
+@@ -48,6 +48,7 @@ import {
      CreateSourceFileOptions,
      createSymlinkCache,
      createTypeChecker,
 +    createTsgoProgram,
      createTypeReferenceDirectiveResolutionCache,
-+    tnbUseTsgoProgramForHost,
      CustomTransformers,
      Debug,
-     DeclarationWithTypeParameterChildren,
-@@ -407,7 +409,10 @@ export function createGetSourceFile(
+@@ -407,7 +408,10 @@ export function createGetSourceFile(
              }
              text = "";
          }
@@ -54,24 +52,23 @@ index b44a155f0..3a44b20da 100644
      };
  }
  
-@@ -1528,6 +1533,16 @@ export function createProgram(_rootNamesOrOptions: readonly string[] | CreatePro
+@@ -1528,6 +1532,15 @@ export function createProgram(_rootNamesOrOptions: readonly string[] | CreatePro
          }
      }
  
 +    // Thin tsgo-backed program: skip the entire TS file-resolution / module-
 +    // resolution / source-file-creation pipeline. tsgo resolves files from
-+    // the tsconfig and uses host-fed overlay content. Taken for batch
-+    // compilation (tsc/vue-tsc/solution builds) and tsserver projects; a plain
-+    // programmatic LanguageService keeps the stock in-process program — see
-+    // tnbUseTsgoProgramForHost for the boundary rationale.
-+    if (options.configFilePath && tnbUseTsgoProgramForHost(createProgramOptionsHost)) {
++    // the tsconfig and uses host-fed overlay content. Saves ~576ms of
++    // createProgram overhead on self-lint. The tsgo backend is the fork's whole
++    // purpose, so it is always taken when a tsconfig is available.
++    if (options.configFilePath) {
 +        return createTsgoProgram(rootNames, options, createProgramOptionsHost, projectReferences, configFileParsingDiagnostics) as Program;
 +    }
 +
      const reportInvalidIgnoreDeprecations = memoize(() => createOptionValueDiagnostic("ignoreDeprecations", Diagnostics.Invalid_value_for_ignoreDeprecations));
  
      let processingDefaultLibFiles: SourceFile[] | undefined;
-@@ -2682,7 +2697,8 @@ export function createProgram(_rootNamesOrOptions: readonly string[] | CreatePro
+@@ -2682,7 +2695,8 @@ export function createProgram(_rootNamesOrOptions: readonly string[] | CreatePro
      }
  
      function getTypeChecker() {
@@ -353,7 +350,7 @@ index 0a45cc3e3..50309c248 100644
          name,
          containerName: undefined!,
 diff --git a/src/services/services.ts b/src/services/services.ts
-index 9885093ed..6592b7017 100644
+index 9885093ed..0cbb4021a 100644
 --- a/src/services/services.ts
 +++ b/src/services/services.ts
 @@ -330,6 +330,9 @@ import {
@@ -394,19 +391,7 @@ index 9885093ed..6592b7017 100644
          let compilerHost: CompilerHost | undefined = {
              getSourceFile: getOrCreateSourceFile,
              getSourceFileByPath: getOrCreateSourceFileByPath,
-@@ -1775,6 +1792,11 @@ export function createLanguageService(
-             jsDocParsingMode: host.jsDocParsingMode,
-             getGlobalTypingsCacheLocation: maybeBind(host, host.getGlobalTypingsCacheLocation),
-         };
-+        // Tag the compiler host with the LanguageServiceHost so the createProgram
-+        // hook can route by consumer: tsserver projects (host.projectService) keep
-+        // the thin tsgo program; a plain programmatic LanguageService gets the
-+        // stock in-process program. See tnbUseTsgoProgramForHost in tsgoChecker.ts.
-+        (compilerHost as any).tnbLanguageServiceHost = host;
- 
-         const originalGetSourceFile = compilerHost.getSourceFile;
- 
-@@ -2034,9 +2056,15 @@ export function createLanguageService(
+@@ -2034,9 +2051,15 @@ export function createLanguageService(
  
      function cleanupSemanticCache(): void {
          if (program) {
