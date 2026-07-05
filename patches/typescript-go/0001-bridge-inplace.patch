@@ -2780,6 +2780,51 @@ index 4659530ff..dfcd64020 100644
  		// Should also be marked as changed since it was closed and reopened
  		assert.Assert(t, result.Changed.Has(testURI1), "close then open should mark as changed")
  		// Should have the new content
+diff --git a/internal/project/parsecache.go b/internal/project/parsecache.go
+index 6ef1cdf62..7ee64ecd9 100644
+--- a/internal/project/parsecache.go
++++ b/internal/project/parsecache.go
+@@ -1,12 +1,23 @@
+ package project
+ 
+ import (
++	"fmt"
++	"os"
++	"sync"
++	"time"
++
+ 	"github.com/microsoft/typescript-go/internal/ast"
+ 	"github.com/microsoft/typescript-go/internal/core"
+ 	"github.com/microsoft/typescript-go/internal/parser"
+ 	"github.com/zeebo/xxh3"
+ )
+ 
++// parseStatsEnabled logs every actual parse (cache miss) to stderr when
++// TNB_PARSE_STATS=1 — diagnostic aid for measuring cross-project re-parse.
++var parseStatsEnabled = sync.OnceValue(func() bool {
++	return os.Getenv("TNB_PARSE_STATS") == "1"
++})
++
+ type ParseCacheKey struct {
+ 	ast.SourceFileParseOptions
+ 	ScriptKind core.ScriptKind
+@@ -31,8 +42,16 @@ func NewParseCache(options RefCountCacheOptions) *ParseCache {
+ 	return NewRefCountCache(
+ 		options,
+ 		func(key ParseCacheKey, fh FileHandle) *ast.SourceFile {
++			var start time.Time
++			if parseStatsEnabled() {
++				start = time.Now()
++			}
+ 			file := parser.ParseSourceFile(key.SourceFileParseOptions, fh.Content(), key.ScriptKind)
+ 			file.Hash = fh.Hash()
++			if parseStatsEnabled() {
++				fmt.Fprintf(os.Stderr, "[tnb-parse] %.3fms %s\n",
++					float64(time.Since(start).Microseconds())/1000, key.FileName)
++			}
+ 			return file
+ 		},
+ 	)
 diff --git a/internal/project/project.go b/internal/project/project.go
 index 39c77aa78..16fb2c8af 100644
 --- a/internal/project/project.go
@@ -3004,6 +3049,54 @@ index 4096e30f3..e557170ae 100644
  				project.ProgramUpdateKind = result.UpdateKind
  				project.ProgramLastUpdate = b.newSnapshotID
  				if result.UpdateKind == ProgramUpdateKindCloned {
+diff --git a/internal/project/refcountcache.go b/internal/project/refcountcache.go
+index 909b5aa4b..2237d958c 100644
+--- a/internal/project/refcountcache.go
++++ b/internal/project/refcountcache.go
+@@ -23,6 +23,13 @@ type RefCountCache[K comparable, V any, AcquireArgs any] struct {
+ 	entries collections.SyncMap[K, *refCountCacheEntry[V]]
+ 
+ 	parse func(K, AcquireArgs) V
++	// pin, when non-nil and true for a key, gives the entry one extra
++	// permanent ref at creation so its refcount can never reach zero and
++	// the entry is never evicted. Correctness is unaffected for content
++	// caches whose key includes a content hash (changed content misses and
++	// re-parses under a new key); the cost is memory, bounded by the union
++	// of pinned keys seen over the cache's lifetime.
++	pin func(K) bool
+ }
+ 
+ func NewRefCountCache[K comparable, V any, AcquireArgs any](
+@@ -35,6 +42,12 @@ func NewRefCountCache[K comparable, V any, AcquireArgs any](
+ 	}
+ }
+ 
++// SetPin installs a pin predicate (see the pin field). Must be called before
++// the cache is used; entries created earlier are not retroactively pinned.
++func (c *RefCountCache[K, V, AcquireArgs]) SetPin(pin func(K) bool) {
++	c.pin = pin
++}
++
+ // Acquire retrieves or creates a cache entry for the given identity and hash.
+ // If an entry exists with matching identity and hash, its refcount is incremented
+ // and the cached value is returned. Otherwise, parse() is called to create the
+@@ -94,9 +107,14 @@ func (c *RefCountCache[K, V, AcquireArgs]) Deref(identity K) {
+ 
+ // loadOrStoreNewLockedEntry loads an existing entry or creates a new one.
+ // The returned entry's mutex is locked and its refCount is incremented
+-// (or initialized to 1 in the case of a new entry).
++// (or initialized to 1 — plus one permanent pin ref for pinned keys —
++// in the case of a new entry).
+ func (c *RefCountCache[K, V, AcquireArgs]) loadOrStoreNewLockedEntry(key K) (*refCountCacheEntry[V], bool) {
+-	entry := &refCountCacheEntry[V]{refCount: 1}
++	newRefCount := 1
++	if c.pin != nil && c.pin(key) {
++		newRefCount = 2
++	}
++	entry := &refCountCacheEntry[V]{refCount: newRefCount}
+ 	entry.mu.Lock()
+ 	existing, loaded := c.entries.LoadOrStore(key, entry)
+ 	if loaded {
 diff --git a/internal/project/session.go b/internal/project/session.go
 index a5c7fefd4..a717cf2d6 100644
 --- a/internal/project/session.go

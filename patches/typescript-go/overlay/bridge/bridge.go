@@ -32,6 +32,7 @@ import (
 	"encoding/base64"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
 	"unsafe"
 
@@ -40,6 +41,7 @@ import (
 	"github.com/microsoft/typescript-go/internal/json"
 	"github.com/microsoft/typescript-go/internal/lsp/lsproto"
 	"github.com/microsoft/typescript-go/internal/project"
+	"github.com/microsoft/typescript-go/internal/tspath"
 	"github.com/microsoft/typescript-go/internal/vfs/osvfs"
 )
 
@@ -121,6 +123,21 @@ func bridgeCheckerPoolOptions() project.CheckerPoolOptions {
 	return opts
 }
 
+// pinnedParseCacheKey reports whether a parse-cache entry should be pinned for
+// the process lifetime: disk-stable declaration files (node_modules and the
+// bundled lib.d.ts set). During a solution build (tsc -b), consecutive projects
+// share most of these; without pinning, closing project N derefs its files and
+// any file that project N+1 doesn't reference is evicted — then re-parsed and
+// re-bound when project N+2 wants it. Correctness is unaffected: the cache key
+// includes the content hash, so changed files miss and re-parse under a new
+// key. Cost is memory, bounded by the union of node_modules/lib declaration
+// files seen by the session (what a tsslint-style process-global cache holds).
+// Kill switch: TNB_PIN_PARSE_CACHE=0.
+func pinnedParseCacheKey(key project.ParseCacheKey) bool {
+	return tspath.IsDeclarationFileName(key.FileName) &&
+		(strings.Contains(key.FileName, "/node_modules/") || strings.HasPrefix(key.FileName, "bundled://"))
+}
+
 // BridgeNewSession creates a project session + api session rooted at cwd.
 // Returns a JSON envelope. On success, env.data is the session handle (number).
 //
@@ -130,9 +147,16 @@ func BridgeNewSession(cwd *C.char) *C.char {
 
 	fs := bundled.WrapFS(osvfs.FS())
 
+	var parseCache *project.ParseCache
+	if os.Getenv("TNB_PIN_PARSE_CACHE") != "0" {
+		parseCache = project.NewParseCache(project.RefCountCacheOptions{})
+		parseCache.SetPin(pinnedParseCacheKey)
+	}
+
 	ps := project.NewSession(&project.SessionInit{
 		BackgroundCtx: context.Background(),
 		FS:            fs,
+		ParseCache:    parseCache,
 		Options: &project.SessionOptions{
 			CurrentDirectory:   cwdStr,
 			DefaultLibraryPath: bundled.LibPath(),
