@@ -335,11 +335,37 @@ class MiniSourceFileCache {
     }
 
     getRetained(p: string, snapshotId: any, projectId: any): any {
-        const byProj = this.bySnap.get(snapshotId);
-        if (!byProj) return undefined;
-        const byPath = byProj.get(projectId);
-        if (!byPath) return undefined;
-        return byPath.get(p);
+        let byProj = this.bySnap.get(snapshotId);
+        let byPath = byProj?.get(projectId);
+        const retained = byPath?.get(p);
+        if (retained) return retained;
+        // Serve stable declaration files without the getSourceFile RPC.
+        // Safe because (a) stableByPath only holds .d.ts paths, whose parse
+        // options key is constant — GetExternalModuleIndicatorOptions returns
+        // the zero options for declaration file names, so every project
+        // produces the same encoded blob for the same content; (b) content
+        // changes surface as snapshot change events, which drop the entry
+        // (invalidateChangedPaths). Go itself only re-reads a disk file when
+        // such an event arrives, so trusting the entry matches what the RPC
+        // would return byte-for-byte.
+        const stable = this.stableByPath.get(p);
+        if (!stable) return undefined;
+        if (!byProj) { byProj = new Map(); this.bySnap.set(snapshotId, byProj); }
+        if (!byPath) { byPath = new Map(); byProj.set(projectId, byPath); }
+        byPath.set(p, stable.file);
+        this.paths.add(p);
+        return stable.file;
+    }
+
+    /** Drop stable entries for files a new snapshot reports as changed/deleted. */
+    invalidateChangedPaths(changes: any): void {
+        const changedProjects = changes?.changedProjects;
+        if (!changedProjects) return;
+        for (const projKey of Object.keys(changedProjects)) {
+            const c = changedProjects[projKey];
+            for (const p of c?.changedFiles ?? []) this.stableByPath.delete(p);
+            for (const p of c?.deletedFiles ?? []) this.stableByPath.delete(p);
+        }
     }
     set(p: string, file: any, key: any, hash: any, snapshotId: any, projectId: any): any {
         if (hash != null && MiniSourceFileCache.isStableDeclarationPath(p)) {
@@ -405,6 +431,9 @@ function ensureBridgeSession(): void {
             const merged = openProject != null ? [openProject, ...(openProjects || [])] : openProjects;
             const wireParams = { ...rest, ...(merged != null ? { openProjects: merged } : {}) };
             const data = _client.apiRequest("updateSnapshot", wireParams);
+            // Changed/deleted files invalidate the cross-snapshot stable
+            // declaration cache (see MiniSourceFileCache.getRetained).
+            if (data?.changes) _sourceFileCache.invalidateChangedPaths(data.changes);
             const onDispose = () => {};
             return new _sync.Snapshot(data, _client, _sourceFileCache, toPath, onDispose);
         },
@@ -1252,11 +1281,13 @@ function remapSymbolDeclarationsToHost(symbol: any, getHostSf: (fileName: string
     let changed = false;
     const mapped = symbol.declarations.map((decl: any) => {
         const next = remapDeclarationToHost(decl, getHostSf);
-        traceSym(
-            `remapSymbolDeclarationsToHost sym=${traceSymSymbol(symbol)} declKind=${traceSymKind(decl?.kind)} `
-            + `declFile=${decl?.getSourceFile?.()?.fileName} mapped=${next !== decl} `
-            + `nextKind=${traceSymKind(next?.kind)} nextHostBound=${!!next?.getSourceFile?.()?.__tnbHostBound}`,
-        );
+        if (_traceSymEnabled) {
+            traceSym(
+                `remapSymbolDeclarationsToHost sym=${traceSymSymbol(symbol)} declKind=${traceSymKind(decl?.kind)} `
+                + `declFile=${decl?.getSourceFile?.()?.fileName} mapped=${next !== decl} `
+                + `nextKind=${traceSymKind(next?.kind)} nextHostBound=${!!next?.getSourceFile?.()?.__tnbHostBound}`,
+            );
+        }
         if (next !== decl) changed = true;
         return next;
     });
@@ -1339,10 +1370,12 @@ function getHostBoundSymbolAtLocation(node: any): any | undefined {
                 // destructured type, not the local binding. The host binder only
                 // has the local (`parent.symbol`); defer to the tsgo RPC path.
                 if (parent.kind === SyntaxKind.BindingElement && parent.propertyName === node) {
-                    traceSym(
-                        `getHostBoundSymbolAtLocation binding-element-propertyName defer-to-rpc `
-                        + `nodeText=${JSON.stringify(traceSymNodeText(node, sf))}`,
-                    );
+                    if (_traceSymEnabled) {
+                        traceSym(
+                            `getHostBoundSymbolAtLocation binding-element-propertyName defer-to-rpc `
+                            + `nodeText=${JSON.stringify(traceSymNodeText(node, sf))}`,
+                        );
+                    }
                     return undefined;
                 }
                 if (parent.name === node || parent.propertyName === node) {
@@ -3793,7 +3826,7 @@ export function createTsgoChecker(program: any): any {
         const cached = refinedSymBySym.get(sym);
         if (cached !== undefined) return cached;
         const refined = ensureSymbolContextualDocCompat(refineHostNavigationSymbol(sym, getHostBoundSf));
-        traceSym(`refineNavSymbol in=${traceSymSymbol(sym)} out=${traceSymSymbol(refined)}`);
+        if (_traceSymEnabled) traceSym(`refineNavSymbol in=${traceSymSymbol(sym)} out=${traceSymSymbol(refined)}`);
         refinedSymBySym.set(sym, refined);
         return refined;
     };
@@ -3821,12 +3854,16 @@ export function createTsgoChecker(program: any): any {
             if (!sf) return undefined;
             const start = typeof node.pos === "number" ? node.pos : node.getStart(sf);
             const end = typeof node.end === "number" ? node.end : node.getEnd(sf);
-            const parent = node.parent;
-            traceSym(
-                `getSymbolAtLocation enter file=${sf.fileName} start=${start} end=${end} `
-                + `kind=${traceSymKind(node.kind)} parentKind=${traceSymKind(parent?.kind)} `
-                + `text=${JSON.stringify(traceSymNodeText(node, sf))}`,
-            );
+            // traceSym arguments are built eagerly — every call site on this
+            // hot path (50k+ calls per lint run) must be gated so the string
+            // work (getText / JSON.stringify) only happens when tracing.
+            if (_traceSymEnabled) {
+                traceSym(
+                    `getSymbolAtLocation enter file=${sf.fileName} start=${start} end=${end} `
+                    + `kind=${traceSymKind(node.kind)} parentKind=${traceSymKind(node.parent?.kind)} `
+                    + `text=${JSON.stringify(traceSymNodeText(node, sf))}`,
+                );
+            }
             // component-meta: getSymbolAtLocation(sourceFile) must return the
             // file's module symbol (sf.symbol), not a tsgo position hit on the
             // first statement (e.g. __VLS_export) which lacks the default export.
@@ -3839,7 +3876,7 @@ export function createTsgoChecker(program: any): any {
                 // Do not refineNavSymbol here — resolveHostExportDefaultSymbol would
                 // replace the module symbol with the __VLS_export const, breaking
                 // getExportsOfModule (component-meta needs the module + default export).
-                traceSym(`getSymbolAtLocation return path=sourcefile sym=${traceSymSymbol(sf.symbol)}`);
+                if (_traceSymEnabled) traceSym(`getSymbolAtLocation return path=sourcefile sym=${traceSymSymbol(sf.symbol)}`);
                 return sf.symbol;
             }
             const t0 = process.env.TSGO_PROFILE === "1" ? Date.now() : 0;
@@ -3873,10 +3910,12 @@ export function createTsgoChecker(program: any): any {
                         : refineNavSymbol(hostSym);
                     storeSymCache(cacheName, start, end, refined);
                     recordHit();
-                    traceSym(
-                        `getSymbolAtLocation return path=host-first source=${rpcSym ? "rpc-canonical" : "host-only"} `
-                        + `sym=${traceSymSymbol(refined)}`,
-                    );
+                    if (_traceSymEnabled) {
+                        traceSym(
+                            `getSymbolAtLocation return path=host-first source=${rpcSym ? "rpc-canonical" : "host-only"} `
+                            + `sym=${traceSymSymbol(refined)}`,
+                        );
+                    }
                     return refined;
                 }
             }
@@ -3918,7 +3957,7 @@ export function createTsgoChecker(program: any): any {
                     if (startSym) posSym = startSym;
                 }
                 let sym: any = posSym;
-                if (tsgoNode && isHostBound) {
+                if (_traceSymEnabled && tsgoNode && isHostBound) {
                     traceSym(
                         `getSymbolAtLocation rpc-map file=${sf.fileName} virtualPos=${start} `
                         + `expectedKind=${traceSymKind(node.kind)} expectedEnd=${end} `
@@ -3932,20 +3971,24 @@ export function createTsgoChecker(program: any): any {
                     const nodeSym = project.checker.getSymbolAtLocation(tsgoNode);
                     if (nodeSym) {
                         sym = nodeSym;
-                        traceSym(
-                            `getSymbolAtLocation rpc-prefer-node file=${sf.fileName} `
-                            + `text=${JSON.stringify(traceSymNodeText(node, sf))} sym=${traceSymSymbol(sym)}`,
-                        );
+                        if (_traceSymEnabled) {
+                            traceSym(
+                                `getSymbolAtLocation rpc-prefer-node file=${sf.fileName} `
+                                + `text=${JSON.stringify(traceSymNodeText(node, sf))} sym=${traceSymSymbol(sym)}`,
+                            );
+                        }
                     }
                 }
                 if (isHostBound && posSym && idText) {
                     const posName = symbolDisplayNameOf(posSym);
                     if (posName && posName !== idText) {
-                        traceSym(
-                            `getSymbolAtLocation rpc-pos-mismatch-retry file=${sf.fileName} `
-                            + `idText=${JSON.stringify(idText)} posName=${JSON.stringify(posName)} `
-                            + `posSym=${traceSymSymbol(posSym)}`,
-                        );
+                        if (_traceSymEnabled) {
+                            traceSym(
+                                `getSymbolAtLocation rpc-pos-mismatch-retry file=${sf.fileName} `
+                                + `idText=${JSON.stringify(idText)} posName=${JSON.stringify(posName)} `
+                                + `posSym=${traceSymSymbol(posSym)}`,
+                            );
+                        }
                         if (tsgoNode && tsgoNode.kind === node.kind) {
                             const retrySym = project.checker.getSymbolAtLocation(tsgoNode);
                             sym = retrySym ?? undefined;
@@ -3969,13 +4012,13 @@ export function createTsgoChecker(program: any): any {
                 sym = refineNavSymbol(sym);
                 storeSymCache(cacheName, start, end, sym);
                 recordRpc();
-                traceSym(`getSymbolAtLocation return path=rpc sym=${traceSymSymbol(sym)}`);
+                if (_traceSymEnabled) traceSym(`getSymbolAtLocation return path=rpc sym=${traceSymSymbol(sym)}`);
                 return sym;
             };
             let cached = probeSymCache(cacheName, start, end);
             if (cached.found) {
                 recordHit();
-                traceSym(`getSymbolAtLocation return path=cache sym=${traceSymSymbol(cached.sym)}`);
+                if (_traceSymEnabled) traceSym(`getSymbolAtLocation return path=cache sym=${traceSymSymbol(cached.sym)}`);
                 return cached.sym;
             }
             // Module-specifier literals: batch-resolve every module reference
@@ -3988,7 +4031,7 @@ export function createTsgoChecker(program: any): any {
                     cached = probeSymCache(cacheName, start, end);
                     if (cached.found) {
                         recordHit();
-                        traceSym(`getSymbolAtLocation return path=import-prefetch sym=${traceSymSymbol(cached.sym)}`);
+                        if (_traceSymEnabled) traceSym(`getSymbolAtLocation return path=import-prefetch sym=${traceSymSymbol(cached.sym)}`);
                         return cached.sym;
                     }
                 }
@@ -4006,7 +4049,7 @@ export function createTsgoChecker(program: any): any {
             cached = probeSymCache(cacheName, start, end);
             if (cached.found) {
                 recordHit();
-                traceSym(`getSymbolAtLocation return path=cache sym=${traceSymSymbol(cached.sym)}`);
+                if (_traceSymEnabled) traceSym(`getSymbolAtLocation return path=cache sym=${traceSymSymbol(cached.sym)}`);
                 return cached.sym;
             }
             // allIdentifiers prefetch is exhaustive on plain disk files; host-bound
@@ -4044,7 +4087,7 @@ export function createTsgoChecker(program: any): any {
             const sf = node.getSourceFile?.();
             if (!sf) return undefined;
             const tsgoNode = findTsgoNodeAtPosition(sf.fileName, node.getStart(sf), node.kind, node.getEnd(sf));
-            traceSym(`getContextualType file=${sf.fileName} kind=${node.kind} hit=${!!tsgoNode}`);
+            if (_traceSymEnabled) traceSym(`getContextualType file=${sf.fileName} kind=${node.kind} hit=${!!tsgoNode}`);
             if (!tsgoNode) return undefined;
             const t = project.checker.getContextualType(tsgoNode);
             if (t) fixupType(t);
@@ -4331,10 +4374,12 @@ export function createTsgoChecker(program: any): any {
                         const refined = rpcSym
                             ? ensureSymbolContextualDocCompat(remapSymbolDeclarationsToHost(rpcSym, getHostBoundSf))
                             : refineNavSymbol(sym);
-                        traceSym(
-                            `getShorthandAssignmentValueSymbol path=host-fast source=${rpcSym ? "rpc-canonical" : "host-only"} `
-                            + `sym=${traceSymSymbol(refined)}`,
-                        );
+                        if (_traceSymEnabled) {
+                            traceSym(
+                                `getShorthandAssignmentValueSymbol path=host-fast source=${rpcSym ? "rpc-canonical" : "host-only"} `
+                                + `sym=${traceSymSymbol(refined)}`,
+                            );
+                        }
                         return refined;
                     }
                     traceSym("getShorthandAssignmentValueSymbol path=host-fast sym=undefined");
@@ -4347,7 +4392,7 @@ export function createTsgoChecker(program: any): any {
             if (!tsgoNode) return undefined;
             try {
                 const rpcSym = refineNavSymbol(project.checker.getShorthandAssignmentValueSymbol(tsgoNode));
-                traceSym(`getShorthandAssignmentValueSymbol path=rpc sym=${traceSymSymbol(rpcSym)}`);
+                if (_traceSymEnabled) traceSym(`getShorthandAssignmentValueSymbol path=rpc sym=${traceSymSymbol(rpcSym)}`);
                 return rpcSym;
             } catch { return undefined; }
         },
