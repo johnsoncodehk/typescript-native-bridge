@@ -428,6 +428,33 @@ export function tnbSetLanguageServiceHost(host: any): void {
     _languageServiceHost = host;
 }
 
+/**
+ * Program-routing policy for the createProgram hook.
+ *
+ * The thin tsgo-backed program pays a per-project bridge cost (dylib load +
+ * initialize once, ensureProject/updateSnapshot per tsconfig) that only
+ * amortizes when the checker workload is large relative to program setup:
+ *   - batch compilation (tsc/vue-tsc/solution builds) — tsgo replaces the
+ *     whole check+emit pipeline, and build-close optimizations depend on it;
+ *   - tsserver projects — long-lived, interactive checker queries dominate.
+ * A plain programmatic LanguageService (lint runners like tsslint create one
+ * per tsconfig for a single pass over on-disk files) is better served by the
+ * stock in-process program: its setup is cheaper than a Go-side program
+ * build, and the document registry shares parsed files across projects.
+ *
+ * createLanguageService tags the compiler host it builds in
+ * synchronizeHostData with the LanguageServiceHost (tnbLanguageServiceHost).
+ * Untagged hosts are compiler/builder hosts — always tsgo. Tagged hosts keep
+ * tsgo only when they belong to a tsserver Project (projectService).
+ *
+ * @internal
+ */
+export function tnbUseTsgoProgramForHost(host: any): boolean {
+    const lsHost = host?.tnbLanguageServiceHost;
+    if (!lsHost) return true;
+    return !!lsHost.projectService;
+}
+
 /** Host script content for tsgo overlay — LS host SSOT, compilerHost fallback at createProgram. */
 function getHostScriptContentForOverlay(fileName: string, options: any, compilerHost?: any) {
     return getHostScriptContent(hostForOverlaySync() ?? compilerHost, fileName, options);
