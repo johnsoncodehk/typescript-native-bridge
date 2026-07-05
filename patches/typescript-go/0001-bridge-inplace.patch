@@ -1088,7 +1088,7 @@ index a76d52a54..d90e35c6b 100644
  
  export function isBindingPattern(node: Node): node is BindingPattern {
 diff --git a/internal/api/proto.go b/internal/api/proto.go
-index 952b572a6..6843c88d6 100644
+index 952b572a6..0cc1ab174 100644
 --- a/internal/api/proto.go
 +++ b/internal/api/proto.go
 @@ -63,13 +63,15 @@ const (
@@ -1167,7 +1167,7 @@ index 952b572a6..6843c88d6 100644
  }
  
  // DocumentIdentifier identifies a document by either a file name (plain string) or a URI object.
-@@ -309,6 +326,29 @@ type UpdateSnapshotParams struct {
+@@ -309,6 +326,35 @@ type UpdateSnapshotParams struct {
  	// CloseFiles lists files to release in the new snapshot. A file is only fully
  	// closed once every API client that opened it closes it.
  	CloseFiles []DocumentIdentifier `json:"closeFiles,omitempty"`
@@ -1180,6 +1180,12 @@ index 952b572a6..6843c88d6 100644
 +	// ExtraFileExtensions extends tsconfig file-name discovery for allowArbitraryExtensions
 +	// hosts (vue-tsc / Volar). Each entry uses core.ScriptKind values (7 = Deferred).
 +	ExtraFileExtensions []ExtraFileExtensionWire `json:"extraFileExtensions,omitempty"`
++	// PrefetchDiagnostics starts the whole-program semantic pass for projects
++	// opened by this request in the background, overlapping it with the
++	// client's work between this response and its getGlobalDiagnostics call.
++	// Solution-build clients (tsc -b) set this; interactive (LSP) clients must
++	// not, or every keystroke would trigger a full check.
++	PrefetchDiagnostics bool `json:"prefetchDiagnostics,omitempty"`
 +}
 +
 +// ExtraFileExtensionWire is the JSON form of tsoptions.FileExtensionInfo for updateSnapshot.
@@ -1197,7 +1203,7 @@ index 952b572a6..6843c88d6 100644
  }
  
  // ProjectFileChanges describes what source files changed within a single project.
-@@ -353,11 +393,13 @@ var unmarshalers = map[Method]func([]byte) (any, error){
+@@ -353,11 +399,13 @@ var unmarshalers = map[Method]func([]byte) (any, error){
  	MethodGetSymbolAtPosition:      unmarshallerFor[GetSymbolAtPositionParams],
  	MethodGetSymbolsAtPositions:    unmarshallerFor[GetSymbolsAtPositionsParams],
  	MethodGetSymbolAtLocation:      unmarshallerFor[GetSymbolAtLocationParams],
@@ -1212,7 +1218,7 @@ index 952b572a6..6843c88d6 100644
  	MethodGetSignaturesOfType:      unmarshallerFor[GetSignaturesOfTypeParams],
  	MethodGetResolvedSignature:     unmarshallerFor[GetResolvedSignatureParams],
  	MethodGetTypeAtLocation:        unmarshallerFor[GetTypeAtLocationParams],
-@@ -369,6 +411,8 @@ var unmarshalers = map[Method]func([]byte) (any, error){
+@@ -369,6 +417,8 @@ var unmarshalers = map[Method]func([]byte) (any, error){
  	MethodGetMembersOfSymbol:      unmarshallerFor[GetSymbolPropertyParams],
  	MethodGetExportsOfSymbol:      unmarshallerFor[GetSymbolPropertyParams],
  	MethodGetExportSymbolOfSymbol: unmarshallerFor[GetSymbolPropertyParams],
@@ -1221,7 +1227,7 @@ index 952b572a6..6843c88d6 100644
  
  	MethodGetSymbolOfType:               unmarshallerFor[GetTypePropertyParams],
  	MethodGetTargetOfType:               unmarshallerFor[GetTypePropertyParams],
-@@ -397,6 +441,7 @@ var unmarshalers = map[Method]func([]byte) (any, error){
+@@ -397,6 +447,7 @@ var unmarshalers = map[Method]func([]byte) (any, error){
  	MethodGetContextualType:                 unmarshallerFor[GetContextualTypeParams],
  	MethodGetBaseTypeOfLiteralType:          unmarshallerFor[GetBaseTypeOfLiteralTypeParams],
  	MethodGetNonNullableType:                unmarshallerFor[GetNonNullableTypeParams],
@@ -1229,7 +1235,7 @@ index 952b572a6..6843c88d6 100644
  	MethodGetTypeFromTypeNode:               unmarshallerFor[GetTypeFromTypeNodeParams],
  	MethodGetWidenedType:                    unmarshallerFor[GetWidenedTypeParams],
  	MethodGetParameterType:                  unmarshallerFor[GetParameterTypeParams],
-@@ -406,6 +451,7 @@ var unmarshalers = map[Method]func([]byte) (any, error){
+@@ -406,6 +457,7 @@ var unmarshalers = map[Method]func([]byte) (any, error){
  	MethodGetTypeOfSymbolAtLocation:         unmarshallerFor[GetTypeOfSymbolAtLocationParams],
  	MethodTypeToTypeNode:                    unmarshallerFor[TypeToTypeNodeParams],
  	MethodSignatureToSignatureDeclaration:   unmarshallerFor[SignatureToSignatureDeclarationParams],
@@ -1237,7 +1243,7 @@ index 952b572a6..6843c88d6 100644
  	MethodTypeToString:                      unmarshallerFor[TypeToTypeNodeParams],
  	MethodIsContextSensitive:                unmarshallerFor[GetContextualTypeParams],
  	MethodGetReturnTypeOfSignature:          unmarshallerFor[CheckerSignatureParams],
-@@ -425,6 +471,7 @@ var unmarshalers = map[Method]func([]byte) (any, error){
+@@ -425,6 +477,7 @@ var unmarshalers = map[Method]func([]byte) (any, error){
  	MethodGetAliasedSymbol:                  unmarshallerFor[CheckerSymbolParams],
  	MethodGetImmediateAliasedSymbol:         unmarshallerFor[CheckerSymbolParams],
  	MethodGetExportsOfModule:                unmarshallerFor[CheckerSymbolParams],
@@ -1245,7 +1251,7 @@ index 952b572a6..6843c88d6 100644
  	MethodGetMemberInModuleExports:          unmarshallerFor[GetMemberInModuleExportsParams],
  	MethodGetJSDocTags:                      unmarshallerFor[CheckerSymbolParams],
  	MethodGetDocumentationComment:           unmarshallerFor[CheckerSymbolParams],
-@@ -451,6 +498,8 @@ var unmarshalers = map[Method]func([]byte) (any, error){
+@@ -451,6 +504,8 @@ var unmarshalers = map[Method]func([]byte) (any, error){
  	MethodGetSemanticDiagnostics:            unmarshallerFor[GetDiagnosticsParams],
  	MethodGetSuggestionDiagnostics:          unmarshallerFor[GetDiagnosticsParams],
  	MethodGetDeclarationDiagnostics:         unmarshallerFor[GetDiagnosticsParams],
@@ -1254,7 +1260,7 @@ index 952b572a6..6843c88d6 100644
  	MethodGetProgramDiagnostics:             unmarshallerFor[GetProjectDiagnosticsParams],
  	MethodGetGlobalDiagnostics:              unmarshallerFor[GetProjectDiagnosticsParams],
  	MethodGetConfigFileParsingDiagnostics:   unmarshallerFor[GetProjectDiagnosticsParams],
-@@ -509,6 +558,36 @@ type GetSymbolAtPositionParams struct {
+@@ -509,6 +564,36 @@ type GetSymbolAtPositionParams struct {
  	Position uint32             `json:"position"`
  }
  
@@ -1291,7 +1297,7 @@ index 952b572a6..6843c88d6 100644
  type GetSymbolsAtPositionsParams struct {
  	Snapshot  SnapshotID         `json:"snapshot"`
  	Project   ProjectID          `json:"project"`
-@@ -751,6 +830,14 @@ type GetSourceFileNamesParams struct {
+@@ -751,6 +836,14 @@ type GetSourceFileNamesParams struct {
  	Project  ProjectID  `json:"project"`
  }
  
@@ -1306,7 +1312,7 @@ index 952b572a6..6843c88d6 100644
  type ResolveNameParams struct {
  	Snapshot       SnapshotID          `json:"snapshot"`
  	Project        ProjectID           `json:"project"`
-@@ -775,6 +862,13 @@ type GetSymbolPropertyParams struct {
+@@ -775,6 +868,13 @@ type GetSymbolPropertyParams struct {
  	Symbol   SymbolID   `json:"objectId"`
  }
  
@@ -1320,7 +1326,7 @@ index 952b572a6..6843c88d6 100644
  // GetSignaturePropertyParams is used for all signature sub-property endpoints.
  type GetSignaturePropertyParams struct {
  	Snapshot  SnapshotID  `json:"snapshot"`
-@@ -887,6 +981,13 @@ type GetNonNullableTypeParams struct {
+@@ -887,6 +987,13 @@ type GetNonNullableTypeParams struct {
  	Type     TypeID     `json:"type"`
  }
  
@@ -1334,7 +1340,7 @@ index 952b572a6..6843c88d6 100644
  // GetTypeFromTypeNodeParams are the parameters for the getTypeFromTypeNode method.
  type GetTypeFromTypeNodeParams struct {
  	Snapshot SnapshotID `json:"snapshot"`
-@@ -982,6 +1083,15 @@ type SignatureToSignatureDeclarationParams struct {
+@@ -982,6 +1089,15 @@ type SignatureToSignatureDeclarationParams struct {
  	Flags     int32       `json:"flags,omitempty"`
  }
  
@@ -1350,7 +1356,7 @@ index 952b572a6..6843c88d6 100644
  // PrintNodeParams are the parameters for the printNode method.
  type PrintNodeParams struct {
  	Data                          string `json:"data"` // base64-encoded binary AST data
-@@ -1070,6 +1180,45 @@ type GetDiagnosticsParams struct {
+@@ -1070,6 +1186,45 @@ type GetDiagnosticsParams struct {
  	File     *DocumentIdentifier `json:"file,omitempty"`
  }
  
@@ -1397,10 +1403,18 @@ index 952b572a6..6843c88d6 100644
  type GetProjectDiagnosticsParams struct {
  	Snapshot SnapshotID `json:"snapshot"`
 diff --git a/internal/api/session.go b/internal/api/session.go
-index b350c6334..f24385b8f 100644
+index b350c6334..a142dfb8f 100644
 --- a/internal/api/session.go
 +++ b/internal/api/session.go
-@@ -16,8 +16,10 @@ import (
+@@ -4,6 +4,7 @@ import (
+ 	"context"
+ 	"encoding/base64"
+ 	"fmt"
++	"os"
+ 	"strconv"
+ 	"strings"
+ 	"sync"
+@@ -16,8 +17,10 @@ import (
  	"github.com/microsoft/typescript-go/internal/collections"
  	"github.com/microsoft/typescript-go/internal/compiler"
  	"github.com/microsoft/typescript-go/internal/core"
@@ -1411,7 +1425,21 @@ index b350c6334..f24385b8f 100644
  	"github.com/microsoft/typescript-go/internal/lsp/lsproto"
  	"github.com/microsoft/typescript-go/internal/nodebuilder"
  	"github.com/microsoft/typescript-go/internal/pprof"
-@@ -46,6 +48,104 @@ type snapshotData struct {
+@@ -29,6 +32,13 @@ import (
+ 
+ var sessionIDCounter atomic.Uint64
+ 
++// prefetchDiagnosticsEnabled gates the build-mode background semantic pass
++// requested via UpdateSnapshotParams.PrefetchDiagnostics
++// (kill switch: TNB_PREFETCH_DIAG=0).
++var prefetchDiagnosticsEnabled = sync.OnceValue(func() bool {
++	return os.Getenv("TNB_PREFETCH_DIAG") != "0"
++})
++
+ // snapshotData holds the per-snapshot state including the snapshot itself
+ // and symbol/type registries scoped to this snapshot.
+ // Multiple clients may hold references to the same snapshot via ref counting;
+@@ -46,6 +56,131 @@ type snapshotData struct {
  
  	projectRegistries   map[ProjectID]*projectRegistryData
  	projectRegistriesMu sync.RWMutex
@@ -1422,8 +1450,12 @@ index b350c6334..f24385b8f 100644
 +	// the incremental snapshot from this instead of re-running the full check.
 +	// Only non-incremental projects take this route; incremental-capable
 +	// projects are served through incrementalPrograms below instead.
-+	semanticDiagMemo   map[*compiler.Program]map[*ast.SourceFile][]*ast.Diagnostic
-+	semanticDiagMemoMu sync.Mutex
++	// semanticDiagInflight singleflights concurrent passes over the same
++	// program (a build-mode prefetch goroutine racing the getGlobalDiagnostics
++	// RPC must share one pass, not run two).
++	semanticDiagMemo     map[*compiler.Program]map[*ast.SourceFile][]*ast.Diagnostic
++	semanticDiagInflight map[*compiler.Program]chan struct{}
++	semanticDiagMemoMu   sync.Mutex
 +
 +	// incrementalPrograms lazily wraps the live program of each
 +	// incremental-capable project (incremental/composite) in an
@@ -1482,23 +1514,46 @@ index b350c6334..f24385b8f 100644
 +// the exact form the incremental builder caches per file. The result is
 +// memoized on the snapshot; canceled passes are not cached.
 +func (sd *snapshotData) fullSemanticPass(ctx context.Context, program *compiler.Program) map[*ast.SourceFile][]*ast.Diagnostic {
-+	sd.semanticDiagMemoMu.Lock()
-+	memo := sd.semanticDiagMemo[program]
-+	sd.semanticDiagMemoMu.Unlock()
-+	if memo != nil {
-+		return memo
++	for {
++		sd.semanticDiagMemoMu.Lock()
++		if memo := sd.semanticDiagMemo[program]; memo != nil {
++			sd.semanticDiagMemoMu.Unlock()
++			return memo
++		}
++		if inflight := sd.semanticDiagInflight[program]; inflight != nil {
++			// Another goroutine (build-mode prefetch or a concurrent RPC) is
++			// already running the pass — wait for it and re-check the memo.
++			sd.semanticDiagMemoMu.Unlock()
++			select {
++			case <-inflight:
++				continue
++			case <-ctx.Done():
++				return nil
++			}
++		}
++		done := make(chan struct{})
++		if sd.semanticDiagInflight == nil {
++			sd.semanticDiagInflight = make(map[*compiler.Program]chan struct{})
++		}
++		sd.semanticDiagInflight[program] = done
++		sd.semanticDiagMemoMu.Unlock()
++
++		result := program.GetSemanticDiagnosticsWithoutNoEmitFiltering(ctx, program.GetSourceFiles())
++		sd.semanticDiagMemoMu.Lock()
++		if ctx.Err() == nil {
++			if sd.semanticDiagMemo == nil {
++				sd.semanticDiagMemo = make(map[*compiler.Program]map[*ast.SourceFile][]*ast.Diagnostic)
++			}
++			sd.semanticDiagMemo[program] = result
++		}
++		delete(sd.semanticDiagInflight, program)
++		sd.semanticDiagMemoMu.Unlock()
++		close(done)
++		if ctx.Err() != nil {
++			return nil
++		}
++		return result
 +	}
-+	result := program.GetSemanticDiagnosticsWithoutNoEmitFiltering(ctx, program.GetSourceFiles())
-+	if ctx.Err() != nil {
-+		return nil
-+	}
-+	sd.semanticDiagMemoMu.Lock()
-+	if sd.semanticDiagMemo == nil {
-+		sd.semanticDiagMemo = make(map[*compiler.Program]map[*ast.SourceFile][]*ast.Diagnostic)
-+	}
-+	sd.semanticDiagMemo[program] = result
-+	sd.semanticDiagMemoMu.Unlock()
-+	return result
 +}
 +
 +// seedFromSemanticDiagMemo seeds an incremental program wrapper's per-file
@@ -1516,7 +1571,7 @@ index b350c6334..f24385b8f 100644
  }
  
  // projectRegistryData holds per-project type and signature registries.
-@@ -154,6 +254,19 @@ func (sd *snapshotData) newSymbolResponse(symbol *ast.Symbol) *SymbolResponse {
+@@ -154,6 +289,19 @@ func (sd *snapshotData) newSymbolResponse(symbol *ast.Symbol) *SymbolResponse {
  	return resp
  }
  
@@ -1536,7 +1591,7 @@ index b350c6334..f24385b8f 100644
  func (sd *snapshotData) registerSymbol(symbol *ast.Symbol) SymbolID {
  	if symbol == nil {
  		return 0
-@@ -363,6 +476,14 @@ type Session struct {
+@@ -363,6 +511,14 @@ type Session struct {
  	openProjects collections.Set[tspath.Path]
  	openFiles    collections.Set[tspath.Path]
  
@@ -1551,7 +1606,7 @@ index b350c6334..f24385b8f 100644
  	// updateMu serializes the whole of handleUpdateSnapshot (and releaseOpenRefs)
  	// against other updates. Unlike snapshotsMu it is held across the slow
  	// projectSession.APIUpdate call, because building the request from
-@@ -535,6 +656,8 @@ func (s *Session) HandleRequest(ctx context.Context, method string, params json.
+@@ -535,6 +691,8 @@ func (s *Session) HandleRequest(ctx context.Context, method string, params json.
  		return s.handleGetSymbolAtLocation(ctx, parsed.(*GetSymbolAtLocationParams))
  	case string(MethodGetSymbolsAtLocations):
  		return s.handleGetSymbolsAtLocations(ctx, parsed.(*GetSymbolsAtLocationsParams))
@@ -1560,7 +1615,7 @@ index b350c6334..f24385b8f 100644
  	case string(MethodGetTypeOfSymbol):
  		return s.handleGetTypeOfSymbol(ctx, parsed.(*GetTypeOfSymbolParams))
  	case string(MethodGetTypesOfSymbols):
-@@ -543,6 +666,8 @@ func (s *Session) HandleRequest(ctx context.Context, method string, params json.
+@@ -543,6 +701,8 @@ func (s *Session) HandleRequest(ctx context.Context, method string, params json.
  		return s.handleGetDeclaredTypeOfSymbol(ctx, parsed.(*GetTypeOfSymbolParams))
  	case string(MethodResolveName):
  		return s.handleResolveName(ctx, parsed.(*ResolveNameParams))
@@ -1569,7 +1624,7 @@ index b350c6334..f24385b8f 100644
  	case string(MethodGetSignaturesOfType):
  		return s.handleGetSignaturesOfType(ctx, parsed.(*GetSignaturesOfTypeParams))
  	case string(MethodGetResolvedSignature):
-@@ -563,6 +688,10 @@ func (s *Session) HandleRequest(ctx context.Context, method string, params json.
+@@ -563,6 +723,10 @@ func (s *Session) HandleRequest(ctx context.Context, method string, params json.
  		return s.handleGetExportsOfSymbol(ctx, parsed.(*GetSymbolPropertyParams))
  	case string(MethodGetExportSymbolOfSymbol):
  		return s.handleGetExportSymbolOfSymbol(ctx, parsed.(*GetSymbolPropertyParams))
@@ -1580,7 +1635,7 @@ index b350c6334..f24385b8f 100644
  	case string(MethodGetSymbolOfType):
  		return s.handleGetSymbolOfType(ctx, parsed.(*GetTypePropertyParams))
  	case string(MethodGetTargetOfType):
-@@ -613,6 +742,8 @@ func (s *Session) HandleRequest(ctx context.Context, method string, params json.
+@@ -613,6 +777,8 @@ func (s *Session) HandleRequest(ctx context.Context, method string, params json.
  		return s.handleGetBaseTypeOfLiteralType(ctx, parsed.(*GetBaseTypeOfLiteralTypeParams))
  	case string(MethodGetNonNullableType):
  		return s.handleGetNonNullableType(ctx, parsed.(*GetNonNullableTypeParams))
@@ -1589,7 +1644,7 @@ index b350c6334..f24385b8f 100644
  	case string(MethodGetTypeFromTypeNode):
  		return s.handleGetTypeFromTypeNode(ctx, parsed.(*GetTypeFromTypeNodeParams))
  	case string(MethodGetWidenedType):
-@@ -631,6 +762,8 @@ func (s *Session) HandleRequest(ctx context.Context, method string, params json.
+@@ -631,6 +797,8 @@ func (s *Session) HandleRequest(ctx context.Context, method string, params json.
  		return s.handleTypeToTypeNode(ctx, parsed.(*TypeToTypeNodeParams))
  	case string(MethodSignatureToSignatureDeclaration):
  		return s.handleSignatureToSignatureDeclaration(ctx, parsed.(*SignatureToSignatureDeclarationParams))
@@ -1598,7 +1653,7 @@ index b350c6334..f24385b8f 100644
  	case string(MethodTypeToString):
  		return s.handleTypeToString(ctx, parsed.(*TypeToTypeNodeParams))
  	case string(MethodPrintNode):
-@@ -671,6 +804,8 @@ func (s *Session) HandleRequest(ctx context.Context, method string, params json.
+@@ -671,6 +839,8 @@ func (s *Session) HandleRequest(ctx context.Context, method string, params json.
  		return s.handleGetImmediateAliasedSymbol(ctx, parsed.(*CheckerSymbolParams))
  	case string(MethodGetExportsOfModule):
  		return s.handleGetExportsOfModule(ctx, parsed.(*CheckerSymbolParams))
@@ -1607,7 +1662,7 @@ index b350c6334..f24385b8f 100644
  	case string(MethodGetMemberInModuleExports):
  		return s.handleGetMemberInModuleExports(ctx, parsed.(*GetMemberInModuleExportsParams))
  	case string(MethodGetJSDocTags):
-@@ -709,6 +844,10 @@ func (s *Session) HandleRequest(ctx context.Context, method string, params json.
+@@ -709,6 +879,10 @@ func (s *Session) HandleRequest(ctx context.Context, method string, params json.
  		return s.handleGetBindDiagnostics(ctx, parsed.(*GetDiagnosticsParams))
  	case string(MethodGetSemanticDiagnostics):
  		return s.handleGetSemanticDiagnostics(ctx, parsed.(*GetDiagnosticsParams))
@@ -1618,7 +1673,7 @@ index b350c6334..f24385b8f 100644
  	case string(MethodGetSuggestionDiagnostics):
  		return s.handleGetSuggestionDiagnostics(ctx, parsed.(*GetDiagnosticsParams))
  	case string(MethodGetDeclarationDiagnostics):
-@@ -777,6 +916,7 @@ func (s *Session) handleInitialize(ctx context.Context) (*InitializeResponse, er
+@@ -777,6 +951,7 @@ func (s *Session) handleInitialize(ctx context.Context) (*InitializeResponse, er
  	return &InitializeResponse{
  		UseCaseSensitiveFileNames: s.projectSession.FS().UseCaseSensitiveFileNames(),
  		CurrentDirectory:          s.projectSession.GetCurrentDirectory(),
@@ -1626,7 +1681,7 @@ index b350c6334..f24385b8f 100644
  	}, nil
  }
  
-@@ -793,6 +933,17 @@ func (s *Session) handleUpdateSnapshot(ctx context.Context, params *UpdateSnapsh
+@@ -793,6 +968,17 @@ func (s *Session) handleUpdateSnapshot(ctx context.Context, params *UpdateSnapsh
  	s.updateMu.Lock()
  	defer s.updateMu.Unlock()
  
@@ -1644,7 +1699,7 @@ index b350c6334..f24385b8f 100644
  	fileChanges := s.toFileChangeSummary(params.FileChanges)
  
  	apiRequest := &project.APISnapshotRequest{}
-@@ -844,6 +995,7 @@ func (s *Session) handleUpdateSnapshot(ctx context.Context, params *UpdateSnapsh
+@@ -844,6 +1030,7 @@ func (s *Session) handleUpdateSnapshot(ctx context.Context, params *UpdateSnapsh
  
  	// Close files: only release a ref we currently hold.
  	var closedFiles []tspath.Path
@@ -1652,7 +1707,7 @@ index b350c6334..f24385b8f 100644
  	for _, f := range params.CloseFiles {
  		path := s.toPath(f.ToURI(s.projectSession.GetCurrentDirectory()).FileName())
  		if !s.openFiles.Has(path) {
-@@ -854,6 +1006,68 @@ func (s *Session) handleUpdateSnapshot(ctx context.Context, params *UpdateSnapsh
+@@ -854,6 +1041,68 @@ func (s *Session) handleUpdateSnapshot(ctx context.Context, params *UpdateSnapsh
  		}
  		apiRequest.CloseFiles.Add(path)
  		closedFiles = append(closedFiles, path)
@@ -1721,7 +1776,37 @@ index b350c6334..f24385b8f 100644
  	}
  
  	// Even when nothing is opened or closed, APIUpdate ensures all projects and
-@@ -1109,6 +1323,83 @@ func (s *Session) handleGetSymbolsAtPositions(ctx context.Context, params *GetSy
+@@ -919,6 +1168,29 @@ func (s *Session) handleUpdateSnapshot(ctx context.Context, params *UpdateSnapsh
+ 		changes = computeSnapshotChanges(prevSD.snapshot, snapshot)
+ 	}
+ 
++	// Build-mode diagnostics prefetch: start the whole-program semantic pass
++	// for the just-opened projects now, so it overlaps with the client's work
++	// between this response and its getGlobalDiagnostics RPC (which then
++	// joins the in-flight pass via fullSemanticPass's singleflight).
++	// Non-incremental projects only: incremental ones are served through the
++	// buildinfo-backed wrapper, which is not safe to run concurrently.
++	if params.PrefetchDiagnostics && prefetchDiagnosticsEnabled() && len(openedProjects) > 0 {
++		opened := collections.NewSetWithSizeHint[tspath.Path](len(openedProjects))
++		for _, p := range openedProjects {
++			opened.Add(p)
++		}
++		for _, proj := range projects {
++			if !opened.Has(proj.ConfigFilePath()) {
++				continue
++			}
++			program := proj.GetProgram()
++			if program == nil || program.Options().IsIncremental() {
++				continue
++			}
++			go sd.fullSemanticPass(context.WithoutCancel(ctx), program)
++		}
++	}
++
+ 	return &UpdateSnapshotResponse{
+ 		Snapshot: handle,
+ 		Projects: projectResponses,
+@@ -1109,6 +1381,83 @@ func (s *Session) handleGetSymbolsAtPositions(ctx context.Context, params *GetSy
  	return results, nil
  }
  
@@ -1805,7 +1890,7 @@ index b350c6334..f24385b8f 100644
  // handleGetSymbolAtLocation returns the symbol at a node location.
  func (s *Session) handleGetSymbolAtLocation(ctx context.Context, params *GetSymbolAtLocationParams) (*SymbolResponse, error) {
  	setup, err := s.setupChecker(ctx, params.Snapshot, params.Project)
-@@ -1264,6 +1555,32 @@ func (s *Session) handleResolveName(ctx context.Context, params *ResolveNamePara
+@@ -1264,6 +1613,32 @@ func (s *Session) handleResolveName(ctx context.Context, params *ResolveNamePara
  	return setup.newSymbolResponse(symbol), nil
  }
  
@@ -1838,7 +1923,7 @@ index b350c6334..f24385b8f 100644
  // handleGetSignaturesOfType returns the call or construct signatures of a type.
  func (s *Session) handleGetSignaturesOfType(ctx context.Context, params *GetSignaturesOfTypeParams) ([]*SignatureResponse, error) {
  	setup, err := s.setupChecker(ctx, params.Snapshot, params.Project)
-@@ -1432,6 +1749,44 @@ func (s *Session) handleGetExportSymbolOfSymbol(_ context.Context, params *GetSy
+@@ -1432,6 +1807,44 @@ func (s *Session) handleGetExportSymbolOfSymbol(_ context.Context, params *GetSy
  	return s.resolveSymbolPropertyOfSymbol(params, func(sym *ast.Symbol) *ast.Symbol { return sym.ExportSymbol })
  }
  
@@ -1883,7 +1968,7 @@ index b350c6334..f24385b8f 100644
  func (s *Session) handleGetSymbolOfType(_ context.Context, params *GetTypePropertyParams) (*SymbolResponse, error) {
  	return s.resolveSymbolPropertyOfType(params, (*checker.Type).Symbol)
  }
-@@ -1449,7 +1804,7 @@ func (s *Session) handleGetRegularTypeOfType(_ context.Context, params *GetTypeP
+@@ -1449,7 +1862,7 @@ func (s *Session) handleGetRegularTypeOfType(_ context.Context, params *GetTypeP
  }
  
  func (s *Session) handleGetTypesOfType(_ context.Context, params *GetTypePropertyParams) ([]*TypeResponse, error) {
@@ -1892,7 +1977,7 @@ index b350c6334..f24385b8f 100644
  }
  
  func (s *Session) handleGetTypeParametersOfType(_ context.Context, params *GetTypePropertyParams) ([]*TypeResponse, error) {
-@@ -1778,6 +2133,28 @@ func (s *Session) handleGetNonNullableType(ctx context.Context, params *GetNonNu
+@@ -1778,6 +2191,28 @@ func (s *Session) handleGetNonNullableType(ctx context.Context, params *GetNonNu
  	return setup.newTypeResponse(result), nil
  }
  
@@ -1921,7 +2006,7 @@ index b350c6334..f24385b8f 100644
  // handleGetTypeFromTypeNode returns the type for a type node.
  func (s *Session) handleGetTypeFromTypeNode(ctx context.Context, params *GetTypeFromTypeNodeParams) (*TypeResponse, error) {
  	setup, err := s.setupChecker(ctx, params.Snapshot, params.Project)
-@@ -2017,6 +2394,31 @@ func (s *Session) handleSignatureToSignatureDeclaration(ctx context.Context, par
+@@ -2017,6 +2452,31 @@ func (s *Session) handleSignatureToSignatureDeclaration(ctx context.Context, par
  	}, nil
  }
  
@@ -1953,7 +2038,7 @@ index b350c6334..f24385b8f 100644
  // handleTypeToString converts a Type to its string representation.
  func (s *Session) handleTypeToString(ctx context.Context, params *TypeToTypeNodeParams) (any, error) {
  	setup, err := s.setupChecker(ctx, params.Snapshot, params.Project)
-@@ -2517,6 +2919,32 @@ func (s *Session) handleGetExportsOfModule(ctx context.Context, params *CheckerS
+@@ -2517,6 +2977,32 @@ func (s *Session) handleGetExportsOfModule(ctx context.Context, params *CheckerS
  	return results, nil
  }
  
@@ -1986,7 +2071,7 @@ index b350c6334..f24385b8f 100644
  // handleGetMemberInModuleExports returns an export by name from a module symbol.
  func (s *Session) handleGetMemberInModuleExports(ctx context.Context, params *GetMemberInModuleExportsParams) (*SymbolResponse, error) {
  	setup, err := s.setupChecker(ctx, params.Snapshot, params.Project)
-@@ -2868,7 +3296,6 @@ func (s *Session) handleGetBindDiagnostics(ctx context.Context, params *GetDiagn
+@@ -2868,7 +3354,6 @@ func (s *Session) handleGetBindDiagnostics(ctx context.Context, params *GetDiagn
  
  // handleGetSemanticDiagnostics returns semantic diagnostics for a file or all files.
  func (s *Session) handleGetSemanticDiagnostics(ctx context.Context, params *GetDiagnosticsParams) ([]*DiagnosticResponse, error) {
@@ -1994,7 +2079,7 @@ index b350c6334..f24385b8f 100644
  	sd, err := s.getSnapshotData(params.Snapshot)
  	if err != nil {
  		return nil, err
-@@ -2884,10 +3311,150 @@ func (s *Session) handleGetSemanticDiagnostics(ctx context.Context, params *GetD
+@@ -2884,10 +3369,150 @@ func (s *Session) handleGetSemanticDiagnostics(ctx context.Context, params *GetD
  		return nil, err
  	}
  
@@ -2145,7 +2230,7 @@ index b350c6334..f24385b8f 100644
  // handleGetSuggestionDiagnostics returns suggestion diagnostics for a file or all files.
  func (s *Session) handleGetSuggestionDiagnostics(ctx context.Context, params *GetDiagnosticsParams) ([]*DiagnosticResponse, error) {
  	ctx = core.WithCheckerLifetime(ctx, core.CheckerLifetimeDiagnostics)
-@@ -2966,7 +3533,6 @@ func (s *Session) handleGetProgramDiagnostics(ctx context.Context, params *GetPr
+@@ -2966,7 +3591,6 @@ func (s *Session) handleGetProgramDiagnostics(ctx context.Context, params *GetPr
  
  // handleGetGlobalDiagnostics returns global (non-file-specific) semantic diagnostics.
  func (s *Session) handleGetGlobalDiagnostics(ctx context.Context, params *GetProjectDiagnosticsParams) ([]*DiagnosticResponse, error) {
@@ -2153,7 +2238,7 @@ index b350c6334..f24385b8f 100644
  	sd, err := s.getSnapshotData(params.Snapshot)
  	if err != nil {
  		return nil, err
-@@ -2983,11 +3549,27 @@ func (s *Session) handleGetGlobalDiagnostics(ctx context.Context, params *GetPro
+@@ -2983,11 +3607,27 @@ func (s *Session) handleGetGlobalDiagnostics(ctx context.Context, params *GetPro
  	}
  
  	// Global diagnostics are accumulated lazily by the project's checker pool as
@@ -2186,7 +2271,7 @@ index b350c6334..f24385b8f 100644
  
  	diags := core.Filter(proj.GetProjectDiagnostics(ctx), func(d *ast.Diagnostic) bool {
  		return d.File() == nil
-@@ -3184,3 +3766,24 @@ func (s *Session) handleGetReferencedSymbolsForNode(ctx context.Context, params
+@@ -3184,3 +3824,24 @@ func (s *Session) handleGetReferencedSymbolsForNode(ctx context.Context, params
  	}
  	return result, nil
  }
@@ -2287,10 +2372,49 @@ index f8d006e92..8f90cd03b 100644
  		defer opts.Tracing.Push(tracing.PhaseProgram, "processRootFiles", map[string]any{"count": len(rootFiles)}, false)()
  	}
 diff --git a/internal/compiler/program.go b/internal/compiler/program.go
-index 35093fab6..d7d464dcc 100644
+index 35093fab6..2412a08d5 100644
 --- a/internal/compiler/program.go
 +++ b/internal/compiler/program.go
-@@ -229,7 +229,7 @@ func (p *Program) GetSourceFileFromReference(origin *ast.SourceFile, ref *ast.Fi
+@@ -5,6 +5,7 @@ import (
+ 	"fmt"
+ 	"io"
+ 	"maps"
++	"os"
+ 	"slices"
+ 	"strings"
+ 	"sync"
+@@ -116,6 +117,30 @@ type Program struct {
+ 	// Cached map of package names to whether they bundle types
+ 	packagesMapOnce sync.Once
+ 	packagesMap     map[string]bool
++
++	// Cached "micro program" classification for the single-checker
++	// diagnostics fast path (see collectCheckerDiagnosticsFromFiles).
++	smallCheckableOnce sync.Once
++	smallCheckable     bool
++}
++
++// isSmallCheckableProgram reports whether the program has at most
++// smallProgramCheckerThreshold checkable (non-skipped) files. Cached: the
++// file set and options are immutable for the lifetime of a Program.
++func (p *Program) isSmallCheckableProgram() bool {
++	p.smallCheckableOnce.Do(func() {
++		count := 0
++		for _, file := range p.files {
++			if !p.SkipTypeChecking(file, false) {
++				count++
++				if count > smallProgramCheckerThreshold {
++					return
++				}
++			}
++		}
++		p.smallCheckable = true
++	})
++	return p.smallCheckable
+ }
+ 
+ // FileExists implements checker.Program.
+@@ -229,7 +254,7 @@ func (p *Program) GetSourceFileFromReference(origin *ast.SourceFile, ref *ast.Fi
  	// Still, without the failed lookup reporting that only the loader does, this isn't terribly complicated
  
  	fileName := tspath.ResolvePath(tspath.GetDirectoryPath(origin.FileName()), ref.FileName)
@@ -2299,6 +2423,79 @@ index 35093fab6..d7d464dcc 100644
  	supportedExtensions := tsoptions.GetSupportedExtensionsWithJsonIfResolveJsonModule(p.Options(), supportedExtensionsBase)
  	allowNonTsExtensions := p.Options().AllowNonTsExtensions.IsTrue()
  	if tspath.HasExtension(fileName) {
+@@ -564,6 +589,17 @@ func (p *Program) collectCheckerDiagnostics(ctx context.Context, sourceFile *ast
+ 		if p.SkipTypeChecking(sourceFile, false) {
+ 			return nil
+ 		}
++		// Small programs: serve per-file diagnostics from the dedicated
++		// diagnostics checker (exclusive via its semaphore) that the
++		// whole-program pass warmed, instead of constructing a query
++		// checker per file. See collectCheckerDiagnosticsFromFiles.
++		if p.compilerCheckerPool == nil && smallProgramSingleChecker() && p.isSmallCheckableProgram() {
++			dctx := core.WithCheckerLifetime(ctx, core.CheckerLifetimeDiagnostics)
++			c, done := p.checkerPool.GetChecker(dctx, sourceFile)
++			result := collect(dctx, c, sourceFile)
++			done()
++			return SortAndDeduplicateDiagnostics(result)
++		}
+ 		c, done := p.GetTypeCheckerForFileExclusive(ctx, sourceFile)
+ 		result := collect(ctx, c, sourceFile)
+ 		done()
+@@ -572,6 +608,17 @@ func (p *Program) collectCheckerDiagnostics(ctx context.Context, sourceFile *ast
+ 	return SortAndDeduplicateDiagnostics(slices.Concat(p.collectCheckerDiagnosticsFromFiles(ctx, p.files, collect)...))
+ }
+ 
++// smallProgramSingleChecker gates the micro-program fast path in
++// collectCheckerDiagnosticsFromFiles (kill switch: TNB_SMALL_PROGRAM_CHECKER=0).
++var smallProgramSingleChecker = sync.OnceValue(func() bool {
++	return os.Getenv("TNB_SMALL_PROGRAM_CHECKER") != "0"
++})
++
++// smallProgramCheckerThreshold mirrors the internal compiler pool's sizing
++// (newCheckerPool allocates one checker per ~4 files): at or below this many
++// checkable files a single checker is cheaper than constructing several.
++const smallProgramCheckerThreshold = 4
++
+ // collectCheckerDiagnosticsFromFiles collects checker diagnostics for a list of files.
+ func (p *Program) collectCheckerDiagnosticsFromFiles(ctx context.Context, sourceFiles []*ast.SourceFile, collect func(context.Context, *checker.Checker, *ast.SourceFile) []*ast.Diagnostic) [][]*ast.Diagnostic {
+ 	diagnostics := make([][]*ast.Diagnostic, len(sourceFiles))
+@@ -580,11 +627,33 @@ func (p *Program) collectCheckerDiagnosticsFromFiles(ctx context.Context, source
+ 			diagnostics[fileIndex] = collect(ctx, c, file)
+ 		})
+ 	} else {
+-		wg := core.NewWorkGroup(p.SingleThreaded())
++		checkable := make([]int, 0, len(sourceFiles))
+ 		for i, file := range sourceFiles {
+-			if p.SkipTypeChecking(file, false) {
+-				continue
++			if !p.SkipTypeChecking(file, false) {
++				checkable = append(checkable, i)
+ 			}
++		}
++		// Micro programs (as produced by solution builds of many small
++		// projects) pay more for checker construction than for checking:
++		// the parallel path below would construct one query checker per
++		// checkable file. Route them through the single dedicated
++		// diagnostics checker instead — matching the checker count the
++		// internal compiler pool would pick for a program this size — so
++		// follow-up per-file RPCs on the same program (declaration emit,
++		// suggestion diagnostics) reuse the same warm checker rather than
++		// constructing yet another one.
++		if len(checkable) > 0 && len(checkable) <= smallProgramCheckerThreshold && smallProgramSingleChecker() {
++			dctx := core.WithCheckerLifetime(ctx, core.CheckerLifetimeDiagnostics)
++			c, done := p.checkerPool.GetChecker(dctx, nil)
++			for _, i := range checkable {
++				diagnostics[i] = collect(dctx, c, sourceFiles[i])
++			}
++			done()
++			return diagnostics
++		}
++		wg := core.NewWorkGroup(p.SingleThreaded())
++		for _, i := range checkable {
++			file := sourceFiles[i]
+ 			wg.Queue(func() {
+ 				c, done := p.checkerPool.GetChecker(ctx, file)
+ 				diagnostics[i] = collect(ctx, c, file)
 diff --git a/internal/execute/incremental/programtosnapshot.go b/internal/execute/incremental/programtosnapshot.go
 index 49ffb3003..196ce4c84 100644
 --- a/internal/execute/incremental/programtosnapshot.go

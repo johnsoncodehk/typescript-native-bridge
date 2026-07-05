@@ -1899,7 +1899,17 @@ export function createTsgoProgram(
     const project = _projectCache.get(configFilePath);
 
     // Build a thin Program object that delegates to the tsgo project.
-    const getTsgoSourceFileNames = () => project?.program?.getSourceFileNames?.() ?? [];
+    // File-name list is immutable per tsgo project object — cache the RPC
+    // (the builder walks it several times per project).
+    let tsgoSourceFileNamesCache: { proj: any; names: readonly string[] } | undefined;
+    const getTsgoSourceFileNames = () => {
+        const proj = project;
+        if (!proj?.program) return [];
+        if (!tsgoSourceFileNamesCache || tsgoSourceFileNamesCache.proj !== proj) {
+            tsgoSourceFileNamesCache = { proj, names: proj.program.getSourceFileNames?.() ?? [] };
+        }
+        return tsgoSourceFileNamesCache.names as string[];
+    };
     const getSourceFileNames = () => getTsgoSourceFileNames().map(toHostFileName);
     const tsgoGetSourceFile = (fileName: string) => project?.program?.getSourceFile?.(toTsgoFileName(fileName));
 
@@ -2162,6 +2172,35 @@ export function createTsgoProgram(
     // project. Declaration diagnostics always carry their source file, so
     // filtering by file matches stock per-file semantics.
     let declarationDiagnosticsCache: { proj: any; result: readonly any[] } | undefined;
+    // Per-file syntactic/semantic diagnostics memo (same invalidation rule).
+    // Stock Program caches bind-and-check diagnostics per file for its
+    // lifetime; the builder re-asks several times per file (buildinfo walk +
+    // emitFilesAndReportErrors), so this converts repeat RPCs into hits.
+    let perFileDiagCache: { proj: any; syntactic: Map<string, readonly any[]>; semantic: Map<string, readonly any[]> } | undefined;
+    const getPerFileDiagCache = (proj: any) => {
+        if (!perFileDiagCache || perFileDiagCache.proj !== proj) {
+            perFileDiagCache = { proj, syntactic: new Map(), semantic: new Map() };
+        }
+        return perFileDiagCache;
+    };
+    const getSyntacticDiagnosticsForFile = (proj: any, fileName: string): readonly any[] => {
+        const cache = getPerFileDiagCache(proj);
+        let result = cache.syntactic.get(fileName);
+        if (!result) {
+            result = mapTsgoDiagnostics(proj.program.getSyntacticDiagnostics?.(tsgoFileArg(fileName)), getDiagnosticSourceFile);
+            cache.syntactic.set(fileName, result);
+        }
+        return result;
+    };
+    const getSemanticDiagnosticsForFile = (proj: any, fileName: string): readonly any[] => {
+        const cache = getPerFileDiagCache(proj);
+        let result = cache.semantic.get(fileName);
+        if (!result) {
+            result = mapTsgoDiagnostics(proj.program.getSemanticDiagnostics?.(tsgoFileArg(fileName)), getDiagnosticSourceFile);
+            cache.semantic.set(fileName, result);
+        }
+        return result;
+    };
 
     const thinProgram: any = {
         // Marks this as a tsgo-backed program: its SourceFiles come straight from
@@ -2214,16 +2253,16 @@ export function createTsgoProgram(
         getConfigFileParsingDiagnostics: () => configDiags,
         getOptionsDiagnostics: () => [],
         getSemanticDiagnostics: (sourceFile?: any) => {
-            const raw = sourceFile?.fileName
-                ? project?.program?.getSemanticDiagnostics?.(tsgoFileArg(sourceFile.fileName))
-                : project?.program?.getSemanticDiagnostics?.();
-            return mapTsgoDiagnostics(raw, getDiagnosticSourceFile);
+            const proj = project;
+            if (!proj?.program) return [];
+            if (sourceFile?.fileName) return getSemanticDiagnosticsForFile(proj, sourceFile.fileName);
+            return mapTsgoDiagnostics(proj.program.getSemanticDiagnostics?.(), getDiagnosticSourceFile);
         },
         getSyntacticDiagnostics: (sourceFile?: any) => {
-            const raw = sourceFile?.fileName
-                ? project?.program?.getSyntacticDiagnostics?.(tsgoFileArg(sourceFile.fileName))
-                : project?.program?.getSyntacticDiagnostics?.();
-            return mapTsgoDiagnostics(raw, getDiagnosticSourceFile);
+            const proj = project;
+            if (!proj?.program) return [];
+            if (sourceFile?.fileName) return getSyntacticDiagnosticsForFile(proj, sourceFile.fileName);
+            return mapTsgoDiagnostics(proj.program.getSyntacticDiagnostics?.(), getDiagnosticSourceFile);
         },
         getGlobalDiagnostics: () => {
             const proj = project;
@@ -2258,15 +2297,17 @@ export function createTsgoProgram(
         },
         getDiagnostics: () => [],
         getBindAndCheckDiagnostics: (sourceFile?: any) => {
-            const synRaw = sourceFile?.fileName
-                ? project?.program?.getSyntacticDiagnostics?.(tsgoFileArg(sourceFile.fileName))
-                : project?.program?.getSyntacticDiagnostics?.();
-            const semRaw = sourceFile?.fileName
-                ? project?.program?.getSemanticDiagnostics?.(tsgoFileArg(sourceFile.fileName))
-                : project?.program?.getSemanticDiagnostics?.();
+            const proj = project;
+            if (!proj?.program) return [];
+            if (sourceFile?.fileName) {
+                return [
+                    ...getSyntacticDiagnosticsForFile(proj, sourceFile.fileName),
+                    ...getSemanticDiagnosticsForFile(proj, sourceFile.fileName),
+                ];
+            }
             return [
-                ...mapTsgoDiagnostics(synRaw, getDiagnosticSourceFile),
-                ...mapTsgoDiagnostics(semRaw, getDiagnosticSourceFile),
+                ...mapTsgoDiagnostics(proj.program.getSyntacticDiagnostics?.(), getDiagnosticSourceFile),
+                ...mapTsgoDiagnostics(proj.program.getSemanticDiagnostics?.(), getDiagnosticSourceFile),
             ];
         },
         getProgramDiagnostics: () => {
@@ -2592,12 +2633,19 @@ export function createTsgoChecker(program: any): any {
         const buildClose = (options as any).tscBuild && process.env.TNB_BUILD_CLOSE !== "0"
             ? beginBuildProject(configFilePath!)
             : { closeParams: undefined, staleSnapshots: undefined };
+        // Build mode: ask tsgo to start the whole-program semantic pass in the
+        // background as soon as the project opens — it overlaps with the JS
+        // builder's work between this call and getGlobalDiagnostics, which
+        // then joins the in-flight pass (Go-side singleflight). Never set for
+        // interactive hosts: a full check per keystroke would be pure waste.
+        const prefetchDiagnostics = !!(options as any).tscBuild && process.env.TNB_PREFETCH_DIAG !== "0";
         const snapshot: any = _api.updateSnapshot({
             openProject: configFilePath!,
             ...(openFiles.length > 0 ? { openFiles } : {}),
             ...(openFilesWithContent.length > 0 ? { openFilesWithContent } : {}),
             ...(extraFileExtensions ? { extraFileExtensions } : {}),
             ...(buildClose.closeParams ?? {}),
+            ...(prefetchDiagnostics ? { prefetchDiagnostics: true } : {}),
         });
         if (programCtx) programCtx.pendingReferencedProjects = undefined;
         project = snapshot.getProject(configFilePath!);
