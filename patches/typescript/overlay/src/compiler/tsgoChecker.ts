@@ -4447,6 +4447,56 @@ export function createTsgoChecker(program: any): any {
             if (t) fixupType(t);
             return t ?? type;
         },
+        // Stock Completions.getPropertiesForObjectExpression calls these; route
+        // through tsgo RPC so union reduction and property merging match stock.
+        getUnionType(types: readonly any[], unionReduction?: number, ..._rest: any[]): any {
+            ensureProject();
+            const list = types ? Array.from(types).filter(Boolean) : [];
+            if (list.length === 0) {
+                const never = project.checker.getNeverType();
+                if (never) fixupType(never);
+                return never;
+            }
+            if (list.length === 1) {
+                const t = list[0];
+                if (t) fixupType(t);
+                return t;
+            }
+            const t = project.checker.getUnionType(list, unionReduction ?? 1);
+            if (t) fixupType(t);
+            return t;
+        },
+        getPromisedTypeOfPromise(type: any): any {
+            ensureProject();
+            if (!type) return undefined;
+            const t = project.checker.getPromisedTypeOfPromise(type);
+            if (t) fixupType(t);
+            return t;
+        },
+        getAllPossiblePropertiesOfTypes(types: readonly any[]): any[] {
+            ensureProject();
+            if (!types?.length) return [];
+            return project.checker.getAllPossiblePropertiesOfTypes([...types]) ?? [];
+        },
+        isArrayLikeType(type: any): boolean {
+            ensureProject();
+            if (!type) return false;
+            return !!project.checker.isArrayLikeType(type);
+        },
+        isTypeInvalidDueToUnionDiscriminant(type: any, node: any): boolean {
+            ensureProject();
+            if (!type || !node) return false;
+            const sf = node.getSourceFile?.();
+            if (!sf) return false;
+            const tsgoNode = findTsgoNodeAtPosition(sf.fileName, node.getStart(sf), node.kind, node.getEnd(sf));
+            if (!tsgoNode || tsgoNode.kind !== node.kind) return false;
+            return !!project.checker.isTypeInvalidDueToUnionDiscriminant(type, tsgoNode);
+        },
+        typeHasCallOrConstructSignatures(type: any): boolean {
+            ensureProject();
+            if (!type) return false;
+            return !!project.checker.typeHasCallOrConstructSignatures(type);
+        },
         getBaseTypes(type: any): readonly any[] {
             ensureProject();
             if (!type) return [];
