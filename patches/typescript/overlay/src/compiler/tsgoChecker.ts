@@ -2312,6 +2312,17 @@ export function createTsgoProgram(
     const getBuilderMetaState = () => {
         const proj = project;
         if (!proj?.program || typeof proj.program.getBuilderFileGraph !== "function") return undefined;
+        // Non-incremental build-mode projects (tsc -b / vue-tsc -b over plain
+        // noEmit tsconfigs, e.g. Nuxt-generated ones): the graph has no
+        // consumer — Go writes the (non-incremental) buildinfo itself, and the
+        // JS builder starts from a fresh state (the non-incremental buildinfo
+        // restores no old program), where the fresh-state drain gate already
+        // skips reference propagation. Fetching it would force a whole-program
+        // hash + referenced-files walk per project (~300ms each) purely to be
+        // discarded. Incremental/composite projects keep the fetch — their
+        // buildinfo diff and change propagation consume it — and Go serves it
+        // from the already-built incremental snapshot at no extra cost.
+        if ((options as any).tscBuild && !options.incremental && !options.composite) return undefined;
         if (!builderMetaCache || builderMetaCache.proj !== proj) {
             const byPath = new Map<string, TnbBuilderMeta>();
             const byHostFile = new Map<string, TnbBuilderMeta>();
