@@ -3219,6 +3219,8 @@ export function createTsgoChecker(program: any): any {
         propertyBulkLoaded.clear();
         signaturesByKindCache.clear();
         baseTypesCache.clear();
+        _objCompletionPending = undefined;
+        _objCompletionBatch = undefined;
     }
 
     function getTsgoSourceFile(fileName: string): any {
@@ -3970,6 +3972,125 @@ export function createTsgoChecker(program: any): any {
         return v;
     };
 
+    // ── Object-literal completion batch ──────────────────────────────
+    // Stock Completions.getPropertiesForObjectExpression makes O(3N) checker
+    // calls for a union contextual type: getPromisedTypeOfPromise per member,
+    // then isArrayLikeType / isTypeInvalidDueToUnionDiscriminant /
+    // typeHasCallOrConstructSignatures per member of the filtered union — each
+    // one a synchronous NAPI round trip through this adapter. getContextualType
+    // records the last object-literal / JSX-attributes query; the first
+    // per-member call then runs the whole pipeline server-side in ONE composite
+    // RPC (getPropertiesForObjectExpression) and seeds the answers below, so
+    // the remaining stock calls become cache hits. Every seeded answer is
+    // exactly what the corresponding per-call RPC would have returned; any
+    // cache miss falls through to the original RPC, so this is purely a
+    // batching layer.
+    interface ObjCompletionBatch {
+        hostNode: any;
+        completionsType: any;
+        promised: Map<any, any>; // contextual member → promised type | null
+        pfMembers: any[]; // members surviving the promise filter, in order
+        pf: any; // union of pfMembers
+        merged: any; // pf ∪ completionsType, when applicable
+        isFinalUnion: boolean;
+        verdicts: Map<any, { isArrayLike: boolean; invalidDueToUnionDiscriminant: boolean; hasCallOrConstructSignatures: boolean }>;
+        filteredMembers: any[]; // final members surviving the stock filter
+        properties: any[];
+    }
+    let _objCompletionPending: { hostNode: any; tsgoNode: any; results: any[] } | undefined;
+    let _objCompletionBatch: ObjCompletionBatch | undefined;
+
+    const sameTypeList = (a: readonly any[], b: readonly any[]): boolean =>
+        a.length === b.length && a.every((t, i) => t === b[i]);
+
+    // A batch only answers queries while the stock pipeline is still working on
+    // the same object literal; when a new object-literal contextual query
+    // arrives, the next per-member call recomputes for the new node (the
+    // discriminant verdicts are node-dependent).
+    const activeObjCompletionBatch = (): ObjCompletionBatch | undefined => {
+        const b = _objCompletionBatch;
+        if (!b) return undefined;
+        if (_objCompletionPending && _objCompletionPending.hostNode !== b.hostNode) return undefined;
+        return b;
+    };
+
+    // Fires the composite RPC when `memberType` is the contextual type (or one
+    // of its already-materialized union members) recorded for the pending
+    // object-literal completion. Union members are matched via __tsgoTypesMemo
+    // only: completions.ts reads `.types` before filtering, so the memo is
+    // already populated and this check never issues an RPC of its own.
+    const tryStartObjCompletionBatch = (memberType: any): ObjCompletionBatch | undefined => {
+        const pending = _objCompletionPending;
+        const proj = _currentProjectRef.project;
+        if (!pending || !proj || typeof proj.checker.getPropertiesForObjectExpression !== "function") return undefined;
+        let contextualType: any;
+        for (const t of pending.results) {
+            if (!t) continue;
+            if (t === memberType || (Array.isArray(t.__tsgoTypesMemo) && t.__tsgoTypesMemo.includes(memberType))) {
+                contextualType = t;
+                break;
+            }
+        }
+        if (!contextualType) return undefined;
+        // Stock's completionsType is the result of the LAST getContextualType
+        // call on the node (ContextFlags.IgnoreNodeInferences). The adapter
+        // drops context flags, so this is normally === contextualType and the
+        // merged-union branch stays dead, matching the stock comparison.
+        const last = pending.results[pending.results.length - 1];
+        const completionsType = last && last !== contextualType ? last : undefined;
+        let info: any;
+        try {
+            info = proj.checker.getPropertiesForObjectExpression(contextualType, completionsType, pending.tsgoNode);
+        }
+        catch {
+            return undefined;
+        }
+        if (!info) return undefined;
+        const TF = sync.TypeFlags;
+        const promised = new Map<any, any>();
+        const pfMembers: any[] = [];
+        for (const m of info.members) {
+            fixupType(m.type);
+            if (m.promisedType) fixupType(m.promisedType);
+            promised.set(m.type, m.promisedType ?? null);
+            if (!m.promisedType) pfMembers.push(m.type);
+        }
+        fixupType(info.promiseFilteredType);
+        if (info.mergedType) fixupType(info.mergedType);
+        const verdicts = new Map<any, any>();
+        for (const fm of info.finalMembers) {
+            fixupType(fm.type);
+            // Primitive members were skipped server-side (stock short-circuits
+            // before any checker call); leave them out so an unexpected query
+            // falls through to the real RPC instead of a fabricated verdict.
+            if ((fm.type.flags & TF.Primitive) === 0) verdicts.set(fm.type, fm);
+            if (fm.apparentProperties && !propertiesCache.has(fm.type)) {
+                propertiesCache.set(fm.type, fm.apparentProperties);
+            }
+        }
+        for (const t of info.filteredTypes) fixupType(t);
+        const finalType = info.mergedType ?? info.promiseFilteredType;
+        const isFinalUnion = info.finalMembers.length > 0;
+        // Non-union final type: stock calls type.getApparentProperties() on it,
+        // which routes through propertiesCache — seed it.
+        if (!isFinalUnion && finalType && !propertiesCache.has(finalType)) {
+            propertiesCache.set(finalType, info.properties);
+        }
+        _objCompletionBatch = {
+            hostNode: pending.hostNode,
+            completionsType,
+            promised,
+            pfMembers,
+            pf: info.promiseFilteredType,
+            merged: info.mergedType,
+            isFinalUnion,
+            verdicts,
+            filteredMembers: info.filteredTypes,
+            properties: info.properties as any[],
+        };
+        return _objCompletionBatch;
+    };
+
     const resolvePropertyOfType = (type: any, name: string): any => {
         const proj = _currentProjectRef.project;
         if (!proj || !type) return undefined;
@@ -4300,6 +4421,18 @@ export function createTsgoChecker(program: any): any {
             if (!tsgoNode) return undefined;
             const t = project.checker.getContextualType(tsgoNode);
             if (t) fixupType(t);
+            // Record object-literal / JSX-attributes contextual queries: stock
+            // completions asks these right before getPropertiesForObjectExpression,
+            // which lets the per-member calls below collapse into one batch RPC.
+            if ((node.kind === SyntaxKind.ObjectLiteralExpression || node.kind === SyntaxKind.JsxAttributes) && tsgoNode.kind === node.kind) {
+                const pending = _objCompletionPending;
+                if (pending && pending.hostNode === node) {
+                    pending.results.push(t);
+                }
+                else {
+                    _objCompletionPending = { hostNode: node, tsgoNode, results: [t] };
+                }
+            }
             return t;
         },
         getResolvedSignature(node: any): any {
@@ -4449,9 +4582,17 @@ export function createTsgoChecker(program: any): any {
         },
         // Stock Completions.getPropertiesForObjectExpression calls these; route
         // through tsgo RPC so union reduction and property merging match stock.
+        // The activeObjCompletionBatch() lookups serve the whole sequence from
+        // the composite RPC fired in getPromisedTypeOfPromise (see the
+        // object-literal completion batch section above).
         getUnionType(types: readonly any[], unionReduction?: number, ..._rest: any[]): any {
             ensureProject();
             const list = types ? Array.from(types).filter(Boolean) : [];
+            const batch = activeObjCompletionBatch();
+            if (batch && (unionReduction ?? 1) === 1) {
+                if (sameTypeList(list, batch.pfMembers)) return batch.pf;
+                if (batch.merged && list.length === 2 && list[0] === batch.pf && list[1] === batch.completionsType) return batch.merged;
+            }
             if (list.length === 0) {
                 const never = project.checker.getNeverType();
                 if (never) fixupType(never);
@@ -4469,6 +4610,8 @@ export function createTsgoChecker(program: any): any {
         getPromisedTypeOfPromise(type: any): any {
             ensureProject();
             if (!type) return undefined;
+            const batch = activeObjCompletionBatch() ?? tryStartObjCompletionBatch(type);
+            if (batch?.promised.has(type)) return batch.promised.get(type) ?? undefined;
             const t = project.checker.getPromisedTypeOfPromise(type);
             if (t) fixupType(t);
             return t;
@@ -4476,16 +4619,25 @@ export function createTsgoChecker(program: any): any {
         getAllPossiblePropertiesOfTypes(types: readonly any[]): any[] {
             ensureProject();
             if (!types?.length) return [];
+            const batch = activeObjCompletionBatch();
+            if (batch?.isFinalUnion && sameTypeList(types, batch.filteredMembers)) return batch.properties;
             return project.checker.getAllPossiblePropertiesOfTypes([...types]) ?? [];
         },
         isArrayLikeType(type: any): boolean {
             ensureProject();
             if (!type) return false;
+            const verdict = activeObjCompletionBatch()?.verdicts.get(type);
+            if (verdict) return verdict.isArrayLike;
             return !!project.checker.isArrayLikeType(type);
         },
         isTypeInvalidDueToUnionDiscriminant(type: any, node: any): boolean {
             ensureProject();
             if (!type || !node) return false;
+            const batch = activeObjCompletionBatch();
+            if (batch && batch.hostNode === node) {
+                const verdict = batch.verdicts.get(type);
+                if (verdict) return verdict.invalidDueToUnionDiscriminant;
+            }
             const sf = node.getSourceFile?.();
             if (!sf) return false;
             const tsgoNode = findTsgoNodeAtPosition(sf.fileName, node.getStart(sf), node.kind, node.getEnd(sf));
@@ -4495,6 +4647,8 @@ export function createTsgoChecker(program: any): any {
         typeHasCallOrConstructSignatures(type: any): boolean {
             ensureProject();
             if (!type) return false;
+            const verdict = activeObjCompletionBatch()?.verdicts.get(type);
+            if (verdict) return verdict.hasCallOrConstructSignatures;
             return !!project.checker.typeHasCallOrConstructSignatures(type);
         },
         getBaseTypes(type: any): readonly any[] {
