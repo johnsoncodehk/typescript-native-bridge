@@ -2666,9 +2666,10 @@ export function createTsgoProgram(
     return new Proxy(thinProgram, {
         get(target: any, prop: string | symbol, receiver: any) {
             if (prop in target) return Reflect.get(target, prop, receiver);
-            // Unknown methods: return no-op to avoid crashes
+            // Program surface is wider than our thin stub; optional callers
+            // (explainFiles, logging) probe methods we do not implement yet.
             if (typeof prop !== "string") return undefined;
-            return typeof prop === "string" ? (..._args: any[]) => undefined : undefined;
+            return (..._args: any[]) => undefined;
         },
         has: (target: any, p) => p in target,
         ownKeys: () => Object.keys(thinProgram),
@@ -4163,6 +4164,87 @@ export function createTsgoChecker(program: any): any {
 
     let checkerProxyRef: any;
 
+    function shouldTreatPropertiesOfExternalModuleAsExports(type: any): boolean {
+        if (!type) return false;
+        const TF = sync.TypeFlags;
+        const OF = sync.ObjectFlags;
+        if (type.flags & TF.Primitive) return false;
+        if (type.objectFlags & OF.Class) return false;
+        ensureProject();
+        try {
+            if (project.checker.isArrayType?.(type)) return false;
+            if (project.checker.isTupleType?.(type)) return false;
+        } catch { /* conservative */ }
+        return true;
+    }
+
+    function tryGetMemberInModuleExportsImpl(memberName: any, moduleSymbol: any): any {
+        if (moduleSymbol?.exports) {
+            const sym = moduleSymbol.exports.get(memberName);
+            return sym ? refineNavSymbol(sym) : undefined;
+        }
+        ensureProject();
+        try {
+            return refineNavSymbol(rpc().getMemberInModuleExports(moduleSymbol, memberName));
+        } catch { return undefined; }
+    }
+
+    function tryGetMemberInModuleExportsAndPropertiesImpl(memberName: any, moduleSymbol: any): any {
+        const symbol = tryGetMemberInModuleExportsImpl(memberName, moduleSymbol);
+        if (symbol) return symbol;
+
+        ensureProject();
+        const mod = resolveModuleSymbolForExports(moduleSymbol);
+        let exportEquals = mod;
+        try {
+            exportEquals = rpc().resolveExternalModuleSymbol(mod) ?? mod;
+        } catch { return undefined; }
+        if (exportEquals === mod) return undefined;
+
+        let exportEqualsType: any;
+        try { exportEqualsType = rpc().getTypeOfSymbol(exportEquals); } catch { return undefined; }
+        if (!exportEqualsType || !shouldTreatPropertiesOfExternalModuleAsExports(exportEqualsType)) return undefined;
+
+        try {
+            return refineNavSymbol(resolvePropertyOfType(exportEqualsType, memberName));
+        } catch { return undefined; }
+    }
+
+    function getSymbolFlagsImpl(symbol: any, excludeTypeOnlyMeanings?: boolean, excludeLocalMeanings?: boolean): number {
+        if (!symbol) return 0;
+        let flags = excludeLocalMeanings ? 0 : (typeof symbol.flags === "number" ? symbol.flags : 0);
+        let current = symbol;
+        const seen = new Set<any>();
+        const isAliasSymbol = (s: any) => !!s && (((s.flags ?? 0) & SymbolFlags.Alias) || !!s.target);
+
+        if (isAliasSymbol(current)) {
+            const hostResolved = resolveHostAliasedSymbol(current);
+            if (hostResolved && hostResolved !== current) {
+                if (typeof hostResolved.flags === "number") flags |= hostResolved.flags;
+                current = hostResolved;
+            }
+        }
+
+        ensureProject();
+        while (isAliasSymbol(current) && !seen.has(current)) {
+            seen.add(current);
+            let target: any;
+            try {
+                target = rpc().getImmediateAliasedSymbol(current);
+            } catch {
+                target = undefined;
+            }
+            if (!target || target === current) {
+                target = current.target;
+            }
+            if (!target || target === current) break;
+            if (typeof target.flags === "number") flags |= target.flags;
+            current = target;
+        }
+
+        return flags;
+    }
+
     const adapter: any = {
         // ── Node-based hot queries (find tsgo node → use tsgo's own API) ──
         getTypeAtLocation(node: any): any {
@@ -4837,14 +4919,10 @@ export function createTsgoChecker(program: any): any {
             return refineNavSymbol(target && target !== symbol ? target : symbol);
         },
         tryGetMemberInModuleExports(memberName: any, moduleSymbol: any): any {
-            if (moduleSymbol?.exports) {
-                const sym = moduleSymbol.exports.get(memberName);
-                return sym ? refineNavSymbol(sym) : undefined;
-            }
-            ensureProject();
-            try {
-                return refineNavSymbol(rpc().tryGetMemberInModuleExports(memberName, moduleSymbol));
-            } catch { return undefined; }
+            return tryGetMemberInModuleExportsImpl(memberName, moduleSymbol);
+        },
+        tryGetMemberInModuleExportsAndProperties(memberName: any, moduleSymbol: any): any {
+            return tryGetMemberInModuleExportsAndPropertiesImpl(memberName, moduleSymbol);
         },
         resolveExternalModuleSymbol(moduleSymbol: any): any {
             ensureProject();
@@ -4861,6 +4939,9 @@ export function createTsgoChecker(program: any): any {
         },
         // Merging is a TS-specific concern; tsgo symbols are already merged.
         getMergedSymbol: (s: any) => s,
+        getSymbolFlags(symbol: any, excludeTypeOnlyMeanings?: boolean, excludeLocalMeanings?: boolean): number {
+            return getSymbolFlagsImpl(symbol, excludeTypeOnlyMeanings, excludeLocalMeanings);
+        },
         getRootSymbols(symbol: any): any[] {
             if (!symbol) return [];
             ensureProject();
@@ -4928,12 +5009,8 @@ export function createTsgoChecker(program: any): any {
         },
     };
 
-    // Proxy: unknown methods → lazily forward to tsgo checker if it has them,
-    // else return a no-op that yields undefined / [] (feature-detect friendly;
-    // many callers iterate the result, so returning a callable is safer than
-    // undefined).
-    // Eagerly create the tsgo project so program.getSourceFile() can return
-    // tsgo-backed files before any checker method is invoked by rules.
+    // Proxy: unknown methods → forward to native checker when present, else throw
+    // so missing adapter coverage fails loudly instead of returning undefined.
     ensureProject();
 
     const wrapCheckerCall = <T extends (...args: any[]) => any>(fn: T): T => {
@@ -4967,10 +5044,12 @@ export function createTsgoChecker(program: any): any {
                 // checker hot path during whole-program lint).
                 return wrapCheckerCall(project.checker[prop].bind(project.checker));
             }
-            // Unknown method — return a no-op so `checker.foo()` doesn't throw.
-            // Most callers feature-detect or iterate; returning undefined from
-            // the call covers both `if (x)` and `for (const i of x ?? [])`.
-            return (..._args: any[]) => undefined;
+            // Missing on both adapter and native checker — throw instead of
+            // silently returning undefined (which hid quick-fix gaps like
+            // getSymbolFlags / tryGetMemberInModuleExportsAndProperties).
+            return (..._args: any[]) => {
+                throw new Error(`tsgoChecker: TypeChecker.${prop} is not implemented in the tsgo adapter`);
+            };
         },
         has(target: any, p) { return p in target; },
     });
