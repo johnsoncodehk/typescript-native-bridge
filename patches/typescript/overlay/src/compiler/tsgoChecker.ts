@@ -18,6 +18,7 @@ import * as ts from "./_namespaces/ts.js";
 import { bindSourceFile } from "./binder.js";
 import { createSourceFile } from "./parser.js";
 import { SyntaxKind, SymbolFlags, NodeFlags, JSDocParsingMode, type Path } from "./types.js";
+import { getBuildInfoText, getTsBuildInfoEmitOutputFilePath } from "./emitter.js";
 import { installTsgoBackedSourceFileLoader, inferScriptKind, createSkeletonSourceFile, getTsgoBackedSourceFile } from "./tsgoBackedSourceFile.js";
 import { getTnbPackageRoot, isBundledLibPath, isHostLibFile, resolveHostFileName, toHostFileName, toTsgoFileName } from "./tsgoLibPaths.js";
 
@@ -2041,6 +2042,7 @@ export function createTsgoProgram(
             const hostSf = getLanguageServiceSourceFile(hostFileName, fileName);
             if (hostSf) {
                 ensureHostSourceFileBound(hostSf, options);
+                ensureTnbVersion(hostSf, hostFileName);
                 sfCache.set(cacheKey, hostSf);
                 return hostSf;
             }
@@ -2051,6 +2053,7 @@ export function createTsgoProgram(
                     : (hostContentByFile.get(hostFileName)?.text ?? "");
                 const hostSf = createBoundHostSourceFile(hostFileName, fileName, text);
                 if (hostSf) {
+                    ensureTnbVersion(hostSf, hostFileName);
                     sfCache.set(cacheKey, hostSf);
                     return hostSf;
                 }
@@ -2059,6 +2062,7 @@ export function createTsgoProgram(
                     createSkeletonSourceFile(hostFileName, text, options.target ?? 99, scriptKind),
                     hostFileName,
                 );
+                ensureTnbVersion(sf, hostFileName);
                 sfCache.set(cacheKey, sf);
                 return sf;
             }
@@ -2072,16 +2076,20 @@ export function createTsgoProgram(
         const anySf = sf as any;
         anySf.path = canon;
         anySf.resolvedPath = canon;
-        anySf.version = "1";
+        ensureTnbVersion(anySf, hostFileName);
         const backed = getTsgoBackedSourceFile(anySf);
         const result = backed ?? anySf;
-        if (result && !("version" in result)) {
-            try { Object.defineProperty(result, "version", { value: "1", writable: true, configurable: true, enumerable: false }); } catch {}
-        }
+        ensureTnbVersion(result, hostFileName);
         if (result && result !== anySf) {
             try {
+                // Canonical path identity: BuilderState keys fileInfos and the
+                // referencedMap by resolvedPath — it must match the light-stub
+                // and builder-meta canonicalization or dependency edges dangle.
                 if (result.resolvedPath === undefined) {
-                    Object.defineProperty(result, "resolvedPath", { value: hostFileName, writable: true, configurable: true });
+                    Object.defineProperty(result, "resolvedPath", { value: canon, writable: true, configurable: true });
+                }
+                if (result.path === undefined) {
+                    Object.defineProperty(result, "path", { value: canon, writable: true, configurable: true });
                 }
                 if (result.originalFileName === undefined) {
                     Object.defineProperty(result, "originalFileName", { value: hostFileName, writable: true, configurable: true });
@@ -2120,6 +2128,16 @@ export function createTsgoProgram(
     // skeleton avoids 1693 eager getSourceFile RPCs; only the ~700 files
     // the files actually linted pay the RPC via getSourceFile(fileName).
     const lightSfCache = new Map<string, any>();
+    // Pure-disk LS lint mode (tsslint CLI): LanguageServiceHost with snapshots
+    // but no overlays / parsed host files / tsserver projectService. Fixed at
+    // program creation — both inputs are. In this mode metadata-only consumers
+    // (getSourceFiles walks, getSourceFileByPath from builder state / drain)
+    // are served light stubs instead of materializing remote ASTs.
+    const preferLightProgramFiles = !preferHostSourceFiles
+        && typeof (programCtx.lsHost as any)?.getScriptSnapshot === "function";
+    // Raw-path → light stub memo: skips repeated resolveHostFileName
+    // normalization (path.normalize/resolve) on the builder's hot path.
+    const lightSfByPathMemo = new Map<string, any>();
     const getOrCreateLightSourceFile = (fileName: string): any => {
         // Use the SAME host-name normalization as getOrCreateSourceFile
         // (resolveHostFileName), not the weaker toHostFileName. Otherwise a
@@ -2134,14 +2152,35 @@ export function createTsgoProgram(
         // tsserver getScriptInfos() requires ScriptInfo for every returned file;
         // default libs are not opened as ScriptInfo — exclude them here.
         const tsgoPath = canonicalSourceFilePath(hostFileName);
+        // Text and line map are lazy in pure-disk lint mode: builder-state /
+        // buildinfo traffic never touches them, but a diagnostic whose `file` is
+        // a light stub (buildinfo diagnostics rehydrated via getSourceFileByPath)
+        // must still map offsets to real line/column. Only files actually asked
+        // pay the disk read. Outside lint mode (vue-tsc / tsc -b) stubs keep the
+        // previous cheap constants — those paths format diagnostics against full
+        // host SourceFiles, and a lazy read per stub measurably slows the build.
+        let lazyText: string | undefined;
+        let lazyLineStarts: readonly number[] | undefined;
+        const textOf = (): string => lazyText ??= (preferLightProgramFiles ? host?.readFile?.(hostFileName) ?? "" : "");
+        const lineStartsOf = (): readonly number[] => lazyLineStarts ??= ts.computeLineStarts(textOf());
         const sf: any = {
             kind: SyntaxKind.SourceFile,
             fileName: hostFileName,
             path: tsgoPath,
             resolvedPath: tsgoPath,
             originalFileName: hostFileName,
-            text: "",
-            version: "1",
+            get text() { return textOf(); },
+            // Volar's decorateProgram (vue-tsc) writes .text back onto program
+            // source files (fillSourceFileText) — accept the write and drop the
+            // stale lazily-computed line starts.
+            set text(value: string) {
+                lazyText = value;
+                lazyLineStarts = undefined;
+            },
+            // Content-derived version (Go hash) — BuilderState serializes this
+            // into buildinfo; a constant here would freeze cross-session change
+            // detection (see builder-meta block above).
+            get version() { return versionForFile(hostFileName); },
             languageVersion: options.target ?? 99,
             languageVariant: 0,
             scriptKind: inferScriptKind(hostFileName),
@@ -2168,10 +2207,10 @@ export function createTsgoProgram(
             },
             pos: 0,
             end: 0,
-            lineMap: [0],
-            getLineStarts: () => [0],
-            getLineAndCharacterOfPosition: () => ({ line: 0, character: 0 }),
-            getPositionOfLineAndCharacter: () => 0,
+            get lineMap() { return lineStartsOf(); },
+            getLineStarts: () => lineStartsOf(),
+            getLineAndCharacterOfPosition: (position: number) => ts.computeLineAndCharacterOfPosition(lineStartsOf(), position),
+            getPositionOfLineAndCharacter: (line: number, character: number) => ts.computePositionOfLineAndCharacter(lineStartsOf(), line, character, textOf()),
             forEachChild: () => undefined,
             // findAllReferences scans every program file; light stubs must not crash token walks.
             getChildren: () => [],
@@ -2257,6 +2296,84 @@ export function createTsgoProgram(
         return result;
     };
 
+    // ── Builder-state metadata (BuilderState.create / tsslint layer-2) ──
+    // One batch RPC per tsgo project supplies, for every program file, the
+    // content-hash version, the referenced-file edges, global-scope effect and
+    // implied module format — computed in Go by the same graph walk tsgo's own
+    // --incremental buildinfo uses (import symbols resolve at alias level; no
+    // semantic pass). BuilderState.create consumes this via tnbBuilderFileMetas
+    // instead of re-deriving the graph through per-import checker RPCs, and
+    // SourceFile.version getters below read the same map so the versions the
+    // builder serializes into buildinfo are content-derived and stable across
+    // sessions (the old constant "1" made every file look unchanged forever —
+    // stale type-aware lint results for dependents of an edited file).
+    type TnbBuilderMeta = { version: string; affectsGlobalScope: true | undefined; impliedFormat: number | undefined; referencedPaths: readonly string[] | undefined };
+    let builderMetaCache: { proj: any; byPath: Map<string, TnbBuilderMeta>; byHostFile: Map<string, TnbBuilderMeta> } | undefined;
+    const getBuilderMetaState = () => {
+        const proj = project;
+        if (!proj?.program || typeof proj.program.getBuilderFileGraph !== "function") return undefined;
+        if (!builderMetaCache || builderMetaCache.proj !== proj) {
+            const byPath = new Map<string, TnbBuilderMeta>();
+            const byHostFile = new Map<string, TnbBuilderMeta>();
+            let entries: readonly any[];
+            try {
+                entries = proj.program.getBuilderFileGraph() ?? [];
+            } catch {
+                return undefined;
+            }
+            for (const e of entries) {
+                const hostFileName = toHostFileName(e.fileName);
+                // Parity with getSourceFiles(): default libs are excluded from
+                // the JS-side program view, so keep them out of fileInfos too.
+                if (isHostLibFile(hostFileName)) continue;
+                const meta: TnbBuilderMeta = {
+                    version: e.version,
+                    affectsGlobalScope: e.affectsGlobalScope ? true : undefined,
+                    impliedFormat: e.impliedNodeFormat || undefined,
+                    referencedPaths: e.refs?.map((r: string) => canonicalSourceFilePath(toHostFileName(r))),
+                };
+                byPath.set(canonicalSourceFilePath(hostFileName), meta);
+                byHostFile.set(hostFileName, meta);
+            }
+            builderMetaCache = { proj, byPath, byHostFile };
+        }
+        return builderMetaCache;
+    };
+    /** Content-derived SourceFile version: Go hash when known, host script version otherwise. */
+    const versionForFile = (hostFileName: string): string => {
+        const meta = getBuilderMetaState()?.byHostFile.get(hostFileName);
+        if (meta) return meta.version;
+        const hv = hostForLs()?.getScriptVersion?.(hostFileName) ?? host?.getScriptVersion?.(hostFileName);
+        return typeof hv === "string" && hv.length ? hv : "1";
+    };
+    /** Lazily bind a content-derived version getter (idempotent; skips host-supplied versions). */
+    const ensureTnbVersion = (sf: any, hostFileName: string): void => {
+        if (!sf) return;
+        try {
+            const own = Object.getOwnPropertyDescriptor(sf, "version");
+            if (own && !own.configurable) return;
+            if (own && own.value !== undefined && own.value !== "1") return;
+            Object.defineProperty(sf, "version", {
+                configurable: true,
+                enumerable: false,
+                get: () => versionForFile(hostFileName),
+            });
+        } catch { /* best-effort */ }
+    };
+    // Root-file membership for buildinfo serialization (builder.ts tryAddRoot
+    // consults this instead of materializing each SourceFile to inspect
+    // fileIncludeReasons, which the thin program does not track).
+    let rootPathSetCache: Set<string> | undefined;
+    const isRootFilePath = (path: any): boolean => {
+        if (!rootPathSetCache) {
+            rootPathSetCache = new Set();
+            for (const fn of collectTsgoOpenFileNames(programCtx.lsHost, rootNames as string[])) {
+                rootPathSetCache.add(canonicalSourceFilePath(fn));
+            }
+        }
+        return rootPathSetCache.has(String(path));
+    };
+
     const thinProgram: any = {
         // Marks this as a tsgo-backed program: its SourceFiles come straight from
         // tsgo and are never acquired via the LanguageService document registry.
@@ -2285,6 +2402,20 @@ export function createTsgoProgram(
         // toLineColumnOffset (go-to-definition span conversion) sees real line maps.
         getSourceFileByPath: (path: any) => {
             const pathStr = String(path);
+            // Pure-disk lint: the builder's affected-file drain calls this once
+            // per changed file (and per graph node on incremental runs). The
+            // fileHasHostSourceContent probe below would CREATE a host snapshot
+            // (tsslint's getScriptSnapshot reads the file from disk and caches
+            // it), turning every metadata lookup into a disk read + fs.stat +
+            // remote-AST RPC via getOrCreateSourceFile. Builder machinery only
+            // needs metadata here — serve the memoized light stub directly.
+            if (preferLightProgramFiles) {
+                const memo = lightSfByPathMemo.get(pathStr);
+                if (memo) return memo;
+                const sf = getOrCreateLightSourceFile(pathStr);
+                lightSfByPathMemo.set(pathStr, sf);
+                return sf;
+            }
             const hostFileName = toHostFileName(pathStr);
             if (fileHasHostSourceContent(pathStr, hostFileName)) {
                 return getOrCreateSourceFile(pathStr);
@@ -2294,10 +2425,20 @@ export function createTsgoProgram(
         getSourceFiles: () => {
             const names = getSourceFileNames();
             const result: any[] = [];
+            // Pure-disk LS lint (tsslint CLI: LanguageServiceHost, no overlays,
+            // no tsserver): whole-program consumers of getSourceFiles()
+            // (BuilderState, buildinfo serialization, hasErrors scans) need only
+            // metadata, so light stubs skip one remote-AST fetch per program
+            // file. The host snapshots every file it reads, which would
+            // otherwise force fileHasHostSourceContent → full materialization
+            // for the entire program. Files actually linted still pull full
+            // ASTs via getSourceFile(fileName). Volar / vue-tsc keep full SFs
+            // (host overlays / parsed host files → preferHostSourceFiles), and
+            // CompilerHost builds (tsc -b) keep their previous behavior.
             for (const name of names) {
                 if (isHostLibFile(name)) continue;
                 const hostFileName = toHostFileName(name);
-                const sf = fileHasHostSourceContent(name, hostFileName)
+                const sf = !preferLightProgramFiles && fileHasHostSourceContent(name, hostFileName)
                     ? getOrCreateSourceFile(name)
                     : getOrCreateLightSourceFile(name);
                 if (sf) result.push(sf);
@@ -2378,6 +2519,18 @@ export function createTsgoProgram(
         getClassifiableNames: () => new Set(),
         getCommonSourceDirectory: () => "",
         getCurrentDirectory: () => host?.getCurrentDirectory?.() ?? process.cwd(),
+        // Same canonicalization rule as canonicalSourceFilePath — the builder
+        // uses this for toPath on root names and buildinfo-relative paths, so
+        // it must agree with SourceFile.path/resolvedPath or fileInfos keys
+        // and referencedMap edges drift apart.
+        getCanonicalFileName: (fileName: string) => canonicalSourceFilePath(fileName),
+        // BuilderState.create hook: whole-program builder metadata from Go
+        // (content-hash versions + referenced-file graph). See the builder-meta
+        // block above.
+        tnbBuilderFileMetas: () => getBuilderMetaState()?.byPath,
+        // builder.ts getBuildInfo root serialization hook (no per-file
+        // SourceFile materialization / fileIncludeReasons bookkeeping needed).
+        tnbIsRootFile: (path: any) => isRootFilePath(path),
         // Emit via tsgo: the Go emitter produces the output text, which we write
         // through the caller's writeFile (or the host's) so --noEmit, Volar output
         // redirection, and build-mode writeFile wrapping stay in the host's control.
@@ -2417,16 +2570,49 @@ export function createTsgoProgram(
         // Program.emitBuildInfo does. Like stock, the write is unconditional
         // at this layer — the JS builder gates on buildInfoEmitPending.
         emitBuildInfo: (writeFile?: any, _ct?: any) => {
-            // tscBuild is the solution builder's injected build-mode marker
-            // (tsbuildPublic sets it on every project's options); forward it so
-            // tsgo applies build-mode buildinfo rules for non-incremental
-            // projects, exactly like the CLI --build flag it mirrors.
-            const res = project?.program?.emitBuildInfo?.({ build: !!(options as any).tscBuild });
-            const outputs = res?.outputFiles ?? [];
             const write = typeof writeFile === "function" ? writeFile : host?.writeFile?.bind(host);
             // Match stock emitter.ts: only track emittedFiles when listEmittedFiles is set;
             // watch.ts logs TSFILE from this array, so leaving it undefined avoids spurious output.
             const emittedFiles: string[] | undefined = options.listEmittedFiles ? [] : undefined;
+
+            // Stock parity: no buildinfo path configured → nothing to emit.
+            // Checked before any RPC so misconfigured callers cost nothing.
+            const buildInfoPath = getTsBuildInfoEmitOutputFilePath(options);
+            if (!buildInfoPath) {
+                return { emitSkipped: true, diagnostics: [], emittedFiles, sourceMaps: [] };
+            }
+
+            // JS-builder bypass — createBuilderProgram installs its state
+            // serializer as getBuildInfo on the program object; serializing
+            // that in-process (like stock Program.emitBuildInfo) instead of
+            // routing through Go avoids handleEmitBuildInfo's whole-program
+            // semantic pass (~12s on Dify's 6181-file lint, where tsslint
+            // deliberately skips per-file semantic work via ignoreSourceFile).
+            // Strictly gated to in-process builder consumers that intercept
+            // the write with an explicit callback (tsslint layer-2 captures
+            // the text and never touches disk): in build mode (`tsc -b` /
+            // `vue-tsc -b`, marked via tscBuild) the .tsbuildinfo on disk is
+            // a tsgo artifact — validated by Go on read, stamped with the
+            // tsgo version — so a JS-serialized file would poison the Go
+            // incremental state and every later build would start cold.
+            if (!(options as any).tscBuild && typeof writeFile === "function" && typeof thinProgram.getBuildInfo === "function") {
+                let builderBuildInfo: any;
+                try {
+                    builderBuildInfo = thinProgram.getBuildInfo();
+                } catch { /* fall through to the Go path */ }
+                if (builderBuildInfo?.version) {
+                    const text = getBuildInfoText(builderBuildInfo);
+                    writeFile(buildInfoPath, text, false, undefined, undefined, { buildInfo: builderBuildInfo });
+                    emittedFiles?.push(buildInfoPath);
+                    return { emitSkipped: false, diagnostics: [], emittedFiles, sourceMaps: [] };
+                }
+            }
+
+            // Go path (build mode and non-builder callers): tsgo serializes its
+            // incremental snapshot; tscBuild mirrors the `tsc -b` CLI flag for
+            // build-mode buildinfo rules on non-incremental projects.
+            const res = project?.program?.emitBuildInfo?.({ build: !!(options as any).tscBuild });
+            const outputs = res?.outputFiles ?? [];
             for (const o of outputs) {
                 let buildInfo: any;
                 try { buildInfo = JSON.parse(o.text); } catch { /* write text regardless */ }
@@ -2786,10 +2972,22 @@ export function createTsgoChecker(program: any): any {
     const symPrefetched = new Set<string>();
     /** Per-file cache misses before batch prefetch — sparse files stay on direct RPC. */
     const symMissCountByFile = new Map<string, number>();
-    const symPrefetchMissThreshold = (() => {
-        const n = Number(process.env.TSGO_SYM_PREFETCH_THRESHOLD ?? "32");
-        return Number.isFinite(n) && n > 0 ? Math.floor(n) : 32;
-    })();
+    let symPrefetchMissThresholdCache: number | undefined;
+    const symPrefetchMissThreshold = (): number => {
+        if (symPrefetchMissThresholdCache !== undefined) return symPrefetchMissThresholdCache;
+        const env = Number(process.env.TSGO_SYM_PREFETCH_THRESHOLD ?? "");
+        if (Number.isFinite(env) && env > 0) {
+            symPrefetchMissThresholdCache = Math.floor(env);
+            return symPrefetchMissThresholdCache;
+        }
+        // Single large programs (e.g. Dify ~6k files): per-file allIdentifiers
+        // prefetch at the default 32-miss bar fires hundreds of times and loses
+        // to direct RPC; micro-project lint (Volar ~10–200 files) stays at 32.
+        ensureProject();
+        const fileCount = project?.program?.getSourceFileNames?.()?.length ?? 0;
+        symPrefetchMissThresholdCache = Math.max(32, Math.min(256, Math.floor(fileCount / 40)));
+        return symPrefetchMissThresholdCache;
+    };
     const symCacheFileName = (fileName: string): string => {
         const h = hostForOverlaySyncLocal();
         return resolveHostFileName(fileName, h);
@@ -4040,7 +4238,7 @@ export function createTsgoChecker(program: any): any {
             symMissCountByFile.set(cacheName, missCount);
             // Sparse files: direct per-position RPC until miss density justifies
             // one whole-file prefetch (break-even ~32 × 12µs vs one batch walk).
-            if (!symPrefetched.has(cacheName) && missCount < symPrefetchMissThreshold) {
+            if (!symPrefetched.has(cacheName) && missCount < symPrefetchMissThreshold()) {
                 return resolveSymbolRpc();
             }
             if (!symPrefetched.has(cacheName)) {

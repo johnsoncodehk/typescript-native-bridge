@@ -11,6 +11,137 @@ index bd9684e48..74b178d66 100644
  export * from "../visitorPublic.js";
  export * from "../sourcemap.js";
  export * from "../transformers/utilities.js";
+diff --git a/src/compiler/builder.ts b/src/compiler/builder.ts
+index 34adf6e49..4048af803 100644
+--- a/src/compiler/builder.ts
++++ b/src/compiler/builder.ts
+@@ -260,6 +260,17 @@ export interface BuilderProgramState extends BuilderState, ReusableBuilderProgra
+     /** Already seen program emit */
+     seenProgramEmit: BuilderFileEmit | undefined;
+     hasErrorsFromOldState?: boolean;
++    /**
++     * True when this state was created without a usable old state, i.e. every
++     * program file entered changedFilesSet at creation. While draining such a
++     * state the reverse-dependency invalidation walk is a provable no-op:
++     * - there are no old-state diagnostics to remove (semanticDiagnosticsFromOldState is undefined),
++     * - every walked file is either still pending in changedFilesSet (handleDtsMayChangeOf
++     *   skips it) or was already drained with the full pendingEmit kind from
++     *   getNextAffectedFile (a superset of anything the walk would add).
++     * Used to skip that walk, which is O(files x reverse-edges) on full builds.
++     */
++    allFilesChangedOnCreate?: boolean;
+ }
+ 
+ interface BuilderProgramStateWithDefinedProgram extends BuilderProgramState {
+@@ -369,6 +380,7 @@ function createBuilderProgramState(
+     else {
+         // We arent using old state, so atleast emit buildInfo with current information
+         state.buildInfoEmitPending = isIncrementalCompilation(compilerOptions);
++        state.allFilesChangedOnCreate = true;
+     }
+ 
+     // Update changed files and copy semantic diagnostics if we can
+@@ -826,6 +838,12 @@ function handleDtsMayChangeOfAffectedFile(
+         return;
+     }
+     if (state.compilerOptions.assumeChangesOnlyAffectDirectDependencies) return;
++    // Fresh full-build state: the reverse-dependency walk below cannot have any
++    // observable effect (see allFilesChangedOnCreate) — every file it would visit
++    // is itself changed and drained with full pendingEmit, and there are no
++    // old-state diagnostics to invalidate. Skipping it turns a full build's
++    // drain from O(files x transitive-referrers) into O(files).
++    if (state.allFilesChangedOnCreate && !state.semanticDiagnosticsFromOldState) return;
+     handleDtsMayChangeOfReferencingExportOfAffectedFile(
+         state,
+         affectedFile,
+@@ -1406,8 +1424,15 @@ function getBuildInfo(state: BuilderProgramStateWithDefinedProgram): BuildInfo {
+     }
+ 
+     function tryAddRoot(path: Path, fileId: IncrementalBuildInfoFileId) {
+-        const file = state.program.getSourceFile(path)!;
+-        if (!state.program.getFileIncludeReasons().get(file.path)!.some(r => r.kind === FileIncludeKind.RootFile)) return;
++        // TNB tsgo-backed thin programs answer root-ness directly: they have no
++        // fileIncludeReasons bookkeeping, and materializing the SourceFile just
++        // to consult it would cost one remote-AST fetch per program file here.
++        const tnbIsRoot = (state.program as Program & { tnbIsRootFile?: (path: Path) => boolean; }).tnbIsRootFile?.(path);
++        if (tnbIsRoot === false) return;
++        if (tnbIsRoot === undefined) {
++            const file = state.program.getSourceFile(path)!;
++            if (!state.program.getFileIncludeReasons().get(file.path)!.some(r => r.kind === FileIncludeKind.RootFile)) return;
++        }
+         // First fileId as is
+         if (!root.length) return root.push(fileId);
+         const last = root[root.length - 1];
+diff --git a/src/compiler/builderState.ts b/src/compiler/builderState.ts
+index 625a64e26..998ae64a3 100644
+--- a/src/compiler/builderState.ts
++++ b/src/compiler/builderState.ts
+@@ -302,6 +302,14 @@ export namespace BuilderState {
+             undefined;
+     }
+ 
++    /** Per-file builder metadata precomputed by a tsgo-backed thin program (TNB fork). */
++    export interface TnbBuilderFileMeta {
++        readonly version: string;
++        readonly affectsGlobalScope: true | undefined;
++        readonly impliedFormat: ResolutionMode;
++        readonly referencedPaths: readonly Path[] | undefined;
++    }
++
+     /**
+      * Creates the state of file references and signature for the new program from oldState if it is safe
+      */
+@@ -311,6 +319,36 @@ export namespace BuilderState {
+         const referencedMap = createReferencedMap(options);
+         const useOldState = canReuseOldState(referencedMap, oldState);
+ 
++        // TNB tsgo-backed thin programs precompute all per-file metadata
++        // (content-hash version, referenced-file edges, global-scope effect,
++        // implied format) in Go via one batch RPC — the same graph walk tsgo's
++        // own --incremental uses. Consuming it here replaces the per-file
++        // checker walks below (getSymbolAtLocation per import literal) and
++        // never materializes remote ASTs for metadata-only files.
++        const tnbMetas: ReadonlyMap<Path, TnbBuilderFileMeta> | undefined = (newProgram as Program & { tnbBuilderFileMetas?: () => ReadonlyMap<Path, TnbBuilderFileMeta> | undefined; }).tnbBuilderFileMetas?.();
++        if (tnbMetas) {
++            tnbMetas.forEach((meta, path) => {
++                const oldUncommittedSignature = useOldState ? oldState!.oldSignatures?.get(path) : undefined;
++                const signature = oldUncommittedSignature === undefined ?
++                    useOldState ? oldState!.fileInfos.get(path)?.signature : undefined :
++                    oldUncommittedSignature || undefined;
++                if (referencedMap && meta.referencedPaths?.length) {
++                    referencedMap.set(path, new Set(meta.referencedPaths));
++                }
++                fileInfos.set(path, {
++                    version: meta.version,
++                    signature,
++                    affectsGlobalScope: !options.outFile ? meta.affectsGlobalScope : undefined,
++                    impliedFormat: meta.impliedFormat,
++                });
++            });
++            return {
++                fileInfos,
++                referencedMap,
++                useFileVersionAsSignature: !disableUseFileVersionAsSignature && !useOldState,
++            };
++        }
++
+         // Ensure source files have parent pointers set
+         newProgram.getTypeChecker();
+ 
+@@ -592,7 +630,12 @@ export namespace BuilderState {
+         cancellationToken: CancellationToken | undefined,
+         host: HostForComputeHash,
+     ) {
+-        if (isFileAffectingGlobalScope(sourceFileWithUpdatedShape)) {
++        // fileInfos carries the same isFileAffectingGlobalScope result computed at
++        // create() time (true | undefined; this path never runs with --outFile).
++        // Reading it avoids re-deriving from the SourceFile shape — which for
++        // TNB tsgo-backed programs is a metadata stub with no statements and
++        // would answer incorrectly (the authoritative value came from Go).
++        if (state.fileInfos.get(sourceFileWithUpdatedShape.resolvedPath)?.affectsGlobalScope) {
+             return getAllFilesExcludingDefaultLibraryFile(state, programOfThisState, sourceFileWithUpdatedShape);
+         }
+ 
 diff --git a/src/compiler/parser.ts b/src/compiler/parser.ts
 index 68133ac5f..3effa07d2 100644
 --- a/src/compiler/parser.ts
