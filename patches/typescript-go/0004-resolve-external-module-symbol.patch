@@ -1,0 +1,148 @@
+diff --git a/internal/api/proto.go b/internal/api/proto.go
+index 0000000..1111111 100644
+--- a/internal/api/proto.go
++++ b/internal/api/proto.go
+@@ -166,6 +166,7 @@ const (
+ 	MethodGetExportsOfModule                  Method = "getExportsOfModule"
+ 	MethodGetRootSymbols                      Method = "getRootSymbols"
+ 	MethodGetMemberInModuleExports            Method = "getMemberInModuleExports"
++	MethodResolveExternalModuleSymbol         Method = "resolveExternalModuleSymbol"
+ 	MethodGetJSDocTags                        Method = "getJsDocTags"
+ 	MethodGetDocumentationComment             Method = "getDocumentationComment"
+ 	MethodIsArrayType                         Method = "isArrayType"
+@@ -510,6 +511,7 @@ var methodUnmarshallers = map[Method]func([]byte) (any, error){
+ 	MethodGetExportsOfModule:                  unmarshallerFor[CheckerSymbolParams],
+ 	MethodGetRootSymbols:                      unmarshallerFor[CheckerSymbolParams],
+ 	MethodGetMemberInModuleExports:            unmarshallerFor[GetMemberInModuleExportsParams],
++	MethodResolveExternalModuleSymbol:         unmarshallerFor[CheckerSymbolParams],
+ 	MethodGetJSDocTags:                        unmarshallerFor[CheckerSymbolParams],
+ 	MethodGetDocumentationComment:             unmarshallerFor[CheckerSymbolParams],
+ 	MethodIsArrayType:                         unmarshallerFor[CheckerTypeParams],
+diff --git a/internal/api/session.go b/internal/api/session.go
+index 0000000..1111111 100644
+--- a/internal/api/session.go
++++ b/internal/api/session.go
+@@ -941,6 +941,8 @@ func (s *Session) HandleRequest(ctx context.Context, method string, params json.
+ 		return s.handleGetRootSymbols(ctx, parsed.(*CheckerSymbolParams))
+ 	case string(MethodGetMemberInModuleExports):
+ 		return s.handleGetMemberInModuleExports(ctx, parsed.(*GetMemberInModuleExportsParams))
++	case string(MethodResolveExternalModuleSymbol):
++		return s.handleResolveExternalModuleSymbol(ctx, parsed.(*CheckerSymbolParams))
+ 	case string(MethodGetJSDocTags):
+ 		return s.handleGetJSDocTags(ctx, parsed.(*CheckerSymbolParams))
+ 	case string(MethodGetDocumentationComment):
+@@ -3678,6 +3680,31 @@ func (s *Session) handleGetRootSymbols(ctx context.Context, params *CheckerSymbol
+ 	return results, nil
+ }
+ 
++// handleResolveExternalModuleSymbol resolves a module symbol to its export= target
++// (with CJS merge), matching stock checker.resolveExternalModuleSymbol.
++func (s *Session) handleResolveExternalModuleSymbol(ctx context.Context, params *CheckerSymbolParams) (*SymbolResponse, error) {
++	setup, err := s.setupChecker(ctx, params.Snapshot, params.Project)
++	if err != nil {
++		return nil, err
++	}
++	defer setup.done()
++
++	symbol, err := setup.resolveSymbolHandle(params.Symbol)
++	if err != nil {
++		return nil, err
++	}
++	if symbol == nil {
++		return nil, nil
++	}
++
++	resolved := setup.checker.ResolveExternalModuleSymbol(symbol)
++	if resolved == nil {
++		return nil, nil
++	}
++
++	return setup.newSymbolResponse(resolved), nil
++}
++
+ // handleGetMemberInModuleExports returns an export by name from a module symbol.
+ func (s *Session) handleGetMemberInModuleExports(ctx context.Context, params *GetMemberInModuleExportsParams) (*SymbolResponse, error) {
+ 	setup, err := s.setupChecker(ctx, params.Snapshot, params.Project)
+diff --git a/_packages/native-preview/src/api/async/api.ts b/_packages/native-preview/src/api/async/api.ts
+index 0000000..1111111 100644
+--- a/_packages/native-preview/src/api/async/api.ts
++++ b/_packages/native-preview/src/api/async/api.ts
+@@ -1635,6 +1635,15 @@ export class Checker {
+         return data ? this.objectRegistry.getOrCreateSymbol(data) : undefined;
+     }
+ 
++    async resolveExternalModuleSymbol(symbol: Symbol): Promise<Symbol | undefined> {
++        const data = await this.client.apiRequest<SymbolResponse | null>("resolveExternalModuleSymbol", {
++            snapshot: this.snapshotId,
++            project: this.projectId,
++            symbol: symbol.id,
++        });
++        return data ? this.objectRegistry.getOrCreateSymbol(data) : undefined;
++    }
++
+     async getJsDocTagsOfSymbol(symbol: Symbol): Promise<readonly JSDocTagInfo[]> {
+         const data = await this.client.apiRequest<JSDocTagInfo[] | null>("getJsDocTags", {
+             snapshot: this.snapshotId,
+diff --git a/_packages/native-preview/src/api/sync/api.ts b/_packages/native-preview/src/api/sync/api.ts
+index 0000000..1111111 100644
+--- a/_packages/native-preview/src/api/sync/api.ts
++++ b/_packages/native-preview/src/api/sync/api.ts
+@@ -1722,6 +1722,15 @@ export class Checker {
+         return data ? this.objectRegistry.getOrCreateSymbol(data) : undefined;
+     }
+ 
++    resolveExternalModuleSymbol(symbol: Symbol): Symbol | undefined {
++        const data = this.client.apiRequest<SymbolResponse | null>("resolveExternalModuleSymbol", {
++            snapshot: this.snapshotId,
++            project: this.projectId,
++            symbol: symbol.id,
++        });
++        return data ? this.objectRegistry.getOrCreateSymbol(data) : undefined;
++    }
++
+     getJsDocTagsOfSymbol(symbol: Symbol): readonly JSDocTagInfo[] {
+         const data = this.client.apiRequest<JSDocTagInfo[] | null>("getJsDocTags", {
+             snapshot: this.snapshotId,
+diff --git a/_packages/native-preview/test/sync/api.test.ts b/_packages/native-preview/test/sync/api.test.ts
+index 0000000..1111111 100644
+--- a/_packages/native-preview/test/sync/api.test.ts
++++ b/_packages/native-preview/test/sync/api.test.ts
+@@ -2952,6 +2952,38 @@ describe("Checker - getExportsOfModule", () => {
+     });
+ });
+ 
++describe("Checker - resolveExternalModuleSymbol", () => {
++    test("resolves export= assignment target for CJS modules", () => {
++        const api = spawnAPI({
++            "/tsconfig.json": JSON.stringify({
++                compilerOptions: { strict: true, module: "commonjs" },
++            }),
++            "/src/mod.ts": `
++const impl = { foo: 1 };
++export = impl;
++`,
++        });
++        try {
++            const snapshot = api.updateSnapshot({ openProject: "/tsconfig.json" });
++            const project = snapshot.getProject("/tsconfig.json")!;
++            const sourceFile = project.program.getSourceFile("/src/mod.ts");
++            assert.ok(sourceFile);
++            const moduleSymbol = project.checker.getSymbolAtLocation(sourceFile);
++            assert.ok(moduleSymbol, "Source file should have a module symbol");
++            const resolved = project.checker.resolveExternalModuleSymbol(moduleSymbol);
++            assert.ok(resolved, "export= module should resolve to assignment target");
++            assert.notStrictEqual(resolved, moduleSymbol, "resolved symbol should differ from module container");
++            const type = project.checker.getTypeOfSymbol(resolved);
++            assert.ok(type, "resolved export= symbol should have a type");
++            const props = project.checker.getPropertiesOfType(type!);
++            assert.ok(props.some(p => p.name === "foo"), "export= value properties should be visible on resolved symbol type");
++        }
++        finally {
++            api.close();
++        }
++    });
++});
++
+ describe("Symbol - getDocumentationComment and getJsDocTags", () => {
+     const docFiles = {
+         "/tsconfig.json": JSON.stringify({ compilerOptions: { strict: true } }),

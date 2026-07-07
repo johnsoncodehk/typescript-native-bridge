@@ -3318,16 +3318,80 @@ export function createTsgoChecker(program: any): any {
         }
     }
 
-    function forEachExportEqualsProperties(tsgoChecker: any, moduleSymbol: any, cb: (symbol: any, key: string) => void): void {
-        let exportEquals = moduleSymbol;
-        try {
-            exportEquals = tsgoChecker.resolveExternalModuleSymbol?.(moduleSymbol) ?? moduleSymbol;
-        } catch { return; }
+    function resolveExternalModuleSymbolImpl(moduleSymbol: any): any {
+        if (!moduleSymbol) return moduleSymbol;
+        ensureProject();
+        const bridge = resolveRpcSymbol(moduleSymbol) ?? (isTsgoBridgeSymbol(moduleSymbol) ? moduleSymbol : undefined);
+        if (bridge) {
+            const checker = rpc();
+            if (typeof checker.resolveExternalModuleSymbol !== "function") {
+                // Stale native-preview: bridge modules without host exports cannot expand export=.
+                if (!moduleSymbol.exports) return moduleSymbol;
+            } else {
+                try {
+                    const resolved = checker.resolveExternalModuleSymbol(bridge);
+                    // Stock returns the input module symbol when there is no export=;
+                    // preserve moduleSymbol identity for downstream === checks.
+                    if (resolved && resolved !== bridge) return resolved;
+                } catch (err) {
+                    // No host fallback — surface RPC/bridge failures instead of
+                    // silently skipping export= property enumeration.
+                    if (!moduleSymbol.exports) throw err;
+                }
+            }
+        }
+        if (moduleSymbol.exports) {
+            try {
+                const exportEquals = moduleSymbol.exports.get("export=");
+                if (exportEquals) return resolveHostAliasedSymbol(exportEquals);
+            } catch { /* host-bound exports table */ }
+        }
+        return moduleSymbol;
+    }
+
+    function getTypeOfSymbolForExportEquals(exportEquals: any): any {
+        if (!exportEquals) return undefined;
+        ensureProject();
+        const bridge = resolveRpcSymbol(exportEquals);
+        if (bridge) {
+            try {
+                const t = rpc().getTypeOfSymbol(bridge);
+                if (t) { fixupType(t); return t; }
+            } catch { /* fall through to declaration anchor */ }
+        }
+        const decls = exportEquals.declarations?.length
+            ? exportEquals.declarations
+            : exportEquals.valueDeclaration ? [exportEquals.valueDeclaration] : [];
+        for (const decl of decls) {
+            if (decl?.kind !== SyntaxKind.ExportAssignment || !decl.expression) continue;
+            const sf = decl.getSourceFile?.();
+            if (!sf || sf.__tnbHostBound) continue;
+            const expr = decl.expression;
+            let start: number | undefined;
+            try { start = expr.getStart(sf); } catch { continue; }
+            if (typeof start !== "number") continue;
+            const tsgoNode = findTsgoNodeAtPosition(sf.fileName, start, expr.kind);
+            if (!tsgoNode) continue;
+            try {
+                const t = project.checker.getTypeAtLocation(tsgoNode);
+                if (t) { fixupType(t); return t; }
+            } catch { /* try next declaration */ }
+        }
+        return undefined;
+    }
+
+    function getPropertiesOfTypeForExportEquals(type: any): readonly any[] {
+        if (!type) return [];
+        ensureProject();
+        return memoGet(propertiesCache, type, () => project.checker.getPropertiesOfType(type) ?? []);
+    }
+
+    function forEachExportEqualsProperties(moduleSymbol: any, cb: (symbol: any, key: string) => void): void {
+        const exportEquals = resolveExternalModuleSymbolImpl(moduleSymbol);
         if (exportEquals === moduleSymbol) return;
-        let exportEqualsType: any;
-        try { exportEqualsType = tsgoChecker.getTypeOfSymbol?.(exportEquals); } catch { return; }
-        if (!exportEqualsType) return;
-        for (const sym of tsgoChecker.getPropertiesOfType?.(exportEqualsType) ?? []) {
+        const exportEqualsType = getTypeOfSymbolForExportEquals(exportEquals);
+        if (!exportEqualsType || !shouldTreatPropertiesOfExternalModuleAsExports(exportEqualsType)) return;
+        for (const sym of getPropertiesOfTypeForExportEquals(exportEqualsType)) {
             const key = exportMemberKey(sym);
             if (key) cb(sym, key);
         }
@@ -3338,7 +3402,7 @@ export function createTsgoChecker(program: any): any {
         const mod = resolveModuleSymbolForExports(moduleSymbol);
         const tsgoChecker = rpc();
         forEachNamedExport(tsgoChecker, mod, cb);
-        forEachExportEqualsProperties(tsgoChecker, mod, cb);
+        forEachExportEqualsProperties(mod, cb);
     }
 
     /** Push all open host files that need overlay into tsgo (single updateSnapshot). */
@@ -4381,17 +4445,14 @@ export function createTsgoChecker(program: any): any {
         const mod = resolveModuleSymbolForExports(moduleSymbol);
         let exportEquals = mod;
         try {
-            exportEquals = rpc().resolveExternalModuleSymbol(mod) ?? mod;
+            exportEquals = resolveExternalModuleSymbolImpl(mod);
         } catch { return undefined; }
         if (exportEquals === mod) return undefined;
 
-        let exportEqualsType: any;
-        try { exportEqualsType = rpc().getTypeOfSymbol(exportEquals); } catch { return undefined; }
+        const exportEqualsType = getTypeOfSymbolForExportEquals(exportEquals);
         if (!exportEqualsType || !shouldTreatPropertiesOfExternalModuleAsExports(exportEqualsType)) return undefined;
 
-        try {
-            return refineNavSymbol(resolvePropertyOfType(exportEqualsType, memberName));
-        } catch { return undefined; }
+        return refineNavSymbol(resolvePropertyOfType(exportEqualsType, memberName));
     }
 
     function getSymbolFlagsImpl(symbol: any, excludeTypeOnlyMeanings?: boolean, excludeLocalMeanings?: boolean): number {
@@ -5109,17 +5170,7 @@ export function createTsgoChecker(program: any): any {
             return tryGetMemberInModuleExportsAndPropertiesImpl(memberName, moduleSymbol);
         },
         resolveExternalModuleSymbol(moduleSymbol: any): any {
-            ensureProject();
-            if (moduleSymbol?.exports) {
-                try {
-                    const resolved = rpc().resolveExternalModuleSymbol(moduleSymbol);
-                    if (resolved) return refineNavSymbol(resolved);
-                } catch { /* host-bound module */ }
-                return refineNavSymbol(moduleSymbol);
-            }
-            try {
-                return refineNavSymbol(rpc().resolveExternalModuleSymbol(moduleSymbol) ?? moduleSymbol);
-            } catch { return refineNavSymbol(moduleSymbol); }
+            return refineNavSymbol(resolveExternalModuleSymbolImpl(moduleSymbol));
         },
         // Merging is a TS-specific concern; tsgo symbols are already merged.
         getMergedSymbol: (s: any) => s,
