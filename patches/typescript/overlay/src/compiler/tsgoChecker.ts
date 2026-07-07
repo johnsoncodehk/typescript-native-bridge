@@ -17,8 +17,9 @@
 import * as ts from "./_namespaces/ts.js";
 import { bindSourceFile } from "./binder.js";
 import { createSourceFile } from "./parser.js";
-import { SyntaxKind, SymbolFlags, NodeFlags, JSDocParsingMode, type Path, type TypeChecker } from "./types.js";
+import { SyntaxKind, SymbolFlags, NodeFlags, JSDocParsingMode, ModuleKind, StructureIsReused, type Path, type Program, type TypeChecker } from "./types.js";
 import { getBuildInfoText, getTsBuildInfoEmitOutputFilePath } from "./emitter.js";
+import { getModeForResolutionAtIndex } from "./program.js";
 import { installTsgoBackedSourceFileLoader, inferScriptKind, createSkeletonSourceFile, getTsgoBackedSourceFile } from "./tsgoBackedSourceFile.js";
 import { getTnbPackageRoot, isBundledLibPath, isHostLibFile, resolveHostFileName, toHostFileName, toTsgoFileName } from "./tsgoLibPaths.js";
 
@@ -2096,6 +2097,7 @@ export function createTsgoProgram(
                 }
             } catch {}
         }
+        ensureFileModuleMeta(result);
         sfCache.set(cacheKey, result);
         return result;
     };
@@ -2215,6 +2217,7 @@ export function createTsgoProgram(
             // findAllReferences scans every program file; light stubs must not crash token walks.
             getChildren: () => [],
         };
+        ensureFileModuleMeta(sf);
         lightSfCache.set(hostFileName, sf);
         return sf;
     };
@@ -2349,6 +2352,46 @@ export function createTsgoProgram(
             builderMetaCache = { proj, byPath, byHostFile };
         }
         return builderMetaCache;
+    };
+    /** Attach Go builder-graph implied module format for explainFiles / watch logging. */
+    const ensureFileModuleMeta = (sf: any): void => {
+        if (!sf || sf.impliedNodeFormat !== undefined) return;
+        const rawName = sf.fileName ?? sf.originalFileName;
+        if (typeof rawName !== "string" || !rawName) return;
+        const hostFileName = resolveHostFileName(rawName, host);
+        const implied = getBuilderMetaState()?.byHostFile.get(hostFileName)?.impliedFormat;
+        if (implied !== undefined) sf.impliedNodeFormat = implied;
+    };
+    const goProgram = () => project?.program;
+    const programFileId = (file: any) => {
+        const name = file?.fileName ?? file?.originalFileName;
+        return typeof name === "string" && name ? tsgoFileArg(name) : undefined;
+    };
+    const usagePosition = (usage: any): number | undefined => {
+        if (!usage) return undefined;
+        const sf = usage.getSourceFile?.();
+        if (!sf || typeof usage.getStart !== "function") return undefined;
+        try { return usage.getStart(sf); } catch { return undefined; }
+    };
+    // Project-reference-aware per-file options via tsgo program RPC.
+    const optionsForFile = (file?: any) => {
+        if (!file) return options;
+        const id = programFileId(file);
+        if (!id) return options;
+        try { return goProgram()?.getCompilerOptionsForFile?.(id) ?? options; } catch { return options; }
+    };
+    const shouldTransformImportCallForFile = (file: any): boolean => {
+        if (!file) return false;
+        const id = programFileId(file);
+        if (!id) return false;
+        try {
+            const moduleKind = ts.getEmitModuleKind(optionsForFile(file));
+            if ((ModuleKind.Node16 <= moduleKind && moduleKind <= ModuleKind.NodeNext) || moduleKind === ModuleKind.Preserve) {
+                return false;
+            }
+            const fmt = goProgram()?.getEmitModuleFormatOfFile?.(id);
+            return typeof fmt === "number" && fmt < ModuleKind.ES2015;
+        } catch { return false; }
     };
     /** Content-derived SourceFile version: Go hash when known, host script version otherwise. */
     const versionForFile = (hostFileName: string): string => {
@@ -2652,6 +2695,86 @@ export function createTsgoProgram(
         getModuleResolutionCache: () => undefined,
         redirectTargetsMap: new Map(),
         getGlobalTypingsCacheLocation: () => undefined,
+        // ── Module format / resolution (delegated to tsgo program RPC) ──
+        getCompilerOptionsForFile: (file: any) => optionsForFile(file),
+        getImpliedNodeFormatForEmit: (file: any) => {
+            const id = programFileId(file);
+            if (!id) return undefined;
+            try { return goProgram()?.getImpliedNodeFormatForEmit?.(id); } catch { return undefined; }
+        },
+        getDefaultResolutionModeForFile: (file: any) => {
+            const id = programFileId(file);
+            if (!id) return undefined;
+            try { return goProgram()?.getDefaultResolutionModeForFile?.(id); } catch { return undefined; }
+        },
+        getModeForUsageLocation: (file: any, usage: any) => {
+            const id = programFileId(file);
+            const pos = usagePosition(usage);
+            if (!id || typeof pos !== "number") return undefined;
+            try { return goProgram()?.getModeForUsageLocation?.(id, pos); } catch { return undefined; }
+        },
+        getModeForResolutionAtIndex: (file: any, index: number) => {
+            if (!file) return undefined;
+            ensureFileModuleMeta(file);
+            return getModeForResolutionAtIndex(file, index, optionsForFile(file));
+        },
+        getEmitModuleFormatOfFile: (file: any) => {
+            const id = programFileId(file);
+            if (!id) return ts.getEmitModuleKind(options);
+            try { return goProgram()?.getEmitModuleFormatOfFile?.(id) ?? ts.getEmitModuleKind(options); } catch { return ts.getEmitModuleKind(options); }
+        },
+        shouldTransformImportCall: (file: any) => shouldTransformImportCallForFile(file),
+        getEmitSyntaxForUsageLocation: (file: any, usage: any) => {
+            const id = programFileId(file);
+            const pos = usagePosition(usage);
+            if (!id || typeof pos !== "number") return undefined;
+            try { return goProgram()?.getEmitSyntaxForUsageLocation?.(id, pos); } catch { return undefined; }
+        },
+        // ── ModuleSpecifierResolutionHost / project metadata stubs ──
+        useCaseSensitiveFileNames: () => host?.useCaseSensitiveFileNames?.() ?? false,
+        fileExists: (fileName: string) => !!(host?.fileExists?.(fileName) ?? host?.fileExists?.(toHostFileName(fileName))),
+        directoryExists: (path: string) => !!host?.directoryExists?.(path),
+        readFile: (path: string) => host?.readFile?.(path),
+        realpath: (path: string) => host?.realpath?.(path) ?? path,
+        getSymlinkCache: () => host?.getSymlinkCache?.(),
+        getModuleSpecifierCache: () => host?.getModuleSpecifierCache?.(),
+        getPackageJsonInfoCache: () => host?.getPackageJsonInfoCache?.(),
+        getNearestAncestorDirectoryWithPackageJson: (fileName: string, rootDir?: string) =>
+            host?.getNearestAncestorDirectoryWithPackageJson?.(fileName, rootDir),
+        trace: (s: string) => { host?.trace?.(s); },
+        getProjectReferences: () => options.projectReferences,
+        getResolvedProjectReferences: () => undefined,
+        getRedirectFromSourceFile: () => undefined,
+        getRedirectFromOutput: () => undefined,
+        isSourceOfProjectReferenceRedirect: () => false,
+        isEmittedFile: () => false,
+        typesPackageExists: () => false,
+        packageBundlesTypes: () => false,
+        getNodeCount: () => 0,
+        getIdentifierCount: () => 0,
+        getSymbolCount: () => 0,
+        getTypeCount: () => 0,
+        getInstantiationCount: () => 0,
+        getRelationCacheSizes: () => ({ assignable: 0, identity: 0, subtype: 0, strictSubtype: 0 }),
+        getCachedSemanticDiagnostics: () => undefined,
+        getAutomaticTypeDirectiveNames: () => [],
+        getFileProcessingDiagnostics: () => undefined,
+        getResolvedModule: () => undefined,
+        getResolvedModuleFromModuleSpecifier: () => undefined,
+        getResolvedTypeReferenceDirective: () => undefined,
+        getResolvedTypeReferenceDirectiveFromTypeReferenceDirective: () => undefined,
+        getLibFileFromReference: () => undefined,
+        forEachResolvedProjectReference: () => undefined,
+        getResolvedProjectReferenceByPath: () => undefined,
+        getProgramDiagnosticsContainer: () => { throw new Error("tsgoChecker: Program.getProgramDiagnosticsContainer is not available on tsgo-backed programs"); },
+        getCurrentPackagesMap: () => undefined,
+        structureIsReused: StructureIsReused.Not,
+        sourceFileToPackageName: new Map(),
+        resolvedModules: undefined,
+        resolvedTypeReferenceDirectiveNames: undefined,
+        resolvedLibReferences: undefined,
+        usesUriStyleNodeCoreModules: undefined,
+        writeFile: host?.writeFile?.bind(host) ?? (() => {}),
         // BuilderProgram support
         structureIsChanged: () => false,
         getFilesWithInvalidatedResolutions: () => new Set(),
@@ -2666,10 +2789,10 @@ export function createTsgoProgram(
     return new Proxy(thinProgram, {
         get(target: any, prop: string | symbol, receiver: any) {
             if (prop in target) return Reflect.get(target, prop, receiver);
-            // Program surface is wider than our thin stub; optional callers
-            // (explainFiles, logging) probe methods we do not implement yet.
             if (typeof prop !== "string") return undefined;
-            return (..._args: any[]) => undefined;
+            return (..._args: any[]) => {
+                throw new Error(`tsgoChecker: Program.${prop} is not implemented on the tsgo-backed program`);
+            };
         },
         has: (target: any, p) => p in target,
         ownKeys: () => Object.keys(thinProgram),
@@ -5348,3 +5471,97 @@ const _tnbCheckerCoverage = {
     getTypeArgumentsForResolvedSignature: "throw",
     isLibType: "throw",
 } as const satisfies Record<keyof TypeChecker, TnbCheckerCoverage>;
+
+// ── Program adapter coverage (compile-time guard) ──
+//   "adapter" — explicit thinProgram implementation with real/stock-parity behavior.
+//   "stub"    — intentional safe default (empty counters, undefined resolvers).
+//   "throw"   — must not be called on supported paths; proxy throws if missing.
+type TnbProgramCoverage = "adapter" | "stub" | "throw";
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+const _tnbProgramCoverage = {
+    getCompilerOptions: "adapter",
+    getSourceFile: "adapter",
+    getSourceFileByPath: "adapter",
+    getCurrentDirectory: "adapter",
+    getRootFileNames: "adapter",
+    getSourceFiles: "adapter",
+    getMissingFilePaths: "stub",
+    getModuleResolutionCache: "stub",
+    getFilesByNameMap: "stub",
+    resolvedModules: "stub",
+    resolvedTypeReferenceDirectiveNames: "stub",
+    getResolvedModule: "stub",
+    getResolvedModuleFromModuleSpecifier: "stub",
+    getResolvedTypeReferenceDirective: "stub",
+    getResolvedTypeReferenceDirectiveFromTypeReferenceDirective: "stub",
+    forEachResolvedModule: "stub",
+    forEachResolvedTypeReferenceDirective: "stub",
+    emit: "adapter",
+    getOptionsDiagnostics: "adapter",
+    getGlobalDiagnostics: "adapter",
+    getSyntacticDiagnostics: "adapter",
+    getSemanticDiagnostics: "adapter",
+    getDeclarationDiagnostics: "adapter",
+    getConfigFileParsingDiagnostics: "adapter",
+    getSuggestionDiagnostics: "adapter",
+    getBindAndCheckDiagnostics: "adapter",
+    getProgramDiagnostics: "adapter",
+    getTypeChecker: "adapter",
+    getCommonSourceDirectory: "adapter",
+    getCachedSemanticDiagnostics: "stub",
+    getClassifiableNames: "stub",
+    getNodeCount: "stub",
+    getIdentifierCount: "stub",
+    getSymbolCount: "stub",
+    getTypeCount: "stub",
+    getInstantiationCount: "stub",
+    getRelationCacheSizes: "stub",
+    getFileProcessingDiagnostics: "stub",
+    getAutomaticTypeDirectiveNames: "stub",
+    getAutomaticTypeDirectiveResolutions: "stub",
+    isSourceFileFromExternalLibrary: "adapter",
+    isSourceFileDefaultLibrary: "adapter",
+    getModeForUsageLocation: "adapter",
+    getModeForResolutionAtIndex: "adapter",
+    getDefaultResolutionModeForFile: "adapter",
+    getImpliedNodeFormatForEmit: "adapter",
+    getEmitModuleFormatOfFile: "adapter",
+    shouldTransformImportCall: "adapter",
+    structureIsReused: "stub",
+    getSourceFileFromReference: "stub",
+    getLibFileFromReference: "stub",
+    sourceFileToPackageName: "stub",
+    redirectTargetsMap: "stub",
+    usesUriStyleNodeCoreModules: "stub",
+    resolvedLibReferences: "stub",
+    getProgramDiagnosticsContainer: "throw",
+    getCurrentPackagesMap: "stub",
+    isEmittedFile: "stub",
+    getFileIncludeReasons: "stub",
+    useCaseSensitiveFileNames: "adapter",
+    getCanonicalFileName: "adapter",
+    getProjectReferences: "adapter",
+    getResolvedProjectReferences: "stub",
+    getRedirectFromSourceFile: "stub",
+    forEachResolvedProjectReference: "stub",
+    getResolvedProjectReferenceByPath: "stub",
+    getRedirectFromOutput: "stub",
+    isSourceOfProjectReferenceRedirect: "stub",
+    getCompilerOptionsForFile: "adapter",
+    getBuildInfo: "stub",
+    emitBuildInfo: "adapter",
+    fileExists: "adapter",
+    directoryExists: "stub",
+    readFile: "stub",
+    realpath: "stub",
+    getSymlinkCache: "stub",
+    getModuleSpecifierCache: "stub",
+    getPackageJsonInfoCache: "stub",
+    getGlobalTypingsCacheLocation: "stub",
+    getNearestAncestorDirectoryWithPackageJson: "stub",
+    trace: "stub",
+    writeFile: "stub",
+    getEmitSyntaxForUsageLocation: "adapter",
+    typesPackageExists: "stub",
+    packageBundlesTypes: "stub",
+} as const satisfies Record<keyof Program, TnbProgramCoverage>;
