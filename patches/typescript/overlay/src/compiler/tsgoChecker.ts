@@ -17,7 +17,7 @@
 import * as ts from "./_namespaces/ts.js";
 import { bindSourceFile } from "./binder.js";
 import { createSourceFile } from "./parser.js";
-import { SyntaxKind, SymbolFlags, NodeFlags, JSDocParsingMode, type Path } from "./types.js";
+import { SyntaxKind, SymbolFlags, NodeFlags, JSDocParsingMode, type Path, type TypeChecker } from "./types.js";
 import { getBuildInfoText, getTsBuildInfoEmitOutputFilePath } from "./emitter.js";
 import { installTsgoBackedSourceFileLoader, inferScriptKind, createSkeletonSourceFile, getTsgoBackedSourceFile } from "./tsgoBackedSourceFile.js";
 import { getTnbPackageRoot, isBundledLibPath, isHostLibFile, resolveHostFileName, toHostFileName, toTsgoFileName } from "./tsgoLibPaths.js";
@@ -4942,6 +4942,103 @@ export function createTsgoChecker(program: any): any {
         getSymbolFlags(symbol: any, excludeTypeOnlyMeanings?: boolean, excludeLocalMeanings?: boolean): number {
             return getSymbolFlagsImpl(symbol, excludeTypeOnlyMeanings, excludeLocalMeanings);
         },
+        // ── Intrinsic-symbol predicates ──
+        // Rename (getSymbolKind), symbolDisplay, exportInfoMap and
+        // suggestionDiagnostics probe these. The sync client answers them as
+        // local id compares against the checker's cached intrinsic symbols;
+        // rpc() resolves host symbols first, and a symbol with no tsgo
+        // counterpart can never be a checker intrinsic (facade → undefined).
+        isUndefinedSymbol(symbol: any): boolean {
+            if (!symbol) return false;
+            ensureProject();
+            try { return !!rpc().isUndefinedSymbol(symbol); } catch { return false; }
+        },
+        isArgumentsSymbol(symbol: any): boolean {
+            if (!symbol) return false;
+            ensureProject();
+            try { return !!rpc().isArgumentsSymbol(symbol); } catch { return false; }
+        },
+        isUnknownSymbol(symbol: any): boolean {
+            if (!symbol) return false;
+            ensureProject();
+            try { return !!rpc().isUnknownSymbol(symbol); } catch { return false; }
+        },
+        // goToDefinition → isDefinitionVisible → DefinitionInfo.isLocal.
+        // Kind-mismatched fallback hits from findTsgoNodeAtPosition would
+        // yield a wrong verdict, so require an exact node mapping; unmapped
+        // (host-only) declarations report not-visible, matching the stock
+        // default for unknown declarations.
+        isDeclarationVisible(declaration: any): boolean {
+            if (!declaration) return false;
+            const sf = declaration.getSourceFile?.();
+            if (!sf?.fileName) return false;
+            let start: number | undefined;
+            let end: number | undefined;
+            try {
+                start = declaration.getStart(sf);
+                end = declaration.getEnd(sf);
+            } catch { return false; }
+            if (typeof start !== "number") return false;
+            ensureProject();
+            const tsgoNode = findTsgoNodeAtPosition(sf.fileName, start, declaration.kind, end);
+            if (!tsgoNode || tsgoNode.kind !== declaration.kind) return false;
+            try { return !!project.checker.isDeclarationVisible(tsgoNode); } catch { return false; }
+        },
+        // Completions property filtering (addTypeProperties). Fallbacks keep
+        // the property: dropping it empties the completion list, while the
+        // predicate only exists to hide inaccessible (private/protected)
+        // members — a rare miss is cosmetic, an empty list is broken.
+        isValidPropertyAccessForCompletions(node: any, type: any, property: any): boolean {
+            if (!node || !type || !property) return false;
+            const sf = node.getSourceFile?.();
+            if (!sf?.fileName) return true;
+            let start: number | undefined;
+            let end: number | undefined;
+            try {
+                start = node.getStart(sf);
+                end = node.getEnd(sf);
+            } catch { return true; }
+            if (typeof start !== "number") return true;
+            ensureProject();
+            const tsgoNode = findTsgoNodeAtPosition(sf.fileName, start, node.kind, end);
+            if (!tsgoNode || tsgoNode.kind !== node.kind) return true;
+            const rpcSym = resolveRpcSymbol(property);
+            if (!rpcSym) return true; // host-only symbol — no tsgo verdict possible
+            try {
+                return !!project.checker.isValidPropertyAccessForCompletions(tsgoNode, type, rpcSym);
+            } catch { return true; }
+        },
+        // Completions (`this.` member lists, #8811): type of `this` at a node.
+        tryGetThisTypeAt(node: any, includeGlobalThis: boolean = true, container?: any): any {
+            if (!node) return undefined;
+            const sf = node.getSourceFile?.();
+            if (!sf?.fileName) return undefined;
+            let start: number | undefined;
+            let end: number | undefined;
+            try {
+                start = node.getStart(sf);
+                end = node.getEnd(sf);
+            } catch { return undefined; }
+            if (typeof start !== "number") return undefined;
+            ensureProject();
+            const tsgoNode = findTsgoNodeAtPosition(sf.fileName, start, node.kind, end);
+            if (!tsgoNode) return undefined;
+            let tsgoContainer: any;
+            if (container) {
+                const csf = container.getSourceFile?.();
+                if (csf?.fileName) {
+                    try {
+                        const mapped = findTsgoNodeAtPosition(csf.fileName, container.getStart(csf), container.kind, container.getEnd(csf));
+                        if (mapped && mapped.kind === container.kind) tsgoContainer = mapped;
+                    } catch { /* container is advisory; fall back to tsgo's own container walk */ }
+                }
+            }
+            try {
+                const t = project.checker.tryGetThisTypeAt(tsgoNode, includeGlobalThis, tsgoContainer);
+                if (t) fixupType(t);
+                return t ?? undefined;
+            } catch { return undefined; }
+        },
         getRootSymbols(symbol: any): any[] {
             if (!symbol) return [];
             ensureProject();
@@ -5055,3 +5152,199 @@ export function createTsgoChecker(program: any): any {
     });
     return checkerProxyRef;
 }
+
+// ── TypeChecker coverage table (compile-time structural guard) ────────────
+// Exhaustive classification of every `keyof TypeChecker` against the tsgo
+// adapter, kept honest by the compiler: adding a method to the TypeChecker
+// interface without classifying it here fails the build, and classifying a
+// key that no longer exists fails via `satisfies` excess-property checking.
+//
+//   "adapter" — explicit adapter-object method (symbol-bearing calls route
+//               through the rpc() facade; node-based calls map positions).
+//   "tsgo"    — no adapter entry; the checker proxy forwards the call to the
+//               native tsgo checker client (symbol-free by construction).
+//   "throw"   — implemented by neither; the proxy throws
+//               "not implemented in the tsgo adapter" at the call site.
+//               Never downgrade a "throw" to a silent no-op — implement it
+//               (adapter and/or Go RPC) and reclassify.
+//
+// This table is documentation plus a compile aid; the runtime source of truth
+// remains the adapter object and the proxy in createTsgoCheckerAdapter.
+type TnbCheckerCoverage = "adapter" | "tsgo" | "throw";
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+const _tnbCheckerCoverage = {
+    getTypeOfSymbolAtLocation: "adapter",
+    getTypeOfSymbol: "adapter",
+    getDeclaredTypeOfSymbol: "adapter",
+    getPropertiesOfType: "adapter",
+    getPropertyOfType: "adapter",
+    getPrivateIdentifierPropertyOfType: "throw",
+    getTypeOfPropertyOfType: "throw",
+    getIndexInfoOfType: "throw",
+    getIndexInfosOfType: "adapter",
+    getIndexInfosOfIndexSymbol: "throw",
+    getSignaturesOfType: "adapter",
+    getIndexTypeOfType: "throw",
+    getIndexType: "tsgo",
+    getBaseTypes: "adapter",
+    getBaseTypeOfLiteralType: "tsgo",
+    getWidenedType: "adapter",
+    getWidenedLiteralType: "throw",
+    getPromisedTypeOfPromise: "adapter",
+    getAwaitedType: "throw",
+    isEmptyAnonymousObjectType: "throw",
+    getReturnTypeOfSignature: "adapter",
+    getParameterType: "tsgo",
+    getParameterIdentifierInfoAtPosition: "throw",
+    getNullableType: "throw",
+    getNonNullableType: "adapter",
+    getNonOptionalType: "adapter",
+    isNullableType: "throw",
+    getTypeArguments: "adapter",
+    typeToTypeNode: "tsgo",
+    typePredicateToTypePredicateNode: "throw",
+    signatureToSignatureDeclaration: "tsgo",
+    indexInfoToIndexSignatureDeclaration: "throw",
+    symbolToEntityName: "throw",
+    symbolToExpression: "throw",
+    symbolToNode: "throw",
+    symbolToTypeParameterDeclarations: "throw",
+    symbolToParameterDeclaration: "throw",
+    typeParameterToDeclaration: "throw",
+    getSymbolsInScope: "adapter",
+    getSymbolAtLocation: "adapter",
+    getIndexInfosAtLocation: "throw",
+    getSymbolsOfParameterPropertyDeclaration: "throw",
+    getShorthandAssignmentValueSymbol: "adapter",
+    getExportSpecifierLocalTargetSymbol: "adapter",
+    getExportSymbolOfSymbol: "throw",
+    getPropertySymbolOfDestructuringAssignment: "throw",
+    getTypeOfAssignmentPattern: "throw",
+    getTypeAtLocation: "adapter",
+    getTypeFromTypeNode: "adapter",
+    signatureToString: "adapter",
+    typeToString: "adapter",
+    symbolToString: "adapter",
+    typePredicateToString: "throw",
+    writeSignature: "adapter",
+    writeType: "adapter",
+    writeSymbol: "adapter",
+    writeTypePredicate: "throw",
+    getFullyQualifiedName: "adapter",
+    getAugmentedPropertiesOfType: "throw",
+    getRootSymbols: "adapter",
+    getSymbolOfExpando: "throw",
+    getContextualType: "adapter",
+    getContextualTypeForObjectLiteralElement: "throw",
+    getContextualTypeForArgumentAtIndex: "throw",
+    getContextualTypeForJsxAttribute: "throw",
+    isContextSensitive: "tsgo",
+    getTypeOfPropertyOfContextualType: "throw",
+    getResolvedSignature: "adapter",
+    getResolvedSignatureForSignatureHelp: "throw",
+    getCandidateSignaturesForStringLiteralCompletions: "throw",
+    getExpandedParameters: "throw",
+    hasEffectiveRestParameter: "throw",
+    containsArgumentsReference: "throw",
+    getSignatureFromDeclaration: "tsgo",
+    isImplementationOfOverload: "throw",
+    isUndefinedSymbol: "adapter",
+    isArgumentsSymbol: "adapter",
+    isUnknownSymbol: "adapter",
+    getMergedSymbol: "adapter",
+    symbolIsValue: "throw",
+    getConstantValue: "tsgo",
+    isValidPropertyAccess: "throw",
+    isValidPropertyAccessForCompletions: "adapter",
+    getAliasedSymbol: "adapter",
+    getImmediateAliasedSymbol: "adapter",
+    getExportsOfModule: "adapter",
+    getExportsAndPropertiesOfModule: "throw",
+    forEachExportAndPropertyOfModule: "adapter",
+    getJsxIntrinsicTagNamesAt: "throw",
+    isOptionalParameter: "throw",
+    getAmbientModules: "adapter",
+    tryGetMemberInModuleExports: "adapter",
+    tryGetMemberInModuleExportsAndProperties: "adapter",
+    getApparentType: "tsgo",
+    getSuggestedSymbolForNonexistentProperty: "throw",
+    getSuggestedSymbolForNonexistentJSXAttribute: "throw",
+    getSuggestedSymbolForNonexistentSymbol: "throw",
+    getSuggestedSymbolForNonexistentModule: "throw",
+    getSuggestedSymbolForNonexistentClassMember: "throw",
+    getBaseConstraintOfType: "adapter",
+    getDefaultFromTypeParameter: "throw",
+    getAnyType: "tsgo",
+    getStringType: "tsgo",
+    getStringLiteralType: "throw",
+    getNumberType: "tsgo",
+    getNumberLiteralType: "throw",
+    getBigIntType: "tsgo",
+    getBigIntLiteralType: "throw",
+    getBooleanType: "tsgo",
+    getUnknownType: "tsgo",
+    getFalseType: "tsgo",
+    getTrueType: "tsgo",
+    getVoidType: "tsgo",
+    getUndefinedType: "tsgo",
+    getNullType: "tsgo",
+    getESSymbolType: "tsgo",
+    getNeverType: "tsgo",
+    getNonPrimitiveType: "throw",
+    getOptionalType: "throw",
+    getUnionType: "adapter",
+    createArrayType: "throw",
+    getElementTypeOfArrayType: "throw",
+    createPromiseType: "throw",
+    getPromiseType: "throw",
+    getPromiseLikeType: "throw",
+    getAnyAsyncIterableType: "throw",
+    isTypeAssignableTo: "adapter",
+    createAnonymousType: "throw",
+    createSignature: "throw",
+    createSymbol: "throw",
+    createIndexInfo: "throw",
+    isSymbolAccessible: "throw",
+    tryFindAmbientModule: "throw",
+    getSymbolWalker: "throw",
+    getDiagnostics: "adapter",
+    getGlobalDiagnostics: "adapter",
+    getEmitResolver: "adapter",
+    requiresAddingImplicitUndefined: "throw",
+    getNodeCount: "adapter",
+    getIdentifierCount: "adapter",
+    getSymbolCount: "adapter",
+    getTypeCount: "adapter",
+    getInstantiationCount: "adapter",
+    getRelationCacheSizes: "adapter",
+    getRecursionIdentity: "throw",
+    getUnmatchedProperties: "throw",
+    isArrayType: "tsgo",
+    isTupleType: "tsgo",
+    isArrayLikeType: "adapter",
+    isTypeInvalidDueToUnionDiscriminant: "adapter",
+    getExactOptionalProperties: "throw",
+    getAllPossiblePropertiesOfTypes: "adapter",
+    resolveName: "adapter",
+    getJsxNamespace: "throw",
+    getJsxFragmentFactory: "throw",
+    getAccessibleSymbolChain: "throw",
+    getTypePredicateOfSignature: "tsgo",
+    resolveExternalModuleName: "throw",
+    resolveExternalModuleSymbol: "adapter",
+    tryGetThisTypeAt: "adapter",
+    getTypeArgumentConstraint: "throw",
+    getSuggestionDiagnostics: "adapter",
+    runWithCancellationToken: "adapter",
+    getLocalTypeParametersOfClassOrInterfaceOrTypeAlias: "throw",
+    isDeclarationVisible: "adapter",
+    isPropertyAccessible: "throw",
+    getTypeOnlyAliasDeclaration: "throw",
+    getMemberOverrideModifierStatus: "throw",
+    isTypeParameterPossiblyReferenced: "throw",
+    typeHasCallOrConstructSignatures: "adapter",
+    getSymbolFlags: "adapter",
+    fillMissingTypeArguments: "throw",
+    getTypeArgumentsForResolvedSignature: "throw",
+    isLibType: "throw",
+} as const satisfies Record<keyof TypeChecker, TnbCheckerCoverage>;
