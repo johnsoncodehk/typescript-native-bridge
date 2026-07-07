@@ -34,6 +34,8 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
+	"time"
 	"unsafe"
 
 	"github.com/microsoft/typescript-go/internal/api"
@@ -138,11 +140,70 @@ func pinnedParseCacheKey(key project.ParseCacheKey) bool {
 		(strings.Contains(key.FileName, "/node_modules/") || strings.HasPrefix(key.FileName, "bundled://"))
 }
 
+// asyncPreemptOff reports whether the Go runtime was loaded with
+// GODEBUG=asyncpreemptoff=1. os.Getenv reads the environ snapshot taken at
+// runtime init — exactly what parsedebugvars saw — so this faithfully
+// detects whether the JS-side guard in loadBridgeDeps() ran before dlopen.
+func asyncPreemptOff() bool {
+	for _, kv := range strings.Split(os.Getenv("GODEBUG"), ",") {
+		if kv == "asyncpreemptoff=1" {
+			return true
+		}
+	}
+	return false
+}
+
+var watchdogOnce sync.Once
+
+// startOrphanWatchdog kills this process if its parent dies. This is the only
+// mechanism that works when the Node main thread is blocked inside a
+// synchronous FFI call: JS timers and the tinypool IPC-disconnect handler all
+// need the event loop, but this goroutine runs on its own Go thread.
+//
+// Default-on only inside test runners (VITEST / JEST set these envs in
+// workers). Other embedders opt in with TNB_PPID_WATCHDOG=1; opt out with =0.
+func startOrphanWatchdog() {
+	watchdogOnce.Do(func() {
+		v := os.Getenv("TNB_PPID_WATCHDOG")
+		if v == "0" {
+			return
+		}
+		if v != "1" && os.Getenv("VITEST") == "" && os.Getenv("JEST_WORKER_ID") == "" {
+			return
+		}
+		if os.Getppid() <= 1 {
+			return // already reparented at startup; don't arm
+		}
+		go func() {
+			for {
+				time.Sleep(2 * time.Second)
+				if os.Getppid() == 1 {
+					// Parent died. SIGKILL ourselves: skips Node's atexit
+					// (ResetStdio) entirely, so the storm can never re-arm,
+					// and the OS reclaims all session memory.
+					_ = syscall.Kill(os.Getpid(), syscall.SIGKILL)
+				}
+			}
+		}()
+	})
+}
+
 // BridgeNewSession creates a project session + api session rooted at cwd.
 // Returns a JSON envelope. On success, env.data is the session handle (number).
 //
 //export BridgeNewSession
 func BridgeNewSession(cwd *C.char) *C.char {
+	// Signal-storm guard (see tsgoChecker.ts loadBridgeDeps): if the embedding
+	// bundle failed to set GODEBUG before dlopen (stale build / load order),
+	// refuse to start instead of arming a 23h ResetStdio-storm orphan.
+	// TNB_SKIP_ASYNC_PREEMPT_OFF=1 is the existing repro escape hatch.
+	if !asyncPreemptOff() && os.Getenv("TNB_SKIP_ASYNC_PREEMPT_OFF") != "1" {
+		return returnEnvelope(envelope{OK: false, Error: "tnb: Go runtime loaded without GODEBUG=asyncpreemptoff=1 — " +
+			"the embedding typescript bundle predates the signal-storm guard; rebuild with `npm run build:lib` " +
+			"(or set TNB_SKIP_ASYNC_PREEMPT_OFF=1 to bypass for repro)"})
+	}
+	startOrphanWatchdog()
+
 	cwdStr := C.GoString(cwd)
 
 	fs := bundled.WrapFS(osvfs.FS())

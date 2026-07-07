@@ -110,6 +110,8 @@ type TnbBridgeProcessState = {
     nodeHandlePatched?: boolean;
     /** RemoteNode.prototype getChildren for LS token walks (findAllReferences/rename). */
     remoteNodeTraversalPatched?: boolean;
+    /** SignalExit bypass listeners installed exactly once per process. */
+    signalExitBypassInstalled?: boolean;
     /** Host text last pushed to the (process-wide) tsgo session per file. */
     syncedOverlayContentByFile?: Map<string, string>;
     /** Solution-build (tsc -b / vue-tsc -b) active-project tracker. The build
@@ -177,6 +179,27 @@ function hydrateBridgeModuleLocals(proc: TnbBridgeProcessState): void {
     if (proc.debugAnnounced) _tnbDebugAnnounced = true;
 }
 
+// ── RPC trace (sync append before each FFI call; TNB_RPC_TRACE=1) ──
+let _rpcTraceSeq = 0;
+const _rpcTraceLog: string = process.env.TNB_RPC_TRACE === "1"
+    ? (process.env.TNB_RPC_TRACE_FILE || "/tmp/tnb-rpc.log")
+    : "";
+function _rpcTraceEnter(method: string, binary: boolean, session: number): number {
+    if (!_rpcTraceLog) return 0;
+    const id = ++_rpcTraceSeq;
+    const fs = require("fs") as typeof import("fs");
+    fs.appendFileSync(
+        _rpcTraceLog,
+        `${Date.now()} ENTER ${id} pid=${process.pid} sess=${session} ${binary ? "BIN" : "JSON"} ${method}\n`,
+    );
+    return id;
+}
+function _rpcTraceExit(id: number, method: string): void {
+    if (!_rpcTraceLog || id === 0) return;
+    const fs = require("fs") as typeof import("fs");
+    fs.appendFileSync(_rpcTraceLog, `${Date.now()} EXIT ${id} ${method}\n`);
+}
+
 function loadBridgeDeps(): void {
     const proc = tnbBridgeProcessState();
     if (proc.koffi) {
@@ -210,7 +233,9 @@ function loadBridgeDeps(): void {
     // storms tcsetattr/ioctl on a TTY until the CPU is pinned and the process
     // won't even die on SIGTERM. GODEBUG is read by the Go runtime at dlopen,
     // so disable async preemption before _koffi.load arms its signal handler.
-    if (!/(?:^|,)asyncpreemptoff=1(?:,|$)/.test(process.env.GODEBUG ?? "")) {
+    // TNB_SKIP_ASYNC_PREEMPT_OFF=1 disables this guard for hang repro only.
+    if (process.env.TNB_SKIP_ASYNC_PREEMPT_OFF !== "1"
+        && !/(?:^|,)asyncpreemptoff=1(?:,|$)/.test(process.env.GODEBUG ?? "")) {
         process.env.GODEBUG = process.env.GODEBUG
             ? `${process.env.GODEBUG},asyncpreemptoff=1`
             : "asyncpreemptoff=1";
@@ -226,6 +251,38 @@ function loadBridgeDeps(): void {
     proc.koffi = _koffi;
     proc.sync = _sync;
     proc.bridgeFns = _bridgeFns;
+    // ── SignalExit bypass (test runners only) ──
+    // Node's C++ SIGTERM/SIGINT handler (node::SignalExit) runs ResetStdio in
+    // signal context; combined with the embedded Go runtime this can spin
+    // forever (fstat/fcntl/tcsetattr EINTR storm) and pin an unkillable
+    // orphan. Installing a JS listener makes libuv take over the sigaction —
+    // its handler only writes to a pipe, deferring all work to the event
+    // loop, so ResetStdio never executes in signal context.
+    // NOTE: never touch SIGURG from JS — that would replace the Go runtime's
+    // own handler.
+    if (!proc.signalExitBypassInstalled
+        && process.env.TNB_SIGNAL_EXIT_BYPASS !== "0"
+        && (process.env.TNB_SIGNAL_EXIT_BYPASS === "1"
+            || process.env.VITEST
+            || process.env.JEST_WORKER_ID)) {
+        proc.signalExitBypassInstalled = true;
+        const signals = ["SIGTERM", "SIGINT", "SIGHUP"] as const;
+        for (const sig of signals) {
+            if (process.listenerCount(sig) === 0) {
+                process.on(sig, () => {
+                    const n = sig === "SIGHUP" ? 1 : sig === "SIGINT" ? 2 : 15;
+                    process.exit(128 + n);
+                });
+            }
+        }
+    }
+    if (_rpcTraceLog) {
+        const fs = require("fs") as typeof import("fs");
+        fs.appendFileSync(
+            _rpcTraceLog,
+            `${Date.now()} BRIDGE_LOAD pid=${process.pid} GODEBUG=${process.env.GODEBUG ?? ""} lib=${resolvedBridge}\n`,
+        );
+    }
 }
 
 /**
@@ -288,10 +345,12 @@ class BridgeClient {
         const paramsJson = params == null ? null : JSON.stringify(params);
         let mc = this.methodCStr.get(method);
         if (!mc) { mc = toCStr(method); this.methodCStr.set(method, mc); }
+        const traceId = _rpcTraceEnter(method, false, this.handle);
         const str = _bridgeFns.BridgeCall(
             this.handleBigInt, mc,
             paramsJson == null ? null : this.toCStrScratch(paramsJson),
         );
+        _rpcTraceExit(traceId, method);
         const result = parseBridgeEnvelope(str);
         if (process.env.TSGO_PROFILE === "1") _profRpc(method, Date.now() - t0);
         return result;
@@ -303,10 +362,12 @@ class BridgeClient {
         const paramsJson = params == null ? null : JSON.stringify(params);
         let mc = this.methodCStr.get(method);
         if (!mc) { mc = toCStr(method); this.methodCStr.set(method, mc); }
+        const traceId = _rpcTraceEnter(method, true, this.handle);
         const res = _bridgeFns.BridgeCallBinary(
             this.handleBigInt, mc,
             paramsJson == null ? null : this.toCStrScratch(paramsJson),
         );
+        _rpcTraceExit(traceId, method);
         if (process.env.TSGO_PROFILE === "1") _profRpc(method, Date.now() - t0);
         const len = Number(res.len);
         if (len <= 0 || res.data == null) return undefined;

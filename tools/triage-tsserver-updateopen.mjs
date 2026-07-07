@@ -1,14 +1,16 @@
 /**
  * Triage: run completions-like opens then check updateOpen (mimics volar test pollution).
  */
-import { launchServer } from '@typescript/server-harness';
 import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { fileURLToPath } from 'node:url';
 import { resolveVolarRoot } from './volar-root.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const volarRoot = resolveVolarRoot();
 const lsPkg = path.join(volarRoot, 'packages/language-server');
+const harnessPath = path.join(lsPkg, 'node_modules/@typescript/server-harness/dist/index.js');
+const { launchServer } = await import(pathToFileURL(harnessPath).href);
 const tsserver = path.join(volarRoot, 'node_modules/typescript/lib/tsserver.js');
 const testWorkspace = path.join(volarRoot, 'test-workspace');
 
