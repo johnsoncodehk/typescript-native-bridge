@@ -4443,10 +4443,7 @@ export function createTsgoChecker(program: any): any {
 
         ensureProject();
         const mod = resolveModuleSymbolForExports(moduleSymbol);
-        let exportEquals = mod;
-        try {
-            exportEquals = resolveExternalModuleSymbolImpl(mod);
-        } catch { return undefined; }
+        const exportEquals = resolveExternalModuleSymbolImpl(mod);
         if (exportEquals === mod) return undefined;
 
         const exportEqualsType = getTypeOfSymbolForExportEquals(exportEquals);
