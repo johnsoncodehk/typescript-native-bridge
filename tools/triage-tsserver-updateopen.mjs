@@ -14,12 +14,17 @@ const { launchServer } = await import(pathToFileURL(harnessPath).href);
 const tsserver = path.join(volarRoot, 'node_modules/typescript/lib/tsserver.js');
 const testWorkspace = path.join(volarRoot, 'test-workspace');
 
+const tnbEnv = { ...process.env };
+if (tnbEnv.TNB_SKIP_ASYNC_PREEMPT_OFF !== '1' && !/(?:^|,)asyncpreemptoff=1(?:,|$)/.test(tnbEnv.GODEBUG ?? '')) {
+	tnbEnv.GODEBUG = tnbEnv.GODEBUG ? `${tnbEnv.GODEBUG},asyncpreemptoff=1` : 'asyncpreemptoff=1';
+}
+
 const server = launchServer(tsserver, [
 	'--disableAutomaticTypingAcquisition',
 	'--globalPlugins', '@vue/typescript-plugin',
 	'--pluginProbeLocations', lsPkg,
 	'--suppressDiagnosticEvents',
-]);
+], undefined, tnbEnv);
 
 let seq = 1;
 async function msg(command, args) {

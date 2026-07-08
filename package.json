@@ -29,7 +29,7 @@
 		"check:lib": "node tools/check-lib-sync.mjs && node tools/check-bundle-shape.mjs",
 		"refresh": "npm run patch:ts && npm run patch:tsgo && npm run check:lib",
 		"build:js": "node tools/patch-tsgo.js && node tools/sync-vendor-native-preview.js && cd typescript-go/_packages/native-preview && npm install --no-save @types/node && npx tsc -b",
-		"build:lib": "npm run patch:ts && cd typescript && npm run build:compiler && npx hereby lkg && cd .. && npm run check:bundle-shape",
+		"build:lib": "npm run patch:ts && cd typescript && npm run build:compiler && npx hereby lkg && cd .. && node tools/patch-lib-shims.js && npm run check:bundle-shape",
 		"build:ts": "node tools/patch-typescript.js && cd typescript && npm install && npm run build:compiler && npx hereby lkg",
 		"build:bridge": "node tools/patch-tsgo.js && node tools/build-bridge.js"
 	},
