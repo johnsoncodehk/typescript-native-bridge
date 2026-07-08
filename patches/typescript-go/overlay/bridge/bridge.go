@@ -140,19 +140,6 @@ func pinnedParseCacheKey(key project.ParseCacheKey) bool {
 		(strings.Contains(key.FileName, "/node_modules/") || strings.HasPrefix(key.FileName, "bundled://"))
 }
 
-// asyncPreemptOff reports whether the Go runtime was loaded with
-// GODEBUG=asyncpreemptoff=1. os.Getenv reads the environ snapshot taken at
-// runtime init — exactly what parsedebugvars saw — so this faithfully
-// detects whether the JS-side guard in loadBridgeDeps() ran before dlopen.
-func asyncPreemptOff() bool {
-	for _, kv := range strings.Split(os.Getenv("GODEBUG"), ",") {
-		if kv == "asyncpreemptoff=1" {
-			return true
-		}
-	}
-	return false
-}
-
 var watchdogOnce sync.Once
 
 // startOrphanWatchdog kills this process if its parent dies. This is the only
@@ -193,15 +180,6 @@ func startOrphanWatchdog() {
 //
 //export BridgeNewSession
 func BridgeNewSession(cwd *C.char) *C.char {
-	// Signal-storm guard (see tsgoChecker.ts loadBridgeDeps): if the embedding
-	// bundle failed to set GODEBUG before dlopen (stale build / load order),
-	// refuse to start instead of arming a 23h ResetStdio-storm orphan.
-	// TNB_SKIP_ASYNC_PREEMPT_OFF=1 is the existing repro escape hatch.
-	if !asyncPreemptOff() && os.Getenv("TNB_SKIP_ASYNC_PREEMPT_OFF") != "1" {
-		return returnEnvelope(envelope{OK: false, Error: "tnb: Go runtime loaded without GODEBUG=asyncpreemptoff=1 — " +
-			"the embedding typescript bundle predates the signal-storm guard; rebuild with `npm run build:lib` " +
-			"(or set TNB_SKIP_ASYNC_PREEMPT_OFF=1 to bypass for repro)"})
-	}
 	startOrphanWatchdog()
 
 	cwdStr := C.GoString(cwd)

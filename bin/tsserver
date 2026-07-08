@@ -1,6 +1,3 @@
 #!/usr/bin/env node
-// TNB: set GODEBUG before loading tsserver bundle (Go reads at dlopen).
-if (process.env.TNB_SKIP_ASYNC_PREEMPT_OFF !== "1" && !/(?:^|,)asyncpreemptoff=1(?:,|$)/.test(process.env.GODEBUG ?? "")) {
-  process.env.GODEBUG = process.env.GODEBUG ? `${process.env.GODEBUG},asyncpreemptoff=1` : "asyncpreemptoff=1";
-}
-require('../lib/tsserver.js')
+require("../lib/tnb-godebug.js");
+require("../lib/tsserver.js");

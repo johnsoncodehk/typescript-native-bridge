@@ -6,13 +6,23 @@ const fs = require("fs");
 const path = require("path");
 
 const repoRoot = path.resolve(__dirname, "..");
+const godebugHelper = path.join(repoRoot, "tools", "tnb-godebug.js");
 const guard = [
-	"// TNB: Go runtime reads GODEBUG at dlopen — set before any bundle loads.",
-	'if (process.env.TNB_SKIP_ASYNC_PREEMPT_OFF !== "1" && !/(?:^|,)asyncpreemptoff=1(?:,|$)/.test(process.env.GODEBUG ?? "")) {',
-	'  process.env.GODEBUG = process.env.GODEBUG ? `${process.env.GODEBUG},asyncpreemptoff=1` : "asyncpreemptoff=1";',
-	"}",
+	"// TNB: Go reads GODEBUG at process start — re-exec CLI entrypoints when missing.",
+	"try { require('./tnb-godebug.js').ensureGodebugReexec(); } catch {}",
 	"",
 ].join("\n");
+
+// Copy helper next to lib shims (lib/ is build output).
+const libGodebug = path.join(repoRoot, "lib", "tnb-godebug.js");
+fs.mkdirSync(path.dirname(libGodebug), { recursive: true });
+fs.copyFileSync(godebugHelper, libGodebug);
+
+const oldGuardRe = /\/\/ TNB: Go runtime reads GODEBUG at dlopen[\s\S]*?\n}\n\n?/;
+
+function stripOldGuard(text) {
+	return text.replace(oldGuardRe, "");
+}
 
 for (const [shim, target] of [["tsserver.js", "./_tsserver.js"], ["tsc.js", "./_tsc.js"]]) {
 	const file = path.join(repoRoot, "lib", shim);
@@ -20,8 +30,8 @@ for (const [shim, target] of [["tsserver.js", "./_tsserver.js"], ["tsc.js", "./_
 		console.error(`patch-lib-shims: missing ${path.relative(repoRoot, file)}`);
 		process.exit(1);
 	}
-	let text = fs.readFileSync(file, "utf8");
-	if (text.includes("TNB: Go runtime reads GODEBUG")) {
+	let text = stripOldGuard(fs.readFileSync(file, "utf8"));
+	if (text.includes("TNB: Go reads GODEBUG at process start")) {
 		continue;
 	}
 	const needle = `module.exports = require("${target}");`;
@@ -33,3 +43,6 @@ for (const [shim, target] of [["tsserver.js", "./_tsserver.js"], ["tsc.js", "./_
 	fs.writeFileSync(file, text);
 	console.log(`patch-lib-shims: ${shim}`);
 }
+
+// lib/typescript.js is require()'d as a library — re-exec there would restart
+// embedders (vitest workers). CLI entrypoints use bin/* and lib/tsc|tsserver.js.
