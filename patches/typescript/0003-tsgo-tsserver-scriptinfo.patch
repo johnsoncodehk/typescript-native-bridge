@@ -36,3 +36,18 @@ index 88fa23c1b..45031fdb7 100644
          });
      }
  
+@@ -1690,8 +1698,12 @@ export abstract class Project implements LanguageServiceHost, ModuleResolutionHo
+                 const file = this.program!.getSourceFileByPath(path);
+                 const info = value.info;
+                 if (!file || value.info?.path === file.resolvedPath) return;
+-                value.info = this.projectService.getScriptInfo(file.fileName)!;
+-                Debug.assert(value.info.isAttached(this));
++                // tsgo may canonicalize resolvedPath differently from the ScriptInfo
++                // opened via updateOpen; fall back to path lookup and skip if missing.
++                const newInfo = this.projectService.getScriptInfoForPath(file.resolvedPath)
++                    ?? this.projectService.getScriptInfo(file.fileName);
++                if (!newInfo?.isAttached(this)) return;
++                value.info = newInfo;
+                 info?.detachFromProject(this);
+             });
+ 
