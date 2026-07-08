@@ -893,6 +893,7 @@ function hostHasScriptSnapshot(host: any, requestFileName: string, hostFileName:
 /** Bind host-parsed SourceFiles for LS (export map, scope) — tsgo skips the TS binder. */
 function ensureHostSourceFileBound(sf: any, options: any): void {
     if (!sf || sf.__tnbHostBound) return;
+    if (!isOverlayCandidatePath(sf.fileName)) return;
     if (sf.symbol !== undefined) { sf.__tnbHostBound = true; return; }
     try { bindSourceFile(sf, options); } catch { /* best-effort */ }
     sf.__tnbHostBound = true;
@@ -3276,6 +3277,8 @@ export function createTsgoChecker(program: any): any {
                 if (sym) return sym;
             } catch { /* host-bound module */ }
         }
+        const bridge = resolveRpcSymbol(moduleSymbol);
+        if (bridge && typeof bridge.id === "number" && bridge.id !== 0) return bridge;
         return moduleSymbol;
     }
 
@@ -3291,30 +3294,67 @@ export function createTsgoChecker(program: any): any {
         return collectNamedExportsFromModuleSymbol(snapSf.symbol);
     }
 
+    function moduleSymbolUsesHostExportTable(moduleSymbol: any): boolean {
+        const hostFileName = moduleSymbolSourceFileName(moduleSymbol);
+        if (!hostFileName || !isOverlayCandidatePath(hostFileName)) return false;
+        for (const decl of moduleSymbol?.declarations ?? []) {
+            if (decl?.getSourceFile?.()?.__tnbHostBound) return true;
+        }
+        const host = hostForOverlaySyncLocal();
+        const overlayCtx = programCtx?.overlayHostCtx;
+        if (!host || !overlayCtx?.options) return false;
+        const snapSf = sourceFileFromHostSnapshot(host, hostFileName, hostFileName, overlayCtx.options.target ?? 99);
+        return !!snapSf?.__tnbHostBound;
+    }
+
     function resolveModuleSymbolForExports(moduleSymbol: any): any {
-        if (moduleSymbol?.exports) return moduleSymbol;
+        if (moduleSymbol?.exports && moduleSymbolUsesHostExportTable(moduleSymbol)) return moduleSymbol;
         const hostFileName = moduleSymbolSourceFileName(moduleSymbol);
         return hostFileName ? resolveTsgoModuleSymbol(moduleSymbol, hostFileName) : moduleSymbol;
     }
 
-    function forEachNamedExport(tsgoChecker: any, moduleSymbol: any, cb: (symbol: any, key: string) => void): void {
-        let fromExports = collectNamedExportsFromModuleSymbol(moduleSymbol);
-        if (!fromExports.length) {
-            const hostFileName = moduleSymbolSourceFileName(moduleSymbol);
-            if (hostFileName) fromExports = resolveHostModuleNamedExports(hostFileName);
+    function resolveExportMapModuleSymbol(moduleSymbol: any, moduleFileName?: string): any {
+        const fileName = moduleFileName ?? moduleSymbolSourceFileName(moduleSymbol);
+        if (moduleSymbolUsesHostExportTable(moduleSymbol)) return moduleSymbol;
+        if (fileName && !isOverlayCandidatePath(fileName)) {
+            ensureProject();
+            pushHostOverlayToTsgo(fileName);
+            const tsgoFile = toTsgoFileName(fileName);
+            try {
+                const sym = project.checker.getSymbolAtPosition(tsgoFile, 0);
+                if (sym && typeof sym.id === "number" && sym.id !== 0) return sym;
+            } catch { /* fall through */ }
         }
-        if (fromExports.length) {
-            for (const exported of fromExports) {
-                const key = exportMemberKey(exported);
-                if (key) cb(exported, key);
+        return resolveModuleSymbolForExports(moduleSymbol);
+    }
+
+    function getRpcExportsOfModule(moduleSymbol: any): any[] {
+        if (!moduleSymbol) return [];
+        ensureProject();
+        const bridge = resolveRpcSymbol(moduleSymbol) ?? (isTsgoBridgeSymbol(moduleSymbol) ? moduleSymbol : undefined);
+        if (!bridge || typeof bridge.id !== "number" || bridge.id === 0) return [];
+        try {
+            return rpc().getExportsOfModule(bridge) ?? [];
+        } catch {
+            return [];
+        }
+    }
+
+    function forEachNamedExport(_tsgoChecker: any, moduleSymbol: any, cb: (symbol: any, key: string) => void): void {
+        let fromExports: any[] = [];
+        if (moduleSymbolUsesHostExportTable(moduleSymbol)) {
+            fromExports = collectNamedExportsFromModuleSymbol(moduleSymbol);
+            if (!fromExports.length) {
+                const hostFileName = moduleSymbolSourceFileName(moduleSymbol);
+                if (hostFileName) fromExports = resolveHostModuleNamedExports(hostFileName);
             }
-            return;
         }
-        if (!moduleSymbol) return;
-        if (typeof tsgoChecker.getExportsOfModule !== "function") return;
-        for (const sym of tsgoChecker.getExportsOfModule(moduleSymbol) ?? []) {
-            const key = exportMemberKey(sym);
-            if (key) cb(sym, key);
+        if (!fromExports.length) {
+            fromExports = getRpcExportsOfModule(moduleSymbol);
+        }
+        for (const exported of fromExports) {
+            const key = exportMemberKey(exported);
+            if (key) cb(exported, key);
         }
     }
 
@@ -3397,11 +3437,10 @@ export function createTsgoChecker(program: any): any {
         }
     }
 
-    function forEachExportAndPropertyOfModuleWorker(moduleSymbol: any, cb: (symbol: any, key: string) => void): void {
+    function forEachExportAndPropertyOfModuleWorker(moduleSymbol: any, cb: (symbol: any, key: string) => void, moduleFileName?: string): void {
         ensureProject();
-        const mod = resolveModuleSymbolForExports(moduleSymbol);
-        const tsgoChecker = rpc();
-        forEachNamedExport(tsgoChecker, mod, cb);
+        const mod = resolveExportMapModuleSymbol(moduleSymbol, moduleFileName);
+        forEachNamedExport(undefined, mod, cb);
         forEachExportEqualsProperties(mod, cb);
     }
 
@@ -5020,30 +5059,38 @@ export function createTsgoChecker(program: any): any {
             if (t) fixupType(t);
             return t;
         },
+        getModuleSymbolForSourceFile(sourceFile: any): any {
+            if (!sourceFile) return undefined;
+            if (sourceFile.symbol) return sourceFile.symbol;
+            ensureProject();
+            const host = hostForOverlaySyncLocal();
+            const hostFile = resolveHostFileName(sourceFile.fileName, host);
+            const candidates = [hostFile, toTsgoFileName(hostFile), sourceFile.fileName];
+            for (const file of candidates) {
+                if (!file) continue;
+                try {
+                    const sym = rpc().getModuleSymbolForSourceFile?.(file);
+                    if (sym && typeof sym.id === "number" && sym.id !== 0) return sym;
+                } catch { /* try next path shape */ }
+            }
+            return resolveExportMapModuleSymbol(undefined, hostFile);
+        },
         forEachExportAndPropertyOfModule(moduleSymbol: any, cb: (symbol: any, key: string) => void): void {
-            forEachExportAndPropertyOfModuleWorker(moduleSymbol, cb);
+            const fileName = moduleSymbolSourceFileName(moduleSymbol);
+            forEachExportAndPropertyOfModuleWorker(moduleSymbol, cb, fileName);
         },
         getExportsOfModule(moduleSymbol: any): readonly any[] {
             if (!moduleSymbol) return [];
-            let hostExports = collectNamedExportsFromModuleSymbol(moduleSymbol);
-            if (!hostExports.length) {
-                const hostFileName = moduleSymbolSourceFileName(moduleSymbol);
-                if (hostFileName) hostExports = resolveHostModuleNamedExports(hostFileName);
+            if (moduleSymbolUsesHostExportTable(moduleSymbol)) {
+                let hostExports = collectNamedExportsFromModuleSymbol(moduleSymbol);
+                if (!hostExports.length) {
+                    const hostFileName = moduleSymbolSourceFileName(moduleSymbol);
+                    if (hostFileName) hostExports = resolveHostModuleNamedExports(hostFileName);
+                }
+                if (hostExports.length) return hostExports;
             }
-            if (hostExports.length) {
-                return hostExports;
-            }
-            ensureProject();
-            const mod = resolveModuleSymbolForExports(moduleSymbol);
-            const resolvedExports = collectNamedExportsFromModuleSymbol(mod);
-            if (resolvedExports.length) {
-                return resolvedExports;
-            }
-            try {
-                return rpc().getExportsOfModule(mod) ?? [];
-            } catch {
-                return [];
-            }
+            const mod = resolveExportMapModuleSymbol(moduleSymbol);
+            return getRpcExportsOfModule(mod);
         },
 
         // ── Diagnostics — empty for PoC ──
