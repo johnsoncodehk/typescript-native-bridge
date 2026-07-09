@@ -122,6 +122,14 @@ type TnbBridgeProcessState = {
     buildModeRef?: { active?: TnbActiveBuildProject };
 };
 
+/** Structure fingerprint of a thin program (for structureIsReused). */
+type TnbProgramShape = {
+    /** Sorted tsgo program file names. */
+    fileNames: readonly string[];
+    /** Compiler options the program was created with. */
+    options: any;
+};
+
 /** One solution-build project currently open in the tsgo session. */
 type TnbActiveBuildProject = {
     configFilePath: string;
@@ -307,6 +315,17 @@ let _sourceFileCache: any;
 // Process-global (see TnbBridgeProcessState.projectCache) — both bundles must
 // see the same Project snapshot per tsconfig.
 const _projectCache: Map<string, any> = tnbBridgeProcessState().projectCache ??= new Map();
+// Shape of the last thin program per (LanguageServiceHost, tsconfig) — the next
+// createTsgoProgram for the same host+config compares against it to report
+// structureIsReused. Keyed per host, not just per tsconfig: tsserver runs
+// several Projects over one tsconfig (the configured project and its
+// AutoImportProviderProject inherit the same options.configFilePath), and their
+// program rebuilds interleave. WeakMap so closed projects drop their shapes.
+const _programShapeByHost = new WeakMap<object, Map<string, TnbProgramShape>>();
+// Hosts that are not stable objects (plain CompilerHost per createProgram call)
+// fall back to a config-keyed memo. Module-level (not cross-bundle): shape
+// tracking sequences JS-side program rebuilds, which stay within one bundle.
+const _programShapeNoHost = new Map<string, TnbProgramShape>();
 
 function toCStr(s: string): Buffer {
     return Buffer.from(s + "\0", "utf8");
@@ -882,6 +901,16 @@ function attachHostSourceFileMetadata(sf: any, hostFileName: string): any {
     sf.resolvedPath = canon as Path;
     if (!sf.imports) sf.imports = [];
     if (!sf.moduleAugmentations) sf.moduleAugmentations = [];
+    // Stock sets ambientModuleNames in collectExternalModuleReferences (program
+    // construction), which the thin program skips. The export-map cache's
+    // onFileChanged iterates it (ambientModuleDeclarationsAreEqual) whenever a
+    // structure-reused program reports a changed file — derive it from the
+    // parsed statements so ambient-module edits still invalidate the cache.
+    if (!sf.ambientModuleNames) {
+        sf.ambientModuleNames = ((sf.statements ?? []) as any[])
+            .filter(s => s.kind === SyntaxKind.ModuleDeclaration && s.name?.kind === SyntaxKind.StringLiteral)
+            .map(s => s.name.text);
+    }
     if (!("version" in sf)) {
         try { Object.defineProperty(sf, "version", { value: "1", writable: true, configurable: true, enumerable: false }); } catch {}
     }
@@ -2044,6 +2073,45 @@ export function createTsgoProgram(
     const getSourceFileNames = () => getTsgoSourceFileNames().map(toHostFileName);
     const tsgoGetSourceFile = (fileName: string) => project?.program?.getSourceFile?.(toTsgoFileName(fileName));
 
+    // ── structureIsReused (tsserver cache invalidation) ──
+    // updateGraphWorker (server/project.ts) clears the export-map cache whenever
+    // a new program reports StructureIsReused.Not, and the thin program is
+    // rebuilt on every updateGraph — a constant `Not` wiped the cache on each
+    // keystroke, so auto-import completionInfo re-scanned every module (~400ms)
+    // instead of hitting the cache (~2ms). Mirror stock
+    // tryReuseStructureFromOldProgram against the previous thin program for the
+    // same tsconfig: SafeModules when the tsgo file set and structure-affecting
+    // options are unchanged (content-only overlay refresh — the same edits that
+    // stock reuses structure for), Not on the first program or when files were
+    // added/removed or options changed. SafeModules rather than Completely
+    // because SourceFiles and module resolutions are rebuilt from the fresh
+    // tsgo snapshot (not reused object-identical), and SafeModules keeps
+    // updateGraphWorker's hasNewProgram bookkeeping (root files, missing-file
+    // watchers) running. Skipped in build mode: `tsc -b` programs are one-shot
+    // and the shape memo would pin every project's file list for the whole build.
+    let structureIsReused = StructureIsReused.Not;
+    if (!(options as any).tscBuild) {
+        let shapes = typeof lsHost === "object" && lsHost !== null ? _programShapeByHost.get(lsHost) : undefined;
+        if (!shapes && typeof lsHost === "object" && lsHost !== null) {
+            shapes = new Map();
+            _programShapeByHost.set(lsHost, shapes);
+        }
+        const shapeMap = shapes ?? _programShapeNoHost;
+        const shapeFileNames = [...getTsgoSourceFileNames()].sort();
+        const prevShape = shapeMap.get(configFilePath);
+        if (
+            prevShape
+            && shapeFileNames.length > 0
+            && prevShape.fileNames.length === shapeFileNames.length
+            && prevShape.fileNames.every((n, i) => n === shapeFileNames[i])
+            && !ts.changesAffectModuleResolution(prevShape.options, options)
+            && !ts.optionsHaveChanges(prevShape.options, options, ts.sourceFileAffectingCompilerOptions)
+        ) {
+            structureIsReused = StructureIsReused.SafeModules;
+        }
+        shapeMap.set(configFilePath, { fileNames: shapeFileNames, options });
+    }
+
     // Helper: create a proper TS SourceFile shell (with path/resolvedPath/etc.)
     // from host content, then wrap it with the tsgo RemoteSourceFile AST via
     // getTsgoBackedSourceFile. BuilderProgram and other TS infrastructure
@@ -2842,7 +2910,7 @@ export function createTsgoProgram(
         getResolvedProjectReferenceByPath: () => undefined,
         getProgramDiagnosticsContainer: () => { throw new Error("tsgoChecker: Program.getProgramDiagnosticsContainer is not available on tsgo-backed programs"); },
         getCurrentPackagesMap: () => undefined,
-        structureIsReused: StructureIsReused.Not,
+        structureIsReused,
         sourceFileToPackageName: new Map(),
         resolvedModules: undefined,
         resolvedTypeReferenceDirectiveNames: undefined,
@@ -5717,7 +5785,7 @@ const _tnbProgramCoverage = {
     getImpliedNodeFormatForEmit: "adapter",
     getEmitModuleFormatOfFile: "adapter",
     shouldTransformImportCall: "adapter",
-    structureIsReused: "stub",
+    structureIsReused: "adapter",
     getSourceFileFromReference: "stub",
     getLibFileFromReference: "stub",
     sourceFileToPackageName: "stub",
