@@ -407,7 +407,7 @@ index 28d29136d..895cc5ff9 100644
  
      function pushAutoImportSymbol(symbol: Symbol, origin: SymbolOriginInfoResolvedExport | SymbolOriginInfoExport) {
 diff --git a/src/services/exportInfoMap.ts b/src/services/exportInfoMap.ts
-index dfd00ce2e..c9c63dca3 100644
+index dfd00ce2e..ae21f7a45 100644
 --- a/src/services/exportInfoMap.ts
 +++ b/src/services/exportInfoMap.ts
 @@ -27,8 +27,11 @@ import {
@@ -430,6 +430,42 @@ index dfd00ce2e..c9c63dca3 100644
      stripQuotes,
      Symbol,
      SymbolFlags,
+@@ -118,7 +122,7 @@ interface CachedSymbolExportInfo {
+ export interface ExportInfoMap {
+     isUsableByFile(importingFile: Path): boolean;
+     clear(): void;
+-    add(importingFile: Path, symbol: Symbol, key: __String, moduleSymbol: Symbol, moduleFile: SourceFile | undefined, exportKind: ExportKind, isFromPackageJson: boolean, checker: TypeChecker): void;
++    add(importingFile: Path, symbol: Symbol, key: __String, moduleSymbol: Symbol, moduleFile: SourceFile | undefined, exportKind: ExportKind, isFromPackageJson: boolean, checker: TypeChecker, targetFlags?: SymbolFlags): void;
+     get(importingFile: Path, key: ExportMapInfoKey): readonly SymbolExportInfo[] | undefined;
+     search<T>(importingFile: Path, preferCapitalized: boolean, matches: (name: string, targetFlags: SymbolFlags) => boolean, action: (info: readonly SymbolExportInfo[], symbolName: string, isFromAmbientModule: boolean, key: ExportMapInfoKey) => T | undefined): T | undefined;
+     releaseSymbols(): void;
+@@ -160,7 +164,7 @@ export function createCacheableExportInfoMap(host: CacheableExportInfoMapHost):
+             symbols.clear();
+             usableByFileName = undefined;
+         },
+-        add: (importingFile, symbol, symbolTableKey, moduleSymbol, moduleFile, exportKind, isFromPackageJson, checker) => {
++        add: (importingFile, symbol, symbolTableKey, moduleSymbol, moduleFile, exportKind, isFromPackageJson, checker, precomputedTargetFlags) => {
+             if (importingFile !== usableByFileName) {
+                 cache.clear();
+                 usableByFileName = importingFile;
+@@ -206,7 +210,7 @@ export function createCacheableExportInfoMap(host: CacheableExportInfoMapHost):
+ 
+             const moduleName = stripQuotes(moduleSymbol.name);
+             const id = exportInfoId++;
+-            const target = skipAlias(symbol, checker);
++            const targetFlags = precomputedTargetFlags ?? skipAlias(symbol, checker).flags;
+             const storedSymbol = symbol.flags & SymbolFlags.Transient ? undefined : symbol;
+             const storedModuleSymbol = moduleSymbol.flags & SymbolFlags.Transient ? undefined : moduleSymbol;
+             if (!storedSymbol || !storedModuleSymbol) symbols.set(id, [symbol, moduleSymbol]);
+@@ -221,7 +225,7 @@ export function createCacheableExportInfoMap(host: CacheableExportInfoMapHost):
+                 moduleFileName: moduleFile?.fileName,
+                 packageName,
+                 exportKind,
+-                targetFlags: target.flags,
++                targetFlags,
+                 isFromPackageJson,
+                 symbol: storedSymbol,
+                 moduleSymbol: storedModuleSymbol,
 @@ -297,7 +301,10 @@ export function createCacheableExportInfoMap(host: CacheableExportInfoMapHost):
              : host.getCurrentProgram()!).getTypeChecker();
          const moduleSymbol = info.moduleSymbol || cachedModuleSymbol || Debug.checkDefined(
@@ -487,12 +523,19 @@ index dfd00ce2e..c9c63dca3 100644
  }
  
  /** @internal */
-@@ -463,12 +484,13 @@ export function forEachExternalModuleToImportFrom(
+@@ -459,16 +480,20 @@ export function forEachExternalModuleToImportFrom(
+     preferences: UserPreferences,
+     useAutoImportProvider: boolean,
+     cb: (module: Symbol, moduleFile: SourceFile | undefined, program: Program, isFromPackageJson: boolean) => void,
++    includeMainProgram: boolean = true,
+ ): void {
      const useCaseSensitiveFileNames = hostUsesCaseSensitiveFileNames(host);
      const excludePatterns = preferences.autoImportFileExcludePatterns && getIsExcludedPatterns(preferences, useCaseSensitiveFileNames);
  
 -    forEachExternalModule(program.getTypeChecker(), program.getSourceFiles(), excludePatterns, host, (module, file) => cb(module, file, program, /*isFromPackageJson*/ false));
-+    forEachExternalModule(program.getTypeChecker(), program.getSourceFiles(), excludePatterns, host, buildModuleSymbolBySourceFileMap(program), (module, file) => cb(module, file, program, /*isFromPackageJson*/ false));
++    if (includeMainProgram) {
++        forEachExternalModule(program.getTypeChecker(), program.getSourceFiles(), excludePatterns, host, buildModuleSymbolBySourceFileMap(program), (module, file) => cb(module, file, program, /*isFromPackageJson*/ false));
++    }
      const autoImportProvider = useAutoImportProvider && host.getPackageJsonAutoImportProvider?.();
      if (autoImportProvider) {
          const start = timestamp();
@@ -503,7 +546,7 @@ index dfd00ce2e..c9c63dca3 100644
              if (file && !program.getSourceFile(file.fileName) || !file && !checker.resolveName(module.name, /*location*/ undefined, SymbolFlags.Module, /*excludeGlobals*/ false)) {
                  // The AutoImportProvider filters files already in the main program out of its *root* files,
                  // but non-root files can still be present in both programs, and already in the export info map
-@@ -490,7 +512,51 @@ function getIsExcludedPatterns(preferences: UserPreferences, useCaseSensitiveFil
+@@ -490,7 +515,51 @@ function getIsExcludedPatterns(preferences: UserPreferences, useCaseSensitiveFil
      });
  }
  
@@ -556,7 +599,7 @@ index dfd00ce2e..c9c63dca3 100644
      const isExcluded = excludePatterns && getIsExcluded(excludePatterns, host);
  
      for (const ambient of checker.getAmbientModules()) {
-@@ -500,7 +566,10 @@ function forEachExternalModule(checker: TypeChecker, allSourceFiles: readonly So
+@@ -500,7 +569,10 @@ function forEachExternalModule(checker: TypeChecker, allSourceFiles: readonly So
      }
      for (const sourceFile of allSourceFiles) {
          if (isExternalOrCommonJsModule(sourceFile) && !isExcluded?.(sourceFile)) {
@@ -568,6 +611,177 @@ index dfd00ce2e..c9c63dca3 100644
          }
      }
  }
+@@ -533,6 +605,116 @@ export function getIsFileExcluded(host: LanguageServiceHost, preferences: UserPr
+     return getIsExcluded(getIsExcludedPatterns(preferences, hostUsesCaseSensitiveFileNames(host)), host);
+ }
+ 
++interface ModuleExportMapBatchModule {
++    moduleFileName?: string;
++    moduleName: string;
++    moduleSymbol: Symbol;
++    defaultExport?: { symbol: Symbol; tableKey: string; exportKind: ExportKind; targetFlags: number; };
++    namedExports: readonly { symbol: Symbol; key: string; targetFlags: number; }[];
++}
++
++interface ModuleExportMapBatch {
++    modules: readonly ModuleExportMapBatchModule[];
++}
++
++function populateExportInfoMapFromModuleExportMapBatch(
++    cache: ExportInfoMap,
++    importingFile: Path,
++    program: Program,
++    host: LanguageServiceHost,
++    preferences: UserPreferences,
++    cancellationToken: CancellationToken | undefined,
++): boolean {
++    const getBatch = (program as Program & { getModuleExportMap?: () => ModuleExportMapBatch | undefined }).getModuleExportMap;
++    if (!getBatch) return false;
++    const batch = getBatch.call(program);
++    if (!batch?.modules?.length) return false;
++
++    const checker = program.getTypeChecker();
++    const isExcluded = preferences.autoImportFileExcludePatterns
++        ? getIsFileExcluded(host, preferences)
++        : undefined;
++    let moduleCount = 0;
++    for (const mod of batch.modules) {
++        if (++moduleCount % 100 === 0) cancellationToken?.throwIfCancellationRequested();
++        const moduleFile = mod.moduleFileName ? program.getSourceFile(mod.moduleFileName) : undefined;
++        if (moduleFile && isExcluded?.(moduleFile)) continue;
++        const defaultInfo = mod.defaultExport;
++        if (defaultInfo) {
++            cache.add(
++                importingFile,
++                defaultInfo.symbol,
++                defaultInfo.exportKind === ExportKind.Default ? InternalSymbolName.Default : InternalSymbolName.ExportEquals,
++                mod.moduleSymbol,
++                moduleFile,
++                defaultInfo.exportKind,
++                /*isFromPackageJson*/ false,
++                checker,
++                defaultInfo.targetFlags,
++            );
++        }
++        const seenExports = new Set<__String>();
++        for (const exp of mod.namedExports) {
++            if (exp.symbol !== defaultInfo?.symbol && addToSeen(seenExports, exp.key as __String)) {
++                cache.add(
++                    importingFile,
++                    exp.symbol,
++                    exp.key,
++                    mod.moduleSymbol,
++                    moduleFile,
++                    ExportKind.Named,
++                    /*isFromPackageJson*/ false,
++                    checker,
++                    exp.targetFlags,
++                );
++            }
++        }
++    }
++    return true;
++}
++
++function addExportInfoForModule(
++    cache: ExportInfoMap,
++    importingFile: Path,
++    moduleSymbol: Symbol,
++    moduleFile: SourceFile | undefined,
++    isFromPackageJson: boolean,
++    program: Program,
++    cancellationToken: CancellationToken | undefined,
++    moduleCountRef: { count: number },
++): void {
++    if (++moduleCountRef.count % 100 === 0) cancellationToken?.throwIfCancellationRequested();
++    const seenExports = new Set<__String>();
++    const checker = program.getTypeChecker();
++    const defaultInfo = getDefaultLikeExportInfo(moduleSymbol, checker);
++    if (defaultInfo && isImportableSymbol(defaultInfo.symbol, checker)) {
++        cache.add(
++            importingFile,
++            defaultInfo.symbol,
++            defaultInfo.exportKind === ExportKind.Default ? InternalSymbolName.Default : InternalSymbolName.ExportEquals,
++            moduleSymbol,
++            moduleFile,
++            defaultInfo.exportKind,
++            isFromPackageJson,
++            checker,
++        );
++    }
++    checker.forEachExportAndPropertyOfModule(moduleSymbol, (exported, key) => {
++        if (exported !== defaultInfo?.symbol && isImportableSymbol(exported, checker) && addToSeen(seenExports, key)) {
++            cache.add(
++                importingFile,
++                exported,
++                key,
++                moduleSymbol,
++                moduleFile,
++                ExportKind.Named,
++                isFromPackageJson,
++                checker,
++            );
++        }
++    });
++}
++
+ /** @internal */
+ export function getExportInfoMap(importingFile: SourceFile | FutureSourceFile, host: LanguageServiceHost, program: Program, preferences: UserPreferences, cancellationToken: CancellationToken | undefined): ExportInfoMap {
+     const start = timestamp();
+@@ -552,42 +734,19 @@ export function getExportInfoMap(importingFile: SourceFile | FutureSourceFile, h
+     }
+ 
+     host.log?.("getExportInfoMap: cache miss or empty; calculating new results");
+-    let moduleCount = 0;
++    const moduleCountRef = { count: 0 };
+     try {
+-        forEachExternalModuleToImportFrom(program, host, preferences, /*useAutoImportProvider*/ true, (moduleSymbol, moduleFile, program, isFromPackageJson) => {
+-            if (++moduleCount % 100 === 0) cancellationToken?.throwIfCancellationRequested();
+-            const seenExports = new Set<__String>();
+-            const checker = program.getTypeChecker();
+-            const defaultInfo = getDefaultLikeExportInfo(moduleSymbol, checker);
+-            // Note: I think we shouldn't actually see resolved module symbols here, but weird merges
+-            // can cause it to happen: see 'completionsImport_mergedReExport.ts'
+-            if (defaultInfo && isImportableSymbol(defaultInfo.symbol, checker)) {
+-                cache.add(
+-                    importingFile.path,
+-                    defaultInfo.symbol,
+-                    defaultInfo.exportKind === ExportKind.Default ? InternalSymbolName.Default : InternalSymbolName.ExportEquals,
+-                    moduleSymbol,
+-                    moduleFile,
+-                    defaultInfo.exportKind,
+-                    isFromPackageJson,
+-                    checker,
+-                );
+-            }
+-            checker.forEachExportAndPropertyOfModule(moduleSymbol, (exported, key) => {
+-                if (exported !== defaultInfo?.symbol && isImportableSymbol(exported, checker) && addToSeen(seenExports, key)) {
+-                    cache.add(
+-                        importingFile.path,
+-                        exported,
+-                        key,
+-                        moduleSymbol,
+-                        moduleFile,
+-                        ExportKind.Named,
+-                        isFromPackageJson,
+-                        checker,
+-                    );
+-                }
++        const usedBatch = populateExportInfoMapFromModuleExportMapBatch(cache, importingFile.path, program, host, preferences, cancellationToken);
++        if (usedBatch) {
++            forEachExternalModuleToImportFrom(program, host, preferences, /*useAutoImportProvider*/ true, (moduleSymbol, moduleFile, prog, isFromPackageJson) => {
++                addExportInfoForModule(cache, importingFile.path, moduleSymbol, moduleFile, isFromPackageJson, prog, cancellationToken, moduleCountRef);
++            }, /*includeMainProgram*/ false);
++        }
++        else {
++            forEachExternalModuleToImportFrom(program, host, preferences, /*useAutoImportProvider*/ true, (moduleSymbol, moduleFile, prog, isFromPackageJson) => {
++                addExportInfoForModule(cache, importingFile.path, moduleSymbol, moduleFile, isFromPackageJson, prog, cancellationToken, moduleCountRef);
+             });
+-        });
++        }
+     }
+     catch (err) {
+         // Ensure cache is reset if operation is cancelled
 diff --git a/src/services/goToDefinition.ts b/src/services/goToDefinition.ts
 index 0a45cc3e3..50309c248 100644
 --- a/src/services/goToDefinition.ts

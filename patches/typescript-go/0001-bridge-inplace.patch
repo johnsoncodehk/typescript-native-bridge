@@ -339,10 +339,10 @@ index 656f7cc4e..0680424bc 100644
      id: number;
      flags: number;
 diff --git a/_packages/native-preview/src/api/sync/types.ts b/_packages/native-preview/src/api/sync/types.ts
-index 4ccc3047d..7ee84f15e 100644
+index 4ccc3047d..671450306 100644
 --- a/_packages/native-preview/src/api/sync/types.ts
 +++ b/_packages/native-preview/src/api/sync/types.ts
-@@ -321,6 +321,33 @@ export interface CompletionInfo {
+@@ -321,6 +321,81 @@ export interface CompletionInfo {
      readonly entries: readonly CompletionEntry[];
  }
  
@@ -371,6 +371,54 @@ index 4ccc3047d..7ee84f15e 100644
 +    readonly affectsGlobalScope?: boolean;
 +    readonly impliedNodeFormat?: number;
 +    readonly refs?: readonly string[];
++}
++
++/** Light symbol wire shape (id/name/flags only). */
++export interface LightSymbolWire {
++    readonly id: number;
++    readonly name: string;
++    readonly flags: number;
++    readonly checkFlags: number;
++}
++
++/** Wire response for {@link Program.getModuleExportMap}. */
++export interface ModuleExportMapWireResponse {
++    readonly modules: readonly {
++        readonly moduleFileName?: string;
++        readonly moduleName: string;
++        readonly moduleSymbol: LightSymbolWire;
++        readonly defaultExport?: {
++            readonly symbol: LightSymbolWire;
++            readonly tableKey: string;
++            readonly exportKind: number;
++            readonly targetFlags: number;
++        };
++        readonly namedExports: readonly {
++            readonly symbol: LightSymbolWire;
++            readonly key: string;
++            readonly targetFlags: number;
++        }[];
++    }[];
++}
++
++/** Materialized auto-import export index from {@link Program.getModuleExportMap}. */
++export interface ModuleExportMapBatch {
++    readonly modules: readonly {
++        readonly moduleFileName?: string;
++        readonly moduleName: string;
++        readonly moduleSymbol: Symbol;
++        readonly defaultExport?: {
++            readonly symbol: Symbol;
++            readonly tableKey: string;
++            readonly exportKind: number;
++            readonly targetFlags: number;
++        };
++        readonly namedExports: readonly {
++            readonly symbol: Symbol;
++            readonly key: string;
++            readonly targetFlags: number;
++        }[];
++    }[];
 +}
 +
  /**

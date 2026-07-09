@@ -2727,6 +2727,16 @@ export function createTsgoProgram(
         // (content-hash versions + referenced-file graph). See the builder-meta
         // block above.
         tnbBuilderFileMetas: () => getBuilderMetaState()?.byPath,
+        // Batch auto-import export index (exportInfoMap cold populate).
+        getModuleExportMap: () => {
+            const proj = project;
+            if (!proj?.checker || typeof proj.checker.getModuleExportMap !== "function") return undefined;
+            try {
+                return proj.checker.getModuleExportMap();
+            } catch {
+                return undefined;
+            }
+        },
         // builder.ts getBuildInfo root serialization hook (no per-file
         // SourceFile materialization / fileIncludeReasons bookkeeping needed).
         tnbIsRootFile: (path: any) => isRootFilePath(path),
@@ -5434,6 +5444,19 @@ export function createTsgoChecker(program: any): any {
             } catch { /* unresolvable → own root */ }
             return (roots?.length ? [...roots] : [symbol]).map(refineNavSymbol);
         },
+        // Stock: getMergedSymbol(symbol.exportSymbol || symbol). Bridge symbols
+        // carry exportSymbol as a lazy id resolved via Symbol.getExportSymbol();
+        // host-bound symbols expose exportSymbol directly.
+        getExportSymbolOfSymbol(symbol: any): any {
+            if (!symbol) return symbol;
+            if (typeof symbol.getExportSymbol === "function") {
+                try {
+                    return refineNavSymbol(symbol.getExportSymbol());
+                } catch { /* fall through to exportSymbol field */ }
+            }
+            const exportSym = symbol.exportSymbol;
+            return refineNavSymbol(exportSym && exportSym !== symbol ? exportSym : symbol);
+        },
         // tsgo bridge-specific symbol RPCs (no stock TS counterpart, no host
         // callers today). Covered explicitly so the unknown-method forward
         // below stays symbol-free by construction.
@@ -5601,7 +5624,7 @@ const _tnbCheckerCoverage = {
     getSymbolsOfParameterPropertyDeclaration: "throw",
     getShorthandAssignmentValueSymbol: "adapter",
     getExportSpecifierLocalTargetSymbol: "adapter",
-    getExportSymbolOfSymbol: "throw",
+    getExportSymbolOfSymbol: "adapter",
     getPropertySymbolOfDestructuringAssignment: "throw",
     getTypeOfAssignmentPattern: "throw",
     getTypeAtLocation: "adapter",
