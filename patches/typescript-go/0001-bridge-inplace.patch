@@ -339,10 +339,10 @@ index 656f7cc4e..0680424bc 100644
      id: number;
      flags: number;
 diff --git a/_packages/native-preview/src/api/sync/types.ts b/_packages/native-preview/src/api/sync/types.ts
-index 4ccc3047d..671450306 100644
+index 4ccc3047d..135e6e3e8 100644
 --- a/_packages/native-preview/src/api/sync/types.ts
 +++ b/_packages/native-preview/src/api/sync/types.ts
-@@ -321,6 +321,81 @@ export interface CompletionInfo {
+@@ -321,6 +321,108 @@ export interface CompletionInfo {
      readonly entries: readonly CompletionEntry[];
  }
  
@@ -387,6 +387,7 @@ index 4ccc3047d..671450306 100644
 +        readonly moduleFileName?: string;
 +        readonly moduleName: string;
 +        readonly moduleSymbol: LightSymbolWire;
++        readonly importableFrom?: boolean;
 +        readonly defaultExport?: {
 +            readonly symbol: LightSymbolWire;
 +            readonly tableKey: string;
@@ -407,6 +408,7 @@ index 4ccc3047d..671450306 100644
 +        readonly moduleFileName?: string;
 +        readonly moduleName: string;
 +        readonly moduleSymbol: Symbol;
++        readonly importableFrom?: boolean;
 +        readonly defaultExport?: {
 +            readonly symbol: Symbol;
 +            readonly tableKey: string;
@@ -418,6 +420,31 @@ index 4ccc3047d..671450306 100644
 +            readonly key: string;
 +            readonly targetFlags: number;
 +        }[];
++    }[];
++}
++
++/** Wire preferences for {@link Program.getModuleSpecifiersBatch}. */
++export interface ModuleSpecifiersBatchPreferencesWire {
++    readonly importModuleSpecifierPreference?: string;
++    readonly importModuleSpecifierEnding?: string;
++    readonly autoImportSpecifierExcludeRegexes?: readonly string[];
++}
++
++/** Wire response for {@link Program.getModuleSpecifiersBatch}. */
++export interface ModuleSpecifiersBatchWireResponse {
++    readonly results: readonly {
++        readonly moduleSymbol: number;
++        readonly kind?: string;
++        readonly moduleSpecifiers: readonly string[];
++    }[];
++}
++
++/** Materialized batch auto-import module specifiers from {@link Program.getModuleSpecifiersBatch}. */
++export interface ModuleSpecifiersBatch {
++    readonly results: readonly {
++        readonly moduleSymbol: Symbol;
++        readonly kind?: string;
++        readonly moduleSpecifiers: readonly string[];
 +    }[];
 +}
 +

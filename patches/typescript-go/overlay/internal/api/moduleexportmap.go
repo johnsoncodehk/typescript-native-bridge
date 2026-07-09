@@ -17,8 +17,9 @@ const (
 
 // GetModuleExportMapParams are parameters for the getModuleExportMap method.
 type GetModuleExportMapParams struct {
-	Snapshot SnapshotID `json:"snapshot"`
-	Project  ProjectID  `json:"project"`
+	Snapshot SnapshotID          `json:"snapshot"`
+	Project  ProjectID           `json:"project"`
+	File     *DocumentIdentifier `json:"file,omitempty"`
 }
 
 // ModuleExportMapResponse is the batch auto-import export index for a program.
@@ -31,6 +32,9 @@ type ModuleExportMapModule struct {
 	ModuleFileName string               `json:"moduleFileName,omitempty"`
 	ModuleName     string               `json:"moduleName"`
 	ModuleSymbol   *LightSymbolResponse `json:"moduleSymbol"`
+	// ImportableFrom is set when GetModuleExportMapParams.File is provided: path
+	// reachability from that file (package.json rules remain on the JS side).
+	ImportableFrom *bool                         `json:"importableFrom,omitempty"`
 	DefaultExport  *ModuleExportMapDefaultExport `json:"defaultExport,omitempty"`
 	NamedExports   []*ModuleExportMapNamedExport `json:"namedExports"`
 }
@@ -74,18 +78,23 @@ func getDefaultLikeExportInfo(c *checker.Checker, moduleSymbol *ast.Symbol) (*as
 	return nil, 0, ""
 }
 
-func computeModuleExportMap(ctx context.Context, program *compiler.Program, sd *snapshotData) (*ModuleExportMapResponse, error) {
+func computeModuleExportMap(ctx context.Context, program *compiler.Program, sd *snapshotData, importingSourceFile *ast.SourceFile) (*ModuleExportMapResponse, error) {
 	chk, done := program.GetTypeChecker(ctx)
 	defer done()
 
 	resp := &ModuleExportMapResponse{}
 	seenModules := make(map[*ast.Symbol]bool)
+	computeImportability := importingSourceFile != nil
 
 	addModule := func(moduleSymbol *ast.Symbol, moduleFile *ast.SourceFile) {
 		if moduleSymbol == nil || seenModules[moduleSymbol] {
 			return
 		}
 		seenModules[moduleSymbol] = true
+
+		if computeImportability && !isModuleImportableFrom(importingSourceFile, moduleFile, program) {
+			return
+		}
 
 		mod := &ModuleExportMapModule{
 			ModuleName:   moduleSymbol.Name,
@@ -94,14 +103,24 @@ func computeModuleExportMap(ctx context.Context, program *compiler.Program, sd *
 		if moduleFile != nil {
 			mod.ModuleFileName = moduleFile.FileName()
 		}
+		if computeImportability {
+			importable := true
+			mod.ImportableFrom = &importable
+		}
 
 		var defaultSymbol *ast.Symbol
 		if sym, kind, tableKey := getDefaultLikeExportInfo(chk, moduleSymbol); sym != nil && isImportableExportSymbol(chk, sym) {
 			defaultSymbol = sym
+			target := chk.SkipAlias(sym)
+			flags := uint32(0)
+			if target != nil {
+				flags = uint32(target.Flags)
+			}
 			mod.DefaultExport = &ModuleExportMapDefaultExport{
-				Symbol:     sd.newLightSymbolResponse(sym),
-				TableKey:   tableKey,
-				ExportKind: kind,
+				Symbol:      sd.newLightSymbolResponse(sym),
+				TableKey:    tableKey,
+				ExportKind:  kind,
+				TargetFlags: flags,
 			}
 		}
 
@@ -159,25 +178,58 @@ func computeModuleExportMap(ctx context.Context, program *compiler.Program, sd *
 	return resp, nil
 }
 
-func (sd *snapshotData) moduleExportMap(ctx context.Context, program *compiler.Program) (*ModuleExportMapResponse, error) {
-	sd.moduleExportMapMemoMu.Lock()
-	if resp, ok := sd.moduleExportMapMemo[program]; ok {
+type moduleExportMapImportabilityCacheKey struct {
+	program       *compiler.Program
+	importingPath string
+}
+
+func (sd *snapshotData) moduleExportMap(ctx context.Context, program *compiler.Program, importingSourceFile *ast.SourceFile) (*ModuleExportMapResponse, error) {
+	if importingSourceFile == nil {
+		sd.moduleExportMapMemoMu.Lock()
+		if resp, ok := sd.moduleExportMapMemo[program]; ok {
+			sd.moduleExportMapMemoMu.Unlock()
+			return resp, nil
+		}
+		sd.moduleExportMapMemoMu.Unlock()
+
+		resp, err := computeModuleExportMap(ctx, program, sd, nil)
+		if err != nil {
+			return nil, err
+		}
+
+		sd.moduleExportMapMemoMu.Lock()
+		if sd.moduleExportMapMemo == nil {
+			sd.moduleExportMapMemo = make(map[*compiler.Program]*ModuleExportMapResponse)
+		}
+		sd.moduleExportMapMemo[program] = resp
 		sd.moduleExportMapMemoMu.Unlock()
 		return resp, nil
 	}
-	sd.moduleExportMapMemoMu.Unlock()
 
-	resp, err := computeModuleExportMap(ctx, program, sd)
+	key := moduleExportMapImportabilityCacheKey{
+		program:       program,
+		importingPath: string(importingSourceFile.Path()),
+	}
+	sd.moduleExportMapImportabilityMemoMu.Lock()
+	if sd.moduleExportMapImportabilityMemo != nil {
+		if resp, ok := sd.moduleExportMapImportabilityMemo[key]; ok {
+			sd.moduleExportMapImportabilityMemoMu.Unlock()
+			return resp, nil
+		}
+	}
+	sd.moduleExportMapImportabilityMemoMu.Unlock()
+
+	resp, err := computeModuleExportMap(ctx, program, sd, importingSourceFile)
 	if err != nil {
 		return nil, err
 	}
 
-	sd.moduleExportMapMemoMu.Lock()
-	if sd.moduleExportMapMemo == nil {
-		sd.moduleExportMapMemo = make(map[*compiler.Program]*ModuleExportMapResponse)
+	sd.moduleExportMapImportabilityMemoMu.Lock()
+	if sd.moduleExportMapImportabilityMemo == nil {
+		sd.moduleExportMapImportabilityMemo = make(map[moduleExportMapImportabilityCacheKey]*ModuleExportMapResponse)
 	}
-	sd.moduleExportMapMemo[program] = resp
-	sd.moduleExportMapMemoMu.Unlock()
+	sd.moduleExportMapImportabilityMemo[key] = resp
+	sd.moduleExportMapImportabilityMemoMu.Unlock()
 	return resp, nil
 }
 

@@ -142,6 +142,51 @@ index 625a64e26..998ae64a3 100644
              return getAllFilesExcludingDefaultLibraryFile(state, programOfThisState, sourceFileWithUpdatedShape);
          }
  
+diff --git a/src/compiler/moduleSpecifiers.ts b/src/compiler/moduleSpecifiers.ts
+index 8860677e6..13763828d 100644
+--- a/src/compiler/moduleSpecifiers.ts
++++ b/src/compiler/moduleSpecifiers.ts
+@@ -57,6 +57,7 @@ import {
+     getResolvePackageJsonExports,
+     getResolvePackageJsonImports,
+     getSourceFileOfModule,
++    getSymbolId,
+     getSupportedExtensions,
+     getTemporaryModuleResolutionState,
+     getTextOfIdentifierOrLiteral,
+@@ -382,6 +383,20 @@ export interface ModuleSpecifierResult {
+     computedWithoutCache: boolean;
+ }
+ 
++let activeModuleSpecifiersBatchCache: Map<number, ModuleSpecifierResult> | undefined;
++
++/** @internal */
++export function withModuleSpecifiersBatchCache<T>(cache: Map<number, ModuleSpecifierResult> | undefined, fn: () => T): T {
++    const prev = activeModuleSpecifiersBatchCache;
++    activeModuleSpecifiersBatchCache = cache;
++    try {
++        return fn();
++    }
++    finally {
++        activeModuleSpecifiersBatchCache = prev;
++    }
++}
++
+ /** @internal */
+ export function getModuleSpecifiersWithCacheInfo(
+     moduleSymbol: Symbol,
+@@ -393,6 +408,11 @@ export function getModuleSpecifiersWithCacheInfo(
+     options: ModuleSpecifierOptions | undefined = {},
+     forAutoImport: boolean,
+ ): ModuleSpecifierResult {
++    const batchCached = activeModuleSpecifiersBatchCache?.get(getSymbolId(moduleSymbol));
++    if (batchCached) {
++        return batchCached;
++    }
++
+     let computedWithoutCache = false;
+     const ambient = tryGetModuleNameFromAmbientModule(moduleSymbol, checker);
+     if (ambient) {
 diff --git a/src/compiler/parser.ts b/src/compiler/parser.ts
 index 68133ac5f..3effa07d2 100644
 --- a/src/compiler/parser.ts
@@ -357,21 +402,36 @@ index aa578c7ed..b8fda3805 100644
  
      /** @internal */
 diff --git a/src/services/completions.ts b/src/services/completions.ts
-index 28d29136d..895cc5ff9 100644
+index 28d29136d..015f9aa3d 100644
 --- a/src/services/completions.ts
 +++ b/src/services/completions.ts
-@@ -4161,6 +4161,25 @@ function getCompletionData(
+@@ -299,6 +299,7 @@ import {
+     modifierToFlag,
+     ModuleDeclaration,
+     moduleExportNameTextEscaped,
++    moduleSpecifiers,
+     ModuleReference,
+     NamedImportBindings,
+     newCaseClauseTracker,
+@@ -4161,7 +4162,66 @@ function getCompletionData(
          const exportInfo = getExportInfoMap(sourceFile, host, program, preferences, cancellationToken);
          const packageJsonAutoImportProvider = host.getPackageJsonAutoImportProvider?.();
          const packageJsonFilter = detailsEntryId ? undefined : createPackageJsonImportFilter(sourceFile, preferences, host);
+-        resolvingModuleSpecifiers(
 +
 +        function getModuleFileForExportInfo(info: SymbolExportInfo): SourceFile | undefined {
 +            return tryCast(info.moduleSymbol.valueDeclaration, isSourceFile)
 +                ?? (info.moduleFileName ? program.getSourceFile(info.moduleFileName) : undefined);
 +        }
 +
++        const importableByModuleSymbolId = new Map<number, boolean>();
 +        function isImportableExportInfo(info: SymbolExportInfo) {
-+            return isImportable(
++            const moduleId = getSymbolId(info.moduleSymbol);
++            const cached = importableByModuleSymbolId.get(moduleId);
++            if (cached !== undefined) {
++                return cached;
++            }
++            const result = isImportable(
 +                info.isFromPackageJson ? packageJsonAutoImportProvider! : program,
 +                sourceFile,
 +                getModuleFileForExportInfo(info),
@@ -381,15 +441,51 @@ index 28d29136d..895cc5ff9 100644
 +                getModuleSpecifierResolutionHost(info.isFromPackageJson),
 +                moduleSpecifierCache,
 +            );
++            importableByModuleSymbolId.set(moduleId, result);
++            return result;
 +        }
 +
-         resolvingModuleSpecifiers(
++        const needsFullModuleSpecifierResolution = !!importStatementCompletion
++            || getResolvePackageJsonExports(program.getCompilerOptions())
++            || !!preferences.autoImportSpecifierExcludeRegexes?.length;
++
++        let moduleSpecifiersBatchCache: Map<number, moduleSpecifiers.ModuleSpecifierResult> | undefined;
++        if (needsFullModuleSpecifierResolution) {
++            type TsgoProgramBatch = Program & {
++                getModuleExportMap?: (importingFileName?: string) => { modules: readonly { moduleSymbol: Symbol; }[]; } | undefined;
++                getModuleSpecifiersBatch?: (
++                    importingFileName: string,
++                    moduleSymbols: readonly Symbol[],
++                    preferences: UserPreferences,
++                ) => { results: readonly { moduleSymbol: Symbol; kind?: moduleSpecifiers.ModuleSpecifierResult["kind"]; moduleSpecifiers: readonly string[]; }[]; } | undefined;
++            };
++            const tsgoProgram = program as TsgoProgramBatch;
++            const exportMap = tsgoProgram.getModuleExportMap?.(sourceFile.fileName);
++            const moduleSymbols = exportMap?.modules?.map(m => m.moduleSymbol);
++            if (moduleSymbols?.length && tsgoProgram.getModuleSpecifiersBatch) {
++                const batch = tsgoProgram.getModuleSpecifiersBatch(sourceFile.fileName, moduleSymbols, preferences);
++                if (batch?.results?.length) {
++                    moduleSpecifiersBatchCache = new Map();
++                    for (const entry of batch.results) {
++                        moduleSpecifiersBatchCache.set(getSymbolId(entry.moduleSymbol), {
++                            kind: entry.kind,
++                            moduleSpecifiers: entry.moduleSpecifiers,
++                            computedWithoutCache: false,
++                        });
++                    }
++                }
++            }
++        }
++
++        moduleSpecifiers.withModuleSpecifiersBatchCache(moduleSpecifiersBatchCache, () => resolvingModuleSpecifiers(
              "collectAutoImports",
              host,
-@@ -4241,19 +4260,6 @@ function getCompletionData(
+             importSpecifierResolver ||= codefix.createImportSpecifierResolver(sourceFile, program, host, preferences),
+@@ -4240,20 +4300,7 @@ function getCompletionData(
+                 flags |= context.resolvedAny() ? CompletionInfoFlags.ResolvedModuleSpecifiers : 0;
                  flags |= context.resolvedBeyondLimit() ? CompletionInfoFlags.ResolvedModuleSpecifiersBeyondLimit : 0;
              },
-         );
+-        );
 -
 -        function isImportableExportInfo(info: SymbolExportInfo) {
 -            return isImportable(
@@ -403,11 +499,12 @@ index 28d29136d..895cc5ff9 100644
 -                moduleSpecifierCache,
 -            );
 -        }
++        ));
      }
  
      function pushAutoImportSymbol(symbol: Symbol, origin: SymbolOriginInfoResolvedExport | SymbolOriginInfoExport) {
 diff --git a/src/services/exportInfoMap.ts b/src/services/exportInfoMap.ts
-index dfd00ce2e..ae21f7a45 100644
+index dfd00ce2e..d0440b695 100644
 --- a/src/services/exportInfoMap.ts
 +++ b/src/services/exportInfoMap.ts
 @@ -27,8 +27,11 @@ import {
@@ -611,7 +708,7 @@ index dfd00ce2e..ae21f7a45 100644
          }
      }
  }
-@@ -533,6 +605,116 @@ export function getIsFileExcluded(host: LanguageServiceHost, preferences: UserPr
+@@ -533,6 +605,118 @@ export function getIsFileExcluded(host: LanguageServiceHost, preferences: UserPr
      return getIsExcluded(getIsExcludedPatterns(preferences, hostUsesCaseSensitiveFileNames(host)), host);
  }
  
@@ -619,6 +716,7 @@ index dfd00ce2e..ae21f7a45 100644
 +    moduleFileName?: string;
 +    moduleName: string;
 +    moduleSymbol: Symbol;
++    importableFrom?: boolean;
 +    defaultExport?: { symbol: Symbol; tableKey: string; exportKind: ExportKind; targetFlags: number; };
 +    namedExports: readonly { symbol: Symbol; key: string; targetFlags: number; }[];
 +}
@@ -630,14 +728,15 @@ index dfd00ce2e..ae21f7a45 100644
 +function populateExportInfoMapFromModuleExportMapBatch(
 +    cache: ExportInfoMap,
 +    importingFile: Path,
++    importingFileName: string,
 +    program: Program,
 +    host: LanguageServiceHost,
 +    preferences: UserPreferences,
 +    cancellationToken: CancellationToken | undefined,
 +): boolean {
-+    const getBatch = (program as Program & { getModuleExportMap?: () => ModuleExportMapBatch | undefined }).getModuleExportMap;
++    const getBatch = (program as Program & { getModuleExportMap?: (importingFileName?: string) => ModuleExportMapBatch | undefined }).getModuleExportMap;
 +    if (!getBatch) return false;
-+    const batch = getBatch.call(program);
++    const batch = getBatch.call(program, importingFileName);
 +    if (!batch?.modules?.length) return false;
 +
 +    const checker = program.getTypeChecker();
@@ -728,7 +827,7 @@ index dfd00ce2e..ae21f7a45 100644
  /** @internal */
  export function getExportInfoMap(importingFile: SourceFile | FutureSourceFile, host: LanguageServiceHost, program: Program, preferences: UserPreferences, cancellationToken: CancellationToken | undefined): ExportInfoMap {
      const start = timestamp();
-@@ -552,42 +734,19 @@ export function getExportInfoMap(importingFile: SourceFile | FutureSourceFile, h
+@@ -552,42 +736,19 @@ export function getExportInfoMap(importingFile: SourceFile | FutureSourceFile, h
      }
  
      host.log?.("getExportInfoMap: cache miss or empty; calculating new results");
@@ -767,7 +866,7 @@ index dfd00ce2e..ae21f7a45 100644
 -                        checker,
 -                    );
 -                }
-+        const usedBatch = populateExportInfoMapFromModuleExportMapBatch(cache, importingFile.path, program, host, preferences, cancellationToken);
++        const usedBatch = populateExportInfoMapFromModuleExportMapBatch(cache, importingFile.path, importingFile.fileName, program, host, preferences, cancellationToken);
 +        if (usedBatch) {
 +            forEachExternalModuleToImportFrom(program, host, preferences, /*useAutoImportProvider*/ true, (moduleSymbol, moduleFile, prog, isFromPackageJson) => {
 +                addExportInfoForModule(cache, importingFile.path, moduleSymbol, moduleFile, isFromPackageJson, prog, cancellationToken, moduleCountRef);

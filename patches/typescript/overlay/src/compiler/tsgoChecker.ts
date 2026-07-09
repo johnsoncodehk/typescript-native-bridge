@@ -2728,11 +2728,29 @@ export function createTsgoProgram(
         // block above.
         tnbBuilderFileMetas: () => getBuilderMetaState()?.byPath,
         // Batch auto-import export index (exportInfoMap cold populate).
-        getModuleExportMap: () => {
+        getModuleExportMap: (importingFileName?: string) => {
             const proj = project;
             if (!proj?.checker || typeof proj.checker.getModuleExportMap !== "function") return undefined;
             try {
-                return proj.checker.getModuleExportMap();
+                return proj.checker.getModuleExportMap(importingFileName ? tsgoFileArg(importingFileName) : undefined);
+            } catch {
+                return undefined;
+            }
+        },
+        // Batch auto-import module specifier resolution (collectAutoImports cold path).
+        getModuleSpecifiersBatch: (importingFileName: string, moduleSymbols: readonly any[], preferences: any) => {
+            const proj = project;
+            if (!proj?.checker || typeof proj.checker.getModuleSpecifiersBatch !== "function") return undefined;
+            try {
+                return proj.checker.getModuleSpecifiersBatch(
+                    tsgoFileArg(importingFileName),
+                    moduleSymbols,
+                    preferences && {
+                        importModuleSpecifierPreference: preferences.importModuleSpecifierPreference,
+                        importModuleSpecifierEnding: preferences.importModuleSpecifierEnding,
+                        autoImportSpecifierExcludeRegexes: preferences.autoImportSpecifierExcludeRegexes,
+                    },
+                );
             } catch {
                 return undefined;
             }
