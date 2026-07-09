@@ -3618,7 +3618,7 @@ export function createTsgoChecker(program: any): any {
         }
 
         const sf = getTsgoSourceFile(fileName);
-        let result: any = sf;
+        let result: any = undefined;
         if (sf) {
             const idx = buildNodeIndex(fileName, sf);
             const bucket = idx?.get(pos);
@@ -3642,6 +3642,10 @@ export function createTsgoChecker(program: any): any {
                 // the innermost (deepest) node — matches the old "deepest
                 // containing" fallback semantics.
                 result = bestWithKindAndEnd ?? bestWithKind ?? bucket[bucket.length - 1];
+                // Never map a non-zero position to the file root — LS passes
+                // DotToken/etc. that RemoteSourceFile's index may not contain;
+                // sending SourceFile to getContextualType panics Go (nil parent).
+                if (result?.kind === SyntaxKind.SourceFile && pos > 0) result = undefined;
             }
         }
         fileCache.set(cacheKey, result);
@@ -4779,9 +4783,17 @@ export function createTsgoChecker(program: any): any {
             ensureProject();
             const sf = node.getSourceFile?.();
             if (!sf) return undefined;
+            // Punctuation / file roots are not expressions and have no contextual
+            // type — stock returns undefined without querying the checker.
+            if (node.kind === SyntaxKind.SourceFile
+                || node.kind === SyntaxKind.DotToken
+                || node.kind === SyntaxKind.QuestionDotToken
+                || node.kind === SyntaxKind.EndOfFileToken) {
+                return undefined;
+            }
             const tsgoNode = findTsgoNodeAtPosition(sf.fileName, node.getStart(sf), node.kind, node.getEnd(sf));
             if (_traceSymEnabled) traceSym(`getContextualType file=${sf.fileName} kind=${node.kind} hit=${!!tsgoNode}`);
-            if (!tsgoNode) return undefined;
+            if (!tsgoNode || tsgoNode.kind === SyntaxKind.SourceFile) return undefined;
             const t = project.checker.getContextualType(tsgoNode);
             if (t) fixupType(t);
             // Record object-literal / JSX-attributes contextual queries: stock

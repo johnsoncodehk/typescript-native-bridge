@@ -557,7 +557,7 @@ index a76d52a54..d90e35c6b 100644
  
  export function isBindingPattern(node: Node): node is BindingPattern {
 diff --git a/internal/checker/checker.go b/internal/checker/checker.go
-index ac37c863d..0ac9fbb6e 100644
+index ac37c863d..70618dee2 100644
 --- a/internal/checker/checker.go
 +++ b/internal/checker/checker.go
 @@ -7258,7 +7258,9 @@ func importClauseFromImported(node *ast.Node) *ast.Node {
@@ -600,6 +600,16 @@ index ac37c863d..0ac9fbb6e 100644
  			}
  		}
  	}
+@@ -29105,6 +29118,9 @@ func (c *Checker) getContextualType(node *ast.Node, contextFlags ContextFlags) *
+ 		return c.contextualInfos[index].t
+ 	}
+ 	parent := node.Parent
++	if parent == nil {
++		return nil
++	}
+ 	switch parent.Kind {
+ 	case ast.KindVariableDeclaration, ast.KindParameter, ast.KindPropertyDeclaration, ast.KindPropertySignature, ast.KindBindingElement:
+ 		return c.getContextualTypeForInitializerExpression(node, contextFlags)
 diff --git a/internal/checker/services.go b/internal/checker/services.go
 index 12b9d4079..db9750b1a 100644
 --- a/internal/checker/services.go

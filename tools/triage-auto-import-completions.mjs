@@ -44,7 +44,7 @@ await send('updateOpen', {
 });
 
 const comp = await send('completions', { file: emptyVue, position: offset });
-const entries = comp?.body?.entries ?? [];
+const entries = Array.isArray(comp?.body) ? comp.body : comp?.body?.entries ?? [];
 const labels = entries.map(e => e.name);
 const withSource = entries.filter(e => e.source);
 const vueSource = withSource.filter(e => String(e.source).includes('vue'));
