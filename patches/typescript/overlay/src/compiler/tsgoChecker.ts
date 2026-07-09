@@ -1964,7 +1964,19 @@ export function createTsgoProgram(
             // Only parse host AST for true overlays (content differs from disk —
             // Volar virtual .vue TS, unsaved edits). Pure disk lint skips this
             // and uses tsgo-backed single-parse instead.
-            if (!shouldSendHostOverlay(resolvedFn, content.text)) continue;
+            if (!shouldSendHostOverlay(resolvedFn, content.text)) {
+                // Host matches disk again after a prior overlay — re-push on-disk text
+                // so tsgo does not keep checking stale overlay content.
+                const synced = _syncedOverlayContentByFile.get(resolvedFn);
+                if (synced !== undefined && synced !== content.text) {
+                    _syncedOverlayContentByFile.delete(resolvedFn);
+                    overlays.push({ fileName: resolvedFn, content: content.text, scriptKind: content.scriptKind });
+                }
+                else if (synced !== undefined) {
+                    _syncedOverlayContentByFile.delete(resolvedFn);
+                }
+                continue;
+            }
             const snapSf = sourceFileFromHostSnapshot(programCtx.lsHost, resolvedFn, fn, options.target ?? 99);
             if (snapSf?.statements?.length) {
                 parsedHostSourceFiles.set(resolvedFn, snapSf);
@@ -3461,7 +3473,17 @@ export function createTsgoChecker(program: any): any {
             if (!content?.text) continue;
             const hostOnly = !fileExistsOnDisk(hostFileName);
             const inTsgo = !!project?.program?.getSourceFile?.(toTsgoFileName(hostFileName));
-            if (!hostOnly && inTsgo && !shouldSendHostOverlay(hostFileName, content.text)) continue;
+            if (!hostOnly && inTsgo && !shouldSendHostOverlay(hostFileName, content.text)) {
+                const synced = _syncedOverlayContentByFile.get(hostFileName);
+                if (synced !== undefined && synced !== content.text) {
+                    _syncedOverlayContentByFile.delete(hostFileName);
+                    openFilesWithContent.push({ fileName: hostFileName, content: content.text, scriptKind: content.scriptKind });
+                }
+                else if (synced !== undefined) {
+                    _syncedOverlayContentByFile.delete(hostFileName);
+                }
+                continue;
+            }
             if (!hostOnly && _syncedOverlayContentByFile.get(hostFileName) === content.text) continue;
             openFilesWithContent.push({ fileName: hostFileName, content: content.text, scriptKind: content.scriptKind });
         }

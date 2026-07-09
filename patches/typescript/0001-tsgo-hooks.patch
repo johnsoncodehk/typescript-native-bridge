@@ -742,7 +742,7 @@ index 9885093ed..0cbb4021a 100644
          }
      }
 diff --git a/src/services/utilities.ts b/src/services/utilities.ts
-index bec7d4b26..eb36c8aab 100644
+index bec7d4b26..7c32cf237 100644
 --- a/src/services/utilities.ts
 +++ b/src/services/utilities.ts
 @@ -107,6 +107,7 @@ import {
@@ -793,3 +793,14 @@ index bec7d4b26..eb36c8aab 100644
  }
  
  /** @internal */
+@@ -3927,7 +3954,9 @@ export function getDefaultLikeExportNameFromDeclaration(symbol: Symbol): string
+             return tryCast(skipOuterExpressions(d.expression), isIdentifier)?.text;
+         }
+         // "export { ~ as default }"
+-        if (isExportSpecifier(d) && d.symbol.flags === SymbolFlags.Alias) {
++        // Bridge/tsgo symbols may surface ExportSpecifier declarations without a bound
++        // `symbol` (host binder did not run on that file); optional-chain and fall through.
++        if (isExportSpecifier(d) && d.symbol?.flags === SymbolFlags.Alias) {
+             return tryCast(d.propertyName, isIdentifier)?.text;
+         }
+         // GH#52694
