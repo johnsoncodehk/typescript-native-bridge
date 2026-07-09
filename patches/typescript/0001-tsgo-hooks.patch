@@ -209,6 +209,33 @@ index b44a155f0..c631f17df 100644
      }
  
      function emit(
+diff --git a/src/compiler/resolutionCache.ts b/src/compiler/resolutionCache.ts
+index da7c2f288..82243fb29 100644
+--- a/src/compiler/resolutionCache.ts
++++ b/src/compiler/resolutionCache.ts
+@@ -72,6 +72,7 @@ import {
+     SourceFile,
+     startsWith,
+     StringLiteralLike,
++    StructureIsReused,
+     trace,
+     updateResolutionField,
+     usesWildcardTypes,
+@@ -786,7 +787,13 @@ export function createResolutionCache(resolutionHost: ResolutionCacheHost, rootD
+         allModuleAndTypeResolutionsAreInvalidated = false;
+         watchFailedLookupLocationOfNonRelativeModuleResolutions();
+         // Update file watches
+-        if (newProgram !== oldProgram) {
++        // tsgo-backed thin programs are a new object on every updateGraph, but
++        // when they report Completely the file set is unchanged and their
++        // SourceFiles never carry packageJsonLocations — the walk below would
++        // be a no-op that still materializes a host-parsed AST for every
++        // program file (~430ms per keystroke). Stock hits this branch with
++        // reused SourceFile objects, where the walk is cheap.
++        if (newProgram !== oldProgram && !((newProgram as any)?.isTsgoBackedProgram && newProgram!.structureIsReused === StructureIsReused.Completely)) {
+             cleanupLibResolutionWatching(newProgram);
+             newProgram?.getSourceFiles().forEach(newFile => {
+                 const expected = newFile.packageJsonLocations?.length ?? 0;
 diff --git a/src/compiler/tsbuildPublic.ts b/src/compiler/tsbuildPublic.ts
 index 04ca4db0f..e1ed32c9e 100644
 --- a/src/compiler/tsbuildPublic.ts

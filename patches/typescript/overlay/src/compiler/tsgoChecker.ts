@@ -2080,15 +2080,18 @@ export function createTsgoProgram(
     // keystroke, so auto-import completionInfo re-scanned every module (~400ms)
     // instead of hitting the cache (~2ms). Mirror stock
     // tryReuseStructureFromOldProgram against the previous thin program for the
-    // same tsconfig: SafeModules when the tsgo file set and structure-affecting
+    // same tsconfig: Completely when the tsgo file set and structure-affecting
     // options are unchanged (content-only overlay refresh — the same edits that
-    // stock reuses structure for), Not on the first program or when files were
-    // added/removed or options changed. SafeModules rather than Completely
-    // because SourceFiles and module resolutions are rebuilt from the fresh
-    // tsgo snapshot (not reused object-identical), and SafeModules keeps
-    // updateGraphWorker's hasNewProgram bookkeeping (root files, missing-file
-    // watchers) running. Skipped in build mode: `tsc -b` programs are one-shot
-    // and the shape memo would pin every project's file list for the whole build.
+    // stock reports Completely for), Not on the first program or when files
+    // were added/removed or options changed. Completely rather than SafeModules
+    // because it also skips updateGraphWorker's hasNewProgram bookkeeping —
+    // the rootFilesMap walk there materializes a full host-parsed SourceFile
+    // per root file (~430ms per keystroke on a 371-file project), while with
+    // an unchanged file set nothing it maintains can move (resolvedPaths are
+    // fixed by the set, thin programs have no missing file paths, and
+    // exportMapCache.onFileChanged below it still sees content changes).
+    // Skipped in build mode: `tsc -b` programs are one-shot and the shape
+    // memo would pin every project's file list for the whole build.
     let structureIsReused = StructureIsReused.Not;
     if (!(options as any).tscBuild) {
         let shapes = typeof lsHost === "object" && lsHost !== null ? _programShapeByHost.get(lsHost) : undefined;
@@ -2107,7 +2110,7 @@ export function createTsgoProgram(
             && !ts.changesAffectModuleResolution(prevShape.options, options)
             && !ts.optionsHaveChanges(prevShape.options, options, ts.sourceFileAffectingCompilerOptions)
         ) {
-            structureIsReused = StructureIsReused.SafeModules;
+            structureIsReused = StructureIsReused.Completely;
         }
         shapeMap.set(configFilePath, { fileNames: shapeFileNames, options });
     }

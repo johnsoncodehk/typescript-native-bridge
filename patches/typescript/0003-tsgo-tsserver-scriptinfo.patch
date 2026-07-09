@@ -1,5 +1,5 @@
 diff --git a/src/server/project.ts b/src/server/project.ts
-index 88fa23c1b..d3909a6eb 100644
+index 88fa23c1b..0e028a045 100644
 --- a/src/server/project.ts
 +++ b/src/server/project.ts
 @@ -1129,8 +1129,16 @@ export abstract class Project implements LanguageServiceHost, ModuleResolutionHo
@@ -51,7 +51,26 @@ index 88fa23c1b..d3909a6eb 100644
                  info?.detachFromProject(this);
              });
  
-@@ -2815,7 +2827,13 @@ export class AutoImportProviderProject extends Project {
+@@ -2751,6 +2763,18 @@ export class AutoImportProviderProject extends Project {
+             return undefined;
+         }
+ 
++        // tsgo-backed hosts: the provider would inherit the host's
++        // options.configFilePath, so its thin program shares the host
++        // tsconfig's tsgo project — the same file set as the host program.
++        // forEachExternalModuleToImportFrom filters host-program files out of
++        // the provider pass, so it can never contribute a dependency
++        // entrypoint here, while costing a full thin-program rebuild on every
++        // host keystroke (the shared file set attaches the open files to the
++        // provider, and each edit marks it dirty).
++        if ((hostProject.getCurrentProgram() as any)?.isTsgoBackedProgram) {
++            return undefined;
++        }
++
+         const compilerOptions = {
+             ...hostProject.getCompilerOptions(),
+             ...this.compilerOptionsOverrides,
+@@ -2815,7 +2839,13 @@ export class AutoImportProviderProject extends Project {
          this.rootFileNames = rootFileNames;
          const oldProgram = this.getCurrentProgram();
          const hasSameSetOfFiles = super.updateGraph();
