@@ -99,7 +99,7 @@ function diffRuns(tnb, stock) {
 	const nodeLike = onlyStock.filter(n =>
 		/^(access|readFile|Buffer|console|process|path|ref|Array|Abort)/.test(n),
 	);
-	return { onlyStock: onlyStock.length, onlyTnb: onlyTnb.length, nodeLikeMissing: nodeLike.length, nodeLikeSample: nodeLike.slice(0, 12) };
+	return { onlyStock: onlyStock.length, onlyTnb: onlyTnb.length, nodeLikeMissing: nodeLike.length, nodeLikeSample: nodeLike.slice(0, 12), onlyStockNames: onlyStock.slice(0, 30), onlyTnbNames: onlyTnb.slice(0, 30) };
 }
 
 console.log('css.ts:', testFile);
@@ -126,5 +126,7 @@ if (!args.has('--tnb-only')) {
 		onlyTnb: diff.onlyTnb,
 		nodeLikeMissing: diff.nodeLikeMissing,
 		nodeLikeSample: diff.nodeLikeSample,
+		onlyStockNames: diff.onlyStockNames,
+		onlyTnbNames: diff.onlyTnbNames,
 	}, null, 2));
 }

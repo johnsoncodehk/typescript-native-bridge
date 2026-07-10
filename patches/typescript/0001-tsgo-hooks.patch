@@ -454,7 +454,7 @@ index 6034c9dfc..0c9a6178d 100644
      let computedWithoutCacheCount = 0;
      const fixes = flatMap(exportInfo, (exportInfo, i) => {
 diff --git a/src/services/completions.ts b/src/services/completions.ts
-index 28d29136d..ef3bd53ab 100644
+index 28d29136d..78ef44a25 100644
 --- a/src/services/completions.ts
 +++ b/src/services/completions.ts
 @@ -175,6 +175,7 @@ import {
@@ -564,7 +564,7 @@ index 28d29136d..ef3bd53ab 100644
          location.getStart(),
          preferences,
          /*isForImportStatementCompletion*/ false,
-@@ -1917,12 +1955,21 @@ function createCompletionEntry(
+@@ -1917,12 +1955,25 @@ function createCompletionEntry(
  
      // Use a 'sortText' of 0' so that all symbol completion entries come before any other
      // entries (like JavaScript identifier entries).
@@ -573,7 +573,11 @@ index 28d29136d..ef3bd53ab 100644
 +    let kindModifiers: string;
 +    if (autoImportOriginHasTargetFlags(origin)) {
 +        kind = getScriptElementKindForAutoImportFlags(origin.targetFlags);
-+        kindModifiers = ScriptElementKindModifier.none;
++        // Batch-materialized symbols may lack declarations; only then skip the
++        // stock modifier computation (which needs declarations / alias walks).
++        kindModifiers = symbol.declarations?.length
++            ? SymbolDisplay.getSymbolModifiers(typeChecker, symbol)
++            : ScriptElementKindModifier.none;
 +    }
 +    else {
 +        kind = SymbolDisplay.getSymbolKind(typeChecker, symbol, location);
@@ -588,7 +592,7 @@ index 28d29136d..ef3bd53ab 100644
          sortText,
          source,
          hasAction: hasAction ? true : undefined,
-@@ -2677,18 +2724,20 @@ export function getCompletionEntriesFromSymbols(
+@@ -2677,18 +2728,20 @@ export function getCompletionEntriesFromSymbols(
          const symbol = symbols[i];
          const origin = symbolToOriginInfoMap?.[i];
          const info = getCompletionEntryDisplayNameForSymbol(symbol, target, origin, kind, !!jsxIdentifierExpected);
@@ -612,7 +616,7 @@ index 28d29136d..ef3bd53ab 100644
          const entry = createCompletionEntry(
              symbol,
              sortText,
-@@ -2735,7 +2784,7 @@ export function getCompletionEntriesFromSymbols(
+@@ -2735,7 +2788,7 @@ export function getCompletionEntriesFromSymbols(
          add: name => uniques.set(name, true),
      };
  
@@ -621,7 +625,7 @@ index 28d29136d..ef3bd53ab 100644
          let allFlags = symbol.flags;
          // export = /**/ here we want to get all meanings, so any symbol is ok
          if (location.parent && isExportAssignment(location.parent)) {
-@@ -2784,7 +2833,13 @@ export function getCompletionEntriesFromSymbols(
+@@ -2784,7 +2837,13 @@ export function getCompletionEntriesFromSymbols(
          // already has an explicit export and user only wants to user explicit
          // module imports then the global keywords will be filtered out so auto
          // import suggestions will win in the completion
@@ -636,7 +640,7 @@ index 28d29136d..ef3bd53ab 100644
          // We only want to filter out the global keywords
          // Auto Imports are not available for scripts so this conditional is always false
          if (
-@@ -2806,9 +2861,18 @@ export function getCompletionEntriesFromSymbols(
+@@ -2806,9 +2865,18 @@ export function getCompletionEntriesFromSymbols(
  
          if (isTypeOnlyLocation) {
              // It's a type, but you can reach it by namespace.type as well
@@ -655,7 +659,7 @@ index 28d29136d..ef3bd53ab 100644
          // expressions are value space (which includes the value namespaces)
          return !!(allFlags & SymbolFlags.Value);
      }
-@@ -4028,11 +4092,24 @@ function getCompletionData(
+@@ -4028,11 +4096,24 @@ function getCompletionData(
  
          symbols = concatenate(symbols, typeChecker.getSymbolsInScope(scopeNode, symbolMeanings));
          Debug.assertEachIsDefined(symbols, "getSymbolsInScope() should all be defined");
@@ -681,7 +685,7 @@ index 28d29136d..ef3bd53ab 100644
              ) {
                  symbolToSortTextMap[getSymbolId(symbol)] = SortText.GlobalsOrKeywords;
              }
-@@ -4161,11 +4238,74 @@ function getCompletionData(
+@@ -4161,11 +4242,74 @@ function getCompletionData(
          const exportInfo = getExportInfoMap(sourceFile, host, program, preferences, cancellationToken);
          const packageJsonAutoImportProvider = host.getPackageJsonAutoImportProvider?.();
          const packageJsonFilter = detailsEntryId ? undefined : createPackageJsonImportFilter(sourceFile, preferences, host);
@@ -757,7 +761,7 @@ index 28d29136d..ef3bd53ab 100644
              position,
              preferences,
              !!importStatementCompletion,
-@@ -4232,6 +4372,7 @@ function getCompletionData(
+@@ -4232,6 +4376,7 @@ function getCompletionData(
                              isDefaultExport,
                              moduleSymbol: exportInfo.moduleSymbol,
                              isFromPackageJson: exportInfo.isFromPackageJson,
@@ -765,7 +769,7 @@ index 28d29136d..ef3bd53ab 100644
                          });
                      },
                  );
-@@ -4240,20 +4381,7 @@ function getCompletionData(
+@@ -4240,20 +4385,7 @@ function getCompletionData(
                  flags |= context.resolvedAny() ? CompletionInfoFlags.ResolvedModuleSpecifiers : 0;
                  flags |= context.resolvedBeyondLimit() ? CompletionInfoFlags.ResolvedModuleSpecifiersBeyondLimit : 0;
              },
@@ -787,7 +791,7 @@ index 28d29136d..ef3bd53ab 100644
      }
  
      function pushAutoImportSymbol(symbol: Symbol, origin: SymbolOriginInfoResolvedExport | SymbolOriginInfoExport) {
-@@ -6089,6 +6217,14 @@ function isDeprecated(symbol: Symbol, checker: TypeChecker) {
+@@ -6089,6 +6221,14 @@ function isDeprecated(symbol: Symbol, checker: TypeChecker) {
      return !!length(declarations) && every(declarations, isDeprecatedDeclaration);
  }
  
@@ -803,7 +807,7 @@ index 28d29136d..ef3bd53ab 100644
   * True if the first character of `lowercaseCharacters` is the first character
   * of some "word" in `identiferString` (where the string is split into "words"
 diff --git a/src/services/exportInfoMap.ts b/src/services/exportInfoMap.ts
-index dfd00ce2e..75614203d 100644
+index dfd00ce2e..a1461721c 100644
 --- a/src/services/exportInfoMap.ts
 +++ b/src/services/exportInfoMap.ts
 @@ -4,7 +4,9 @@ import {
@@ -850,7 +854,7 @@ index dfd00ce2e..75614203d 100644
      isUsableByFile(importingFile: Path): boolean;
      clear(): void;
 -    add(importingFile: Path, symbol: Symbol, key: __String, moduleSymbol: Symbol, moduleFile: SourceFile | undefined, exportKind: ExportKind, isFromPackageJson: boolean, checker: TypeChecker): void;
-+    add(importingFile: Path, symbol: Symbol, key: __String, moduleSymbol: Symbol, moduleFile: SourceFile | undefined, exportKind: ExportKind, isFromPackageJson: boolean, checker: TypeChecker, targetFlags?: SymbolFlags, moduleNameOverride?: string): void;
++    add(importingFile: Path, symbol: Symbol, key: __String, moduleSymbol: Symbol, moduleFile: SourceFile | undefined, exportKind: ExportKind, isFromPackageJson: boolean, checker: TypeChecker, targetFlags?: SymbolFlags, moduleNameOverride?: string, symbolNamesOverride?: string | readonly [string, string?]): void;
      get(importingFile: Path, key: ExportMapInfoKey): readonly SymbolExportInfo[] | undefined;
      search<T>(importingFile: Path, preferCapitalized: boolean, matches: (name: string, targetFlags: SymbolFlags) => boolean, action: (info: readonly SymbolExportInfo[], symbolName: string, isFromAmbientModule: boolean, key: ExportMapInfoKey) => T | undefined): T | undefined;
      releaseSymbols(): void;
@@ -859,11 +863,20 @@ index dfd00ce2e..75614203d 100644
              usableByFileName = undefined;
          },
 -        add: (importingFile, symbol, symbolTableKey, moduleSymbol, moduleFile, exportKind, isFromPackageJson, checker) => {
-+        add: (importingFile, symbol, symbolTableKey, moduleSymbol, moduleFile, exportKind, isFromPackageJson, checker, precomputedTargetFlags, moduleNameOverride) => {
++        add: (importingFile, symbol, symbolTableKey, moduleSymbol, moduleFile, exportKind, isFromPackageJson, checker, precomputedTargetFlags, moduleNameOverride, symbolNamesOverride) => {
              if (importingFile !== usableByFileName) {
                  cache.clear();
                  usableByFileName = importingFile;
-@@ -204,14 +212,14 @@ export function createCacheableExportInfoMap(host: CacheableExportInfoMapHost):
+@@ -197,21 +205,21 @@ export function createCacheableExportInfoMap(host: CacheableExportInfoMapHost):
+             // 3. Otherwise, we have a default/namespace import that can be imported by any name, and
+             //    `symbolTableKey` will be something undesirable like `export=` or `default`, so we try to
+             //    get a better name.
+-            const names = exportKind === ExportKind.Named || isExternalModuleSymbol(namedSymbol)
++            const names = symbolNamesOverride ?? (exportKind === ExportKind.Named || isExternalModuleSymbol(namedSymbol)
+                 ? unescapeLeadingUnderscores(symbolTableKey)
+-                : getNamesForExportedSymbol(namedSymbol, checker, /*scriptTarget*/ undefined);
++                : getNamesForExportedSymbol(namedSymbol, checker, /*scriptTarget*/ undefined));
+ 
              const symbolName = typeof names === "string" ? names : names[0];
              const capitalizedSymbolName = typeof names === "string" ? undefined : names[1];
  
@@ -988,7 +1001,7 @@ index dfd00ce2e..75614203d 100644
                  isImportablePath(
                      fromFile.fileName,
                      toPath,
-@@ -429,6 +467,69 @@ function fileContainsPackageImport(sourceFile: SourceFile, packageName: string)
+@@ -429,6 +467,70 @@ function fileContainsPackageImport(sourceFile: SourceFile, packageName: string)
      return sourceFile.imports && sourceFile.imports.some(i => i.text === packageName || i.text.startsWith(packageName + "/"));
  }
  
@@ -996,6 +1009,7 @@ index dfd00ce2e..75614203d 100644
 +function isBatchTransitiveOnlyPackage(specifier: string): boolean {
 +    const name = stripQuotes(specifier);
 +    return name === "@vue/compiler-sfc" || startsWith(name, "@vue/compiler-sfc/")
++        || name === "@vue/reactivity" || startsWith(name, "@vue/reactivity/")
 +        || name === "alien-signals" || startsWith(name, "alien-signals/");
 +}
 +
@@ -1058,7 +1072,7 @@ index dfd00ce2e..75614203d 100644
  /**
   * Don't include something from a `node_modules` that isn't actually reachable by a global import.
   * A relative import to node_modules is usually a bad idea.
-@@ -441,15 +542,114 @@ function isImportablePath(
+@@ -441,15 +543,114 @@ function isImportablePath(
      host: ModuleSpecifierResolutionHost,
  ): boolean {
      // If it's in a `node_modules` but is not reachable from here via a global import, don't bother.
@@ -1179,7 +1193,7 @@ index dfd00ce2e..75614203d 100644
  }
  
  /** @internal */
-@@ -459,24 +659,39 @@ export function forEachExternalModuleToImportFrom(
+@@ -459,24 +660,39 @@ export function forEachExternalModuleToImportFrom(
      preferences: UserPreferences,
      useAutoImportProvider: boolean,
      cb: (module: Symbol, moduleFile: SourceFile | undefined, program: Program, isFromPackageJson: boolean) => void,
@@ -1228,7 +1242,7 @@ index dfd00ce2e..75614203d 100644
          host.log?.(`forEachExternalModuleToImportFrom autoImportProvider: ${timestamp() - start}`);
      }
  }
-@@ -490,7 +705,92 @@ function getIsExcludedPatterns(preferences: UserPreferences, useCaseSensitiveFil
+@@ -490,7 +706,92 @@ function getIsExcludedPatterns(preferences: UserPreferences, useCaseSensitiveFil
      });
  }
  
@@ -1322,7 +1336,7 @@ index dfd00ce2e..75614203d 100644
      const isExcluded = excludePatterns && getIsExcluded(excludePatterns, host);
  
      for (const ambient of checker.getAmbientModules()) {
-@@ -500,7 +800,10 @@ function forEachExternalModule(checker: TypeChecker, allSourceFiles: readonly So
+@@ -500,7 +801,10 @@ function forEachExternalModule(checker: TypeChecker, allSourceFiles: readonly So
      }
      for (const sourceFile of allSourceFiles) {
          if (isExternalOrCommonJsModule(sourceFile) && !isExcluded?.(sourceFile)) {
@@ -1334,7 +1348,7 @@ index dfd00ce2e..75614203d 100644
          }
      }
  }
-@@ -533,6 +836,480 @@ export function getIsFileExcluded(host: LanguageServiceHost, preferences: UserPr
+@@ -533,6 +837,547 @@ export function getIsFileExcluded(host: LanguageServiceHost, preferences: UserPr
      return getIsExcluded(getIsExcludedPatterns(preferences, hostUsesCaseSensitiveFileNames(host)), host);
  }
  
@@ -1398,6 +1412,7 @@ index dfd00ce2e..75614203d 100644
 +    }
 +
 +    let moduleCount = 0;
++    const skippedDefaultExports: { moduleName: string; moduleFileName?: string; }[] = [];
 +    const sortedModules = batch.modules.slice().sort((a: ModuleExportMapBatchModule, b: ModuleExportMapBatchModule) => {
 +        const specA = specifierByModuleSymbolId.get(getSymbolId(a.moduleSymbol)) ?? a.moduleName;
 +        const specB = specifierByModuleSymbolId.get(getSymbolId(b.moduleSymbol)) ?? b.moduleName;
@@ -1427,19 +1442,42 @@ index dfd00ce2e..75614203d 100644
 +        const overridePkgRoot = getNpmPackageRootFromSpecifier(overrideSpecifier);
 +        const isSubpathOverride = !!(overridePkgRoot && overrideSpecifier !== overridePkgRoot);
 +        const defaultInfo = mod.defaultExport;
++        // tsgo batch default/export= symbols may lack declaration chains, so derive
++        // entry names explicitly (with a moduleSymbolToValidIdentifier fallback, same
++        // semantics as stock) and skip only the individual export when underivable.
 +        if (defaultInfo) {
-+            cache.add(
-+                importingFile,
-+                defaultInfo.symbol,
-+                defaultInfo.exportKind === ExportKind.Default ? InternalSymbolName.Default : InternalSymbolName.ExportEquals,
-+                mod.moduleSymbol,
-+                moduleFile,
-+                defaultInfo.exportKind,
-+                /*isFromPackageJson*/ false,
-+                checker,
-+                defaultInfo.targetFlags,
-+                moduleNameOverride,
-+            );
++            if (moduleFile && importingFile === moduleFile.path) {
++                skippedDefaultExports.push({ moduleName: overrideSpecifier, moduleFileName: mod.moduleFileName });
++            }
++            else {
++                const defaultTableKey = defaultInfo.exportKind === ExportKind.Default ? InternalSymbolName.Default : InternalSymbolName.ExportEquals;
++                const defaultNames = resolveDefaultLikeExportNamesForBatch(
++                    defaultInfo.symbol,
++                    defaultTableKey,
++                    defaultInfo.exportKind,
++                    mod.moduleSymbol,
++                    checker,
++                    /*allowModuleSymbolFallback*/ true,
++                );
++                if (!defaultNames) {
++                    skippedDefaultExports.push({ moduleName: overrideSpecifier, moduleFileName: mod.moduleFileName });
++                }
++                else {
++                    cache.add(
++                        importingFile,
++                        defaultInfo.symbol,
++                        defaultTableKey,
++                        mod.moduleSymbol,
++                        moduleFile,
++                        defaultInfo.exportKind,
++                        /*isFromPackageJson*/ false,
++                        checker,
++                        defaultInfo.targetFlags,
++                        moduleNameOverride,
++                        defaultNames,
++                    );
++                }
++            }
 +        }
 +        const seenExports = new Set<__String>();
 +        for (const exp of mod.namedExports) {
@@ -1475,7 +1513,50 @@ index dfd00ce2e..75614203d 100644
 +            }
 +        }
 +    }
++    if (skippedDefaultExports.length) {
++        host.log?.(`populateExportInfoMapFromModuleExportMapBatch: skipped ${skippedDefaultExports.length} default export(s) with no derivable name: ${skippedDefaultExports.map(s => s.moduleFileName ?? s.moduleName).join(", ")}`);
++    }
 +    return true;
++}
++
++/** tsgo batch default/export= symbols may lack declaration chains; skip when unnameable. */
++function resolveDefaultLikeExportNamesForBatch(
++    symbol: Symbol,
++    symbolTableKey: __String,
++    exportKind: ExportKind,
++    moduleSymbol: Symbol,
++    checker: TypeChecker,
++    allowModuleSymbolFallback: boolean,
++): string | readonly [string, string] | undefined {
++    const isDefault = exportKind === ExportKind.Default;
++    const namedSymbol = isDefault && getLocalSymbolForExportDefault(symbol) || symbol;
++    if (exportKind === ExportKind.Named || isExternalModuleSymbol(namedSymbol)) {
++        return unescapeLeadingUnderscores(symbolTableKey);
++    }
++    return tryGetNamesForBatchDefaultExport(namedSymbol, moduleSymbol, checker, /*scriptTarget*/ undefined, allowModuleSymbolFallback);
++}
++
++function tryGetNamesForBatchDefaultExport(
++    namedSymbol: Symbol,
++    moduleSymbol: Symbol,
++    checker: TypeChecker,
++    scriptTarget: ScriptTarget | undefined,
++    allowModuleSymbolFallback: boolean,
++): string | readonly [string, string] | undefined {
++    let names: string | readonly [string, string] | undefined;
++    forEachNameOfDefaultExport(namedSymbol, checker, scriptTarget, (name, capitalizedName) => {
++        names = capitalizedName !== undefined ? [name, capitalizedName] : name;
++        return true;
++    });
++    if (names !== undefined || !allowModuleSymbolFallback) {
++        return names;
++    }
++    const uncapitalized = moduleSymbolToValidIdentifier(moduleSymbol, scriptTarget, /*forceCapitalize*/ false);
++    const capitalized = moduleSymbolToValidIdentifier(moduleSymbol, scriptTarget, /*forceCapitalize*/ true);
++    if (uncapitalized) {
++        return capitalized !== uncapitalized ? [uncapitalized, capitalized] : uncapitalized;
++    }
++    return undefined;
 +}
 +
 +/** Stock walks project sources plus AutoImportProvider package.json deps; tsgo batch can omit them. */
@@ -1815,7 +1896,7 @@ index dfd00ce2e..75614203d 100644
  /** @internal */
  export function getExportInfoMap(importingFile: SourceFile | FutureSourceFile, host: LanguageServiceHost, program: Program, preferences: UserPreferences, cancellationToken: CancellationToken | undefined): ExportInfoMap {
      const start = timestamp();
-@@ -552,42 +1329,17 @@ export function getExportInfoMap(importingFile: SourceFile | FutureSourceFile, h
+@@ -552,42 +1397,17 @@ export function getExportInfoMap(importingFile: SourceFile | FutureSourceFile, h
      }
  
      host.log?.("getExportInfoMap: cache miss or empty; calculating new results");
