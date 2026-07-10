@@ -1234,9 +1234,9 @@ function copyScopeSymbolsFromTable(table: any, meaning: number, out: Map<string,
     }
 }
 /**
- * bindSourceFile locals/exports walk for Volar host-only virtual files
- * (__tnbHostBound), which tsgo has no mirror of. Real files go through the
- * getSymbolsInScope RPC instead.
+ * bindSourceFile locals/exports walk for genuine host-only virtual files
+ * (__tnbHostBound with no tsgo mirror). Real project files that are host-bound
+ * for LS token walks still use the getSymbolsInScope RPC (globals via tsgo).
  */
 function getHostSymbolsInScope(location: any, meaning: number): any[] {
     if (!location?.getSourceFile?.()?.__tnbHostBound) return [];
@@ -1266,6 +1266,28 @@ function getHostSymbolsInScope(location: any, meaning: number): any[] {
     }
     symbols.delete("this");
     return [...symbols.values()];
+}
+/** tsgo getSymbolsInScope can miss host-bound import bindings (e.g. type-only namespace aliases). */
+function mergeHostLocalScopeSymbols(tsgoSymbols: any[], location: any, meaning: number): any[] {
+    const sf = location?.getSourceFile?.();
+    if (!sf?.__tnbHostBound) return tsgoSymbols;
+    const hostLocals = getHostSymbolsInScope(location, meaning);
+    if (!hostLocals.length) return tsgoSymbols;
+    const seen = new Set<string>();
+    for (const sym of tsgoSymbols) {
+        const id = sym.escapedName ?? sym.name;
+        if (id) seen.add(String(id));
+    }
+    const merged = [...tsgoSymbols];
+    for (const sym of hostLocals) {
+        const id = sym.escapedName ?? sym.name;
+        if (!id || seen.has(String(id))) continue;
+        const decls = sym.declarations ?? (sym.valueDeclaration ? [sym.valueDeclaration] : undefined);
+        if (!decls?.some((d: any) => d.getSourceFile?.() === sf)) continue;
+        seen.add(String(id));
+        merged.unshift(sym);
+    }
+    return merged;
 }
 /** Lexical resolve on host-bound AST (mirrors checker.resolveEntityName for LS paths). */
 function resolveEntityNameOnHostBoundAst(name: string, location: any, meaning: number): any | undefined {
@@ -1921,8 +1943,39 @@ function installRemoteNodeTraversalHooks(): void {
         if (typeof RemoteNode.prototype.getChildren !== "function") {
             RemoteNode.prototype.getChildren = function (this: any, _sourceFile?: any) {
                 const children: any[] = [];
-                this.forEachChild((child: any) => children.push(child));
+                // RemoteNode.forEachChild stops when the visitor returns truthy;
+                // Array.push does, so token walks must not return push's length.
+                this.forEachChild((child: any) => { children.push(child); });
                 return children;
+            };
+        }
+        if (typeof RemoteNode.prototype.getFirstToken !== "function") {
+            RemoteNode.prototype.getFirstToken = function (this: any, sourceFile?: any) {
+                const children = this.getChildren(sourceFile);
+                if (!children.length) return undefined;
+                for (const child of children) {
+                    if (child.kind < SyntaxKind.FirstJSDocNode || child.kind > SyntaxKind.LastJSDocNode) {
+                        return child.kind < SyntaxKind.FirstNode
+                            ? child
+                            : child.getFirstToken?.(sourceFile);
+                    }
+                }
+                return undefined;
+            };
+        }
+        if (typeof RemoteNode.prototype.getLastToken !== "function") {
+            RemoteNode.prototype.getLastToken = function (this: any, sourceFile?: any) {
+                const children = this.getChildren(sourceFile);
+                const child = children[children.length - 1];
+                if (!child) return undefined;
+                return child.kind < SyntaxKind.FirstNode
+                    ? child
+                    : child.getLastToken?.(sourceFile);
+            };
+        }
+        if (typeof RemoteNode.prototype.getChildCount !== "function") {
+            RemoteNode.prototype.getChildCount = function (this: any, sourceFile?: any) {
+                return this.getChildren(sourceFile).length;
             };
         }
         proc.remoteNodeTraversalPatched = true;
@@ -3370,6 +3423,8 @@ export function createTsgoChecker(program: any): any {
     const moduleSpecPrefetched = new Set<string>();
     /** getSymbolsInScope memo — keyed (file:start:end:meaning); see adapter. */
     const symbolsInScopeCache = new Map<string, any[]>();
+    /** tryFindAmbientModule memo — keyed unquoted module name; null = miss. */
+    const ambientModuleByNameCache = new Map<string, any | null>();
     // Per-file index: start position → all tsgo nodes that start there.
     // Built once per file via a single AST walk, after which every
     // findTsgoNodeAtPosition call is an O(1) map lookup + a tiny kind/end
@@ -3619,6 +3674,7 @@ export function createTsgoChecker(program: any): any {
         symPrefetchPopulated.clear();
         moduleSpecPrefetched.clear();
         symbolsInScopeCache.clear();
+        ambientModuleByNameCache.clear();
         symMissCountByFile.clear();
         rpcSymbolCache.clear();
         nodeTypeCache.clear();
@@ -5230,17 +5286,43 @@ export function createTsgoChecker(program: any): any {
         getSuggestionDiagnostics(): readonly any[] { return []; },
         getGlobalDiagnostics(): readonly any[] { return []; },
         getDiagnostics(): readonly any[] { return []; },
-        getAmbientModules(): readonly any[] { return []; },
+        getAmbientModules(): readonly any[] {
+            ensureProject();
+            try {
+                const batch = project.checker.getModuleExportMap?.();
+                return (batch?.modules ?? []).filter((m: any) => !m.moduleFileName).map((m: any) => m.moduleSymbol);
+            }
+            catch {
+                return [];
+            }
+        },
+        tryFindAmbientModule(moduleName: string): any {
+            if (!moduleName) return undefined;
+            const key = moduleName.replace(/^"|"$/g, "");
+            ensureProject();
+            if (ambientModuleByNameCache.has(key)) {
+                return ambientModuleByNameCache.get(key) ?? undefined;
+            }
+            try {
+                const batch = project.checker.getModuleExportMap?.();
+                for (const mod of batch?.modules ?? []) {
+                    if (mod.moduleFileName) continue;
+                    const name = mod.moduleName?.replace(/^"|"$/g, "");
+                    if (name === key) {
+                        ambientModuleByNameCache.set(key, mod.moduleSymbol);
+                        return mod.moduleSymbol;
+                    }
+                }
+            }
+            catch { /* empty */ }
+            ambientModuleByNameCache.set(key, null);
+            return undefined;
+        },
 
         // ── Stubs ──
         getSymbolsInScope(location: any, meaning: number): any[] {
             if (!location) return [];
             const sf = location.getSourceFile?.();
-            // Volar host-only virtual files have no tsgo mirror; the binder scope
-            // walk over host locals/exports is genuine host-only bridging.
-            if (sf?.__tnbHostBound) {
-                return getHostSymbolsInScope(location, meaning).map(refineNavSymbol);
-            }
             if (!sf) return [];
             ensureProject();
             // Memoized per (location, meaning): the response marshals every
@@ -5252,11 +5334,36 @@ export function createTsgoChecker(program: any): any {
             const scopeKey = `${symCacheFileName(sf.fileName)}:${start}:${end}:${meaning}`;
             const memo = symbolsInScopeCache.get(scopeKey);
             if (memo) return memo;
-            const tsgoNode = findTsgoNodeAtPosition(sf.fileName, start, location.kind, end);
-            if (!tsgoNode) return [];
-            const result = (project.checker.getSymbolsInScope(tsgoNode, meaning) ?? []).map(refineNavSymbol);
-            symbolsInScopeCache.set(scopeKey, result);
-            return result;
+            let tsgoNode = findTsgoNodeAtPosition(sf.fileName, start, location.kind, end);
+            if (!tsgoNode) {
+                // Scope anchor can be a token tsgo's index doesn't cover (EOF,
+                // synthetic nodes). SourceFile scope still includes globals.
+                tsgoNode = getTsgoSourceFile(sf.fileName);
+            }
+            if (tsgoNode) {
+                let result = (project.checker.getSymbolsInScope(tsgoNode, meaning) ?? []).map(refineNavSymbol);
+                if (sf.__tnbHostBound) {
+                    result = mergeHostLocalScopeSymbols(result, location, meaning).map(sym =>
+                        refinedSymBySym.has(sym) ? sym : refineNavSymbol(sym),
+                    );
+                }
+                if (process.env.TNB_SCOPE_TRACE === "1") {
+                    try {
+                        require("node:fs").appendFileSync(
+                            "/tmp/tnb-scope-trace.log",
+                            `[scope] ${symCacheFileName(sf.fileName)}:${start} hostBound=${!!sf.__tnbHostBound} syms=${result.length}\n`,
+                        );
+                    } catch { /* ignore */ }
+                }
+                symbolsInScopeCache.set(scopeKey, result);
+                return result;
+            }
+            // Genuine host-only virtual files have no tsgo mirror; walk host
+            // bindSourceFile locals/exports (no lib globals — tsgo unavailable).
+            if (sf.__tnbHostBound) {
+                return getHostSymbolsInScope(location, meaning).map(refineNavSymbol);
+            }
+            return [];
         },
         getExportSpecifierLocalTargetSymbol(node: any): any {
             if (!node) return undefined;
@@ -5730,7 +5837,7 @@ const _tnbCheckerCoverage = {
     createSymbol: "throw",
     createIndexInfo: "throw",
     isSymbolAccessible: "throw",
-    tryFindAmbientModule: "throw",
+    tryFindAmbientModule: "adapter",
     getSymbolWalker: "throw",
     getDiagnostics: "adapter",
     getGlobalDiagnostics: "adapter",

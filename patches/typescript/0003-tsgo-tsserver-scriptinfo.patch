@@ -1,8 +1,24 @@
 diff --git a/src/server/project.ts b/src/server/project.ts
-index 88fa23c1b..0e028a045 100644
+index 88fa23c1b..45b8d3d71 100644
 --- a/src/server/project.ts
 +++ b/src/server/project.ts
-@@ -1129,8 +1129,16 @@ export abstract class Project implements LanguageServiceHost, ModuleResolutionHo
+@@ -76,6 +76,7 @@ import {
+     isDeclarationFileName,
+     isExternalModuleNameRelative,
+     isInsideNodeModules,
++    isRootedDiskPath,
+     JSDocParsingMode,
+     JsTyping,
+     LanguageService,
+@@ -112,6 +113,7 @@ import {
+     ResolvedRefAndOutputDts,
+     ResolvedTypeReferenceDirectiveWithFailedLookupLocations,
+     resolvePackageNameToPackageJson,
++    resolveProjectReferencePath,
+     returnFalse,
+     ScriptKind,
+     some,
+@@ -1129,8 +1131,16 @@ export abstract class Project implements LanguageServiceHost, ModuleResolutionHo
          this.cleanupProgram();
          // Release external files
          forEach(this.externalFiles, externalFile => this.detachScriptInfoIfNotRoot(externalFile));
@@ -21,7 +37,7 @@ index 88fa23c1b..0e028a045 100644
          this.projectService.pendingEnsureProjectForOpenFiles = true;
  
          this.rootFilesMap = undefined!;
-@@ -1213,10 +1221,10 @@ export abstract class Project implements LanguageServiceHost, ModuleResolutionHo
+@@ -1213,10 +1223,10 @@ export abstract class Project implements LanguageServiceHost, ModuleResolutionHo
              // if language service is not enabled - return just root files
              return this.getRootScriptInfos();
          }
@@ -36,7 +52,7 @@ index 88fa23c1b..0e028a045 100644
          });
      }
  
-@@ -1690,8 +1698,12 @@ export abstract class Project implements LanguageServiceHost, ModuleResolutionHo
+@@ -1690,8 +1700,12 @@ export abstract class Project implements LanguageServiceHost, ModuleResolutionHo
                  const file = this.program!.getSourceFileByPath(path);
                  const info = value.info;
                  if (!file || value.info?.path === file.resolvedPath) return;
@@ -51,26 +67,70 @@ index 88fa23c1b..0e028a045 100644
                  info?.detachFromProject(this);
              });
  
-@@ -2751,6 +2763,18 @@ export class AutoImportProviderProject extends Project {
+@@ -2646,7 +2660,8 @@ export class AutoImportProviderProject extends Project {
+             }
+         }
+ 
+-        const references = program.getResolvedProjectReferences();
++        const references = program.getResolvedProjectReferences()
++            ?? getResolvedProjectReferencesForAutoImportProvider(hostProject, program);
+         let referencesAddded = 0;
+         if (references?.length && hostProject.projectService.getHostPreferences().includeCompletionsForModuleExports) {
+             // Add direct referenced projects to rootFiles names
+@@ -2729,6 +2744,27 @@ export class AutoImportProviderProject extends Project {
+                 }
+             });
+         }
++
++        function getResolvedProjectReferencesForAutoImportProvider(hostProject: Project, program: Program): readonly (ResolvedProjectReference | undefined)[] | undefined {
++            if (!(program as any).isTsgoBackedProgram) {
++                return undefined;
++            }
++            const projectRefs = hostProject.getProjectReferences?.();
++            const getParsedCommandLine = hostProject.getParsedCommandLine;
++            if (!projectRefs?.length || !getParsedCommandLine) {
++                return undefined;
++            }
++            const configPath = hostProject.getCompilerOptions().configFilePath ?? hostProject.getProjectName();
++            const configDir = getDirectoryPath(configPath);
++            return mapDefined(projectRefs, ref => {
++                const refConfigPath = resolveProjectReferencePath(ref);
++                const absoluteRefPath = isRootedDiskPath(refConfigPath)
++                    ? refConfigPath
++                    : combinePaths(configDir, refConfigPath);
++                const commandLine = getParsedCommandLine.call(hostProject, absoluteRefPath);
++                return commandLine ? { commandLine } as ResolvedProjectReference : undefined;
++            });
++        }
+     }
+ 
+     /** @internal */
+@@ -2751,10 +2787,20 @@ export class AutoImportProviderProject extends Project {
              return undefined;
          }
  
-+        // tsgo-backed hosts: the provider would inherit the host's
-+        // options.configFilePath, so its thin program shares the host
-+        // tsconfig's tsgo project — the same file set as the host program.
-+        // forEachExternalModuleToImportFrom filters host-program files out of
-+        // the provider pass, so it can never contribute a dependency
-+        // entrypoint here, while costing a full thin-program rebuild on every
-+        // host keystroke (the shared file set attaches the open files to the
-+        // provider, and each edit marks it dirty).
-+        if ((hostProject.getCurrentProgram() as any)?.isTsgoBackedProgram) {
-+            return undefined;
+-        const compilerOptions = {
+-            ...hostProject.getCompilerOptions(),
+-            ...this.compilerOptionsOverrides,
+-        };
++        // tsgo-backed hosts inherit options.configFilePath, which routes
++        // createProgram to createTsgoProgram and shares the host tsconfig's
++        // file set. Strip configFilePath/configFile so the provider uses stock
++        // createProgram with a small root set from package.json deps only.
++        const hostOptions = hostProject.getCompilerOptions();
++        const isTsgoBacked = !!(hostProject.getCurrentProgram() as any)?.isTsgoBackedProgram;
++        let compilerOptions: CompilerOptions;
++        if (isTsgoBacked) {
++            const { configFilePath: _, configFile: __, ...hostOptionsWithoutConfig } = hostOptions as CompilerOptions & { configFile?: unknown };
++            compilerOptions = { ...hostOptionsWithoutConfig, ...this.compilerOptionsOverrides };
 +        }
-+
-         const compilerOptions = {
-             ...hostProject.getCompilerOptions(),
-             ...this.compilerOptionsOverrides,
-@@ -2815,7 +2839,13 @@ export class AutoImportProviderProject extends Project {
++        else {
++            compilerOptions = { ...hostOptions, ...this.compilerOptionsOverrides };
++        }
+ 
+         const rootNames = this.getRootFileNames(dependencySelection, hostProject, host, compilerOptions);
+         if (!rootNames.length) {
+@@ -2815,7 +2861,13 @@ export class AutoImportProviderProject extends Project {
          this.rootFileNames = rootFileNames;
          const oldProgram = this.getCurrentProgram();
          const hasSameSetOfFiles = super.updateGraph();

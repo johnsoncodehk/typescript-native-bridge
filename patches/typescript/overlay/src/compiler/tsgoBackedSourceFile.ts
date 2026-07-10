@@ -172,7 +172,10 @@ function installGetChildrenForLanguageService(shell: any, skeletonSf?: any): voi
     if (typeof shell.forEachChild === "function") {
         shell.getChildren = function (this: any) {
             const children: any[] = [];
-            this.forEachChild((child: any) => children.push(child));
+            // RemoteNode.forEachChild short-circuits on a truthy visitor return;
+            // Array.push returns the new length, so a bare push callback stops
+            // after the first child and breaks findPrecedingToken / completion.
+            this.forEachChild((child: any) => { children.push(child); });
             return children;
         };
         return;

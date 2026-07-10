@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"strings"
 
 	"github.com/microsoft/typescript-go/internal/ast"
 	"github.com/microsoft/typescript-go/internal/checker"
@@ -92,9 +93,9 @@ func computeModuleExportMap(ctx context.Context, program *compiler.Program, sd *
 		}
 		seenModules[moduleSymbol] = true
 
-		if computeImportability && !isModuleImportableFrom(importingSourceFile, moduleFile, program) {
-			return
-		}
+		// Path/package.json importability is enforced on the JS side (stock
+		// forEachExternalModule + isImportablePath). Go-side pre-filter was
+		// stricter and dropped pnpm-resolved modules from the batch map.
 
 		mod := &ModuleExportMapModule{
 			ModuleName:   moduleSymbol.Name,
@@ -159,6 +160,18 @@ func computeModuleExportMap(ctx context.Context, program *compiler.Program, sd *
 			continue
 		}
 		addModule(ambient, nil)
+		// Node16 parity: stock may expose both "process" and "node:process".
+		var altName string
+		if strings.HasPrefix(ambient.Name, "node:") {
+			altName = strings.TrimPrefix(ambient.Name, "node:")
+		} else {
+			altName = "node:" + ambient.Name
+		}
+		if altName != ambient.Name {
+			if alt := chk.TryFindAmbientModule(altName); alt != nil {
+				addModule(alt, nil)
+			}
+		}
 	}
 
 	for _, sf := range program.SourceFiles() {
