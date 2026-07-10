@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "hooks": {
+    "beforeShellExecution": [
+      {
+        "command": ".cursor/hooks/block-adhoc-tsserver-harness.mjs",
+        "failClosed": false
+      }
+    ]
+  }
+}
