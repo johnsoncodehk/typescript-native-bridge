@@ -859,7 +859,7 @@ index 28d29136d..6180faa70 100644
   * True if the first character of `lowercaseCharacters` is the first character
   * of some "word" in `identiferString` (where the string is split into "words"
 diff --git a/src/services/exportInfoMap.ts b/src/services/exportInfoMap.ts
-index dfd00ce2e..733fae38d 100644
+index dfd00ce2e..a6b14ba3d 100644
 --- a/src/services/exportInfoMap.ts
 +++ b/src/services/exportInfoMap.ts
 @@ -4,7 +4,10 @@ import {
@@ -920,7 +920,7 @@ index dfd00ce2e..733fae38d 100644
              if (importingFile !== usableByFileName) {
                  cache.clear();
                  usableByFileName = importingFile;
-@@ -197,21 +206,21 @@ export function createCacheableExportInfoMap(host: CacheableExportInfoMapHost):
+@@ -197,21 +206,22 @@ export function createCacheableExportInfoMap(host: CacheableExportInfoMapHost):
              // 3. Otherwise, we have a default/namespace import that can be imported by any name, and
              //    `symbolTableKey` will be something undesirable like `export=` or `default`, so we try to
              //    get a better name.
@@ -943,11 +943,12 @@ index dfd00ce2e..733fae38d 100644
              if (!storedSymbol || !storedModuleSymbol) symbols.set(id, [symbol, moduleSymbol]);
  
 -            exportInfo.add(key(symbolName, symbol, isExternalModuleNameRelative(moduleName) ? undefined : moduleName, checker), {
-+            exportInfo.add(key(symbolName, symbol, ambientModuleKeyForExportMap(moduleFile, moduleName, moduleNameOverride, isFromPackageJson), checker), {
++            const exportMapKey = key(symbolName, symbol, ambientModuleKeyForExportMap(moduleFile, moduleName, moduleNameOverride, isFromPackageJson), checker);
++            const cachedInfo: CachedSymbolExportInfo = {
                  id,
                  symbolTableKey,
                  symbolName,
-@@ -221,7 +230,7 @@ export function createCacheableExportInfoMap(host: CacheableExportInfoMapHost):
+@@ -221,11 +231,18 @@ export function createCacheableExportInfoMap(host: CacheableExportInfoMapHost):
                  moduleFileName: moduleFile?.fileName,
                  packageName,
                  exportKind,
@@ -956,7 +957,19 @@ index dfd00ce2e..733fae38d 100644
                  isFromPackageJson,
                  symbol: storedSymbol,
                  moduleSymbol: storedModuleSymbol,
-@@ -279,7 +288,12 @@ export function createCacheableExportInfoMap(host: CacheableExportInfoMapHost):
+-            });
++            };
++            const existing = exportInfo.get(exportMapKey);
++            if (existing && shouldPrependExportInfoEntry(cachedInfo, existing)) {
++                existing.unshift(cachedInfo);
++            }
++            else {
++                exportInfo.add(exportMapKey, cachedInfo);
++            }
+         },
+         get: (importingFile, key) => {
+             if (importingFile !== usableByFileName) return;
+@@ -279,7 +296,12 @@ export function createCacheableExportInfoMap(host: CacheableExportInfoMapHost):
      return cache;
  
      function rehydrateCachedInfo(info: CachedSymbolExportInfo): SymbolExportInfo {
@@ -970,7 +983,7 @@ index dfd00ce2e..733fae38d 100644
          const { id, exportKind, targetFlags, isFromPackageJson, moduleFileName } = info;
          const [cachedSymbol, cachedModuleSymbol] = symbols.get(id) || emptyArray;
          if (cachedSymbol && cachedModuleSymbol) {
-@@ -287,17 +301,22 @@ export function createCacheableExportInfoMap(host: CacheableExportInfoMapHost):
+@@ -287,17 +309,22 @@ export function createCacheableExportInfoMap(host: CacheableExportInfoMapHost):
                  symbol: cachedSymbol,
                  moduleSymbol: cachedModuleSymbol,
                  moduleFileName,
@@ -996,7 +1009,7 @@ index dfd00ce2e..733fae38d 100644
                  : checker.tryFindAmbientModule(info.moduleName),
          );
          const symbol = info.symbol || cachedSymbol || Debug.checkDefined(
-@@ -311,6 +330,7 @@ export function createCacheableExportInfoMap(host: CacheableExportInfoMapHost):
+@@ -311,6 +338,7 @@ export function createCacheableExportInfoMap(host: CacheableExportInfoMapHost):
              symbol,
              moduleSymbol,
              moduleFileName,
@@ -1004,7 +1017,7 @@ index dfd00ce2e..733fae38d 100644
              exportKind,
              targetFlags,
              isFromPackageJson,
-@@ -374,14 +394,21 @@ export function isImportable(
+@@ -374,14 +402,21 @@ export function isImportable(
      packageJsonFilter: PackageJsonImportFilter | undefined,
      moduleSpecifierResolutionHost: ModuleSpecifierResolutionHost,
      moduleSpecifierCache: ModuleSpecifierCache | undefined,
@@ -1028,7 +1041,7 @@ index dfd00ce2e..733fae38d 100644
          return !packageJsonFilter
              || packageJsonFilter.allowsImportingAmbientModule(toModule, moduleSpecifierResolutionHost)
              || fileContainsPackageImport(fromFile, moduleName);
-@@ -405,7 +432,7 @@ export function isImportable(
+@@ -405,7 +440,7 @@ export function isImportable(
              const file = program.getSourceFile(toPath);
              // Determine to import using toPath only if toPath is what we were looking at
              // or there doesnt exist the file in the program by the symlink
@@ -1037,7 +1050,7 @@ index dfd00ce2e..733fae38d 100644
                  isImportablePath(
                      fromFile.fileName,
                      toPath,
-@@ -429,6 +456,62 @@ function fileContainsPackageImport(sourceFile: SourceFile, packageName: string)
+@@ -429,6 +464,81 @@ function fileContainsPackageImport(sourceFile: SourceFile, packageName: string)
      return sourceFile.imports && sourceFile.imports.some(i => i.text === packageName || i.text.startsWith(packageName + "/"));
  }
  
@@ -1070,6 +1083,25 @@ index dfd00ce2e..733fae38d 100644
 +    return pkgRoot && subpathFromFile !== pkgRoot ? subpathFromFile : undefined;
 +}
 +
++/** getImportFixes marks exportInfos[0] as non-re-export; prefer direct node_modules subpath exports ahead of barrels. */
++function shouldPrependExportInfoEntry(newEntry: CachedSymbolExportInfo, existing: readonly CachedSymbolExportInfo[]): boolean {
++    if (!newEntry.moduleFileName || !pathContainsNodeModules(newEntry.moduleFileName)) {
++        return false;
++    }
++    const newSubpath = getNpmPackageSubpathSpecifier(newEntry.moduleFile, stripQuotes(newEntry.moduleName));
++    if (!newSubpath) {
++        return false;
++    }
++    const pkgRoot = getNpmPackageRootFromSpecifier(newSubpath);
++    return existing.some(entry => {
++        if (entry.moduleFileName && !pathContainsNodeModules(entry.moduleFileName)) {
++            return true;
++        }
++        const existingName = entry.moduleName && stripQuotes(entry.moduleName);
++        return !!(pkgRoot && existingName === pkgRoot);
++    });
++}
++
 +function hasImportableModulePath(
 +    program: Program,
 +    fromFile: SourceFile,
@@ -1100,7 +1132,7 @@ index dfd00ce2e..733fae38d 100644
  /**
   * Don't include something from a `node_modules` that isn't actually reachable by a global import.
   * A relative import to node_modules is usually a bad idea.
-@@ -441,15 +524,114 @@ function isImportablePath(
+@@ -441,15 +551,114 @@ function isImportablePath(
      host: ModuleSpecifierResolutionHost,
  ): boolean {
      // If it's in a `node_modules` but is not reachable from here via a global import, don't bother.
@@ -1221,7 +1253,7 @@ index dfd00ce2e..733fae38d 100644
  }
  
  /** @internal */
-@@ -459,24 +641,39 @@ export function forEachExternalModuleToImportFrom(
+@@ -459,24 +668,39 @@ export function forEachExternalModuleToImportFrom(
      preferences: UserPreferences,
      useAutoImportProvider: boolean,
      cb: (module: Symbol, moduleFile: SourceFile | undefined, program: Program, isFromPackageJson: boolean) => void,
@@ -1260,17 +1292,17 @@ index dfd00ce2e..733fae38d 100644
 +                else if (program.getSourceFile(file.fileName)) {
 +                    return;
 +                }
-             }
--        });
++            }
 +            else if (checker.resolveName(module.name, /*location*/ undefined, SymbolFlags.Module, /*excludeGlobals*/ false)) {
 +                return;
-+            }
+             }
+-        });
 +            cb(module, file, autoImportProvider, /*isFromPackageJson*/ true);
 +        }, autoImportProvider);
          host.log?.(`forEachExternalModuleToImportFrom autoImportProvider: ${timestamp() - start}`);
      }
  }
-@@ -490,7 +687,92 @@ function getIsExcludedPatterns(preferences: UserPreferences, useCaseSensitiveFil
+@@ -490,7 +714,92 @@ function getIsExcludedPatterns(preferences: UserPreferences, useCaseSensitiveFil
      });
  }
  
@@ -1364,7 +1396,7 @@ index dfd00ce2e..733fae38d 100644
      const isExcluded = excludePatterns && getIsExcluded(excludePatterns, host);
  
      for (const ambient of checker.getAmbientModules()) {
-@@ -500,7 +782,10 @@ function forEachExternalModule(checker: TypeChecker, allSourceFiles: readonly So
+@@ -500,7 +809,10 @@ function forEachExternalModule(checker: TypeChecker, allSourceFiles: readonly So
      }
      for (const sourceFile of allSourceFiles) {
          if (isExternalOrCommonJsModule(sourceFile) && !isExcluded?.(sourceFile)) {
@@ -1376,7 +1408,7 @@ index dfd00ce2e..733fae38d 100644
          }
      }
  }
-@@ -533,6 +818,549 @@ export function getIsFileExcluded(host: LanguageServiceHost, preferences: UserPr
+@@ -533,6 +845,549 @@ export function getIsFileExcluded(host: LanguageServiceHost, preferences: UserPr
      return getIsExcluded(getIsExcludedPatterns(preferences, hostUsesCaseSensitiveFileNames(host)), host);
  }
  
@@ -1926,7 +1958,7 @@ index dfd00ce2e..733fae38d 100644
  /** @internal */
  export function getExportInfoMap(importingFile: SourceFile | FutureSourceFile, host: LanguageServiceHost, program: Program, preferences: UserPreferences, cancellationToken: CancellationToken | undefined): ExportInfoMap {
      const start = timestamp();
-@@ -552,42 +1380,17 @@ export function getExportInfoMap(importingFile: SourceFile | FutureSourceFile, h
+@@ -552,42 +1407,17 @@ export function getExportInfoMap(importingFile: SourceFile | FutureSourceFile, h
      }
  
      host.log?.("getExportInfoMap: cache miss or empty; calculating new results");
