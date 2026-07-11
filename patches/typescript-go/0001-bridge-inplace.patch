@@ -1,5 +1,5 @@
 diff --git a/_packages/native-preview/src/api/node/node.generated.ts b/_packages/native-preview/src/api/node/node.generated.ts
-index ff74677b3..a7684f764 100644
+index ff74677b3..d2915344c 100644
 --- a/_packages/native-preview/src/api/node/node.generated.ts
 +++ b/_packages/native-preview/src/api/node/node.generated.ts
 @@ -36,8 +36,14 @@ import {
@@ -204,16 +204,36 @@ index ff74677b3..a7684f764 100644
              case SyntaxKind.Identifier:
              case SyntaxKind.PrivateIdentifier:
              case SyntaxKind.JsxText:
-@@ -893,7 +954,7 @@ export class RemoteNode extends RemoteNodeBase implements Node {
+@@ -892,8 +953,27 @@ export class RemoteNode extends RemoteNodeBase implements Node {
+         }
      }
  
++    /**
++     * Stock Identifier/PrivateIdentifier carry `escapedText` (leading "__"
++     * escaped with an extra "_"); the JS printer's synthesized-node path
++     * (`idText`) reads it. tsgo stores the unescaped text, so escape here.
++     */
++    get escapedText(): string | undefined {
++        switch (this._rawKind) {
++            case SyntaxKind.Identifier:
++            case SyntaxKind.PrivateIdentifier: {
++                const text = this.text;
++                if (text === undefined) return undefined;
++                return text.length >= 2 && text.charCodeAt(0) === 0x5f && text.charCodeAt(1) === 0x5f
++                    ? "_" + text
++                    : text;
++            }
++        }
++        return undefined;
++    }
++
      get rawText(): string | undefined {
 -        switch (this.kind) {
 +        switch (this._rawKind) {
              case SyntaxKind.TemplateHead:
              case SyntaxKind.TemplateMiddle:
              case SyntaxKind.TemplateTail:
-@@ -911,12 +972,19 @@ export class RemoteNode extends RemoteNodeBase implements Node {
+@@ -911,12 +991,19 @@ export class RemoteNode extends RemoteNodeBase implements Node {
          return this.view.getUint32(this._byteIndex + NODE_OFFSET_FLAGS, true);
      }
  
@@ -685,6 +705,23 @@ index ac37c863d..70618dee2 100644
  	switch parent.Kind {
  	case ast.KindVariableDeclaration, ast.KindParameter, ast.KindPropertyDeclaration, ast.KindPropertySignature, ast.KindBindingElement:
  		return c.getContextualTypeForInitializerExpression(node, contextFlags)
+diff --git a/internal/checker/printer.go b/internal/checker/printer.go
+index 21704cc7d..e2ce5e3e2 100644
+--- a/internal/checker/printer.go
++++ b/internal/checker/printer.go
+@@ -426,6 +426,12 @@ func (c *Checker) SignatureToSignatureDeclaration(signature *Signature, kind ast
+ 	return nodeBuilder.SignatureToSignatureDeclaration(signature, kind, enclosingDeclaration, flags, nodebuilder.InternalFlagsNone, nil)
+ }
+ 
++func (c *Checker) TypeParameterToDeclaration(t *Type, enclosingDeclaration *ast.Node, flags nodebuilder.Flags) *ast.Node {
++	nodeBuilder, release := c.getNodeBuilder()
++	defer release()
++	return nodeBuilder.TypeParameterToDeclaration(t, enclosingDeclaration, flags, nodebuilder.InternalFlagsNone, nil)
++}
++
+ // ExpandSymbolForHover produces declaration strings for a symbol with verbosity support for expandable hover.
+ func (c *Checker) ExpandSymbolForHover(symbol *ast.Symbol, meaning ast.SymbolFlags, vc *VerbosityContext) string {
+ 	nodeBuilder, release := c.getNodeBuilder()
 diff --git a/internal/checker/services.go b/internal/checker/services.go
 index 12b9d4079..db9750b1a 100644
 --- a/internal/checker/services.go

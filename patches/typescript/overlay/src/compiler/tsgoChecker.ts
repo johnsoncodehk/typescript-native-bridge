@@ -4938,6 +4938,27 @@ export function createTsgoChecker(program: any): any {
             ensureProject();
             return project.checker.typeToString(type, undefined, flags);
         },
+        // SymbolDisplay formats type-parameter-typed variables via the checker
+        // nodebuilder ("const row: Row extends BaseRow"). The tsgo RPC decodes
+        // the built declaration node; host-bound enclosing declarations are
+        // mapped to their tsgo mirror (name resolution scope), else omitted.
+        typeParameterToDeclaration(parameter: any, enclosingDeclaration?: any, flags?: number): any {
+            if (!parameter) return undefined;
+            ensureProject();
+            let tsgoLocation: any;
+            if (enclosingDeclaration && typeof enclosingDeclaration.getStart === "function") {
+                const sf = enclosingDeclaration.getSourceFile?.();
+                if (sf?.fileName) {
+                    tsgoLocation = findTsgoNodeAtPosition(
+                        sf.fileName,
+                        enclosingDeclaration.getStart(sf),
+                        enclosingDeclaration.kind,
+                        enclosingDeclaration.getEnd(sf),
+                    );
+                }
+            }
+            return project.checker.typeParameterToDeclaration(parameter, tsgoLocation, flags);
+        },
         // Stock checker exposes writer-based emitters consumed by the services
         // displayParts builders (typeToDisplayParts/symbolToDisplayParts/
         // signatureToDisplayParts → quickInfo, references symbolDisplayString).
@@ -5651,7 +5672,7 @@ const _tnbCheckerCoverage = {
     symbolToNode: "throw",
     symbolToTypeParameterDeclarations: "throw",
     symbolToParameterDeclaration: "throw",
-    typeParameterToDeclaration: "throw",
+    typeParameterToDeclaration: "adapter",
     getSymbolsInScope: "adapter",
     getSymbolAtLocation: "adapter",
     getIndexInfosAtLocation: "throw",
