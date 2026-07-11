@@ -1032,12 +1032,12 @@ function hostDefaultExportSymbolForFile(fileName: string, getHostSf: (fileName: 
     if (!sf) return undefined;
     // Stock checker identity for a module default export is the ExportAssignment
     // symbol (escapedName "default", carries the `export` modifier for
-    // getSymbolModifiers). The __VLS_export const is only a span anchor —
+    // getSymbolModifiers). The codegen export const is only a span anchor —
     // definition spans are served by hostDefaultExportDefinitionSpan, not here.
     const exp = findHostExportDefaultStatement(sf);
     if (exp?.symbol) return exp.symbol;
-    const vlsDecl = findHostVlsExportDeclaration(sf);
-    if (vlsDecl?.symbol) return vlsDecl.symbol;
+    const targetDecl = findHostDefaultExportTargetDeclaration(sf);
+    if (targetDecl?.symbol) return targetDecl.symbol;
     return undefined;
 }
 /** Resolve alias chain on host-bound symbols (bindSourceFile), before tsgo RPC. */
@@ -1068,13 +1068,25 @@ function findHostExportDefaultStatement(sf: any): any | undefined {
     }
     return undefined;
 }
-function findHostVlsExportDeclaration(sf: any): any | undefined {
-    if (!sf?.__tnbHostBound) return undefined;
+/**
+ * Volar-style codegen exports a stub that references a generated local:
+ *     const X = <component expr>; export default {} as typeof X;
+ * Resolve the ExportAssignment's `typeof X` back to X's declaration
+ * structurally, so nothing depends on the generated identifier's name.
+ */
+function findHostDefaultExportTargetDeclaration(sf: any): any | undefined {
+    const exp = findHostExportDefaultStatement(sf);
+    const type = exp?.expression?.kind === SyntaxKind.AsExpression ? exp.expression.type : undefined;
+    const entity = type?.kind === SyntaxKind.TypeQuery ? type.exprName : undefined;
+    if (entity?.kind !== SyntaxKind.Identifier) return undefined;
+    // Compare escapedText on both sides: identifiers from the same parse share
+    // the same escaping (names starting with "__" carry an extra underscore).
+    const name = entity.escapedText;
+    if (name === undefined) return undefined;
     for (const stmt of sf.statements ?? []) {
         if (stmt.kind !== SyntaxKind.VariableStatement) continue;
         for (const decl of stmt.declarationList?.declarations ?? []) {
-            const name = decl.name?.escapedName ?? decl.name?.text;
-            if (name === "__VLS_export") return decl;
+            if (decl.name?.kind === SyntaxKind.Identifier && decl.name.escapedText === name) return decl;
         }
     }
     return undefined;
@@ -1085,8 +1097,8 @@ function isExportDefaultStubExpression(expr: any): boolean {
 }
 /** Anchor node for default export in host-bound virtual snapshot (codegen const or ExportAssignment). */
 function findHostDefaultExportAnchor(sf: any): any | undefined {
-    const vlsDecl = findHostVlsExportDeclaration(sf);
-    if (vlsDecl?.initializer) return vlsDecl.initializer;
+    const targetDecl = findHostDefaultExportTargetDeclaration(sf);
+    if (targetDecl?.initializer) return targetDecl.initializer;
     const exp = findHostExportDefaultStatement(sf);
     if (exp) {
         const expr = exp.expression ?? exp;
@@ -1105,12 +1117,12 @@ function spanFromHostNode(sf: any, node: any): { start: number; length: number }
 }
 function hostDefaultExportDefinitionSpan(sf: any): { start: number; length: number } | undefined {
     if (!sf?.__tnbHostBound) return undefined;
-    const vlsDecl = findHostVlsExportDeclaration(sf);
+    const targetDecl = findHostDefaultExportTargetDeclaration(sf);
     const exp = findHostExportDefaultStatement(sf);
-    if (vlsDecl?.initializer && exp) {
+    if (targetDecl?.initializer && exp) {
         const start = exp.getStart?.(sf);
-        let end = vlsDecl.initializer.getEnd?.(sf);
-        const stmt = vlsDecl.parent?.parent;
+        let end = targetDecl.initializer.getEnd?.(sf);
+        const stmt = targetDecl.parent?.parent;
         if (stmt?.kind === SyntaxKind.VariableStatement) {
             end = Math.max(end ?? 0, stmt.getEnd?.(sf) ?? 0);
         }
@@ -1445,7 +1457,7 @@ function isCrossFileImportExportName(node: any): boolean {
 export function tnbDefinitionSpanForHostFileReference(targetFile: any): { start: number; length: number } | undefined {
     return hostDefaultExportDefinitionSpan(targetFile);
 }
-/** Host-bound declaration → virtual snapshot span (e.g. __VLS_export initializer). */
+/** Host-bound declaration → virtual snapshot span (default-export anchor declarations only). */
 export function tnbHostExportDefinitionTextSpan(declaration: any): { start: number; length: number } | undefined {
     if (!declaration) return undefined;
     const sf = declaration.getSourceFile?.();
@@ -1459,10 +1471,7 @@ export function tnbHostExportDefinitionTextSpan(declaration: any): { start: numb
     if (declaration.kind === SyntaxKind.ExportAssignment && !declaration.isExportEquals) {
         return hostDefaultExportDefinitionSpan(sf) ?? spanFromHostNode(sf, declaration);
     }
-    if (
-        declaration.kind === SyntaxKind.VariableDeclaration
-        && (declaration.name?.escapedName ?? declaration.name?.text) === "__VLS_export"
-    ) {
+    if (declaration.kind === SyntaxKind.VariableDeclaration && declaration === findHostDefaultExportTargetDeclaration(sf)) {
         return hostDefaultExportDefinitionSpan(sf);
     }
     return undefined;
@@ -4747,7 +4756,7 @@ export function createTsgoChecker(program: any): any {
             }
             // component-meta: getSymbolAtLocation(sourceFile) must return the
             // file's module symbol (sf.symbol), not a tsgo position hit on the
-            // first statement (e.g. __VLS_export) which lacks the default export.
+            // first statement (e.g. the codegen export const) which lacks the default export.
             if (node.kind === SyntaxKind.SourceFile && sf.symbol) {
                 // Return the module symbol directly. Do NOT write symByPos here:
                 // this whole-file symbol has no single span, and caching it under
@@ -4755,7 +4764,7 @@ export function createTsgoChecker(program: any): any {
                 // This branch already short-circuits every SourceFile query, so a
                 // cache is unnecessary anyway.
                 // Do not refineNavSymbol here — resolveHostExportDefaultSymbol would
-                // replace the module symbol with the __VLS_export const, breaking
+                // replace the module symbol with the codegen export const, breaking
                 // getExportsOfModule (component-meta needs the module + default export).
                 if (_traceSymEnabled) traceSym(`getSymbolAtLocation return path=sourcefile sym=${traceSymSymbol(sf.symbol)}`);
                 return sf.symbol;
