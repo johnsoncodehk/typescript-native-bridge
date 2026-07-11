@@ -454,7 +454,7 @@ index 6034c9dfc..0c9a6178d 100644
      let computedWithoutCacheCount = 0;
      const fixes = flatMap(exportInfo, (exportInfo, i) => {
 diff --git a/src/services/completions.ts b/src/services/completions.ts
-index 28d29136d..78ef44a25 100644
+index 28d29136d..6180faa70 100644
 --- a/src/services/completions.ts
 +++ b/src/services/completions.ts
 @@ -175,6 +175,7 @@ import {
@@ -640,7 +640,20 @@ index 28d29136d..78ef44a25 100644
          // We only want to filter out the global keywords
          // Auto Imports are not available for scripts so this conditional is always false
          if (
-@@ -2806,9 +2865,18 @@ export function getCompletionEntriesFromSymbols(
+@@ -2798,6 +2857,12 @@ export function getCompletionEntriesFromSymbols(
+         }
+ 
+         allFlags |= getCombinedLocalAndExportSymbolFlags(symbolOrigin);
++        // tsgo scope symbols do not bridge exportSymbol, so the stock combined-flags
++        // walk cannot reach the local symbol. ExportValue is by definition the
++        // value-space export marker, which is exactly what stock derives.
++        if (isTsgoScopeSymbol && symbol.flags & SymbolFlags.ExportValue) {
++            allFlags |= SymbolFlags.Value;
++        }
+ 
+         // import m = /**/ <-- It can only access namespace (if typing import = x. this would get member symbols and not namespace)
+         if (isInRightSideOfInternalImportEqualsDeclaration(location)) {
+@@ -2806,9 +2871,18 @@ export function getCompletionEntriesFromSymbols(
  
          if (isTypeOnlyLocation) {
              // It's a type, but you can reach it by namespace.type as well
@@ -659,7 +672,19 @@ index 28d29136d..78ef44a25 100644
          // expressions are value space (which includes the value namespaces)
          return !!(allFlags & SymbolFlags.Value);
      }
-@@ -4028,11 +4096,24 @@ function getCompletionData(
+@@ -3588,6 +3662,11 @@ function getCompletionData(
+     let importSpecifierResolver: codefix.ImportSpecifierResolver | undefined;
+     const symbolToOriginInfoMap: SymbolOriginInfoMap = [];
+     const symbolToSortTextMap: SymbolSortTextMap = [];
++    // tsgo bridge materializes distinct proxy objects for the same underlying
++    // symbol (scope walk vs export map), so stock's symbolId-based global
++    // suppression in pushAutoImportSymbol misses. Track marked tsgo globals by
++    // name and fall back to declaration identity.
++    let tsgoGlobalsByName: Map<string, Symbol> | undefined;
+     const seenPropertySymbols = new Set<SymbolId>();
+     const isTypeOnlyLocation = isTypeOnlyCompletion();
+     const getModuleSpecifierResolutionHost = memoizeOne((isFromPackageJson: boolean) => {
+@@ -4028,13 +4107,29 @@ function getCompletionData(
  
          symbols = concatenate(symbols, typeChecker.getSymbolsInScope(scopeNode, symbolMeanings));
          Debug.assertEachIsDefined(symbols, "getSymbolsInScope() should all be defined");
@@ -684,8 +709,13 @@ index 28d29136d..78ef44a25 100644
 +                !symbolHasDeclarationInSourceFile(symbol, sourceFile)
              ) {
                  symbolToSortTextMap[getSymbolId(symbol)] = SortText.GlobalsOrKeywords;
++                if ((symbol as Symbol & { objectRegistry?: unknown }).objectRegistry) {
++                    (tsgoGlobalsByName ??= new Map()).set(symbol.name, symbol);
++                }
              }
-@@ -4161,11 +4242,74 @@ function getCompletionData(
+             if (typeOnlyAliasNeedsPromotion && !(symbol.flags & SymbolFlags.Value)) {
+                 const typeOnlyAliasDeclaration = symbol.declarations && find(symbol.declarations, isTypeOnlyImportDeclaration);
+@@ -4161,11 +4256,74 @@ function getCompletionData(
          const exportInfo = getExportInfoMap(sourceFile, host, program, preferences, cancellationToken);
          const packageJsonAutoImportProvider = host.getPackageJsonAutoImportProvider?.();
          const packageJsonFilter = detailsEntryId ? undefined : createPackageJsonImportFilter(sourceFile, preferences, host);
@@ -761,7 +791,7 @@ index 28d29136d..78ef44a25 100644
              position,
              preferences,
              !!importStatementCompletion,
-@@ -4232,6 +4376,7 @@ function getCompletionData(
+@@ -4232,6 +4390,7 @@ function getCompletionData(
                              isDefaultExport,
                              moduleSymbol: exportInfo.moduleSymbol,
                              isFromPackageJson: exportInfo.isFromPackageJson,
@@ -769,7 +799,7 @@ index 28d29136d..78ef44a25 100644
                          });
                      },
                  );
-@@ -4240,20 +4385,7 @@ function getCompletionData(
+@@ -4240,20 +4399,7 @@ function getCompletionData(
                  flags |= context.resolvedAny() ? CompletionInfoFlags.ResolvedModuleSpecifiers : 0;
                  flags |= context.resolvedBeyondLimit() ? CompletionInfoFlags.ResolvedModuleSpecifiersBeyondLimit : 0;
              },
@@ -791,11 +821,33 @@ index 28d29136d..78ef44a25 100644
      }
  
      function pushAutoImportSymbol(symbol: Symbol, origin: SymbolOriginInfoResolvedExport | SymbolOriginInfoExport) {
-@@ -6089,6 +6221,14 @@ function isDeprecated(symbol: Symbol, checker: TypeChecker) {
+@@ -4262,6 +4408,12 @@ function getCompletionData(
+             // If an auto-importable symbol is available as a global, don't add the auto import
+             return;
+         }
++        if (tsgoGlobalsByName && (symbol as Symbol & { objectRegistry?: unknown }).objectRegistry) {
++            const global = tsgoGlobalsByName.get(symbol.name);
++            if (global && global !== symbol && tsgoSymbolsShareADeclaration(symbol, global)) {
++                return;
++            }
++        }
+         symbolToOriginInfoMap[symbols.length] = origin;
+         symbolToSortTextMap[symbolId] = importStatementCompletion ? SortText.LocationPriority : SortText.AutoImportSuggestions;
+         symbols.push(symbol);
+@@ -6089,6 +6241,23 @@ function isDeprecated(symbol: Symbol, checker: TypeChecker) {
      return !!length(declarations) && every(declarations, isDeprecatedDeclaration);
  }
  
 +/** tsgo light symbols have lazy declarations; avoid RPC when marking globals. */
++/** Declaration-identity fallback for tsgo proxy symbols with distinct object ids. */
++function tsgoSymbolsShareADeclaration(a: Symbol, b: Symbol): boolean {
++    const declA = a.valueDeclaration ?? a.declarations?.[0];
++    const declB = b.valueDeclaration ?? b.declarations?.[0];
++    return !!declA && !!declB
++        && declA.pos === declB.pos && declA.end === declB.end
++        && declA.getSourceFile().fileName === declB.getSourceFile().fileName;
++}
++
 +function symbolHasDeclarationInSourceFile(symbol: Symbol, sourceFile: SourceFile): boolean {
 +    if ((symbol as Symbol & { objectRegistry?: unknown; }).objectRegistry && !symbol.valueDeclaration && !symbol.declarations?.length) {
 +        return false;
@@ -807,20 +859,21 @@ index 28d29136d..78ef44a25 100644
   * True if the first character of `lowercaseCharacters` is the first character
   * of some "word" in `identiferString` (where the string is split into "words"
 diff --git a/src/services/exportInfoMap.ts b/src/services/exportInfoMap.ts
-index dfd00ce2e..a1461721c 100644
+index dfd00ce2e..733fae38d 100644
 --- a/src/services/exportInfoMap.ts
 +++ b/src/services/exportInfoMap.ts
-@@ -4,7 +4,9 @@ import {
+@@ -4,7 +4,10 @@ import {
      append,
      arrayIsEqualTo,
      CancellationToken,
 +    combinePaths,
      consumesNodeCoreModules,
 +    createModuleSpecifierResolutionHost,
++    createPackageJsonImportFilter,
      createMultiMap,
      Debug,
      emptyArray,
-@@ -27,8 +29,11 @@ import {
+@@ -27,8 +30,11 @@ import {
      hostUsesCaseSensitiveFileNames,
      InternalSymbolName,
      isExternalModuleNameRelative,
@@ -832,7 +885,7 @@ index dfd00ce2e..a1461721c 100644
      isKnownSymbol,
      isNonGlobalAmbientModule,
      isPrivateIdentifierSymbol,
-@@ -50,6 +55,7 @@ import {
+@@ -50,6 +56,7 @@ import {
      SourceFile,
      startsWith,
      Statement,
@@ -840,7 +893,7 @@ index dfd00ce2e..a1461721c 100644
      stripQuotes,
      Symbol,
      SymbolFlags,
-@@ -83,6 +89,8 @@ export interface SymbolExportInfo {
+@@ -83,6 +90,8 @@ export interface SymbolExportInfo {
      readonly moduleSymbol: Symbol;
      /** Set if `moduleSymbol` is an external module, not an ambient module */
      moduleFileName: string | undefined;
@@ -849,7 +902,7 @@ index dfd00ce2e..a1461721c 100644
      exportKind: ExportKind;
      targetFlags: SymbolFlags;
      /** True if export was only found via the package.json AutoImportProvider (for telemetry). */
-@@ -118,7 +126,7 @@ interface CachedSymbolExportInfo {
+@@ -118,7 +127,7 @@ interface CachedSymbolExportInfo {
  export interface ExportInfoMap {
      isUsableByFile(importingFile: Path): boolean;
      clear(): void;
@@ -858,7 +911,7 @@ index dfd00ce2e..a1461721c 100644
      get(importingFile: Path, key: ExportMapInfoKey): readonly SymbolExportInfo[] | undefined;
      search<T>(importingFile: Path, preferCapitalized: boolean, matches: (name: string, targetFlags: SymbolFlags) => boolean, action: (info: readonly SymbolExportInfo[], symbolName: string, isFromAmbientModule: boolean, key: ExportMapInfoKey) => T | undefined): T | undefined;
      releaseSymbols(): void;
-@@ -160,7 +168,7 @@ export function createCacheableExportInfoMap(host: CacheableExportInfoMapHost):
+@@ -160,7 +169,7 @@ export function createCacheableExportInfoMap(host: CacheableExportInfoMapHost):
              symbols.clear();
              usableByFileName = undefined;
          },
@@ -867,7 +920,7 @@ index dfd00ce2e..a1461721c 100644
              if (importingFile !== usableByFileName) {
                  cache.clear();
                  usableByFileName = importingFile;
-@@ -197,21 +205,21 @@ export function createCacheableExportInfoMap(host: CacheableExportInfoMapHost):
+@@ -197,21 +206,21 @@ export function createCacheableExportInfoMap(host: CacheableExportInfoMapHost):
              // 3. Otherwise, we have a default/namespace import that can be imported by any name, and
              //    `symbolTableKey` will be something undesirable like `export=` or `default`, so we try to
              //    get a better name.
@@ -894,7 +947,7 @@ index dfd00ce2e..a1461721c 100644
                  id,
                  symbolTableKey,
                  symbolName,
-@@ -221,7 +229,7 @@ export function createCacheableExportInfoMap(host: CacheableExportInfoMapHost):
+@@ -221,7 +230,7 @@ export function createCacheableExportInfoMap(host: CacheableExportInfoMapHost):
                  moduleFileName: moduleFile?.fileName,
                  packageName,
                  exportKind,
@@ -903,7 +956,7 @@ index dfd00ce2e..a1461721c 100644
                  isFromPackageJson,
                  symbol: storedSymbol,
                  moduleSymbol: storedModuleSymbol,
-@@ -279,7 +287,12 @@ export function createCacheableExportInfoMap(host: CacheableExportInfoMapHost):
+@@ -279,7 +288,12 @@ export function createCacheableExportInfoMap(host: CacheableExportInfoMapHost):
      return cache;
  
      function rehydrateCachedInfo(info: CachedSymbolExportInfo): SymbolExportInfo {
@@ -917,7 +970,7 @@ index dfd00ce2e..a1461721c 100644
          const { id, exportKind, targetFlags, isFromPackageJson, moduleFileName } = info;
          const [cachedSymbol, cachedModuleSymbol] = symbols.get(id) || emptyArray;
          if (cachedSymbol && cachedModuleSymbol) {
-@@ -287,17 +300,22 @@ export function createCacheableExportInfoMap(host: CacheableExportInfoMapHost):
+@@ -287,17 +301,22 @@ export function createCacheableExportInfoMap(host: CacheableExportInfoMapHost):
                  symbol: cachedSymbol,
                  moduleSymbol: cachedModuleSymbol,
                  moduleFileName,
@@ -943,7 +996,7 @@ index dfd00ce2e..a1461721c 100644
                  : checker.tryFindAmbientModule(info.moduleName),
          );
          const symbol = info.symbol || cachedSymbol || Debug.checkDefined(
-@@ -311,6 +329,7 @@ export function createCacheableExportInfoMap(host: CacheableExportInfoMapHost):
+@@ -311,6 +330,7 @@ export function createCacheableExportInfoMap(host: CacheableExportInfoMapHost):
              symbol,
              moduleSymbol,
              moduleFileName,
@@ -951,7 +1004,7 @@ index dfd00ce2e..a1461721c 100644
              exportKind,
              targetFlags,
              isFromPackageJson,
-@@ -374,13 +393,23 @@ export function isImportable(
+@@ -374,14 +394,21 @@ export function isImportable(
      packageJsonFilter: PackageJsonImportFilter | undefined,
      moduleSpecifierResolutionHost: ModuleSpecifierResolutionHost,
      moduleSpecifierCache: ModuleSpecifierCache | undefined,
@@ -959,14 +1012,9 @@ index dfd00ce2e..a1461721c 100644
  ): boolean {
      if (!toFile) {
          // Ambient module
-+        if (moduleNameOverride !== undefined) {
-+            // Batch export map supplies ambient module names; trust these before
-+            // node-core prefix heuristics (which can reject `node:process` when
-+            // useNodePrefix is false via `false === startsWith(name, "node:")`).
-+            return true;
-+        }
          let useNodePrefix;
-         const moduleName = stripQuotes(toModule.name);
+-        const moduleName = stripQuotes(toModule.name);
++        const moduleName = stripQuotes(moduleNameOverride ?? toModule.name);
          if (nodeCoreModules.has(moduleName) && (useNodePrefix = shouldUseUriStyleNodeCoreModules(fromFile, program)) !== undefined) {
 -            return useNodePrefix === startsWith(moduleName, "node:");
 +            if (useNodePrefix === startsWith(moduleName, "node:")) return true;
@@ -974,25 +1022,13 @@ index dfd00ce2e..a1461721c 100644
 +            if (useNodePrefix && nodeCoreModules.has(`node:${moduleName}`)) return true;
 +            return false;
          }
++        // Stock keys ambient importability off the declaring file's package
++        // (e.g. "fs" -> @types/node); batch symbols without declarations are
++        // trusted the same way stock trusts declaration-less ambient symbols.
          return !packageJsonFilter
              || packageJsonFilter.allowsImportingAmbientModule(toModule, moduleSpecifierResolutionHost)
-@@ -388,6 +417,15 @@ export function isImportable(
-     }
- 
-     Debug.assertIsDefined(toFile);
-+    if (moduleNameOverride !== undefined) {
-+        const overrideName = stripQuotes(moduleNameOverride);
-+        // Batch populate stores a resolved package specifier; trust it only when
-+        // stock path importability would also pass (filters @babel/types etc.).
-+        if (!isExternalModuleNameRelative(overrideName)
-+            && hasImportableModulePath(program, fromFile, toFile, moduleSpecifierResolutionHost)) {
-+            return true;
-+        }
-+    }
-     if (fromFile === toFile) return false;
-     const cachedResult = moduleSpecifierCache?.get(fromFile.path, toFile.path, preferences, {});
-     if (cachedResult?.isBlockedByPackageJsonDependencies !== undefined) {
-@@ -405,7 +443,7 @@ export function isImportable(
+             || fileContainsPackageImport(fromFile, moduleName);
+@@ -405,7 +432,7 @@ export function isImportable(
              const file = program.getSourceFile(toPath);
              // Determine to import using toPath only if toPath is what we were looking at
              // or there doesnt exist the file in the program by the symlink
@@ -1001,18 +1037,10 @@ index dfd00ce2e..a1461721c 100644
                  isImportablePath(
                      fromFile.fileName,
                      toPath,
-@@ -429,6 +467,70 @@ function fileContainsPackageImport(sourceFile: SourceFile, packageName: string)
+@@ -429,6 +456,62 @@ function fileContainsPackageImport(sourceFile: SourceFile, packageName: string)
      return sourceFile.imports && sourceFile.imports.some(i => i.text === packageName || i.text.startsWith(packageName + "/"));
  }
  
-+/** Packages tsgo batch includes via transitive deps but stock never auto-imports. */
-+function isBatchTransitiveOnlyPackage(specifier: string): boolean {
-+    const name = stripQuotes(specifier);
-+    return name === "@vue/compiler-sfc" || startsWith(name, "@vue/compiler-sfc/")
-+        || name === "@vue/reactivity" || startsWith(name, "@vue/reactivity/")
-+        || name === "alien-signals" || startsWith(name, "alien-signals/");
-+}
-+
 +/** True when a batch/auto-import module specifier is a real package name, not a disk path. */
 +function isNpmPackageSpecifier(specifier: string): boolean {
 +    if (!specifier || isExternalModuleNameRelative(specifier)) return false;
@@ -1072,7 +1100,7 @@ index dfd00ce2e..a1461721c 100644
  /**
   * Don't include something from a `node_modules` that isn't actually reachable by a global import.
   * A relative import to node_modules is usually a bad idea.
-@@ -441,15 +543,114 @@ function isImportablePath(
+@@ -441,15 +524,114 @@ function isImportablePath(
      host: ModuleSpecifierResolutionHost,
  ): boolean {
      // If it's in a `node_modules` but is not reachable from here via a global import, don't bother.
@@ -1193,7 +1221,7 @@ index dfd00ce2e..a1461721c 100644
  }
  
  /** @internal */
-@@ -459,24 +660,39 @@ export function forEachExternalModuleToImportFrom(
+@@ -459,24 +641,39 @@ export function forEachExternalModuleToImportFrom(
      preferences: UserPreferences,
      useAutoImportProvider: boolean,
      cb: (module: Symbol, moduleFile: SourceFile | undefined, program: Program, isFromPackageJson: boolean) => void,
@@ -1232,17 +1260,17 @@ index dfd00ce2e..a1461721c 100644
 +                else if (program.getSourceFile(file.fileName)) {
 +                    return;
 +                }
-+            }
-+            else if (checker.resolveName(module.name, /*location*/ undefined, SymbolFlags.Module, /*excludeGlobals*/ false)) {
-+                return;
              }
 -        });
++            else if (checker.resolveName(module.name, /*location*/ undefined, SymbolFlags.Module, /*excludeGlobals*/ false)) {
++                return;
++            }
 +            cb(module, file, autoImportProvider, /*isFromPackageJson*/ true);
 +        }, autoImportProvider);
          host.log?.(`forEachExternalModuleToImportFrom autoImportProvider: ${timestamp() - start}`);
      }
  }
-@@ -490,7 +706,92 @@ function getIsExcludedPatterns(preferences: UserPreferences, useCaseSensitiveFil
+@@ -490,7 +687,92 @@ function getIsExcludedPatterns(preferences: UserPreferences, useCaseSensitiveFil
      });
  }
  
@@ -1336,7 +1364,7 @@ index dfd00ce2e..a1461721c 100644
      const isExcluded = excludePatterns && getIsExcluded(excludePatterns, host);
  
      for (const ambient of checker.getAmbientModules()) {
-@@ -500,7 +801,10 @@ function forEachExternalModule(checker: TypeChecker, allSourceFiles: readonly So
+@@ -500,7 +782,10 @@ function forEachExternalModule(checker: TypeChecker, allSourceFiles: readonly So
      }
      for (const sourceFile of allSourceFiles) {
          if (isExternalOrCommonJsModule(sourceFile) && !isExcluded?.(sourceFile)) {
@@ -1348,7 +1376,7 @@ index dfd00ce2e..a1461721c 100644
          }
      }
  }
-@@ -533,6 +837,547 @@ export function getIsFileExcluded(host: LanguageServiceHost, preferences: UserPr
+@@ -533,6 +818,549 @@ export function getIsFileExcluded(host: LanguageServiceHost, preferences: UserPr
      return getIsExcluded(getIsExcludedPatterns(preferences, hostUsesCaseSensitiveFileNames(host)), host);
  }
  
@@ -1433,7 +1461,6 @@ index dfd00ce2e..a1461721c 100644
 +            : mod.moduleName;
 +        if (!moduleNameOverride) continue;
 +        if (!isNpmPackageSpecifier(stripQuotes(moduleNameOverride)) && !isProjectSource) continue;
-+        if (resolvedSpecifier && isBatchTransitiveOnlyPackage(resolvedSpecifier)) continue;
 +        if (moduleFile && importingSourceFile && moduleSpecifierResolutionHost
 +            && !hasImportableModulePath(program, importingSourceFile, moduleFile, moduleSpecifierResolutionHost)) {
 +            continue;
@@ -1571,6 +1598,9 @@ index dfd00ce2e..a1461721c 100644
 +    importingFileName: string,
 +): void {
 +    const importingSourceFile = program.getSourceFile(importingFileName);
++    const moduleSpecifierResolutionHost = importingSourceFile
++        ? createModuleSpecifierResolutionHost(program, host)
++        : undefined;
 +    const moduleNameOverrideByModuleSymbolId = new Map<number, string>();
 +    const moduleSymbolsForBatch: Symbol[] = [];
 +    const pendingModules: {
@@ -1896,7 +1926,7 @@ index dfd00ce2e..a1461721c 100644
  /** @internal */
  export function getExportInfoMap(importingFile: SourceFile | FutureSourceFile, host: LanguageServiceHost, program: Program, preferences: UserPreferences, cancellationToken: CancellationToken | undefined): ExportInfoMap {
      const start = timestamp();
-@@ -552,42 +1397,17 @@ export function getExportInfoMap(importingFile: SourceFile | FutureSourceFile, h
+@@ -552,42 +1380,17 @@ export function getExportInfoMap(importingFile: SourceFile | FutureSourceFile, h
      }
  
      host.log?.("getExportInfoMap: cache miss or empty; calculating new results");
@@ -2161,7 +2191,7 @@ index 9885093ed..0cbb4021a 100644
          }
      }
 diff --git a/src/services/utilities.ts b/src/services/utilities.ts
-index bec7d4b26..7c32cf237 100644
+index bec7d4b26..927d0cff0 100644
 --- a/src/services/utilities.ts
 +++ b/src/services/utilities.ts
 @@ -107,6 +107,7 @@ import {
@@ -2183,7 +2213,7 @@ index bec7d4b26..7c32cf237 100644
          const specifier = moduleSpecifiers.getNodeModulesPackageName(
              host.getCompilationSettings(),
              fromFile,
-@@ -3797,6 +3802,28 @@ export function createPackageJsonImportFilter(fromFile: SourceFile | FutureSourc
+@@ -3797,6 +3802,29 @@ export function createPackageJsonImportFilter(fromFile: SourceFile | FutureSourc
          }
          return components[0];
      }
@@ -2192,9 +2222,10 @@ index bec7d4b26..7c32cf237 100644
 +        const nodeModulesSegment = "/node_modules/";
 +        const innerNodeModulesIndex = fileName.lastIndexOf(nodeModulesSegment);
 +        if (innerNodeModulesIndex >= 0) {
++            // Keep both components for scoped packages (@scope/name).
 +            const afterInner = fileName.substring(innerNodeModulesIndex + nodeModulesSegment.length);
-+            const endSlash = afterInner.indexOf("/");
-+            const segment = endSlash >= 0 ? afterInner.substring(0, endSlash) : afterInner;
++            const components = afterInner.split("/");
++            const segment = startsWith(components[0], "@") ? (components[1] ? `${components[0]}/${components[1]}` : undefined) : components[0];
 +            if (segment && segment !== ".pnpm") {
 +                return getNodeModuleRootSpecifier(segment);
 +            }
@@ -2207,12 +2238,12 @@ index bec7d4b26..7c32cf237 100644
 +        if (!segment || segment.startsWith(".pnpm")) {
 +            return undefined;
 +        }
-+        return getNodeModuleRootSpecifier(segment.split("/")[0]);
++        return getNodeModuleRootSpecifier(segment);
 +    }
  }
  
  /** @internal */
-@@ -3927,7 +3954,9 @@ export function getDefaultLikeExportNameFromDeclaration(symbol: Symbol): string
+@@ -3927,7 +3955,9 @@ export function getDefaultLikeExportNameFromDeclaration(symbol: Symbol): string
              return tryCast(skipOuterExpressions(d.expression), isIdentifier)?.text;
          }
          // "export { ~ as default }"
