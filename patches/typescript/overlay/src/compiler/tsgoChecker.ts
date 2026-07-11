@@ -1450,13 +1450,20 @@ export function tnbHostExportDefinitionTextSpan(declaration: any): { start: numb
     if (!declaration) return undefined;
     const sf = declaration.getSourceFile?.();
     if (!sf?.__tnbHostBound) return undefined;
-    const combined = hostDefaultExportDefinitionSpan(sf);
-    if (combined) return combined;
+    // Only default-export-shaped declarations map to the combined component
+    // span. Ordinary declarations (binding elements, parameters, locals) must
+    // keep their own name span so Volar can map them back into the template.
     if (declaration.kind === SyntaxKind.SourceFile) {
-        return tnbDefinitionSpanForHostFileReference(sf);
+        return hostDefaultExportDefinitionSpan(sf) ?? tnbDefinitionSpanForHostFileReference(sf);
     }
     if (declaration.kind === SyntaxKind.ExportAssignment && !declaration.isExportEquals) {
-        return spanFromHostNode(sf, declaration);
+        return hostDefaultExportDefinitionSpan(sf) ?? spanFromHostNode(sf, declaration);
+    }
+    if (
+        declaration.kind === SyntaxKind.VariableDeclaration
+        && (declaration.name?.escapedName ?? declaration.name?.text) === "__VLS_export"
+    ) {
+        return hostDefaultExportDefinitionSpan(sf);
     }
     return undefined;
 }
