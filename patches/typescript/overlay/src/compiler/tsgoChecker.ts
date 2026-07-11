@@ -1032,13 +1032,9 @@ function hostDefaultExportSymbolForFile(fileName: string, getHostSf: (fileName: 
     if (!sf) return undefined;
     // Stock checker identity for a module default export is the ExportAssignment
     // symbol (escapedName "default", carries the `export` modifier for
-    // getSymbolModifiers). The codegen export const is only a span anchor —
-    // definition spans are served by hostDefaultExportDefinitionSpan, not here.
-    const exp = findHostExportDefaultStatement(sf);
-    if (exp?.symbol) return exp.symbol;
-    const targetDecl = findHostDefaultExportTargetDeclaration(sf);
-    if (targetDecl?.symbol) return targetDecl.symbol;
-    return undefined;
+    // getSymbolModifiers). Host-bound files always go through bindSourceFile,
+    // so the statement's symbol is present whenever the statement exists.
+    return findHostExportDefaultStatement(sf)?.symbol;
 }
 /** Resolve alias chain on host-bound symbols (bindSourceFile), before tsgo RPC. */
 function resolveHostAliasedSymbol(symbol: any): any {
@@ -1054,11 +1050,6 @@ function resolveHostAliasedSymbol(symbol: any): any {
     }
     return current ?? symbol;
 }
-function symbolDeclarationsAreFileLevelOnly(symbol: any): boolean {
-    const decls = symbol?.declarations;
-    if (!decls?.length) return false;
-    return decls.every((d: any) => d.kind === SyntaxKind.SourceFile || d.kind === SyntaxKind.ModuleDeclaration);
-}
 function findHostExportDefaultStatement(sf: any): any | undefined {
     if (!sf?.__tnbHostBound) return undefined;
     for (const stmt of sf.statements ?? []) {
@@ -1068,87 +1059,15 @@ function findHostExportDefaultStatement(sf: any): any | undefined {
     }
     return undefined;
 }
-/**
- * Volar-style codegen exports a stub that references a generated local:
- *     const X = <component expr>; export default {} as typeof X;
- * Resolve the ExportAssignment's `typeof X` back to X's declaration
- * structurally, so nothing depends on the generated identifier's name.
- */
-function findHostDefaultExportTargetDeclaration(sf: any): any | undefined {
-    const exp = findHostExportDefaultStatement(sf);
-    const type = exp?.expression?.kind === SyntaxKind.AsExpression ? exp.expression.type : undefined;
-    const entity = type?.kind === SyntaxKind.TypeQuery ? type.exprName : undefined;
-    if (entity?.kind !== SyntaxKind.Identifier) return undefined;
-    // Compare escapedText on both sides: identifiers from the same parse share
-    // the same escaping (names starting with "__" carry an extra underscore).
-    const name = entity.escapedText;
-    if (name === undefined) return undefined;
-    for (const stmt of sf.statements ?? []) {
-        if (stmt.kind !== SyntaxKind.VariableStatement) continue;
-        for (const decl of stmt.declarationList?.declarations ?? []) {
-            if (decl.name?.kind === SyntaxKind.Identifier && decl.name.escapedText === name) return decl;
-        }
-    }
-    return undefined;
-}
-function isExportDefaultStubExpression(expr: any): boolean {
-    return expr?.kind === SyntaxKind.AsExpression
-        && expr.expression?.kind === SyntaxKind.ObjectLiteralExpression;
-}
-/** Anchor node for default export in host-bound virtual snapshot (codegen const or ExportAssignment). */
-function findHostDefaultExportAnchor(sf: any): any | undefined {
-    const targetDecl = findHostDefaultExportTargetDeclaration(sf);
-    if (targetDecl?.initializer) return targetDecl.initializer;
-    const exp = findHostExportDefaultStatement(sf);
-    if (exp) {
-        const expr = exp.expression ?? exp;
-        if (!isExportDefaultStubExpression(expr)) return expr;
-    }
-    return undefined;
-}
-function spanFromHostNode(sf: any, node: any): { start: number; length: number } | undefined {
-    if (!node || !sf) return undefined;
-    const start = node.getStart?.(sf);
-    const end = node.getEnd?.(sf);
-    if (typeof start === "number" && typeof end === "number" && end > start) {
-        return { start, length: end - start };
-    }
-    return undefined;
-}
-function hostDefaultExportDefinitionSpan(sf: any): { start: number; length: number } | undefined {
-    if (!sf?.__tnbHostBound) return undefined;
-    const targetDecl = findHostDefaultExportTargetDeclaration(sf);
-    const exp = findHostExportDefaultStatement(sf);
-    if (targetDecl?.initializer && exp) {
-        const start = exp.getStart?.(sf);
-        let end = targetDecl.initializer.getEnd?.(sf);
-        const stmt = targetDecl.parent?.parent;
-        if (stmt?.kind === SyntaxKind.VariableStatement) {
-            end = Math.max(end ?? 0, stmt.getEnd?.(sf) ?? 0);
-        }
-        const text = sf.text ?? "";
-        while (typeof end === "number" && end < text.length && /[\t \n\r]/.test(text[end])) {
-            end++;
-        }
-        if (typeof start === "number" && typeof end === "number" && end > start) {
-            return { start, length: end - start };
-        }
-    }
-    const anchor = findHostDefaultExportAnchor(sf);
-    if (anchor) return spanFromHostNode(sf, anchor);
-    if (exp) return spanFromHostNode(sf, exp);
-    return undefined;
-}
-/** tsgo module/file symbols → host bindSourceFile default-export symbol. */
+/** tsgo module default-export member symbols → host bindSourceFile default-export symbol. */
 function resolveHostExportDefaultSymbol(symbol: any, getHostSf: (fileName: string) => any | undefined): any {
     if (!symbol) return symbol;
-    if (symbolDeclarationsAreFileLevelOnly(symbol)) {
-        const fileName = symbol.declarations?.[0]?.getSourceFile?.()?.fileName;
-        if (fileName) {
-            const hostSym = hostDefaultExportSymbolForFile(fileName, getHostSf);
-            if (hostSym) return hostSym;
-        }
-    }
+    // Note: module symbols themselves (declarations = [SourceFile]) are NOT
+    // redirected here — stock getSymbolAtLocation on a module specifier returns
+    // the module symbol, and its SourceFile declaration produces the whole-file
+    // definition span that downstream mappers rely on. Only degenerate
+    // default-export *member* symbols (tsgo RPC loses their declaration chain)
+    // are re-anchored to the host binder's ExportAssignment symbol.
     const memberName = (symbol.escapedName ?? symbol.name) as string | undefined;
     if (isModuleDefaultExportMemberName(memberName)) {
         const fileName = moduleSymbolSourceFileName(symbol.parent)
@@ -1452,29 +1371,6 @@ function isCrossFileImportExportName(node: any): boolean {
         || (parent.kind === SyntaxKind.ExportSpecifier && parent.name === node)
         || (parent.kind === SyntaxKind.ImportClause && parent.name === node)
     );
-}
-/** Host file-reference definitions: span in virtual snapshot for Volar position mappers. */
-export function tnbDefinitionSpanForHostFileReference(targetFile: any): { start: number; length: number } | undefined {
-    return hostDefaultExportDefinitionSpan(targetFile);
-}
-/** Host-bound declaration → virtual snapshot span (default-export anchor declarations only). */
-export function tnbHostExportDefinitionTextSpan(declaration: any): { start: number; length: number } | undefined {
-    if (!declaration) return undefined;
-    const sf = declaration.getSourceFile?.();
-    if (!sf?.__tnbHostBound) return undefined;
-    // Only default-export-shaped declarations map to the combined component
-    // span. Ordinary declarations (binding elements, parameters, locals) must
-    // keep their own name span so Volar can map them back into the template.
-    if (declaration.kind === SyntaxKind.SourceFile) {
-        return hostDefaultExportDefinitionSpan(sf) ?? tnbDefinitionSpanForHostFileReference(sf);
-    }
-    if (declaration.kind === SyntaxKind.ExportAssignment && !declaration.isExportEquals) {
-        return hostDefaultExportDefinitionSpan(sf) ?? spanFromHostNode(sf, declaration);
-    }
-    if (declaration.kind === SyntaxKind.VariableDeclaration && declaration === findHostDefaultExportTargetDeclaration(sf)) {
-        return hostDefaultExportDefinitionSpan(sf);
-    }
-    return undefined;
 }
 /** Symbol from host-bound AST when tsgo position RPC misses (LS path). */
 function getHostBoundSymbolAtLocation(node: any): any | undefined {
@@ -5608,9 +5504,6 @@ export function createTsgoChecker(program: any): any {
         getMemberInModuleExports(symbol: any, name: string): any {
             ensureProject();
             try { return refineNavSymbol(rpc().getMemberInModuleExports(symbol, name)); } catch { return undefined; }
-        },
-        getDefinitionSpanForDeclaration(declaration: any): { start: number; length: number } | undefined {
-            return tnbHostExportDefinitionTextSpan(declaration);
         },
         // Emit resolver — the lint path doesn't emit; return a minimal
         // stub if code reads properties off it.
