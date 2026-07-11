@@ -4907,6 +4907,19 @@ export function createTsgoChecker(program: any): any {
             if (!tsgoNode) return undefined;
             return project.checker.getResolvedSignature(tsgoNode);
         },
+        // SymbolDisplay resolves a type parameter's owning signature from its
+        // declaration ("(type parameter) T in pick<...>"). Declarations reaching
+        // here are JS-side AST nodes (post declaration-remap); map to the tsgo
+        // mirror before the RPC, same as getResolvedSignature above.
+        getSignatureFromDeclaration(declaration: any): any {
+            if (!declaration) return undefined;
+            ensureProject();
+            const sf = declaration.getSourceFile?.();
+            if (!sf?.fileName) return undefined;
+            const tsgoNode = findTsgoNodeAtPosition(sf.fileName, declaration.getStart(sf), declaration.kind, declaration.getEnd(sf));
+            if (!tsgoNode) return undefined;
+            return project.checker.getSignatureFromDeclaration(tsgoNode);
+        },
         getTypeFromTypeNode(typeNode: any): any {
             ensureProject();
             const t = project.checker.getTypeFromTypeNode(typeNode);
@@ -4958,6 +4971,35 @@ export function createTsgoChecker(program: any): any {
                 }
             }
             return project.checker.typeParameterToDeclaration(parameter, tsgoLocation, flags);
+        },
+        // SymbolDisplay renders "interface Wrap<W>" / "type Pair<P> = ..." by
+        // asking for the symbol's type parameter declarations and printing them
+        // as a list. Symbols reaching here can be host binder symbols (post
+        // declaration-remap); resolve to the tsgo counterpart first. The printer
+        // only needs an array with NodeArray shape (pos/end/hasTrailingComma).
+        symbolToTypeParameterDeclarations(symbol: any, enclosingDeclaration?: any, flags?: number): any {
+            if (!symbol) return undefined;
+            ensureProject();
+            const rpcSym = resolveRpcSymbol(symbol);
+            if (!rpcSym) return undefined;
+            let tsgoLocation: any;
+            if (enclosingDeclaration && typeof enclosingDeclaration.getStart === "function") {
+                const sf = enclosingDeclaration.getSourceFile?.();
+                if (sf?.fileName) {
+                    tsgoLocation = findTsgoNodeAtPosition(
+                        sf.fileName,
+                        enclosingDeclaration.getStart(sf),
+                        enclosingDeclaration.kind,
+                        enclosingDeclaration.getEnd(sf),
+                    );
+                }
+            }
+            const nodes = project.checker.symbolToTypeParameterDeclarations(rpcSym, tsgoLocation, flags) ?? [];
+            const list: any = nodes.slice();
+            list.pos = -1;
+            list.end = -1;
+            list.hasTrailingComma = false;
+            return list;
         },
         // Stock checker exposes writer-based emitters consumed by the services
         // displayParts builders (typeToDisplayParts/symbolToDisplayParts/
@@ -5670,7 +5712,7 @@ const _tnbCheckerCoverage = {
     symbolToEntityName: "throw",
     symbolToExpression: "throw",
     symbolToNode: "throw",
-    symbolToTypeParameterDeclarations: "throw",
+    symbolToTypeParameterDeclarations: "adapter",
     symbolToParameterDeclaration: "throw",
     typeParameterToDeclaration: "adapter",
     getSymbolsInScope: "adapter",
@@ -5708,7 +5750,7 @@ const _tnbCheckerCoverage = {
     getExpandedParameters: "throw",
     hasEffectiveRestParameter: "throw",
     containsArgumentsReference: "throw",
-    getSignatureFromDeclaration: "tsgo",
+    getSignatureFromDeclaration: "adapter",
     isImplementationOfOverload: "throw",
     isUndefinedSymbol: "adapter",
     isArgumentsSymbol: "adapter",

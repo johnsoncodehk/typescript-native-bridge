@@ -22,6 +22,9 @@ const content = [
 	'\tconst spare = other;',
 	'\treturn { held, spare };',
 	'}',
+	'export class Box<B extends Base> { item!: B; }',
+	'export interface Wrap<W> { inner: W; }',
+	'export type Pair<P> = [P, P];',
 	'',
 ].join('\n');
 
@@ -37,6 +40,12 @@ const CASES = [
 	{ id: 'unconstrainedUse', needle: 'spare = other', pick: 'spare' },
 	{ id: 'paramT', needle: 'item: T', pick: 'item' },
 	{ id: 'typeParamDecl', needle: 'T extends Base, U', pick: 'T' },
+	{ id: 'classTypeParamDecl', needle: 'B extends Base>', pick: 'B' },
+	{ id: 'interfaceTypeParamDecl', needle: 'Wrap<W>', pick: '<W' },
+	{ id: 'aliasTypeParamDecl', needle: 'Pair<P>', pick: '<P' },
+	{ id: 'className', needle: 'Box<B extends', pick: 'Box' },
+	{ id: 'interfaceName', needle: 'Wrap<W>', pick: 'Wrap' },
+	{ id: 'aliasName', needle: 'Pair<P>', pick: 'Pair' },
 ];
 
 function lineCol(text, offset) {
@@ -57,7 +66,8 @@ async function runAll(tsserverPath, env) {
 		});
 		const out = {};
 		for (const c of CASES) {
-			const offset = content.indexOf(c.needle) + c.needle.indexOf(c.pick);
+			const pickOffset = c.pick.startsWith('<') ? 1 : 0;
+			const offset = content.indexOf(c.needle) + c.needle.indexOf(c.pick) + pickOffset;
 			const pos = lineCol(content, offset);
 			const res = await send('quickinfo', { file: fixture, line: pos.line, offset: pos.col });
 			out[c.id] = {

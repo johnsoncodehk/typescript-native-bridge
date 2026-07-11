@@ -705,11 +705,26 @@ index ac37c863d..70618dee2 100644
  	switch parent.Kind {
  	case ast.KindVariableDeclaration, ast.KindParameter, ast.KindPropertyDeclaration, ast.KindPropertySignature, ast.KindBindingElement:
  		return c.getContextualTypeForInitializerExpression(node, contextFlags)
+diff --git a/internal/checker/nodebuilderimpl.go b/internal/checker/nodebuilderimpl.go
+index 188da07aa..de823b4e7 100644
+--- a/internal/checker/nodebuilderimpl.go
++++ b/internal/checker/nodebuilderimpl.go
+@@ -1606,7 +1606,9 @@ func (b *NodeBuilderImpl) symbolToTypeParameterDeclarations(symbol *ast.Symbol)
+ 
+ func (b *NodeBuilderImpl) typeParametersToTypeParameterDeclarations(symbol *ast.Symbol) []*ast.Node {
+ 	targetSymbol := b.ch.getTargetSymbol(symbol)
+-	if targetSymbol.Flags&(ast.SymbolFlagsClass|ast.SymbolFlagsInterface|ast.SymbolFlagsAlias) != 0 {
++	// Stock checks SymbolFlags.TypeAlias here; SymbolFlagsAlias (import alias)
++	// was a mistranslation that dropped type parameters from type alias display.
++	if targetSymbol.Flags&(ast.SymbolFlagsClass|ast.SymbolFlagsInterface|ast.SymbolFlagsTypeAlias) != 0 {
+ 		var results []*ast.Node
+ 		params := b.ch.getLocalTypeParametersOfClassOrInterfaceOrTypeAlias(symbol)
+ 		for _, param := range params {
 diff --git a/internal/checker/printer.go b/internal/checker/printer.go
-index 21704cc7d..e2ce5e3e2 100644
+index 21704cc7d..8044b2240 100644
 --- a/internal/checker/printer.go
 +++ b/internal/checker/printer.go
-@@ -426,6 +426,12 @@ func (c *Checker) SignatureToSignatureDeclaration(signature *Signature, kind ast
+@@ -426,6 +426,18 @@ func (c *Checker) SignatureToSignatureDeclaration(signature *Signature, kind ast
  	return nodeBuilder.SignatureToSignatureDeclaration(signature, kind, enclosingDeclaration, flags, nodebuilder.InternalFlagsNone, nil)
  }
  
@@ -717,6 +732,12 @@ index 21704cc7d..e2ce5e3e2 100644
 +	nodeBuilder, release := c.getNodeBuilder()
 +	defer release()
 +	return nodeBuilder.TypeParameterToDeclaration(t, enclosingDeclaration, flags, nodebuilder.InternalFlagsNone, nil)
++}
++
++func (c *Checker) SymbolToTypeParameterDeclarations(symbol *ast.Symbol, enclosingDeclaration *ast.Node, flags nodebuilder.Flags) []*ast.Node {
++	nodeBuilder, release := c.getNodeBuilder()
++	defer release()
++	return nodeBuilder.SymbolToTypeParameterDeclarations(symbol, enclosingDeclaration, flags, nodebuilder.InternalFlagsNone, nil)
 +}
 +
  // ExpandSymbolForHover produces declaration strings for a symbol with verbosity support for expandable hover.
