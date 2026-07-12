@@ -5959,6 +5959,197 @@ export function createTsgoChecker(program: any): any {
                 return !!project.checker.isValidPropertyAccessForCompletions(tsgoNode, type, rpcSym);
             } catch { return true; }
         },
+        // Type-argument constraint for completions / stringCompletions / codefixes.
+        getTypeArgumentConstraint(node: any): any {
+            if (!node) return undefined;
+            const sf = node.getSourceFile?.();
+            if (!sf?.fileName) return undefined;
+            let start: number | undefined;
+            let end: number | undefined;
+            try {
+                start = node.getStart(sf);
+                end = node.getEnd(sf);
+            } catch { return undefined; }
+            if (typeof start !== "number") return undefined;
+            ensureProject();
+            const tsgoNode = findTsgoNodeAtPosition(sf.fileName, start, node.kind, end);
+            if (!tsgoNode) return undefined;
+            const t = project.checker.getTypeArgumentConstraint(tsgoNode);
+            if (t) fixupType(t);
+            return t;
+        },
+        // Import/export clause completions — module exports + export= properties.
+        getExportsAndPropertiesOfModule(moduleSymbol: any): readonly any[] {
+            if (!moduleSymbol) return [];
+            ensureProject();
+            const rpcSym = resolveRpcSymbol(moduleSymbol) ?? (isTsgoBridgeSymbol(moduleSymbol) ? moduleSymbol : undefined);
+            if (!rpcSym) return [];
+            return project.checker.getExportsAndPropertiesOfModule(rpcSym) ?? [];
+        },
+        // JSX intrinsic tag name completions (`<di`).
+        getJsxIntrinsicTagNamesAt(location: any): readonly any[] {
+            if (!location) return [];
+            const sf = location.getSourceFile?.();
+            if (!sf?.fileName) return [];
+            let start: number | undefined;
+            let end: number | undefined;
+            try {
+                start = location.getStart(sf);
+                end = location.getEnd(sf);
+            } catch { return []; }
+            if (typeof start !== "number") return [];
+            ensureProject();
+            const tsgoNode = findTsgoNodeAtPosition(sf.fileName, start, location.kind, end);
+            if (!tsgoNode) return [];
+            return project.checker.getJsxIntrinsicTagNamesAt(tsgoNode) ?? [];
+        },
+        // Object-literal completion filtering for private/protected members.
+        isPropertyAccessible(node: any, isSuper: boolean, isWrite: boolean, containingType: any, property: any): boolean {
+            if (!node || !containingType || !property) return false;
+            const sf = node.getSourceFile?.();
+            if (!sf?.fileName) return true;
+            let start: number | undefined;
+            let end: number | undefined;
+            try {
+                start = node.getStart(sf);
+                end = node.getEnd(sf);
+            } catch { return true; }
+            if (typeof start !== "number") return true;
+            ensureProject();
+            const tsgoNode = findTsgoNodeAtPosition(sf.fileName, start, node.kind, end);
+            if (!tsgoNode || tsgoNode.kind !== node.kind) return true;
+            const rpcSym = resolveRpcSymbol(property);
+            if (!rpcSym) return true;
+            try {
+                return !!project.checker.isPropertyAccessible(tsgoNode, !!isSuper, !!isWrite, containingType, rpcSym);
+            } catch { return true; }
+        },
+        // Auto-import / FQN chain: undefined when no accessible chain (not []).
+        getAccessibleSymbolChain(
+            symbol: any,
+            enclosingDeclaration: any,
+            meaning: number,
+            useOnlyExternalAliasing: boolean,
+        ): readonly any[] | undefined {
+            if (!symbol) return undefined;
+            ensureProject();
+            const rpcSym = resolveRpcSymbol(symbol) ?? (isTsgoBridgeSymbol(symbol) ? symbol : undefined);
+            if (!rpcSym) return undefined;
+            let tsgoEnclosing: any;
+            if (enclosingDeclaration) {
+                const sf = enclosingDeclaration.getSourceFile?.();
+                if (sf?.fileName) {
+                    let start: number | undefined;
+                    let end: number | undefined;
+                    try {
+                        start = enclosingDeclaration.getStart(sf);
+                        end = enclosingDeclaration.getEnd(sf);
+                    } catch { /* ignore */ }
+                    if (typeof start === "number") {
+                        tsgoEnclosing = findTsgoNodeAtPosition(sf.fileName, start, enclosingDeclaration.kind, end);
+                    }
+                }
+            }
+            return project.checker.getAccessibleSymbolChain(rpcSym, tsgoEnclosing, meaning, !!useOnlyExternalAliasing);
+        },
+        // Call-argument contextual type (object-literal member completions).
+        getContextualTypeForArgumentAtIndex(callTarget: any, argIndex: number): any {
+            if (!callTarget) return undefined;
+            const sf = callTarget.getSourceFile?.();
+            if (!sf?.fileName) return undefined;
+            let start: number | undefined;
+            let end: number | undefined;
+            try {
+                start = callTarget.getStart(sf);
+                end = callTarget.getEnd(sf);
+            } catch { return undefined; }
+            if (typeof start !== "number") return undefined;
+            ensureProject();
+            const tsgoNode = findTsgoNodeAtPosition(sf.fileName, start, callTarget.kind, end);
+            if (!tsgoNode) return undefined;
+            const t = project.checker.getContextualTypeForArgumentAtIndex(tsgoNode, argIndex);
+            if (t) fixupType(t);
+            return t;
+        },
+        // JSX attribute value contextual type. Go has no contextFlags; LS omits flags.
+        getContextualTypeForJsxAttribute(attribute: any, _contextFlags?: number): any {
+            if (!attribute) return undefined;
+            const sf = attribute.getSourceFile?.();
+            if (!sf?.fileName) return undefined;
+            let start: number | undefined;
+            let end: number | undefined;
+            try {
+                start = attribute.getStart(sf);
+                end = attribute.getEnd(sf);
+            } catch { return undefined; }
+            if (typeof start !== "number") return undefined;
+            ensureProject();
+            const tsgoNode = findTsgoNodeAtPosition(sf.fileName, start, attribute.kind, end);
+            if (!tsgoNode) return undefined;
+            const t = project.checker.getContextualTypeForJsxAttribute(tsgoNode);
+            if (t) fixupType(t);
+            return t;
+        },
+        // Property-access validity (distinct from isValidPropertyAccessForCompletions).
+        isValidPropertyAccess(node: any, propertyName: string): boolean {
+            if (!node || typeof propertyName !== "string") return false;
+            const sf = node.getSourceFile?.();
+            if (!sf?.fileName) return true;
+            let start: number | undefined;
+            let end: number | undefined;
+            try {
+                start = node.getStart(sf);
+                end = node.getEnd(sf);
+            } catch { return true; }
+            if (typeof start !== "number") return true;
+            ensureProject();
+            const tsgoNode = findTsgoNodeAtPosition(sf.fileName, start, node.kind, end);
+            if (!tsgoNode || tsgoNode.kind !== node.kind) return true;
+            try {
+                return !!project.checker.isValidPropertyAccess(tsgoNode, propertyName);
+            } catch { return true; }
+        },
+        // String-literal argument completions — candidate signatures.
+        getCandidateSignaturesForStringLiteralCompletions(call: any, editingArgument: any): readonly any[] {
+            if (!call || !editingArgument) return [];
+            const sf = call.getSourceFile?.();
+            if (!sf?.fileName) return [];
+            let callStart: number | undefined;
+            let callEnd: number | undefined;
+            let argStart: number | undefined;
+            let argEnd: number | undefined;
+            try {
+                callStart = call.getStart(sf);
+                callEnd = call.getEnd(sf);
+                const argSf = editingArgument.getSourceFile?.() ?? sf;
+                argStart = editingArgument.getStart(argSf);
+                argEnd = editingArgument.getEnd(argSf);
+            } catch { return []; }
+            if (typeof callStart !== "number" || typeof argStart !== "number") return [];
+            ensureProject();
+            const tsgoCall = findTsgoNodeAtPosition(sf.fileName, callStart, call.kind, callEnd);
+            const argSf = editingArgument.getSourceFile?.() ?? sf;
+            const tsgoArg = findTsgoNodeAtPosition(argSf.fileName, argStart, editingArgument.kind, argEnd);
+            if (!tsgoCall || !tsgoArg) return [];
+            return project.checker.getCandidateSignaturesForStringLiteralCompletions(tsgoCall, tsgoArg) ?? [];
+        },
+        // Parameter-property dual symbols (references / codefixes).
+        getSymbolsOfParameterPropertyDeclaration(parameter: any, parameterName: string): readonly any[] {
+            if (!parameter || typeof parameterName !== "string") return [];
+            const sf = parameter.getSourceFile?.();
+            if (!sf?.fileName) return [];
+            let start: number | undefined;
+            let end: number | undefined;
+            try {
+                start = parameter.getStart(sf);
+                end = parameter.getEnd(sf);
+            } catch { return []; }
+            if (typeof start !== "number") return [];
+            ensureProject();
+            const tsgoNode = findTsgoNodeAtPosition(sf.fileName, start, parameter.kind, end);
+            if (!tsgoNode) return [];
+            return project.checker.getSymbolsOfParameterPropertyDeclaration(tsgoNode, parameterName) ?? [];
+        },
         // Completions (`this.` member lists, #8811): type of `this` at a node.
         tryGetThisTypeAt(node: any, includeGlobalThis: boolean = true, container?: any): any {
             if (!node) return undefined;
@@ -6176,7 +6367,7 @@ const _tnbCheckerCoverage = {
     getSymbolsInScope: "adapter",
     getSymbolAtLocation: "adapter",
     getIndexInfosAtLocation: "adapter",
-    getSymbolsOfParameterPropertyDeclaration: "throw",
+    getSymbolsOfParameterPropertyDeclaration: "adapter",
     getShorthandAssignmentValueSymbol: "adapter",
     getExportSpecifierLocalTargetSymbol: "adapter",
     getExportSymbolOfSymbol: "adapter",
@@ -6198,13 +6389,13 @@ const _tnbCheckerCoverage = {
     getSymbolOfExpando: "throw",
     getContextualType: "adapter",
     getContextualTypeForObjectLiteralElement: "adapter",
-    getContextualTypeForArgumentAtIndex: "throw",
-    getContextualTypeForJsxAttribute: "throw",
+    getContextualTypeForArgumentAtIndex: "adapter",
+    getContextualTypeForJsxAttribute: "adapter",
     isContextSensitive: "tsgo",
     getTypeOfPropertyOfContextualType: "throw",
     getResolvedSignature: "adapter",
     getResolvedSignatureForSignatureHelp: "adapter",
-    getCandidateSignaturesForStringLiteralCompletions: "throw",
+    getCandidateSignaturesForStringLiteralCompletions: "adapter",
     getExpandedParameters: "adapter",
     hasEffectiveRestParameter: "adapter",
     containsArgumentsReference: "throw",
@@ -6216,14 +6407,14 @@ const _tnbCheckerCoverage = {
     getMergedSymbol: "adapter",
     symbolIsValue: "throw",
     getConstantValue: "tsgo",
-    isValidPropertyAccess: "throw",
+    isValidPropertyAccess: "adapter",
     isValidPropertyAccessForCompletions: "adapter",
     getAliasedSymbol: "adapter",
     getImmediateAliasedSymbol: "adapter",
     getExportsOfModule: "adapter",
-    getExportsAndPropertiesOfModule: "throw",
+    getExportsAndPropertiesOfModule: "adapter",
     forEachExportAndPropertyOfModule: "adapter",
-    getJsxIntrinsicTagNamesAt: "throw",
+    getJsxIntrinsicTagNamesAt: "adapter",
     isOptionalParameter: "adapter",
     getAmbientModules: "adapter",
     tryGetMemberInModuleExports: "adapter",
@@ -6290,17 +6481,17 @@ const _tnbCheckerCoverage = {
     resolveName: "adapter",
     getJsxNamespace: "throw",
     getJsxFragmentFactory: "throw",
-    getAccessibleSymbolChain: "throw",
+    getAccessibleSymbolChain: "adapter",
     getTypePredicateOfSignature: "tsgo",
     resolveExternalModuleName: "throw",
     resolveExternalModuleSymbol: "adapter",
     tryGetThisTypeAt: "adapter",
-    getTypeArgumentConstraint: "throw",
+    getTypeArgumentConstraint: "adapter",
     getSuggestionDiagnostics: "adapter",
     runWithCancellationToken: "adapter",
     getLocalTypeParametersOfClassOrInterfaceOrTypeAlias: "adapter",
     isDeclarationVisible: "adapter",
-    isPropertyAccessible: "throw",
+    isPropertyAccessible: "adapter",
     getTypeOnlyAliasDeclaration: "throw",
     getMemberOverrideModifierStatus: "throw",
     isTypeParameterPossiblyReferenced: "throw",
