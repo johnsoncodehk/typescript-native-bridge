@@ -1064,6 +1064,58 @@ function hostifyDecodedDeclarationNode(node: any): any {
     const member = stmt?.members?.[0];
     return member;
 }
+/** Hostify signature declarations for completions/codefix (kind-sensitive parse). */
+function hostifyDecodedSignatureDeclaration(node: any, kind: number): any {
+    if (!node) return undefined;
+    if (isMutableHostAstNode(node)) return node;
+    stampIdentifierEscapedText(node);
+    let text = usingSingleLineStringWriter(writer => {
+        getRemoveCommentsPrinter().writeNode(EmitHint.Unspecified, node, /*sourceFile*/ undefined, writer);
+    });
+    if (!text) return undefined;
+    // Nodebuilder often emits nameless methods (`(): T`); inject a placeholder so
+    // the reparse is legal. Callers replace the name via factory.update*.
+    if (/^\s*[\(<]/.test(text) || /^\s*</.test(text)) {
+        text = `__m${text}`;
+    }
+    // MethodDeclaration must be reparsed as a class member (interface wrap yields MethodSignature).
+    if (kind === SyntaxKind.MethodDeclaration) {
+        const sf = createSourceFile(
+            "__tnb_methodDecl.ts",
+            `class __C { ${text} }`,
+            hostSourceFileOptions(/*languageVersion*/ 99, /*host*/ undefined),
+            /*setParentNodes*/ true,
+            /*scriptKind*/ 3 /* ScriptKind.TS */,
+        );
+        const stmt: any = sf.statements?.[0];
+        return stmt?.members?.[0];
+    }
+    if (kind === SyntaxKind.FunctionDeclaration) {
+        if (/^\s*(async\s+)?function\b/.test(text) === false) {
+            text = `function ${text}`;
+        }
+        const sf = createSourceFile(
+            "__tnb_fnDecl.ts",
+            text,
+            hostSourceFileOptions(/*languageVersion*/ 99, /*host*/ undefined),
+            /*setParentNodes*/ true,
+            /*scriptKind*/ 3 /* ScriptKind.TS */,
+        );
+        return sf.statements?.[0];
+    }
+    // FunctionExpression / ArrowFunction
+    const sf = createSourceFile(
+        "__tnb_fnExpr.ts",
+        `const __e = (${text});`,
+        hostSourceFileOptions(/*languageVersion*/ 99, /*host*/ undefined),
+        /*setParentNodes*/ true,
+        /*scriptKind*/ 3 /* ScriptKind.TS */,
+    );
+    const stmt: any = sf.statements?.[0];
+    let init = stmt?.declarationList?.declarations?.[0]?.initializer;
+    while (init?.kind === SyntaxKind.ParenthesizedExpression) init = init.expression;
+    return init;
+}
 /** Hostify a decoded expression (symbolToExpression) for factory/textChanges. */
 function hostifyDecodedExpression(node: any): any {
     if (!node) return undefined;
@@ -6264,6 +6316,35 @@ export function createTsgoChecker(program: any): any {
                 return hostifyDecodedExpression(node) ?? node;
             } catch { return undefined; }
         },
+        // Unlocks class-member snippet completions (addNewNodeForMemberSymbol →
+        // createSignatureDeclarationFromSignature) which pass a host ClassLike as
+        // enclosingDeclaration; bare "tsgo" forwarding dies in getNodeId.
+        signatureToSignatureDeclaration(
+            signature: any,
+            kind: number,
+            enclosingDeclaration?: any,
+            flags?: number,
+            _internalFlags?: number,
+            _tracker?: any,
+        ): any {
+            if (!signature) return undefined;
+            ensureProject();
+            const tsgoLocation = mapHostEnclosingToTsgo(enclosingDeclaration);
+            try {
+                const node = project.checker.signatureToSignatureDeclaration(
+                    signature,
+                    kind,
+                    tsgoLocation,
+                    flags,
+                );
+                if (!node) return undefined;
+                applySingleLineEmitFlagsToDeclaration(node);
+                stampIdentifierEscapedText(node);
+                // Never fall back to the decoded node — factory.update* needs mutable pos.
+                return hostifyDecodedSignatureDeclaration(node, kind);
+            }
+            catch { return undefined; }
+        },
         symbolToNode(symbol: any, meaning: number, enclosingDeclaration?: any, flags?: number, internalFlags?: number): any {
             if (!symbol) return undefined;
             ensureProject();
@@ -6599,6 +6680,90 @@ export function createTsgoChecker(program: any): any {
             );
             if (t) fixupType(t);
             return t;
+        },
+        // ── Final-3: override status / expando / symbolWalker narrow RPC ──
+        getMemberOverrideModifierStatus(node: any, member: any, memberSymbol: any): number {
+            // Stock MemberOverrideStatus.Ok = 0. Synthetic ClassElement (completions)
+            // cannot be mapped via findTsgoNodeAtPosition — extract modifier flags in JS.
+            if (!node || !memberSymbol) return 0;
+            ensureProject();
+            const sf = node.getSourceFile?.();
+            if (!sf?.fileName) return 0;
+            let start: number | undefined;
+            let end: number | undefined;
+            try {
+                start = node.getStart(sf);
+                end = node.getEnd(sf);
+            }
+            catch { return 0; }
+            if (typeof start !== "number") return 0;
+            const tsgoClass = findTsgoNodeAtPosition(sf.fileName, start, node.kind, end);
+            if (!tsgoClass) return 0;
+            const rpcSym = resolveRpcSymbol(memberSymbol)
+                ?? (isTsgoBridgeSymbol(memberSymbol) ? memberSymbol : undefined);
+            if (!rpcSym || typeof rpcSym.id !== "number") return 0;
+            const cacheFlags = Number(member?.modifierFlagsCache ?? 0);
+            // ModifierFlags: Override=1<<4, Abstract=1<<6, Static=1<<8
+            let memberHasOverride = !!(cacheFlags & (1 << 4));
+            let memberHasAbstract = !!(cacheFlags & (1 << 6));
+            let memberIsStatic = !!(cacheFlags & (1 << 8));
+            for (const mod of member?.modifiers ?? []) {
+                if (mod?.kind === SyntaxKind.OverrideKeyword) memberHasOverride = true;
+                if (mod?.kind === SyntaxKind.AbstractKeyword) memberHasAbstract = true;
+                if (mod?.kind === SyntaxKind.StaticKeyword) memberIsStatic = true;
+            }
+            // Stock speculative path: no parent → hasSyntacticModifier only (covered above).
+            const memberHasName = !!(member?.name);
+            try {
+                return project.checker.getMemberOverrideModifierStatus(
+                    tsgoClass,
+                    rpcSym,
+                    memberHasOverride,
+                    memberHasAbstract,
+                    memberIsStatic,
+                    memberHasName,
+                ) ?? 0;
+            }
+            catch { return 0; }
+        },
+        getSymbolOfExpando(node: any, allowDeclaration: boolean): any {
+            if (!node) return undefined;
+            const sf = node.getSourceFile?.();
+            if (!sf?.fileName) return undefined;
+            let start: number | undefined;
+            let end: number | undefined;
+            try {
+                start = node.getStart(sf);
+                end = node.getEnd(sf);
+            }
+            catch { return undefined; }
+            if (typeof start !== "number") return undefined;
+            ensureProject();
+            const tsgoNode = findTsgoNodeAtPosition(sf.fileName, start, node.kind, end);
+            if (!tsgoNode) return undefined;
+            try {
+                return refineNavSymbol(project.checker.getSymbolOfExpando(tsgoNode, !!allowDeclaration));
+            }
+            catch { return undefined; }
+        },
+        getSymbolWalker(_accept?: (symbol: any) => boolean): any {
+            // Narrow bypass: collectVisitedTypeParameters returns only TypeParameter
+            // types (consumer filters isTypeParameter). visitedSymbols unused.
+            return {
+                walkType: (type: any) => {
+                    if (!type) return { visitedTypes: [], visitedSymbols: [] };
+                    ensureProject();
+                    try {
+                        const visited = project.checker.collectVisitedTypeParameters(type) ?? [];
+                        for (const t of visited) fixupType(t);
+                        return { visitedTypes: visited, visitedSymbols: [] };
+                    }
+                    catch {
+                        return { visitedTypes: [], visitedSymbols: [] };
+                    }
+                },
+                walkSymbol: () => ({ visitedTypes: [], visitedSymbols: [] }),
+            };
         },
         getModuleSymbolForSourceFile(sourceFile: any): any {
             if (!sourceFile) return undefined;
@@ -7276,7 +7441,7 @@ const _tnbCheckerCoverage = {
     getTypeArguments: "adapter",
     typeToTypeNode: "adapter",
     typePredicateToTypePredicateNode: "adapter",
-    signatureToSignatureDeclaration: "tsgo",
+    signatureToSignatureDeclaration: "adapter",
     indexInfoToIndexSignatureDeclaration: "adapter",
     symbolToEntityName: "adapter",
     symbolToExpression: "adapter",
@@ -7306,7 +7471,7 @@ const _tnbCheckerCoverage = {
     getFullyQualifiedName: "adapter",
     getAugmentedPropertiesOfType: "adapter",
     getRootSymbols: "adapter",
-    getSymbolOfExpando: "throw",
+    getSymbolOfExpando: "adapter",
     getContextualType: "adapter",
     getContextualTypeForObjectLiteralElement: "adapter",
     getContextualTypeForArgumentAtIndex: "adapter",
@@ -7379,7 +7544,7 @@ const _tnbCheckerCoverage = {
     createIndexInfo: "adapter",
     isSymbolAccessible: "adapter",
     tryFindAmbientModule: "adapter",
-    getSymbolWalker: "throw",
+    getSymbolWalker: "adapter",
     getDiagnostics: "adapter",
     getGlobalDiagnostics: "adapter",
     getEmitResolver: "adapter",
@@ -7413,7 +7578,7 @@ const _tnbCheckerCoverage = {
     isDeclarationVisible: "adapter",
     isPropertyAccessible: "adapter",
     getTypeOnlyAliasDeclaration: "adapter",
-    getMemberOverrideModifierStatus: "throw",
+    getMemberOverrideModifierStatus: "adapter",
     isTypeParameterPossiblyReferenced: "throw",
     typeHasCallOrConstructSignatures: "adapter",
     getSymbolFlags: "adapter",

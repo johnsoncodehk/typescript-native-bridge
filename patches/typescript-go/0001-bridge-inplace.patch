@@ -706,7 +706,7 @@ index ac37c863d..70618dee2 100644
  	case ast.KindVariableDeclaration, ast.KindParameter, ast.KindPropertyDeclaration, ast.KindPropertySignature, ast.KindBindingElement:
  		return c.getContextualTypeForInitializerExpression(node, contextFlags)
 diff --git a/internal/checker/exports.go b/internal/checker/exports.go
-index dca835399..ae9894da9 100644
+index dca835399..bd81d5593 100644
 --- a/internal/checker/exports.go
 +++ b/internal/checker/exports.go
 @@ -3,6 +3,7 @@ package checker
@@ -761,7 +761,7 @@ index dca835399..ae9894da9 100644
  func (c *Checker) IsContextSensitive(node *ast.Node) bool {
  	return c.isContextSensitive(node)
  }
-@@ -341,3 +379,244 @@ func (c *Checker) RemoveMissingOrUndefinedType(t *Type) *Type {
+@@ -341,3 +379,249 @@ func (c *Checker) RemoveMissingOrUndefinedType(t *Type) *Type {
  func (c *Checker) GetWidenedType(t *Type) *Type {
  	return c.getWidenedType(t)
  }
@@ -1006,6 +1006,11 @@ index dca835399..ae9894da9 100644
 +	}
 +	return c.newAnonymousType(symbol, table, callSignatures, constructSignatures, infos)
 +}
++
++// Final-3 batch TypeChecker methods (implementations live in sibling files):
++//   GetMemberOverrideModifierStatus — override_status.go
++//   GetSymbolOfExpando               — expando.go
++//   CollectVisitedTypeParameters     — symbolwalker.go
 diff --git a/internal/checker/nodebuilderimpl.go b/internal/checker/nodebuilderimpl.go
 index 188da07aa..de823b4e7 100644
 --- a/internal/checker/nodebuilderimpl.go
