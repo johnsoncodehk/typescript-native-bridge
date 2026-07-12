@@ -4556,11 +4556,37 @@ export function createTsgoChecker(program: any): any {
         // a Transient-flagged tsgo symbol flowing into stock services
         // (find-all-refs fromRoot, SymbolDisplay getSymbolKind) would crash on
         // `links.checkFlags`. Satisfy the contract at the prototype.
+        // Also provide lazy `links.type` → getTypeOfSymbol for inferFromUsage
+        // readback of materialized transient parameters (inferFromUsage.ts:1207).
         if (!Object.getOwnPropertyDescriptor(proto, "links")) {
             Object.defineProperty(proto, "links", {
                 configurable: true,
                 get() {
-                    return this.__tnbLinks ??= { checkFlags: this.checkFlags ?? 0 };
+                    if (this.__tnbLinks) return this.__tnbLinks;
+                    const self = this;
+                    const links: any = { checkFlags: this.checkFlags ?? 0 };
+                    Object.defineProperty(links, "type", {
+                        configurable: true,
+                        enumerable: true,
+                        get() {
+                            if (Object.prototype.hasOwnProperty.call(this, "_type")) return this._type;
+                            try {
+                                ensureProject();
+                                const t = rpc().getTypeOfSymbol(self);
+                                if (t) fixupType(t);
+                                this._type = t;
+                                return t;
+                            }
+                            catch {
+                                return undefined;
+                            }
+                        },
+                        set(v: any) {
+                            this._type = v;
+                        },
+                    });
+                    this.__tnbLinks = links;
+                    return links;
                 },
             });
         }
@@ -6447,6 +6473,133 @@ export function createTsgoChecker(program: any): any {
                 isRestParameter: !!info.isRestParameter,
             };
         },
+        // ── Constructor batch 7+8 ──
+        // Local placeholders for createSymbol/createIndexInfo; materialize at
+        // createSignature / createAnonymousType boundaries via atomic Go RPCs.
+        createSymbol(flags: number, name: any): any {
+            // Stock ORs Transient; callers write links.type before materialization.
+            return {
+                flags: (flags | SymbolFlags.Transient) >>> 0,
+                escapedName: name,
+                name,
+                links: { checkFlags: 0 },
+                __tnbPlaceholder: true,
+            };
+        },
+        createIndexInfo(keyType: any, valueType: any, isReadonly: boolean): any {
+            return {
+                keyType,
+                type: valueType,
+                valueType,
+                isReadonly: !!isReadonly,
+                declaration: undefined,
+            };
+        },
+        createArrayType(elementType: any): any {
+            ensureProject();
+            if (!elementType) return undefined;
+            const t = project.checker.createArrayType(elementType);
+            if (t) fixupType(t);
+            return t;
+        },
+        createPromiseType(promisedType: any): any {
+            ensureProject();
+            if (!promisedType) return undefined;
+            const t = project.checker.createPromiseType(promisedType);
+            if (t) fixupType(t);
+            return t;
+        },
+        createSignature(
+            declaration: any,
+            typeParameters: any,
+            thisParameter: any,
+            parameters: any[],
+            returnType: any,
+            typePredicate: any,
+            minArgumentCount: number,
+            flags: number,
+        ): any {
+            ensureProject();
+            // Design: Go createSignatureFromParts ignores decl/typeParams/this/predicate.
+            // Consuming sites mostly pass undefined; returnValueCorrect may pass real
+            // declaration/typeParams/thisParameter — reported as deviation, still assemble.
+            const materialized: any[] = [];
+            for (const p of parameters ?? []) {
+                if (p?.__tnbPlaceholder) {
+                    const typed = project.checker.createTransientSymbolWithType(
+                        p.flags >>> 0,
+                        String(p.escapedName ?? p.name ?? ""),
+                        p.links?.type,
+                    );
+                    materialized.push(typed);
+                }
+                else if (p && typeof p.id === "number") {
+                    materialized.push(p);
+                }
+                else if (p) {
+                    const rpcSym = resolveRpcSymbol(p);
+                    if (rpcSym && typeof rpcSym.id === "number") materialized.push(rpcSym);
+                }
+            }
+            const sig = project.checker.createSignatureFromParts(
+                materialized,
+                returnType,
+                minArgumentCount ?? 0,
+                flags ?? 0,
+            );
+            return sig;
+        },
+        createAnonymousType(
+            symbol: any,
+            members: any,
+            callSignatures: any[],
+            constructSignatures: any[],
+            indexInfos: any[],
+        ): any {
+            ensureProject();
+            const memberSyms: any[] = [];
+            if (members) {
+                const values = typeof members.values === "function"
+                    ? [...members.values()]
+                    : Array.isArray(members) ? members : Object.values(members);
+                for (const m of values) {
+                    if (!m) continue;
+                    if (m.__tnbPlaceholder) {
+                        memberSyms.push(project.checker.createTransientSymbolWithType(
+                            m.flags >>> 0,
+                            String(m.escapedName ?? m.name ?? ""),
+                            m.links?.type,
+                        ));
+                    }
+                    else if (typeof m.id === "number") {
+                        memberSyms.push(m);
+                    }
+                    else {
+                        const rpcSym = resolveRpcSymbol(m);
+                        if (rpcSym && typeof rpcSym.id === "number") memberSyms.push(rpcSym);
+                    }
+                }
+            }
+            let owner: any;
+            if (symbol) {
+                if (typeof symbol.id === "number") owner = symbol;
+                else owner = resolveRpcSymbol(symbol);
+            }
+            const indexParts = (indexInfos ?? []).map((info: any) => ({
+                keyType: info.keyType,
+                valueType: info.type ?? info.valueType,
+                isReadonly: !!info.isReadonly,
+            }));
+            const t = project.checker.createAnonymousTypeFromParts(
+                owner && typeof owner.id === "number" ? owner : undefined,
+                memberSyms,
+                callSignatures ?? [],
+                constructSignatures ?? [],
+                indexParts,
+            );
+            if (t) fixupType(t);
+            return t;
+        },
         getModuleSymbolForSourceFile(sourceFile: any): any {
             if (!sourceFile) return undefined;
             if (sourceFile.symbol) return sourceFile.symbol;
@@ -7213,17 +7366,17 @@ const _tnbCheckerCoverage = {
     getNonPrimitiveType: "throw",
     getOptionalType: "throw",
     getUnionType: "adapter",
-    createArrayType: "throw",
+    createArrayType: "adapter",
     getElementTypeOfArrayType: "adapter",
-    createPromiseType: "throw",
+    createPromiseType: "adapter",
     getPromiseType: "adapter",
     getPromiseLikeType: "adapter",
     getAnyAsyncIterableType: "adapter",
     isTypeAssignableTo: "adapter",
-    createAnonymousType: "throw",
-    createSignature: "throw",
-    createSymbol: "throw",
-    createIndexInfo: "throw",
+    createAnonymousType: "adapter",
+    createSignature: "adapter",
+    createSymbol: "adapter",
+    createIndexInfo: "adapter",
     isSymbolAccessible: "adapter",
     tryFindAmbientModule: "adapter",
     getSymbolWalker: "throw",

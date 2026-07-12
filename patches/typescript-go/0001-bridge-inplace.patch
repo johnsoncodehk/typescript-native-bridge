@@ -706,7 +706,7 @@ index ac37c863d..70618dee2 100644
  	case ast.KindVariableDeclaration, ast.KindParameter, ast.KindPropertyDeclaration, ast.KindPropertySignature, ast.KindBindingElement:
  		return c.getContextualTypeForInitializerExpression(node, contextFlags)
 diff --git a/internal/checker/exports.go b/internal/checker/exports.go
-index dca835399..fee83453c 100644
+index dca835399..ae9894da9 100644
 --- a/internal/checker/exports.go
 +++ b/internal/checker/exports.go
 @@ -3,6 +3,7 @@ package checker
@@ -761,7 +761,7 @@ index dca835399..fee83453c 100644
  func (c *Checker) IsContextSensitive(node *ast.Node) bool {
  	return c.isContextSensitive(node)
  }
-@@ -341,3 +379,185 @@ func (c *Checker) RemoveMissingOrUndefinedType(t *Type) *Type {
+@@ -341,3 +379,244 @@ func (c *Checker) RemoveMissingOrUndefinedType(t *Type) *Type {
  func (c *Checker) GetWidenedType(t *Type) *Type {
  	return c.getWidenedType(t)
  }
@@ -946,6 +946,65 @@ index dca835399..fee83453c 100644
 +		return symbol.ValueDeclaration.Name()
 +	}
 +	return nil
++}
++
++// CreateArrayType wraps createArrayType (stock checker.ts createArrayType).
++func (c *Checker) CreateArrayType(elementType *Type) *Type {
++	return c.createArrayType(elementType)
++}
++
++// CreatePromiseType wraps createPromiseType (stock checker.ts createPromiseType).
++func (c *Checker) CreatePromiseType(promisedType *Type) *Type {
++	return c.createPromiseType(promisedType)
++}
++
++// CreateTransientSymbolWithType builds a transient symbol and pins its resolved
++// type via valueSymbolLinks.resolvedType (same field as newParameter/newProperty
++// at checker.go:14023-14030).
++func (c *Checker) CreateTransientSymbolWithType(flags ast.SymbolFlags, name string, t *Type) *ast.Symbol {
++	symbol := c.newSymbol(flags, name)
++	if t != nil {
++		c.valueSymbolLinks.Get(symbol).resolvedType = t
++	}
++	return symbol
++}
++
++// CreateSignatureFromParts assembles a Signature via newSignature
++// (checker.go:25163). Declaration / typeParams / thisParam / typePredicate are
++// omitted (stock consumers in this batch pass undefined for those, or only need
++// parameters+returnType for assignability).
++func (c *Checker) CreateSignatureFromParts(parameters []*ast.Symbol, returnType *Type, minArgumentCount int, flags SignatureFlags) *Signature {
++	return c.newSignature(flags, nil /*declaration*/, nil /*typeParameters*/, nil /*thisParameter*/, parameters, returnType, nil /*resolvedTypePredicate*/, minArgumentCount)
++}
++
++// IndexInfoPart is the wire shape for createAnonymousTypeFromParts index infos.
++type IndexInfoPart struct {
++	KeyType    *Type
++	ValueType  *Type
++	IsReadonly bool
++}
++
++// CreateAnonymousTypeFromParts assembles an anonymous type via newAnonymousType
++// (checker.go:25006) and newIndexInfo (checker.go:25179).
++func (c *Checker) CreateAnonymousTypeFromParts(
++	symbol *ast.Symbol,
++	members []*ast.Symbol,
++	callSignatures []*Signature,
++	constructSignatures []*Signature,
++	indexInfos []IndexInfoPart,
++) *Type {
++	table := make(ast.SymbolTable, len(members))
++	for _, member := range members {
++		if member == nil {
++			continue
++		}
++		table[member.Name] = member
++	}
++	infos := make([]*IndexInfo, 0, len(indexInfos))
++	for _, part := range indexInfos {
++		infos = append(infos, c.newIndexInfo(part.KeyType, part.ValueType, part.IsReadonly, nil /*declaration*/, nil /*components*/))
++	}
++	return c.newAnonymousType(symbol, table, callSignatures, constructSignatures, infos)
 +}
 diff --git a/internal/checker/nodebuilderimpl.go b/internal/checker/nodebuilderimpl.go
 index 188da07aa..de823b4e7 100644
