@@ -706,7 +706,7 @@ index ac37c863d..70618dee2 100644
  	case ast.KindVariableDeclaration, ast.KindParameter, ast.KindPropertyDeclaration, ast.KindPropertySignature, ast.KindBindingElement:
  		return c.getContextualTypeForInitializerExpression(node, contextFlags)
 diff --git a/internal/checker/exports.go b/internal/checker/exports.go
-index dca835399..742196359 100644
+index dca835399..06fc7ee45 100644
 --- a/internal/checker/exports.go
 +++ b/internal/checker/exports.go
 @@ -298,6 +298,43 @@ func (c *Checker) GetIndexInfosOfType(t *Type) []*IndexInfo {
@@ -753,7 +753,7 @@ index dca835399..742196359 100644
  func (c *Checker) IsContextSensitive(node *ast.Node) bool {
  	return c.isContextSensitive(node)
  }
-@@ -341,3 +378,51 @@ func (c *Checker) RemoveMissingOrUndefinedType(t *Type) *Type {
+@@ -341,3 +378,71 @@ func (c *Checker) RemoveMissingOrUndefinedType(t *Type) *Type {
  func (c *Checker) GetWidenedType(t *Type) *Type {
  	return c.getWidenedType(t)
  }
@@ -805,6 +805,26 @@ index dca835399..742196359 100644
 +func (c *Checker) IsLibType(t *Type) bool {
 +	return c.IsLibTypeForHoverVerbosity(t)
 +}
++
++func (c *Checker) GetSuggestedSymbolForNonexistentProperty(name *ast.Node, containingType *Type) *ast.Symbol {
++	return c.getSuggestedSymbolForNonexistentProperty(name, containingType)
++}
++
++func (c *Checker) GetSuggestedSymbolForNonexistentClassMember(name string, baseType *Type) *ast.Symbol {
++	return c.getSuggestedSymbolForNonexistentClassMember(name, baseType)
++}
++
++func (c *Checker) GetSuggestedSymbolForNonexistentJSXAttribute(name string, containingType *Type) *ast.Symbol {
++	return c.getSuggestedSymbolForNonexistentJSXAttribute(name, containingType)
++}
++
++func (c *Checker) GetSuggestedSymbolForNonexistentModule(name *ast.Node, targetModule *ast.Symbol) *ast.Symbol {
++	return c.getSuggestedSymbolForNonexistentModule(name, targetModule)
++}
++
++func (c *Checker) GetSuggestedSymbolForNonexistentSymbol(location *ast.Node, outerName string, meaning ast.SymbolFlags) *ast.Symbol {
++	return c.getSuggestedSymbolForNonexistentSymbol(location, outerName, meaning)
++}
 diff --git a/internal/checker/nodebuilderimpl.go b/internal/checker/nodebuilderimpl.go
 index 188da07aa..de823b4e7 100644
 --- a/internal/checker/nodebuilderimpl.go
@@ -821,7 +841,7 @@ index 188da07aa..de823b4e7 100644
  		params := b.ch.getLocalTypeParametersOfClassOrInterfaceOrTypeAlias(symbol)
  		for _, param := range params {
 diff --git a/internal/checker/printer.go b/internal/checker/printer.go
-index 21704cc7d..08a6773a9 100644
+index 21704cc7d..2c1c23145 100644
 --- a/internal/checker/printer.go
 +++ b/internal/checker/printer.go
 @@ -426,6 +426,24 @@ func (c *Checker) SignatureToSignatureDeclaration(signature *Signature, kind ast
@@ -849,6 +869,46 @@ index 21704cc7d..08a6773a9 100644
  // ExpandSymbolForHover produces declaration strings for a symbol with verbosity support for expandable hover.
  func (c *Checker) ExpandSymbolForHover(symbol *ast.Symbol, meaning ast.SymbolFlags, vc *VerbosityContext) string {
  	nodeBuilder, release := c.getNodeBuilder()
+@@ -484,3 +502,39 @@ func (c *Checker) TypePredicateToTypePredicateNode(t *TypePredicate, enclosingDe
+ 	nodeBuilder := c.getNodeBuilderEx(idToSymbol)
+ 	return nodeBuilder.TypePredicateToTypePredicateNode(t, enclosingDeclaration, flags, nodebuilder.InternalFlagsNone, nil)
+ }
++
++func (c *Checker) SymbolToExpression(symbol *ast.Symbol, meaning ast.SymbolFlags, enclosingDeclaration *ast.Node, flags nodebuilder.Flags, internalFlags nodebuilder.InternalFlags) *ast.Node {
++	nodeBuilder, release := c.getNodeBuilder()
++	defer release()
++	return nodeBuilder.SymbolToExpression(symbol, meaning, enclosingDeclaration, flags, internalFlags, nil)
++}
++
++func (c *Checker) SymbolToNode(symbol *ast.Symbol, meaning ast.SymbolFlags, enclosingDeclaration *ast.Node, flags nodebuilder.Flags, internalFlags nodebuilder.InternalFlags) *ast.Node {
++	nodeBuilder, release := c.getNodeBuilder()
++	defer release()
++	return nodeBuilder.SymbolToNode(symbol, meaning, enclosingDeclaration, flags, internalFlags, nil)
++}
++
++func (c *Checker) SymbolToEntityName(symbol *ast.Symbol, meaning ast.SymbolFlags, enclosingDeclaration *ast.Node, flags nodebuilder.Flags, internalFlags nodebuilder.InternalFlags) *ast.Node {
++	nodeBuilder, release := c.getNodeBuilder()
++	defer release()
++	return nodeBuilder.SymbolToEntityName(symbol, meaning, enclosingDeclaration, flags, internalFlags, nil)
++}
++
++// TypePredicateToTypePredicateNodeFromParts reconstructs a TypePredicate from
++// wire fields (no TypePredicate handle registry) and builds the AST node.
++func (c *Checker) TypePredicateToTypePredicateNodeFromParts(kind TypePredicateKind, parameterName string, parameterIndex int32, t *Type, enclosingDeclaration *ast.Node, flags nodebuilder.Flags) *ast.Node {
++	pred := c.newTypePredicate(kind, parameterName, parameterIndex, t)
++	nodeBuilder, release := c.getNodeBuilder()
++	defer release()
++	return nodeBuilder.TypePredicateToTypePredicateNode(pred, enclosingDeclaration, flags, nodebuilder.InternalFlagsNone, nil)
++}
++
++// IndexInfoToIndexSignatureDeclaration reconstructs IndexInfo from wire fields
++// (key/value/readonly/declaration; no IndexInfo handle) and builds the AST.
++func (c *Checker) IndexInfoToIndexSignatureDeclaration(keyType, valueType *Type, isReadonly bool, declaration, enclosingDeclaration *ast.Node, flags nodebuilder.Flags) *ast.Node {
++	info := c.newIndexInfo(keyType, valueType, isReadonly, declaration, nil)
++	nodeBuilder, release := c.getNodeBuilder()
++	defer release()
++	return nodeBuilder.IndexInfoToIndexSignatureDeclaration(info, enclosingDeclaration, flags, nodebuilder.InternalFlagsNone, nil)
++}
 diff --git a/internal/checker/services.go b/internal/checker/services.go
 index 12b9d4079..db9750b1a 100644
 --- a/internal/checker/services.go

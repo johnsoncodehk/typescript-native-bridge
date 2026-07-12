@@ -1043,6 +1043,89 @@ function hostifyDecodedTypeNode(typeNode: any): any {
     const stmt: any = sf.statements?.[0];
     return stmt?.type;
 }
+
+/** Hostify a decoded declaration-like node (index signature, etc.) for textChanges. */
+function hostifyDecodedDeclarationNode(node: any): any {
+    if (!node) return undefined;
+    if (isMutableHostAstNode(node)) return node;
+    stampIdentifierEscapedText(node);
+    const text = usingSingleLineStringWriter(writer => {
+        getRemoveCommentsPrinter().writeNode(EmitHint.Unspecified, node, /*sourceFile*/ undefined, writer);
+    });
+    if (!text) return undefined;
+    const sf = createSourceFile(
+        "__tnb_declNode.ts",
+        `interface __D { ${text} }`,
+        hostSourceFileOptions(/*languageVersion*/ 99, /*host*/ undefined),
+        /*setParentNodes*/ true,
+        /*scriptKind*/ 3 /* ScriptKind.TS */,
+    );
+    const stmt: any = sf.statements?.[0];
+    const member = stmt?.members?.[0];
+    return member;
+}
+/** Hostify a decoded expression (symbolToExpression) for factory/textChanges. */
+function hostifyDecodedExpression(node: any): any {
+    if (!node) return undefined;
+    if (isMutableHostAstNode(node)) return node;
+    stampIdentifierEscapedText(node);
+    const text = usingSingleLineStringWriter(writer => {
+        getRemoveCommentsPrinter().writeNode(EmitHint.Unspecified, node, /*sourceFile*/ undefined, writer);
+    });
+    if (!text) return undefined;
+    const sf = createSourceFile(
+        "__tnb_exprNode.ts",
+        `const __e = (${text});`,
+        hostSourceFileOptions(/*languageVersion*/ 99, /*host*/ undefined),
+        /*setParentNodes*/ true,
+        /*scriptKind*/ 3 /* ScriptKind.TS */,
+    );
+    const stmt: any = sf.statements?.[0];
+    let init = stmt?.declarationList?.declarations?.[0]?.initializer;
+    // Unwrap the synthetic parens from `const __e = (…);`.
+    while (init?.kind === SyntaxKind.ParenthesizedExpression) init = init.expression;
+    return init;
+}
+/** Hostify a decoded property name (symbolToNode ComputedPropertyName / Identifier). */
+function hostifyDecodedPropertyName(node: any): any {
+    if (!node) return undefined;
+    if (isMutableHostAstNode(node)) return node;
+    stampIdentifierEscapedText(node);
+    const text = usingSingleLineStringWriter(writer => {
+        getRemoveCommentsPrinter().writeNode(EmitHint.Unspecified, node, /*sourceFile*/ undefined, writer);
+    });
+    if (!text) return undefined;
+    const sf = createSourceFile(
+        "__tnb_propName.ts",
+        `const __o = { ${text}: 0 };`,
+        hostSourceFileOptions(/*languageVersion*/ 99, /*host*/ undefined),
+        /*setParentNodes*/ true,
+        /*scriptKind*/ 3 /* ScriptKind.TS */,
+    );
+    const stmt: any = sf.statements?.[0];
+    const init = stmt?.declarationList?.declarations?.[0]?.initializer;
+    return init?.properties?.[0]?.name;
+}
+/** Hostify a TypePredicateNode via function return-type position (legal syntax). */
+function hostifyDecodedTypePredicateNode(node: any): any {
+    if (!node) return undefined;
+    if (isMutableHostAstNode(node)) return node;
+    stampIdentifierEscapedText(node);
+    const text = usingSingleLineStringWriter(writer => {
+        getRemoveCommentsPrinter().writeNode(EmitHint.Unspecified, node, /*sourceFile*/ undefined, writer);
+    });
+    if (!text) return undefined;
+    const sf = createSourceFile(
+        "__tnb_predNode.ts",
+        `function __f(x: unknown): ${text} { return true as any; }`,
+        hostSourceFileOptions(/*languageVersion*/ 99, /*host*/ undefined),
+        /*setParentNodes*/ true,
+        /*scriptKind*/ 3 /* ScriptKind.TS */,
+    );
+    const stmt: any = sf.statements?.[0];
+    return stmt?.type;
+}
+
 function attachTypeParameterNameSymbols(typeNode: any, typeParameters: readonly any[] | undefined): void {
     if (!typeNode || !typeParameters?.length) return;
     const symByName = new Map<string, any>();
@@ -1122,6 +1205,34 @@ function applySingleLineEmitFlagsToDeclaration(node: any): any {
     visit(node);
     return node;
 }
+
+/**
+ * Decoded RemoteNode Identifiers expose `.text` but older native-preview builds
+ * omit `.escapedText`. Stock printer `idText` reads `escapedText` only — stamp
+ * an own property so emit/textChanges do not crash on undefined.length.
+ */
+function stampIdentifierEscapedText(node: any, fallbackName?: string): void {
+    if (!node || typeof node !== "object") return;
+    const kind = node.kind;
+    // Accept stock (80/81) and raw tsgo (79/80) Identifier kinds — remap may not
+    // have run yet when NodeBuilder first returns a decoded node.
+    if (kind === SyntaxKind.Identifier || kind === SyntaxKind.PrivateIdentifier || kind === 79 || kind === 80 || kind === 81) {
+        const text = node.escapedText ?? node.text ?? fallbackName;
+        if (text != null && text !== "") {
+            const s = String(text);
+            try {
+                Object.defineProperty(node, "escapedText", { value: s, configurable: true, writable: true, enumerable: true });
+            } catch { /* prototype may block; best-effort */ }
+            try {
+                if (node.text == null) {
+                    Object.defineProperty(node, "text", { value: s, configurable: true, writable: true, enumerable: true });
+                }
+            } catch { /* ignore */ }
+        }
+    }
+    ts.forEachChild(node, (child: any) => stampIdentifierEscapedText(child));
+}
+
 function applySingleLineEmitFlagsRecursive(node: any): any {
     applySingleLineEmitFlagsToTypeSubtree(node);
     return node;
@@ -4403,6 +4514,42 @@ export function createTsgoChecker(program: any): any {
         if (!Object.getOwnPropertyDescriptor(proto, "escapedName")) {
             Object.defineProperty(proto, "escapedName", { configurable: true, get() { return this.name; } });
         }
+        // Stock EnumLike defaulting (tryGetValueFromType) reads `type.symbol.exports`
+        // as a Map and picks the first member via `.values()`. Bridge Symbol only
+        // exposes getExports(); materialize a Map lazily.
+        if (!Object.getOwnPropertyDescriptor(proto, "exports")) {
+            Object.defineProperty(proto, "exports", {
+                configurable: true,
+                get() {
+                    if (Object.prototype.hasOwnProperty.call(this, "__tnbExports")) return this.__tnbExports;
+                    try {
+                        const list = typeof this.getExports === "function" ? this.getExports() : undefined;
+                        if (!list?.length) {
+                            this.__tnbExports = undefined;
+                            return undefined;
+                        }
+                        // Match stock SymbolTable insertion (= declaration) order so
+                        // firstOrUndefinedIterator(exports.values()) picks the same
+                        // enum member as stock (e.g. Color.Red not Color.Green).
+                        const sorted = list.slice().sort((a: any, b: any) => {
+                            const pa = a?.valueDeclaration?.pos ?? a?.declarations?.[0]?.pos ?? 0;
+                            const pb = b?.valueDeclaration?.pos ?? b?.declarations?.[0]?.pos ?? 0;
+                            return pa - pb;
+                        });
+                        const map = new Map<string, any>();
+                        for (const s of sorted) {
+                            const key = String(s?.escapedName ?? s?.name ?? "");
+                            if (key) map.set(key, s);
+                        }
+                        this.__tnbExports = map.size ? map : undefined;
+                        return this.__tnbExports;
+                    } catch {
+                        this.__tnbExports = undefined;
+                        return undefined;
+                    }
+                },
+            });
+        }
         // Stock TransientSymbol carries `links.checkFlags`; getCheckFlags reads
         // it whenever SymbolFlags.Transient is set. tsgo symbols expose raw
         // `checkFlags` (bit layout audited identical) but no `links` object, so
@@ -6003,6 +6150,197 @@ export function createTsgoChecker(program: any): any {
             if (!type) return [];
             return project.checker.getAugmentedPropertiesOfType(type) ?? [];
         },
+        getSuggestedSymbolForNonexistentProperty(name: any, containingType: any): any {
+            if (!name || !containingType) return undefined;
+            ensureProject();
+            // Stock accepts MemberName | string; Go takes *ast.Node. LS always passes a node.
+            if (typeof name === "string") return undefined;
+            const sf = name.getSourceFile?.();
+            if (!sf?.fileName) return undefined;
+            let start: number | undefined;
+            let end: number | undefined;
+            try {
+                start = name.getStart(sf);
+                end = name.getEnd(sf);
+            } catch { return undefined; }
+            if (typeof start !== "number") return undefined;
+            const tsgoNode = findTsgoNodeAtPosition(sf.fileName, start, name.kind, end);
+            if (!tsgoNode) return undefined;
+            try {
+                return refineNavSymbol(project.checker.getSuggestedSymbolForNonexistentProperty(tsgoNode, containingType));
+            } catch { return undefined; }
+        },
+        getSuggestedSymbolForNonexistentClassMember(name: string, baseType: any): any {
+            if (typeof name !== "string" || !baseType) return undefined;
+            ensureProject();
+            try {
+                return refineNavSymbol(project.checker.getSuggestedSymbolForNonexistentClassMember(name, baseType));
+            } catch { return undefined; }
+        },
+        getSuggestedSymbolForNonexistentJSXAttribute(name: any, containingType: any): any {
+            if (!containingType) return undefined;
+            ensureProject();
+            const strName = typeof name === "string" ? name : (name?.escapedText ?? name?.text ?? name?.getText?.());
+            if (typeof strName !== "string" || !strName) return undefined;
+            try {
+                return refineNavSymbol(project.checker.getSuggestedSymbolForNonexistentJSXAttribute(strName, containingType));
+            } catch { return undefined; }
+        },
+        getSuggestedSymbolForNonexistentModule(name: any, targetModule: any): any {
+            if (!name || !targetModule) return undefined;
+            ensureProject();
+            const rpcMod = resolveRpcSymbol(targetModule) ?? (isTsgoBridgeSymbol(targetModule) ? targetModule : undefined);
+            if (!rpcMod) return undefined;
+            const sf = name.getSourceFile?.();
+            if (!sf?.fileName) return undefined;
+            let start: number | undefined;
+            let end: number | undefined;
+            try {
+                start = name.getStart(sf);
+                end = name.getEnd(sf);
+            } catch { return undefined; }
+            if (typeof start !== "number") return undefined;
+            const tsgoNode = findTsgoNodeAtPosition(sf.fileName, start, name.kind, end);
+            if (!tsgoNode) return undefined;
+            try {
+                return refineNavSymbol(project.checker.getSuggestedSymbolForNonexistentModule(tsgoNode, rpcMod));
+            } catch { return undefined; }
+        },
+        getSuggestedSymbolForNonexistentSymbol(location: any, name: string, meaning: number): any {
+            if (!location || typeof name !== "string") return undefined;
+            ensureProject();
+            const sf = location.getSourceFile?.();
+            if (!sf?.fileName) return undefined;
+            let start: number | undefined;
+            let end: number | undefined;
+            try {
+                start = location.getStart(sf);
+                end = location.getEnd(sf);
+            } catch { return undefined; }
+            if (typeof start !== "number") return undefined;
+            const tsgoNode = findTsgoNodeAtPosition(sf.fileName, start, location.kind, end);
+            if (!tsgoNode) return undefined;
+            try {
+                return refineNavSymbol(project.checker.getSuggestedSymbolForNonexistentSymbol(tsgoNode, name, meaning >>> 0));
+            } catch { return undefined; }
+        },
+        symbolToExpression(symbol: any, meaning: number, enclosingDeclaration?: any, flags?: number, internalFlags?: number): any {
+            if (!symbol) return undefined;
+            ensureProject();
+            const rpcSym = resolveRpcSymbol(symbol) ?? (isTsgoBridgeSymbol(symbol) ? symbol : undefined);
+            if (!rpcSym) return undefined;
+            const tsgoLocation = mapHostEnclosingToTsgo(enclosingDeclaration);
+            try {
+                const node = project.checker.symbolToExpression(rpcSym, meaning >>> 0, tsgoLocation, flags, internalFlags);
+                if (!node) return undefined;
+                applySingleLineEmitFlagsToDeclaration(node);
+                stampIdentifierEscapedText(node);
+                return hostifyDecodedExpression(node) ?? node;
+            } catch { return undefined; }
+        },
+        symbolToNode(symbol: any, meaning: number, enclosingDeclaration?: any, flags?: number, internalFlags?: number): any {
+            if (!symbol) return undefined;
+            ensureProject();
+            const rpcSym = resolveRpcSymbol(symbol) ?? (isTsgoBridgeSymbol(symbol) ? symbol : undefined);
+            if (!rpcSym) return undefined;
+            const tsgoLocation = mapHostEnclosingToTsgo(enclosingDeclaration);
+            try {
+                const node = project.checker.symbolToNode(rpcSym, meaning >>> 0, tsgoLocation, flags, internalFlags);
+                if (!node) return undefined;
+                applySingleLineEmitFlagsToDeclaration(node);
+                stampIdentifierEscapedText(node);
+                return hostifyDecodedPropertyName(node) ?? hostifyDecodedExpression(node) ?? node;
+            } catch { return undefined; }
+        },
+        symbolToEntityName(symbol: any, meaning: number, enclosingDeclaration?: any, flags?: number, internalFlags?: number): any {
+            if (!symbol) return undefined;
+            ensureProject();
+            const rpcSym = resolveRpcSymbol(symbol) ?? (isTsgoBridgeSymbol(symbol) ? symbol : undefined);
+            if (!rpcSym) return undefined;
+            const tsgoLocation = mapHostEnclosingToTsgo(enclosingDeclaration);
+            try {
+                const node = project.checker.symbolToEntityName(rpcSym, meaning >>> 0, tsgoLocation, flags, internalFlags);
+                if (!node) return undefined;
+                applySingleLineEmitFlagsToDeclaration(node);
+                stampIdentifierEscapedText(node);
+                return hostifyDecodedExpression(node) ?? node;
+            } catch { return undefined; }
+        },
+        typePredicateToTypePredicateNode(predicate: any, enclosingDeclaration?: any, flags?: number): any {
+            if (!predicate) return undefined;
+            ensureProject();
+            const tsgoLocation = mapHostEnclosingToTsgo(enclosingDeclaration);
+            try {
+                const node = project.checker.typePredicateToTypePredicateNode(predicate, tsgoLocation, flags);
+                if (!node) return undefined;
+                applySingleLineEmitFlagsToDeclaration(node);
+                // Shape fixup: decoded parameterName Identifier may lack escapedText.
+                const pn = node.parameterName;
+                const predKind = predicate.kind as number;
+                if (pn && (predKind === 1 || predKind === 3)) {
+                    const name = String(predicate.parameterName ?? pn.text ?? pn.escapedText ?? "");
+                    if (name) {
+                        try {
+                            Object.defineProperty(pn, "escapedText", { value: name, configurable: true, writable: true, enumerable: true });
+                            Object.defineProperty(pn, "text", { value: name, configurable: true, writable: true, enumerable: true });
+                        } catch { stampIdentifierEscapedText(pn, name); }
+                    }
+                }
+                stampIdentifierEscapedText(node);
+                // Type predicates are illegal in `type T = …`; reparse as a return type.
+                return hostifyDecodedTypePredicateNode(node) ?? node;
+            } catch { return undefined; }
+        },
+        indexInfoToIndexSignatureDeclaration(info: any, enclosingDeclaration?: any, flags?: number): any {
+            if (!info) return undefined;
+            ensureProject();
+            const tsgoLocation = mapHostEnclosingToTsgo(enclosingDeclaration);
+            try {
+                // Pass IndexInfo shape through; sync API reconstructs from key/value/readonly/declaration.
+                const keyId = info.keyType?.id;
+                const valId = (info.type ?? info.valueType)?.id;
+                if (process.env.TNB_TRACE_INDEXINFO === "1") {
+                    try {
+                        const fs = require("fs") as typeof import("fs");
+                        fs.appendFileSync("/tmp/tnb-indexinfo-trace.jsonl", JSON.stringify({
+                            keyId, valId, hasDecl: !!info.declaration, declKind: info.declaration?.kind,
+                            isReadonly: !!info.isReadonly, hasLocation: !!tsgoLocation,
+                        }) + "\n");
+                    } catch { /* ignore */ }
+                }
+                if (typeof keyId !== "number" || typeof valId !== "number") {
+                    if (process.env.TNB_TRACE_INDEXINFO === "1") {
+                        try {
+                            const fs = require("fs") as typeof import("fs");
+                            fs.appendFileSync("/tmp/tnb-indexinfo-trace.jsonl", JSON.stringify({ err: "missing type ids", keyId, valId }) + "\n");
+                        } catch { /* ignore */ }
+                    }
+                    return undefined;
+                }
+                const node = project.checker.indexInfoToIndexSignatureDeclaration(info, tsgoLocation, flags);
+                if (!node) {
+                    if (process.env.TNB_TRACE_INDEXINFO === "1") {
+                        try {
+                            const fs = require("fs") as typeof import("fs");
+                            fs.appendFileSync("/tmp/tnb-indexinfo-trace.jsonl", JSON.stringify({ err: "rpc returned empty", keyId, valId }) + "\n");
+                        } catch { /* ignore */ }
+                    }
+                    return undefined;
+                }
+                applySingleLineEmitFlagsToDeclaration(node);
+                stampIdentifierEscapedText(node);
+                // textChanges.insertMemberAtStart needs a mutable host AST node.
+                return hostifyDecodedDeclarationNode(node) ?? node;
+            } catch (e) {
+                if (process.env.TNB_TRACE_INDEXINFO === "1") {
+                    try {
+                        const fs = require("fs") as typeof import("fs");
+                        fs.appendFileSync("/tmp/tnb-indexinfo-trace.jsonl", JSON.stringify({ err: String((e as any)?.message ?? e) }) + "\n");
+                    } catch { /* ignore */ }
+                }
+                return undefined;
+            }
+        },
         getModuleSymbolForSourceFile(sourceFile: any): any {
             if (!sourceFile) return undefined;
             if (sourceFile.symbol) return sourceFile.symbol;
@@ -6678,12 +7016,12 @@ const _tnbCheckerCoverage = {
     isNullableType: "adapter",
     getTypeArguments: "adapter",
     typeToTypeNode: "adapter",
-    typePredicateToTypePredicateNode: "throw",
+    typePredicateToTypePredicateNode: "adapter",
     signatureToSignatureDeclaration: "tsgo",
-    indexInfoToIndexSignatureDeclaration: "throw",
-    symbolToEntityName: "throw",
-    symbolToExpression: "throw",
-    symbolToNode: "throw",
+    indexInfoToIndexSignatureDeclaration: "adapter",
+    symbolToEntityName: "adapter",
+    symbolToExpression: "adapter",
+    symbolToNode: "adapter",
     symbolToTypeParameterDeclarations: "adapter",
     symbolToParameterDeclaration: "adapter",
     typeParameterToDeclaration: "adapter",
@@ -6743,11 +7081,11 @@ const _tnbCheckerCoverage = {
     tryGetMemberInModuleExports: "adapter",
     tryGetMemberInModuleExportsAndProperties: "adapter",
     getApparentType: "tsgo",
-    getSuggestedSymbolForNonexistentProperty: "throw",
-    getSuggestedSymbolForNonexistentJSXAttribute: "throw",
-    getSuggestedSymbolForNonexistentSymbol: "throw",
-    getSuggestedSymbolForNonexistentModule: "throw",
-    getSuggestedSymbolForNonexistentClassMember: "throw",
+    getSuggestedSymbolForNonexistentProperty: "adapter",
+    getSuggestedSymbolForNonexistentJSXAttribute: "adapter",
+    getSuggestedSymbolForNonexistentSymbol: "adapter",
+    getSuggestedSymbolForNonexistentModule: "adapter",
+    getSuggestedSymbolForNonexistentClassMember: "adapter",
     getBaseConstraintOfType: "adapter",
     getDefaultFromTypeParameter: "throw",
     getAnyType: "tsgo",
