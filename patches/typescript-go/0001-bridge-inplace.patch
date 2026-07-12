@@ -706,7 +706,7 @@ index ac37c863d..70618dee2 100644
  	case ast.KindVariableDeclaration, ast.KindParameter, ast.KindPropertyDeclaration, ast.KindPropertySignature, ast.KindBindingElement:
  		return c.getContextualTypeForInitializerExpression(node, contextFlags)
 diff --git a/internal/checker/exports.go b/internal/checker/exports.go
-index dca835399..699f305fc 100644
+index dca835399..742196359 100644
 --- a/internal/checker/exports.go
 +++ b/internal/checker/exports.go
 @@ -298,6 +298,43 @@ func (c *Checker) GetIndexInfosOfType(t *Type) []*IndexInfo {
@@ -753,6 +753,58 @@ index dca835399..699f305fc 100644
  func (c *Checker) IsContextSensitive(node *ast.Node) bool {
  	return c.isContextSensitive(node)
  }
+@@ -341,3 +378,51 @@ func (c *Checker) RemoveMissingOrUndefinedType(t *Type) *Type {
+ func (c *Checker) GetWidenedType(t *Type) *Type {
+ 	return c.getWidenedType(t)
+ }
++
++func (c *Checker) GetAwaitedType(t *Type) *Type {
++	return c.getAwaitedType(t)
++}
++
++func (c *Checker) GetNullableType(t *Type, flags TypeFlags) *Type {
++	return c.getNullableType(t, flags)
++}
++
++func (c *Checker) GetIndexInfoOfTypeByKind(t *Type, kind int32) *IndexInfo {
++	key := c.stringType
++	if kind == 1 {
++		key = c.numberType
++	}
++	return c.getIndexInfoOfType(t, key)
++}
++
++func (c *Checker) GetIndexTypeOfTypeByKind(t *Type, kind int32) *Type {
++	key := c.stringType
++	if kind == 1 {
++		key = c.numberType
++	}
++	return c.getIndexTypeOfType(t, key)
++}
++
++func (c *Checker) GetUnmatchedProperties(source, target *Type, requireOptionalProperties, matchDiscriminantProperties bool) []*ast.Symbol {
++	return c.getUnmatchedProperties(source, target, requireOptionalProperties, matchDiscriminantProperties)
++}
++
++func (c *Checker) SymbolIsValue(symbol *ast.Symbol) bool {
++	return c.symbolIsValue(symbol)
++}
++
++func (c *Checker) GetIndexInfosOfIndexSymbol(indexSymbol *ast.Symbol, siblingSymbols []*ast.Symbol) []*IndexInfo {
++	return c.getIndexInfosOfIndexSymbol(indexSymbol, siblingSymbols)
++}
++
++func (c *Checker) ContainsArgumentsReference(node *ast.Node) bool {
++	return c.containsArgumentsReference(node)
++}
++
++func (c *Checker) GetAugmentedPropertiesOfType(t *Type) []*ast.Symbol {
++	return c.getAugmentedPropertiesOfType(t)
++}
++
++func (c *Checker) IsLibType(t *Type) bool {
++	return c.IsLibTypeForHoverVerbosity(t)
++}
 diff --git a/internal/checker/nodebuilderimpl.go b/internal/checker/nodebuilderimpl.go
 index 188da07aa..de823b4e7 100644
 --- a/internal/checker/nodebuilderimpl.go

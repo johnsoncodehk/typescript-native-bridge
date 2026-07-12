@@ -1010,6 +1010,39 @@ let _removeCommentsPrinter: any;
 function getRemoveCommentsPrinter(): any {
     return _removeCommentsPrinter ??= createPrinterWithRemoveComments();
 }
+/** True when `pos` is assignable — host AST nodes, not RemoteNodeBase. */
+function isMutableHostAstNode(node: any): boolean {
+    if (!node) return false;
+    try {
+        const prev = node.pos;
+        node.pos = prev;
+        return true;
+    } catch {
+        return false;
+    }
+}
+/**
+ * Shape-transform a decoded tsgo TypeNode (RemoteNode) into a mutable host
+ * TypeNode so stock factory/textChanges can nest/replace it. Semantics come
+ * from the printed type text; no checker reimplementation.
+ */
+function hostifyDecodedTypeNode(typeNode: any): any {
+    if (!typeNode) return undefined;
+    if (isMutableHostAstNode(typeNode)) return typeNode;
+    const text = usingSingleLineStringWriter(writer => {
+        getRemoveCommentsPrinter().writeNode(EmitHint.Unspecified, typeNode, /*sourceFile*/ undefined, writer);
+    });
+    if (!text) return undefined;
+    const sf = createSourceFile(
+        "__tnb_typeToTypeNode.ts",
+        `type __T = ${text};`,
+        hostSourceFileOptions(/*languageVersion*/ 99, /*host*/ undefined),
+        /*setParentNodes*/ true,
+        /*scriptKind*/ 3 /* ScriptKind.TS */,
+    );
+    const stmt: any = sf.statements?.[0];
+    return stmt?.type;
+}
 function attachTypeParameterNameSymbols(typeNode: any, typeParameters: readonly any[] | undefined): void {
     if (!typeNode || !typeParameters?.length) return;
     const symByName = new Map<string, any>();
@@ -4159,7 +4192,7 @@ export function createTsgoChecker(program: any): any {
         if (!target.isClass) target.isClass = function (this: any) { return (objectFlagsOf(this) & OF.Class) !== 0; };
         if (!target.isIndexType) target.isIndexType = has(TF.Index);
         if (!target.getFlags) target.getFlags = function () { return this.flags; };
-        if (!target.isNullableType) target.isNullableType = has((TF.Null ?? 0) | (TF.Undefined ?? 0));
+        // isNullableType — stock Type method; installed in patchTypeProto via checker RPC.
     }
 
     function patchTypeProto(sample: any, s: any): void {
@@ -4220,7 +4253,9 @@ export function createTsgoChecker(program: any): any {
         }
         if (!proto.getApparentProperties) {
             proto.getApparentProperties = function () {
-                return this.getProperties();
+                const proj = _currentProjectRef.project;
+                if (!proj) return [];
+                return proj.checker.getAugmentedPropertiesOfType(this) ?? [];
             };
         }
         if (!proto.getBaseTypes) {
@@ -4260,42 +4295,33 @@ export function createTsgoChecker(program: any): any {
                 return undefined;
             };
         }
-        // getNumberIndexType / getStringIndexType — rule code (no-for-in-array's
-        // isArrayLike, ts-api-utils' rest-param handling) reads these directly
-        // off Type objects. Resolve via the checker's index infos: find the
-        // info whose key type matches Number/String and return its value type.
-        // Falls back to the apparent type so inherited index signatures resolve.
-        const indexTypeOfKind = (self: any, keyFlag: number): any => {
-            const proj = _currentProjectRef.project;
-            if (!proj || !self) return undefined;
-            const pick = (t: any): any => {
-                const infos = proj.checker.getIndexInfosOfType(t) ?? [];
-                for (const info of infos) {
-                    const kt = info?.keyType;
-                    if (kt && typeof kt.flags === "number" && (kt.flags & keyFlag) !== 0) {
-                        const vt = info.valueType;
-                        if (vt) fixupType(vt);
-                        return vt;
-                    }
-                }
-                return undefined;
-            };
-            const direct = pick(self);
-            if (direct !== undefined) return direct;
-            try {
-                const apparent = proj.checker.getApparentType(self);
-                if (apparent && apparent !== self) {
-                    if (apparent) fixupType(apparent);
-                    return pick(apparent);
-                }
-            } catch { /* best-effort */ }
-            return undefined;
-        };
+        // getNumberIndexType / getStringIndexType — stock Type path:
+        // checker.getIndexTypeOfType(this, IndexKind.String|Number).
         if (!proto.getNumberIndexType) {
-            proto.getNumberIndexType = function () { return indexTypeOfKind(this, TF.Number); };
+            proto.getNumberIndexType = function () {
+                const proj = _currentProjectRef.project;
+                if (!proj) return undefined;
+                const t = proj.checker.getIndexTypeOfType(this, 1 /* IndexKind.Number */);
+                if (t) fixupType(t);
+                return t;
+            };
         }
         if (!proto.getStringIndexType) {
-            proto.getStringIndexType = function () { return indexTypeOfKind(this, TF.String); };
+            proto.getStringIndexType = function () {
+                const proj = _currentProjectRef.project;
+                if (!proj) return undefined;
+                const t = proj.checker.getIndexTypeOfType(this, 0 /* IndexKind.String */);
+                if (t) fixupType(t);
+                return t;
+            };
+        }
+        // isNullableType — stock Type path: checker.isNullableType(this).
+        if (!proto.isNullableType) {
+            proto.isNullableType = function () {
+                const proj = _currentProjectRef.project;
+                if (!proj) return false;
+                return !!proj.checker.isNullableType(this);
+            };
         }
     }
 
@@ -5247,8 +5273,26 @@ export function createTsgoChecker(program: any): any {
             return project.checker.getSignatureFromDeclaration(tsgoNode);
         },
         getTypeFromTypeNode(typeNode: any): any {
+            // Host type nodes (e.g. async return annotations) must be mapped to
+            // RemoteNode before the RPC — getNodeId requires a tsgo node.
             ensureProject();
-            const t = project.checker.getTypeFromTypeNode(typeNode);
+            let node = typeNode;
+            if (typeNode && typeof typeNode.getStart === "function") {
+                const sf = typeNode.getSourceFile?.();
+                if (sf?.fileName) {
+                    let start: number | undefined;
+                    let end: number | undefined;
+                    try {
+                        start = typeNode.getStart(sf);
+                        end = typeNode.getEnd(sf);
+                    } catch { /* ignore */ }
+                    if (typeof start === "number") {
+                        const mapped = findTsgoNodeAtPosition(sf.fileName, start, typeNode.kind, end);
+                        if (mapped) node = mapped;
+                    }
+                }
+            }
+            const t = project.checker.getTypeFromTypeNode(node);
             if (t) fixupType(t);
             return t;
         },
@@ -5273,6 +5317,18 @@ export function createTsgoChecker(program: any): any {
         // Symbol-only queries the scope manager uses — see delegation in the
         // stubs section below (getShorthandAssignmentValueSymbol etc.).
 
+        // Host enclosingDeclaration → tsgo mirror (getNodeId needs RemoteNode).
+        // Decoded RemoteNode is hostified so factory/textChanges can mutate pos.
+        typeToTypeNode(type: any, enclosingDeclaration?: any, flags?: number): any {
+            if (!type) return undefined;
+            ensureProject();
+            const tsgoLocation = mapHostEnclosingToTsgo(enclosingDeclaration);
+            const typeNode = project.checker.typeToTypeNode(type, tsgoLocation, flags);
+            if (!typeNode) return undefined;
+            attachTypeReferenceSymbols(project.checker, type, typeNode);
+            applySingleLineEmitFlagsToTypeSubtree(typeNode);
+            return hostifyDecodedTypeNode(typeNode);
+        },
         typeToString(type: any, _enclosing?: any, flags?: number): string {
             ensureProject();
             return project.checker.typeToString(type, undefined, flags);
@@ -5680,6 +5736,273 @@ export function createTsgoChecker(program: any): any {
             if (t) fixupType(t);
             return t;
         },
+        // ── Type/Symbol query batch (22 methods) ──
+        getAwaitedType(type: any): any {
+            ensureProject();
+            if (!type) return undefined;
+            const t = project.checker.getAwaitedType(type);
+            if (t) fixupType(t);
+            return t;
+        },
+        getNullableType(type: any, flags: number): any {
+            ensureProject();
+            if (!type) return type;
+            const t = project.checker.getNullableType(type, flags);
+            if (t) fixupType(t);
+            return t;
+        },
+        isNullableType(type: any): boolean {
+            ensureProject();
+            if (!type) return false;
+            return !!project.checker.isNullableType(type);
+        },
+        getElementTypeOfArrayType(type: any): any {
+            ensureProject();
+            if (!type) return undefined;
+            const t = project.checker.getElementTypeOfArrayType(type);
+            if (t) fixupType(t);
+            return t;
+        },
+        getIndexInfoOfType(type: any, kind: number): any {
+            ensureProject();
+            if (!type) return undefined;
+            const info = project.checker.getIndexInfoOfType(type, kind);
+            if (!info) return undefined;
+            // Stock IndexInfo.type; bridge materializeIndexInfo uses valueType.
+            const typeField = info.type ?? info.valueType;
+            if (typeField) fixupType(typeField);
+            if (info.keyType) fixupType(info.keyType);
+            const decl = info?.declaration;
+            if (decl && typeof decl.resolve === "function") {
+                const resolved = decl.resolve(project);
+                if (resolved) {
+                    if (decl.symbol && !resolved.symbol) {
+                        Object.defineProperty(resolved, "symbol", { value: decl.symbol, configurable: true });
+                    }
+                    return { ...info, type: typeField, valueType: info.valueType ?? typeField, declaration: resolved };
+                }
+            }
+            return { ...info, type: typeField, valueType: info.valueType ?? typeField };
+        },
+        getIndexTypeOfType(type: any, kind: number): any {
+            ensureProject();
+            if (!type) return undefined;
+            const t = project.checker.getIndexTypeOfType(type, kind);
+            if (t) fixupType(t);
+            return t;
+        },
+        getTypeOfPropertyOfType(type: any, name: string): any {
+            ensureProject();
+            if (!type || typeof name !== "string") return undefined;
+            const t = project.checker.getTypeOfPropertyOfType(type, name);
+            if (t) fixupType(t);
+            return t;
+        },
+        getTypeOfPropertyOfContextualType(type: any, name: string): any {
+            ensureProject();
+            if (!type || typeof name !== "string") return undefined;
+            const t = project.checker.getTypeOfPropertyOfContextualType(type, name);
+            if (t) fixupType(t);
+            return t;
+        },
+        fillMissingTypeArguments(
+            typeArguments: readonly any[],
+            typeParameters: readonly any[] | undefined,
+            minTypeArgumentCount: number,
+            isJavaScriptImplicitAny: boolean,
+        ): any[] {
+            ensureProject();
+            const results = project.checker.fillMissingTypeArguments(
+                typeArguments ?? [],
+                typeParameters,
+                minTypeArgumentCount,
+                !!isJavaScriptImplicitAny,
+            );
+            if (results) for (const t of results) if (t) fixupType(t);
+            return results ?? [];
+        },
+        getWidenedLiteralType(type: any): any {
+            ensureProject();
+            if (!type) return type;
+            const t = project.checker.getWidenedLiteralType(type);
+            if (t) fixupType(t);
+            return t;
+        },
+        // Stock returns IterableIterator; array is for-of compatible.
+        getUnmatchedProperties(
+            source: any,
+            target: any,
+            requireOptionalProperties: boolean,
+            matchDiscriminantProperties: boolean,
+        ): any[] {
+            ensureProject();
+            if (!source || !target) return [];
+            return project.checker.getUnmatchedProperties(
+                source,
+                target,
+                !!requireOptionalProperties,
+                !!matchDiscriminantProperties,
+            ) ?? [];
+        },
+        isEmptyAnonymousObjectType(type: any): boolean {
+            ensureProject();
+            if (!type) return false;
+            return !!project.checker.isEmptyAnonymousObjectType(type);
+        },
+        isLibType(type: any): boolean {
+            ensureProject();
+            if (!type) return false;
+            return !!project.checker.isLibType(type);
+        },
+        symbolIsValue(symbol: any): boolean {
+            if (!symbol) return false;
+            ensureProject();
+            try { return !!rpc().symbolIsValue(symbol); } catch { return false; }
+        },
+        // Go export takes the parameter node only; enclosing is unused on the RPC.
+        requiresAddingImplicitUndefined(node: any, _enclosing?: any): boolean {
+            if (!node) return false;
+            const sf = node.getSourceFile?.();
+            if (!sf?.fileName) return false;
+            let start: number | undefined;
+            let end: number | undefined;
+            try {
+                start = node.getStart(sf);
+                end = node.getEnd(sf);
+            } catch { return false; }
+            if (typeof start !== "number") return false;
+            ensureProject();
+            const tsgoNode = findTsgoNodeAtPosition(sf.fileName, start, node.kind, end);
+            if (!tsgoNode || tsgoNode.kind !== node.kind) return false;
+            return !!project.checker.requiresAddingImplicitUndefined(tsgoNode);
+        },
+        getTypeOnlyAliasDeclaration(symbol: any): any {
+            if (!symbol) return undefined;
+            ensureProject();
+            try {
+                const handle = rpc().getTypeOnlyAliasDeclaration(symbol);
+                if (!handle) return undefined;
+                if (typeof handle.resolve === "function") {
+                    const resolved = handle.resolve(project);
+                    if (resolved) return resolved;
+                }
+                return handle;
+            } catch { return undefined; }
+        },
+        resolveExternalModuleName(moduleSpecifier: any): any {
+            if (!moduleSpecifier) return undefined;
+            const sf = moduleSpecifier.getSourceFile?.();
+            if (!sf?.fileName) return undefined;
+            let start: number | undefined;
+            let end: number | undefined;
+            try {
+                start = moduleSpecifier.getStart(sf);
+                end = moduleSpecifier.getEnd(sf);
+            } catch { return undefined; }
+            if (typeof start !== "number") return undefined;
+            ensureProject();
+            const tsgoNode = findTsgoNodeAtPosition(sf.fileName, start, moduleSpecifier.kind, end);
+            if (!tsgoNode) return undefined;
+            try {
+                return refineNavSymbol(project.checker.resolveExternalModuleName(tsgoNode));
+            } catch { return undefined; }
+        },
+        getPropertySymbolOfDestructuringAssignment(location: any): any {
+            if (!location) return undefined;
+            const sf = location.getSourceFile?.();
+            if (!sf?.fileName) return undefined;
+            let start: number | undefined;
+            let end: number | undefined;
+            try {
+                start = location.getStart(sf);
+                end = location.getEnd(sf);
+            } catch { return undefined; }
+            if (typeof start !== "number") return undefined;
+            ensureProject();
+            const tsgoNode = findTsgoNodeAtPosition(sf.fileName, start, location.kind, end);
+            if (!tsgoNode) return undefined;
+            try {
+                return refineNavSymbol(project.checker.getPropertySymbolOfDestructuringAssignment(tsgoNode));
+            } catch { return undefined; }
+        },
+        isSymbolAccessible(
+            symbol: any,
+            enclosingDeclaration: any,
+            meaning: number,
+            shouldComputeAliasesToMakeVisible: boolean,
+        ): { accessibility: number; errorSymbolName?: string; errorModuleName?: string } {
+            if (!symbol) return { accessibility: 3 /* NotResolved */ };
+            ensureProject();
+            const rpcSym = resolveRpcSymbol(symbol) ?? (isTsgoBridgeSymbol(symbol) ? symbol : undefined);
+            if (!rpcSym) return { accessibility: 3 /* NotResolved */ };
+            const tsgoEnclosing = mapHostEnclosingToTsgo(enclosingDeclaration);
+            try {
+                return project.checker.isSymbolAccessible(
+                    rpcSym,
+                    tsgoEnclosing,
+                    meaning >>> 0,
+                    !!shouldComputeAliasesToMakeVisible,
+                ) ?? { accessibility: 0 };
+            } catch {
+                return { accessibility: 3 /* NotResolved */ };
+            }
+        },
+        getIndexInfosOfIndexSymbol(indexSymbol: any, siblingSymbols?: readonly any[]): any[] {
+            if (!indexSymbol) return [];
+            ensureProject();
+            const rpcSym = resolveRpcSymbol(indexSymbol) ?? (isTsgoBridgeSymbol(indexSymbol) ? indexSymbol : undefined);
+            if (!rpcSym) return [];
+            let siblings: any[] | undefined;
+            if (siblingSymbols?.length) {
+                siblings = [];
+                for (const s of siblingSymbols) {
+                    const r = resolveRpcSymbol(s) ?? (isTsgoBridgeSymbol(s) ? s : undefined);
+                    if (r) siblings.push(r);
+                }
+            }
+            let infos: any[] | undefined;
+            try {
+                infos = project.checker.getIndexInfosOfIndexSymbol(rpcSym, siblings);
+            } catch { return []; }
+            if (!infos) return [];
+            return infos.map((info: any) => {
+                const typeField = info?.type ?? info?.valueType;
+                if (typeField) fixupType(typeField);
+                if (info?.keyType) fixupType(info.keyType);
+                const decl = info?.declaration;
+                if (decl && typeof decl.resolve === "function") {
+                    const resolved = decl.resolve(project);
+                    if (resolved) {
+                        if (decl.symbol && !resolved.symbol) {
+                            Object.defineProperty(resolved, "symbol", { value: decl.symbol, configurable: true });
+                        }
+                        return { ...info, type: typeField, valueType: info.valueType ?? typeField, declaration: resolved };
+                    }
+                }
+                return { ...info, type: typeField, valueType: info?.valueType ?? typeField };
+            });
+        },
+        containsArgumentsReference(node: any): boolean {
+            if (!node) return false;
+            const sf = node.getSourceFile?.();
+            if (!sf?.fileName) return false;
+            let start: number | undefined;
+            let end: number | undefined;
+            try {
+                start = node.getStart(sf);
+                end = node.getEnd(sf);
+            } catch { return false; }
+            if (typeof start !== "number") return false;
+            ensureProject();
+            const tsgoNode = findTsgoNodeAtPosition(sf.fileName, start, node.kind, end);
+            if (!tsgoNode || tsgoNode.kind !== node.kind) return false;
+            return !!project.checker.containsArgumentsReference(tsgoNode);
+        },
+        getAugmentedPropertiesOfType(type: any): readonly any[] {
+            ensureProject();
+            if (!type) return [];
+            return project.checker.getAugmentedPropertiesOfType(type) ?? [];
+        },
         getModuleSymbolForSourceFile(sourceFile: any): any {
             if (!sourceFile) return undefined;
             if (sourceFile.symbol) return sourceFile.symbol;
@@ -5773,7 +6096,7 @@ export function createTsgoChecker(program: any): any {
                 tsgoNode = getTsgoSourceFile(sf.fileName);
             }
             if (tsgoNode) {
-                let result = (project.checker.getSymbolsInScope(tsgoNode, meaning) ?? []).map(refineNavSymbol);
+                let result = (project.checker.getSymbolsInScope(tsgoNode, meaning >>> 0) ?? []).map(refineNavSymbol);
                 if (sf.__tnbHostBound) {
                     result = mergeHostLocalScopeSymbols(result, location, meaning).map(sym =>
                         refinedSymBySym.has(sym) ? sym : refineNavSymbol(sym),
@@ -6050,7 +6373,7 @@ export function createTsgoChecker(program: any): any {
                     }
                 }
             }
-            return project.checker.getAccessibleSymbolChain(rpcSym, tsgoEnclosing, meaning, !!useOnlyExternalAliasing);
+            return project.checker.getAccessibleSymbolChain(rpcSym, tsgoEnclosing, meaning >>> 0, !!useOnlyExternalAliasing);
         },
         // Call-argument contextual type (object-literal member completions).
         getContextualTypeForArgumentAtIndex(callTarget: any, argIndex: number): any {
@@ -6235,7 +6558,7 @@ export function createTsgoChecker(program: any): any {
                 }
             }
             try {
-                const sym = project.checker.resolveName(name, meaning, tsgoLocation, excludeGlobals);
+                const sym = project.checker.resolveName(name, meaning >>> 0, tsgoLocation, excludeGlobals);
                 if (sym) return refineNavSymbol(sym);
             } catch {
                 // fall through to host-bound AST
@@ -6332,29 +6655,29 @@ const _tnbCheckerCoverage = {
     getPropertiesOfType: "adapter",
     getPropertyOfType: "adapter",
     getPrivateIdentifierPropertyOfType: "throw",
-    getTypeOfPropertyOfType: "throw",
-    getIndexInfoOfType: "throw",
+    getTypeOfPropertyOfType: "adapter",
+    getIndexInfoOfType: "adapter",
     getIndexInfosOfType: "adapter",
-    getIndexInfosOfIndexSymbol: "throw",
+    getIndexInfosOfIndexSymbol: "adapter",
     getSignaturesOfType: "adapter",
-    getIndexTypeOfType: "throw",
+    getIndexTypeOfType: "adapter",
     getIndexType: "tsgo",
     getBaseTypes: "adapter",
     getBaseTypeOfLiteralType: "tsgo",
     getWidenedType: "adapter",
-    getWidenedLiteralType: "throw",
+    getWidenedLiteralType: "adapter",
     getPromisedTypeOfPromise: "adapter",
-    getAwaitedType: "throw",
-    isEmptyAnonymousObjectType: "throw",
+    getAwaitedType: "adapter",
+    isEmptyAnonymousObjectType: "adapter",
     getReturnTypeOfSignature: "adapter",
     getParameterType: "tsgo",
     getParameterIdentifierInfoAtPosition: "throw",
-    getNullableType: "throw",
+    getNullableType: "adapter",
     getNonNullableType: "adapter",
     getNonOptionalType: "adapter",
-    isNullableType: "throw",
+    isNullableType: "adapter",
     getTypeArguments: "adapter",
-    typeToTypeNode: "tsgo",
+    typeToTypeNode: "adapter",
     typePredicateToTypePredicateNode: "throw",
     signatureToSignatureDeclaration: "tsgo",
     indexInfoToIndexSignatureDeclaration: "throw",
@@ -6371,7 +6694,7 @@ const _tnbCheckerCoverage = {
     getShorthandAssignmentValueSymbol: "adapter",
     getExportSpecifierLocalTargetSymbol: "adapter",
     getExportSymbolOfSymbol: "adapter",
-    getPropertySymbolOfDestructuringAssignment: "throw",
+    getPropertySymbolOfDestructuringAssignment: "adapter",
     getTypeOfAssignmentPattern: "throw",
     getTypeAtLocation: "adapter",
     getTypeFromTypeNode: "adapter",
@@ -6384,7 +6707,7 @@ const _tnbCheckerCoverage = {
     writeSymbol: "adapter",
     writeTypePredicate: "adapter",
     getFullyQualifiedName: "adapter",
-    getAugmentedPropertiesOfType: "throw",
+    getAugmentedPropertiesOfType: "adapter",
     getRootSymbols: "adapter",
     getSymbolOfExpando: "throw",
     getContextualType: "adapter",
@@ -6392,20 +6715,20 @@ const _tnbCheckerCoverage = {
     getContextualTypeForArgumentAtIndex: "adapter",
     getContextualTypeForJsxAttribute: "adapter",
     isContextSensitive: "tsgo",
-    getTypeOfPropertyOfContextualType: "throw",
+    getTypeOfPropertyOfContextualType: "adapter",
     getResolvedSignature: "adapter",
     getResolvedSignatureForSignatureHelp: "adapter",
     getCandidateSignaturesForStringLiteralCompletions: "adapter",
     getExpandedParameters: "adapter",
     hasEffectiveRestParameter: "adapter",
-    containsArgumentsReference: "throw",
+    containsArgumentsReference: "adapter",
     getSignatureFromDeclaration: "adapter",
     isImplementationOfOverload: "adapter",
     isUndefinedSymbol: "adapter",
     isArgumentsSymbol: "adapter",
     isUnknownSymbol: "adapter",
     getMergedSymbol: "adapter",
-    symbolIsValue: "throw",
+    symbolIsValue: "adapter",
     getConstantValue: "tsgo",
     isValidPropertyAccess: "adapter",
     isValidPropertyAccessForCompletions: "adapter",
@@ -6447,7 +6770,7 @@ const _tnbCheckerCoverage = {
     getOptionalType: "throw",
     getUnionType: "adapter",
     createArrayType: "throw",
-    getElementTypeOfArrayType: "throw",
+    getElementTypeOfArrayType: "adapter",
     createPromiseType: "throw",
     getPromiseType: "throw",
     getPromiseLikeType: "throw",
@@ -6457,13 +6780,13 @@ const _tnbCheckerCoverage = {
     createSignature: "throw",
     createSymbol: "throw",
     createIndexInfo: "throw",
-    isSymbolAccessible: "throw",
+    isSymbolAccessible: "adapter",
     tryFindAmbientModule: "adapter",
     getSymbolWalker: "throw",
     getDiagnostics: "adapter",
     getGlobalDiagnostics: "adapter",
     getEmitResolver: "adapter",
-    requiresAddingImplicitUndefined: "throw",
+    requiresAddingImplicitUndefined: "adapter",
     getNodeCount: "adapter",
     getIdentifierCount: "adapter",
     getSymbolCount: "adapter",
@@ -6471,7 +6794,7 @@ const _tnbCheckerCoverage = {
     getInstantiationCount: "adapter",
     getRelationCacheSizes: "adapter",
     getRecursionIdentity: "throw",
-    getUnmatchedProperties: "throw",
+    getUnmatchedProperties: "adapter",
     isArrayType: "tsgo",
     isTupleType: "tsgo",
     isArrayLikeType: "adapter",
@@ -6483,7 +6806,7 @@ const _tnbCheckerCoverage = {
     getJsxFragmentFactory: "throw",
     getAccessibleSymbolChain: "adapter",
     getTypePredicateOfSignature: "tsgo",
-    resolveExternalModuleName: "throw",
+    resolveExternalModuleName: "adapter",
     resolveExternalModuleSymbol: "adapter",
     tryGetThisTypeAt: "adapter",
     getTypeArgumentConstraint: "adapter",
@@ -6492,14 +6815,14 @@ const _tnbCheckerCoverage = {
     getLocalTypeParametersOfClassOrInterfaceOrTypeAlias: "adapter",
     isDeclarationVisible: "adapter",
     isPropertyAccessible: "adapter",
-    getTypeOnlyAliasDeclaration: "throw",
+    getTypeOnlyAliasDeclaration: "adapter",
     getMemberOverrideModifierStatus: "throw",
     isTypeParameterPossiblyReferenced: "throw",
     typeHasCallOrConstructSignatures: "adapter",
     getSymbolFlags: "adapter",
-    fillMissingTypeArguments: "throw",
+    fillMissingTypeArguments: "adapter",
     getTypeArgumentsForResolvedSignature: "throw",
-    isLibType: "throw",
+    isLibType: "adapter",
 } as const satisfies Record<keyof TypeChecker, TnbCheckerCoverage>;
 
 // ── Program adapter coverage (compile-time guard) ──
