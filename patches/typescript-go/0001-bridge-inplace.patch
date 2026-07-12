@@ -721,10 +721,10 @@ index 188da07aa..de823b4e7 100644
  		params := b.ch.getLocalTypeParametersOfClassOrInterfaceOrTypeAlias(symbol)
  		for _, param := range params {
 diff --git a/internal/checker/printer.go b/internal/checker/printer.go
-index 21704cc7d..8044b2240 100644
+index 21704cc7d..08a6773a9 100644
 --- a/internal/checker/printer.go
 +++ b/internal/checker/printer.go
-@@ -426,6 +426,18 @@ func (c *Checker) SignatureToSignatureDeclaration(signature *Signature, kind ast
+@@ -426,6 +426,24 @@ func (c *Checker) SignatureToSignatureDeclaration(signature *Signature, kind ast
  	return nodeBuilder.SignatureToSignatureDeclaration(signature, kind, enclosingDeclaration, flags, nodebuilder.InternalFlagsNone, nil)
  }
  
@@ -738,6 +738,12 @@ index 21704cc7d..8044b2240 100644
 +	nodeBuilder, release := c.getNodeBuilder()
 +	defer release()
 +	return nodeBuilder.SymbolToTypeParameterDeclarations(symbol, enclosingDeclaration, flags, nodebuilder.InternalFlagsNone, nil)
++}
++
++func (c *Checker) SymbolToParameterDeclaration(symbol *ast.Symbol, enclosingDeclaration *ast.Node, flags nodebuilder.Flags) *ast.Node {
++	nodeBuilder, release := c.getNodeBuilder()
++	defer release()
++	return nodeBuilder.SymbolToParameterDeclaration(symbol, enclosingDeclaration, flags, nodebuilder.InternalFlagsNone, nil)
 +}
 +
  // ExpandSymbolForHover produces declaration strings for a symbol with verbosity support for expandable hover.

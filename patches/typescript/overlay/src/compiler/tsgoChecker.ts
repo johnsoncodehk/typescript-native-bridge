@@ -17,8 +17,10 @@
 import * as ts from "./_namespaces/ts.js";
 import { bindSourceFile } from "./binder.js";
 import { createSourceFile } from "./parser.js";
-import { SyntaxKind, SymbolFlags, NodeFlags, JSDocParsingMode, ModuleKind, StructureIsReused, type Path, type Program, type TypeChecker } from "./types.js";
-import { getBuildInfoText, getTsBuildInfoEmitOutputFilePath } from "./emitter.js";
+import { SyntaxKind, SymbolFlags, NodeFlags, JSDocParsingMode, ModuleKind, StructureIsReused, EmitHint, EmitFlags, type Path, type Program, type TypeChecker } from "./types.js";
+import { getBuildInfoText, getTsBuildInfoEmitOutputFilePath, createPrinterWithRemoveComments } from "./emitter.js";
+import { usingSingleLineStringWriter } from "./utilities.js";
+import { setEmitFlags, addEmitFlags } from "./factory/emitNode.js";
 import { getModeForResolutionAtIndex } from "./program.js";
 import { installTsgoBackedSourceFileLoader, inferScriptKind, createSkeletonSourceFile, getTsgoBackedSourceFile } from "./tsgoBackedSourceFile.js";
 import { getTnbPackageRoot, isBundledLibPath, isHostLibFile, resolveHostFileName, toHostFileName, toTsgoFileName } from "./tsgoLibPaths.js";
@@ -979,8 +981,142 @@ function resolveDocDeclaration(decl: any): any | undefined {
 // concatenates .text via displayPartsToString, so a single "text" part is loss-
 // less there. Use the canonical "text" kind (not "") so other consumers that
 // switch on part.kind still classify it correctly.
+// tsgo's JSDoc extraction keeps the comment's trailing newline; stock's parser
+// strips it. Trim at the boundary so doc/tag texts match stock byte-for-byte.
+function trimDocTrailingNewlines(text: string): string {
+    return text.replace(/\n+$/, "");
+}
+function trimDocPartsTrailingNewlines(parts: any[] | undefined): any[] {
+    if (!parts?.length) return parts ?? [];
+    const last = parts[parts.length - 1];
+    if (typeof last?.text === "string" && /\n$/.test(last.text)) {
+        parts[parts.length - 1] = { ...last, text: trimDocTrailingNewlines(last.text) };
+    }
+    return parts;
+}
+function trimJsDocTagsTrailingNewlines(tags: any[] | undefined): any[] {
+    if (!tags?.length) return tags ?? [];
+    for (const tag of tags) {
+        if (Array.isArray(tag?.text)) trimDocPartsTrailingNewlines(tag.text);
+        else if (typeof tag?.text === "string") tag.text = trimDocTrailingNewlines(tag.text);
+    }
+    return tags;
+}
 function displayPartsFromDocText(text: string): any[] {
-    return text ? [{ kind: "text", text }] : [];
+    const trimmed = trimDocTrailingNewlines(text);
+    return trimmed ? [{ kind: "text", text: trimmed }] : [];
+}
+let _removeCommentsPrinter: any;
+function getRemoveCommentsPrinter(): any {
+    return _removeCommentsPrinter ??= createPrinterWithRemoveComments();
+}
+function attachTypeParameterNameSymbols(typeNode: any, typeParameters: readonly any[] | undefined): void {
+    if (!typeNode || !typeParameters?.length) return;
+    const symByName = new Map<string, any>();
+    for (const tp of typeParameters) {
+        const sym = tp?.symbol ?? tp;
+        const name = symbolDisplayNameOf(sym);
+        if (name) symByName.set(name, sym);
+    }
+    const visit = (node: any): void => {
+        if (!node) return;
+        if (node.kind === SyntaxKind.Identifier && !node.symbol) {
+            const name = node.escapedText ?? node.text;
+            const sym = symByName.get(String(name));
+            if (sym) node.symbol = sym;
+        }
+        ts.forEachChild(node, visit);
+    };
+    visit(typeNode);
+}
+function attachTypeParameterSymbolsFromType(type: any, typeNode: any): void {
+    if (!type || !typeNode) return;
+    const sym = type.symbol;
+    if (!(sym?.flags & SymbolFlags.TypeParameter)) return;
+    const visit = (node: any): void => {
+        if (!node) return;
+        if (node.kind === SyntaxKind.Identifier && !node.symbol) node.symbol = sym;
+        ts.forEachChild(node, visit);
+    };
+    visit(typeNode);
+}
+/**
+ * Pair a Type with its typeToTypeNode result and attach `.symbol` to type
+ * reference name identifiers. The emitter classifies identifier display parts
+ * by node.symbol (className/interfaceName/...); RPC-decoded nodes carry no
+ * symbol association, so `GenericClass<...>` would degrade to kind "text".
+ */
+function attachTypeReferenceSymbols(checker: any, type: any, typeNode: any): void {
+    if (!type || !typeNode || typeNode.kind !== SyntaxKind.TypeReference) return;
+    const nameNode = typeNode.typeName;
+    const ident = nameNode?.kind === SyntaxKind.QualifiedName ? nameNode.right : nameNode;
+    if (ident?.kind === SyntaxKind.Identifier && !ident.symbol) {
+        const sym = type.aliasSymbol ?? type.symbol;
+        const name = String(ident.escapedText ?? ident.text ?? "");
+        if (sym && symbolDisplayNameOf(sym) === name) ident.symbol = sym;
+    }
+    const argNodes = typeNode.typeArguments;
+    if (!argNodes?.length) return;
+    let typeArgs: readonly any[] | undefined;
+    try {
+        typeArgs = type.aliasSymbol ? type.aliasTypeArguments : checker.getTypeArguments(type);
+    }
+    catch { return; }
+    if (!typeArgs || typeArgs.length !== argNodes.length) return;
+    for (let i = 0; i < argNodes.length; i++) {
+        attachTypeReferenceSymbols(checker, typeArgs[i], argNodes[i]);
+    }
+}
+function forceSingleLineEmitFlags(node: any): void {
+    if (!node || typeof node !== "object") return;
+    const emitNode = node.emitNode ?? (node.emitNode = { internalFlags: 0 });
+    emitNode.flags = (emitNode.flags ?? 0) | EmitFlags.SingleLine;
+}
+function applySingleLineEmitFlagsToTypeSubtree(node: any): void {
+    if (!node) return;
+    forceSingleLineEmitFlags(node);
+    ts.forEachChild(node, (child: any) => {
+        applySingleLineEmitFlagsToTypeSubtree(child);
+    });
+}
+function applySingleLineEmitFlagsToDeclaration(node: any): any {
+    if (!node) return node;
+    const visit = (n: any): void => {
+        if (!n || n.kind === SyntaxKind.SourceFile) return;
+        forceSingleLineEmitFlags(n);
+        ts.forEachChild(n, visit);
+    };
+    visit(node);
+    return node;
+}
+function applySingleLineEmitFlagsRecursive(node: any): any {
+    applySingleLineEmitFlagsToTypeSubtree(node);
+    return node;
+}
+const typeKeywordNames = new Set([
+    "string", "number", "boolean", "undefined", "null", "void", "never",
+    "unknown", "any", "bigint", "symbol", "object",
+]);
+function writeTypeTextFallback(writer: any, text: string): void {
+    if (!text) return;
+    if (typeKeywordNames.has(text) && writer.writeKeyword) {
+        writer.writeKeyword(text);
+    }
+    else {
+        writer.write?.(text);
+    }
+}
+function bridgeTypePredicateToHostNode(predicate: any, typeNode: any): any {
+    const factory = ts.factory;
+    const kind = predicate.kind as number;
+    let assertsModifier: any;
+    if (kind === 2 || kind === 3) {
+        assertsModifier = factory.createToken(SyntaxKind.AssertsKeyword);
+    }
+    const parameterName = (kind === 1 || kind === 3)
+        ? factory.createIdentifier(predicate.parameterName ?? "")
+        : factory.createThisTypeNode();
+    return factory.createTypePredicateNode(assertsModifier, parameterName, typeNode);
 }
 /** Map tsgo internal symbol markers to stock display names (ast.EscapeAllInternalSymbolNames). */
 function unescapeTsgoSymbolName(name: string): string {
@@ -1907,6 +2043,16 @@ function installRemoteNodeTraversalHooks(): void {
             RemoteNode.prototype.getChildCount = function (this: any, sourceFile?: any) {
                 return this.getChildren(sourceFile).length;
             };
+        }
+        // tsgo names TypeParameterDeclaration's default `defaultType` (`default`
+        // is a Go keyword); stock consumers read `.default` (emitter's
+        // emitTypeParameter prints `= D`, services read it for defaults).
+        // Alias it at the boundary so decoded nodes keep the stock shape.
+        if (!Object.getOwnPropertyDescriptor(RemoteNode.prototype, "default")) {
+            Object.defineProperty(RemoteNode.prototype, "default", {
+                configurable: true,
+                get(this: any) { return this.defaultType; },
+            });
         }
         proc.remoteNodeTraversalPatched = true;
     } catch { /* native-preview not built yet */ }
@@ -3047,7 +3193,7 @@ function installNodeHandleHooks(s: any): void {
         "argument", "argumentExpression", "arguments", "assertsModifier", "asteriskToken",
         "attributes", "awaitModifier", "block", "body", "caseBlock", "catchClause", "checkType",
         "children", "className", "clauses", "closingElement", "closingFragment", "colonToken",
-        "comment", "condition", "constraint", "declarationList", "declarations", "defaultType",
+        "comment", "condition", "constraint", "declarationList", "declarations", "default", "defaultType",
         "dotDotDotToken", "elements", "elementType", "elseStatement", "endOfFileToken",
         "equalsGreaterThanToken", "equalsToken", "exclamationToken", "exportClause", "expression",
         "exprName", "extendsType", "falseType", "finallyBlock", "head", "heritageClauses",
@@ -3760,6 +3906,42 @@ export function createTsgoChecker(program: any): any {
         return result;
     }
 
+    /**
+     * Map a host enclosingDeclaration to its tsgo mirror for NodeBuilder
+     * context. signatureHelp's contextual invocations pass *tokens* (e.g. the
+     * OpenParenToken of `onEvent(`), which never appear in the tsgo node index
+     * (forEachChild skips tokens), so the exact-position lookup misses and Go
+     * loses the enclosing context — disabling stock's annotation-reuse branch
+     * (`once?: boolean` degrades to `once?: boolean | undefined`). Fall back
+     * to the innermost tsgo *node* containing the position; NodeBuilder only
+     * needs it for scoping/reuse, not identity.
+     */
+    function mapHostEnclosingToTsgo(enclosingDeclaration: any): any {
+        if (!enclosingDeclaration || typeof enclosingDeclaration.getStart !== "function") return undefined;
+        const sf = enclosingDeclaration.getSourceFile?.();
+        if (!sf?.fileName) return undefined;
+        const start = enclosingDeclaration.getStart(sf);
+        const exact = findTsgoNodeAtPosition(sf.fileName, start, enclosingDeclaration.kind, enclosingDeclaration.getEnd(sf));
+        if (exact) return exact;
+        const tsgoSf = getTsgoSourceFile(sf.fileName);
+        if (!tsgoSf) return undefined;
+        let deepest: any;
+        let cur: any = tsgoSf;
+        for (;;) {
+            let next: any;
+            cur.forEachChild?.((child: any) => {
+                if (next) return;
+                const cPos = child.pos ?? child.getFullStart?.();
+                const cEnd = typeof child.getEnd === "function" ? child.getEnd() : child.end;
+                if (cPos <= start && start < cEnd) next = child;
+            });
+            if (!next) break;
+            deepest = next;
+            cur = next;
+        }
+        return deepest;
+    }
+
     // ── Host↔tsgo symbol RPC boundary ────────────────────────────────
     // Two kinds of symbols flow through the checker surface:
     //   1. tsgo bridge symbols (native-preview _sync.Symbol) — their .id is a
@@ -4105,6 +4287,17 @@ export function createTsgoChecker(program: any): any {
                 return t;
             };
         }
+        // getTypeParameterAtPosition — stock SignatureObject delegates to
+        // checker.getParameterType; bridge Signature implements it via registry
+        // RPC. Wrap to fixupType for LS consumers.
+        if (proto.getTypeParameterAtPosition) {
+            const orig = proto.getTypeParameterAtPosition;
+            proto.getTypeParameterAtPosition = function (pos: number) {
+                const t = orig.call(this, pos);
+                if (t) fixupType(t);
+                return t;
+            };
+        }
         // getDeclaration — tsgo stores it as `this.declaration` (a NodeHandle).
         if (!proto.getDeclaration) {
             proto.getDeclaration = function () { return this.declaration; };
@@ -4121,7 +4314,7 @@ export function createTsgoChecker(program: any): any {
             if (!decl) return [];
             let parts: any[] = [];
             try {
-                parts = jsDocCommentsFromDeclarations([decl]) ?? [];
+                parts = trimDocPartsTrailingNewlines(jsDocCommentsFromDeclarations([decl]) ?? []);
             }
             catch { parts = []; }
             if (parts.length) this.__tnbDocComment = parts;
@@ -4133,7 +4326,7 @@ export function createTsgoChecker(program: any): any {
             if (!decl) return [];
             let tags: any[] = [];
             try {
-                tags = jsDocTagsFromDeclarations([decl]) ?? [];
+                tags = trimJsDocTagsTrailingNewlines(jsDocTagsFromDeclarations([decl]) ?? []);
             }
             catch { tags = []; }
             if (tags.length) this.__tnbJsDocTags = tags;
@@ -4237,7 +4430,7 @@ export function createTsgoChecker(program: any): any {
             }
             if (typeof this.id === "number" && this.id > 0 && checker?.getJsDocTagsOfSymbol) {
                 try {
-                    const tags = checker.getJsDocTagsOfSymbol(this) ?? [];
+                    const tags = trimJsDocTagsTrailingNewlines(checker.getJsDocTagsOfSymbol(this) ?? []);
                     if (tags.length) return tags;
                 }
                 catch { /* fall through */ }
@@ -4246,7 +4439,7 @@ export function createTsgoChecker(program: any): any {
                 const decl = resolveDocDeclaration(decls[0]);
                 if (decl) {
                     try {
-                        return jsDocTagsFromDeclarations([decl]) ?? [];
+                        return trimJsDocTagsTrailingNewlines(jsDocTagsFromDeclarations([decl]) ?? []);
                     }
                     catch { /* empty */ }
                 }
@@ -4657,6 +4850,15 @@ export function createTsgoChecker(program: any): any {
             ensureProject();
             const sf = node.getSourceFile?.();
             if (!sf) return undefined;
+            // Stock resolves `a.b` to the symbol of `b`
+            // (getSymbolOfNameOrPropertyAccessExpression). Query the name node
+            // for the whole pipeline — the position-keyed symbol cache stores
+            // identifier entries, so probing with the whole-node span would hit
+            // the LHS identifier that shares the node's start position (e.g.
+            // signatureHelp call-target `ctx.withThis` displaying `ctx`).
+            if (node.kind === SyntaxKind.PropertyAccessExpression && node.name?.getSourceFile) {
+                node = node.name;
+            }
             const start = typeof node.pos === "number" ? node.pos : node.getStart(sf);
             const end = typeof node.end === "number" ? node.end : node.getEnd(sf);
             // traceSym arguments are built eagerly — every call site on this
@@ -4926,6 +5128,63 @@ export function createTsgoChecker(program: any): any {
             if (!tsgoNode) return undefined;
             return project.checker.getResolvedSignature(tsgoNode);
         },
+        // Signature help uses CheckMode.IsForSignatureHelp + cache clear — not
+        // the ordinary getResolvedSignature RPC. Stock fills candidatesOutArray
+        // as a side effect; we push into the caller-supplied array and return
+        // the resolved signature.
+        getResolvedSignatureForSignatureHelp(node: any, candidatesOutArray?: any[], argumentCount?: number): any {
+            ensureProject();
+            const sf = node.getSourceFile?.();
+            if (!sf) return undefined;
+            const tsgoNode = findTsgoNodeAtPosition(sf.fileName, node.getStart(sf), node.kind, node.getEnd(sf));
+            if (!tsgoNode) return undefined;
+            const { resolved, candidates } = project.checker.getResolvedSignatureForSignatureHelp(tsgoNode, argumentCount);
+            if (candidatesOutArray) {
+                candidatesOutArray.length = 0;
+                for (const c of candidates) candidatesOutArray.push(c);
+            }
+            return resolved;
+        },
+        getExpandedParameters(signature: any, skipUnionExpanding?: boolean): any {
+            if (!signature) return [];
+            ensureProject();
+            return project.checker.getExpandedParameters(signature, skipUnionExpanding);
+        },
+        hasEffectiveRestParameter(signature: any): boolean {
+            if (!signature) return false;
+            ensureProject();
+            return project.checker.hasEffectiveRestParameter(signature);
+        },
+        getContextualTypeForObjectLiteralElement(element: any, _contextFlags?: number): any {
+            if (!element) return undefined;
+            ensureProject();
+            const sf = element.getSourceFile?.();
+            if (!sf) return undefined;
+            const tsgoNode = findTsgoNodeAtPosition(sf.fileName, element.getStart(sf), element.kind, element.getEnd(sf));
+            if (!tsgoNode) return undefined;
+            // LS callers omit flags; Go defaults to ContextFlagsNone.
+            const t = project.checker.getContextualTypeForObjectLiteralElement(tsgoNode, 0);
+            if (t) fixupType(t);
+            return t;
+        },
+        // signatureHelp / convertParamsToDestructuredObject: parameter optionality.
+        // Host ParameterDeclaration → tsgo mirror (same mapping as isDeclarationVisible).
+        isOptionalParameter(node: any): boolean {
+            if (!node) return false;
+            const sf = node.getSourceFile?.();
+            if (!sf?.fileName) return false;
+            let start: number | undefined;
+            let end: number | undefined;
+            try {
+                start = node.getStart(sf);
+                end = node.getEnd(sf);
+            } catch { return false; }
+            if (typeof start !== "number") return false;
+            ensureProject();
+            const tsgoNode = findTsgoNodeAtPosition(sf.fileName, start, node.kind, end);
+            if (!tsgoNode || tsgoNode.kind !== node.kind) return false;
+            return !!project.checker.isOptionalParameter(tsgoNode);
+        },
         // SymbolDisplay resolves a type parameter's owning signature from its
         // declaration ("(type parameter) T in pick<...>"). Declarations reaching
         // here are JS-side AST nodes (post declaration-remap); map to the tsgo
@@ -4989,7 +5248,14 @@ export function createTsgoChecker(program: any): any {
                     );
                 }
             }
-            return project.checker.typeParameterToDeclaration(parameter, tsgoLocation, flags);
+            const node = project.checker.typeParameterToDeclaration(parameter, tsgoLocation, flags);
+            if (node?.name && parameter?.symbol) {
+                node.name.symbol = parameter.symbol;
+            }
+            return applySingleLineEmitFlagsToDeclaration(node);
+        },
+        applySingleLineEmitFlags(node: any): any {
+            return applySingleLineEmitFlagsRecursive(node);
         },
         // SymbolDisplay renders "interface Wrap<W>" / "type Pair<P> = ..." by
         // asking for the symbol's type parameter declarations and printing them
@@ -5020,16 +5286,103 @@ export function createTsgoChecker(program: any): any {
             list.hasTrailingComma = false;
             return list;
         },
+        // signatureHelp itemInfoForParameters builds ParameterDeclaration nodes
+        // via symbolToParameterDeclaration. Host symbols → resolveRpcSymbol;
+        // enclosingDeclaration is host-bound → map to tsgo mirror.
+        symbolToParameterDeclaration(symbol: any, enclosingDeclaration?: any, flags?: number): any {
+            if (!symbol) return undefined;
+            ensureProject();
+            const rpcSym = resolveRpcSymbol(symbol);
+            if (!rpcSym) return undefined;
+            const tsgoLocation = mapHostEnclosingToTsgo(enclosingDeclaration);
+            const node = project.checker.symbolToParameterDeclaration(rpcSym, tsgoLocation, flags);
+            if (node?.type) {
+                let typeParams: readonly any[] | undefined;
+                const paramDecl = rpcSym.valueDeclaration ?? rpcSym.declarations?.[0];
+                const parent = paramDecl?.parent;
+                if (parent) {
+                    const sf = parent.getSourceFile?.();
+                    if (sf?.fileName) {
+                        const tsgoParent = findTsgoNodeAtPosition(sf.fileName, parent.getStart(sf), parent.kind, parent.getEnd(sf));
+                        if (tsgoParent) {
+                            const sig = project.checker.getSignatureFromDeclaration(tsgoParent);
+                            typeParams = sig?.typeParameters ?? sig?.target?.typeParameters;
+                            if (typeParams) for (const t of typeParams) fixupType(t);
+                        }
+                    }
+                }
+                attachTypeParameterNameSymbols(node.type, typeParams);
+            }
+            return applySingleLineEmitFlagsToDeclaration(node);
+        },
+        getLocalTypeParametersOfClassOrInterfaceOrTypeAlias(symbol: any): any {
+            if (!symbol) return undefined;
+            ensureProject();
+            const rpcSym = resolveRpcSymbol(symbol);
+            if (!rpcSym) return undefined;
+            const tps = project.checker.getLocalTypeParametersOfClassOrInterfaceOrTypeAlias(rpcSym);
+            if (!tps) return undefined;
+            for (const t of tps) fixupType(t);
+            return tps;
+        },
         // Stock checker exposes writer-based emitters consumed by the services
         // displayParts builders (typeToDisplayParts/symbolToDisplayParts/
         // signatureToDisplayParts → quickInfo, references symbolDisplayString).
-        // tsgo has no writer RPC; serialize via the string RPCs and emit a
-        // single text part (flattened by displayPartsToString anyway).
-        writeType(type: any, _enclosing?: any, flags?: number, writer?: any): void {
+        // tsgo has no writer RPC; build a TypeNode via typeToTypeNode and print
+        // with the host printer so DisplayPartsSymbolWriter gets keyword/punct
+        // kinds (signatureHelp return-type suffix, quickInfo, etc.).
+        writeType(type: any, enclosingDeclaration?: any, flags?: number, writer?: any): void {
             if (!type || !writer) return;
             ensureProject();
-            const text = project.checker.typeToString(type, undefined, flags) ?? "";
-            if (text) writer.write?.(text);
+            let tsgoLocation: any;
+            if (enclosingDeclaration && typeof enclosingDeclaration.getStart === "function") {
+                const sf = enclosingDeclaration.getSourceFile?.();
+                if (sf?.fileName) {
+                    tsgoLocation = findTsgoNodeAtPosition(
+                        sf.fileName,
+                        enclosingDeclaration.getStart(sf),
+                        enclosingDeclaration.kind,
+                        enclosingDeclaration.getEnd(sf),
+                    );
+                }
+            }
+            const typeNode = project.checker.typeToTypeNode(type, tsgoLocation, flags);
+            if (typeNode) {
+                attachTypeParameterSymbolsFromType(type, typeNode);
+                attachTypeReferenceSymbols(project.checker, type, typeNode);
+                applySingleLineEmitFlagsToTypeSubtree(typeNode);
+                const sourceFile = enclosingDeclaration?.getSourceFile?.();
+                getRemoveCommentsPrinter().writeNode(EmitHint.Unspecified, typeNode, sourceFile, writer);
+                return;
+            }
+            const text = project.checker.typeToString(type, tsgoLocation, flags) ?? "";
+            writeTypeTextFallback(writer, text);
+        },
+        writeTypePredicate(predicate: any, enclosingDeclaration?: any, flags?: number, writer?: any): void {
+            if (!predicate || !writer) return;
+            ensureProject();
+            let tsgoLocation: any;
+            if (enclosingDeclaration && typeof enclosingDeclaration.getStart === "function") {
+                const sf = enclosingDeclaration.getSourceFile?.();
+                if (sf?.fileName) {
+                    tsgoLocation = findTsgoNodeAtPosition(
+                        sf.fileName,
+                        enclosingDeclaration.getStart(sf),
+                        enclosingDeclaration.kind,
+                        enclosingDeclaration.getEnd(sf),
+                    );
+                }
+            }
+            const typeNode = predicate.type
+                ? project.checker.typeToTypeNode(predicate.type, tsgoLocation, flags)
+                : undefined;
+            const predicateNode = bridgeTypePredicateToHostNode(predicate, typeNode);
+            const sourceFile = enclosingDeclaration?.getSourceFile?.();
+            getRemoveCommentsPrinter().writeNode(EmitHint.Unspecified, predicateNode, sourceFile, writer);
+        },
+        typePredicateToString(predicate: any, enclosingDeclaration?: any, flags?: number): string {
+            if (!predicate) return "";
+            return usingSingleLineStringWriter(writer => checkerProxyRef.writeTypePredicate(predicate, enclosingDeclaration, flags, writer));
         },
         writeSymbol(symbol: any, _enclosing?: any, _meaning?: number, _flags?: number, writer?: any): void {
             if (!symbol || !writer) return;
@@ -5733,7 +6086,7 @@ const _tnbCheckerCoverage = {
     symbolToExpression: "throw",
     symbolToNode: "throw",
     symbolToTypeParameterDeclarations: "adapter",
-    symbolToParameterDeclaration: "throw",
+    symbolToParameterDeclaration: "adapter",
     typeParameterToDeclaration: "adapter",
     getSymbolsInScope: "adapter",
     getSymbolAtLocation: "adapter",
@@ -5749,26 +6102,26 @@ const _tnbCheckerCoverage = {
     signatureToString: "adapter",
     typeToString: "adapter",
     symbolToString: "adapter",
-    typePredicateToString: "throw",
+    typePredicateToString: "adapter",
     writeSignature: "adapter",
     writeType: "adapter",
     writeSymbol: "adapter",
-    writeTypePredicate: "throw",
+    writeTypePredicate: "adapter",
     getFullyQualifiedName: "adapter",
     getAugmentedPropertiesOfType: "throw",
     getRootSymbols: "adapter",
     getSymbolOfExpando: "throw",
     getContextualType: "adapter",
-    getContextualTypeForObjectLiteralElement: "throw",
+    getContextualTypeForObjectLiteralElement: "adapter",
     getContextualTypeForArgumentAtIndex: "throw",
     getContextualTypeForJsxAttribute: "throw",
     isContextSensitive: "tsgo",
     getTypeOfPropertyOfContextualType: "throw",
     getResolvedSignature: "adapter",
-    getResolvedSignatureForSignatureHelp: "throw",
+    getResolvedSignatureForSignatureHelp: "adapter",
     getCandidateSignaturesForStringLiteralCompletions: "throw",
-    getExpandedParameters: "throw",
-    hasEffectiveRestParameter: "throw",
+    getExpandedParameters: "adapter",
+    hasEffectiveRestParameter: "adapter",
     containsArgumentsReference: "throw",
     getSignatureFromDeclaration: "adapter",
     isImplementationOfOverload: "throw",
@@ -5786,7 +6139,7 @@ const _tnbCheckerCoverage = {
     getExportsAndPropertiesOfModule: "throw",
     forEachExportAndPropertyOfModule: "adapter",
     getJsxIntrinsicTagNamesAt: "throw",
-    isOptionalParameter: "throw",
+    isOptionalParameter: "adapter",
     getAmbientModules: "adapter",
     tryGetMemberInModuleExports: "adapter",
     tryGetMemberInModuleExportsAndProperties: "adapter",
@@ -5860,7 +6213,7 @@ const _tnbCheckerCoverage = {
     getTypeArgumentConstraint: "throw",
     getSuggestionDiagnostics: "adapter",
     runWithCancellationToken: "adapter",
-    getLocalTypeParametersOfClassOrInterfaceOrTypeAlias: "throw",
+    getLocalTypeParametersOfClassOrInterfaceOrTypeAlias: "adapter",
     isDeclarationVisible: "adapter",
     isPropertyAccessible: "throw",
     getTypeOnlyAliasDeclaration: "throw",
