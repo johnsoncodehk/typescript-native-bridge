@@ -717,6 +717,24 @@ function traceSym(message: string): void {
         // ignore tracing IO errors
     }
 }
+const _traceThrowEnabled = process.env.TNB_TRACE_THROW === "1";
+const _traceThrowFile = process.env.TNB_TRACE_THROW_FILE;
+function traceThrow(kind: "TypeChecker" | "Program", method: string): void {
+    if (!_traceThrowEnabled) return;
+    try {
+        const raw = new Error().stack ?? "";
+        const frames = raw.split("\n").slice(2, 7).map(s => s.trim()).filter(Boolean);
+        const line = JSON.stringify({ kind, method, stack: frames }) + "\n";
+        if (_traceThrowFile) {
+            const fs = require("fs") as typeof import("fs");
+            fs.appendFileSync(_traceThrowFile, line, "utf8");
+            return;
+        }
+        process.stderr.write(line);
+    } catch {
+        // ignore tracing IO errors
+    }
+}
 function traceSymKind(kind: number | undefined): string {
     if (typeof kind !== "number") return "n/a";
     const kindTable = (ts as any)?.["SyntaxKind"];
@@ -2929,6 +2947,7 @@ export function createTsgoProgram(
             if (prop in target) return Reflect.get(target, prop, receiver);
             if (typeof prop !== "string") return undefined;
             return (..._args: any[]) => {
+                traceThrow("Program", prop);
                 throw new Error(`tsgoChecker: Program.${prop} is not implemented on the tsgo-backed program`);
             };
         },
@@ -5649,6 +5668,7 @@ export function createTsgoChecker(program: any): any {
             // silently returning undefined (which hid quick-fix gaps like
             // getSymbolFlags / tryGetMemberInModuleExportsAndProperties).
             return (..._args: any[]) => {
+                traceThrow("TypeChecker", prop);
                 throw new Error(`tsgoChecker: TypeChecker.${prop} is not implemented in the tsgo adapter`);
             };
         },
