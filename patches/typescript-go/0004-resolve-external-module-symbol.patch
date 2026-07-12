@@ -1,5 +1,5 @@
 diff --git a/_packages/native-preview/src/api/async/api.ts b/_packages/native-preview/src/api/async/api.ts
-index 27b3ad932..595c1aa11 100644
+index 27b3ad932..20d2aa8e8 100644
 --- a/_packages/native-preview/src/api/async/api.ts
 +++ b/_packages/native-preview/src/api/async/api.ts
 @@ -44,6 +44,7 @@ import type {
@@ -565,41 +565,79 @@ index 27b3ad932..595c1aa11 100644
      async getShorthandAssignmentValueSymbol(node: Node): Promise<Symbol | undefined> {
          const data = await this.client.apiRequest<SymbolResponse | null>("getShorthandAssignmentValueSymbol", {
              snapshot: this.snapshotId,
-@@ -1069,6 +1527,30 @@ export class Checker {
+@@ -1026,6 +1484,19 @@ export class Checker {
+     async getAnyType(): Promise<Type> {
+         return this.getIntrinsicType("getAnyType");
+     }
++    async getPromiseType(): Promise<Type> {
++        return this.getIntrinsicType("getPromiseType");
++    }
++    async getPromiseLikeType(): Promise<Type> {
++        return this.getIntrinsicType("getPromiseLikeType");
++    }
++    async getAnyAsyncIterableType(): Promise<Type | undefined> {
++        const data = await this.client.apiRequest<TypeResponse | null>("getAnyAsyncIterableType", {
++            snapshot: this.snapshotId,
++            project: this.projectId,
++        });
++        return data ? this.objectRegistry.getOrCreateType(data) : undefined;
++    }
+     async getStringType(): Promise<Type> {
+         return this.getIntrinsicType("getStringType");
+     }
+@@ -1069,38 +1540,72 @@ export class Checker {
          return decodeNode(binaryData) as TypeNode;
      }
  
+-    async signatureToSignatureDeclaration(signature: Signature, kind: SyntaxKind, enclosingDeclaration?: Node, flags?: NodeBuilderFlags): Promise<Node | undefined> {
+-        const binaryData = await this.client.apiRequestBinary("signatureToSignatureDeclaration", {
 +    async typeParameterToDeclaration(type: Type, enclosingDeclaration?: Node, flags?: number): Promise<Node | undefined> {
 +        const binaryData = await this.client.apiRequestBinary("typeParameterToDeclaration", {
-+            snapshot: this.snapshotId,
-+            project: this.projectId,
-+            type: type.id,
-+            location: enclosingDeclaration ? getNodeId(enclosingDeclaration) : undefined,
-+            flags,
-+        });
-+        if (!binaryData) return undefined;
-+        return decodeNode(binaryData);
-+    }
-+
-+    async symbolToTypeParameterDeclarations(symbol: Symbol, enclosingDeclaration?: Node, flags?: number): Promise<Node[]> {
-+        const encoded = await this.client.apiRequest<string[] | undefined>("symbolToTypeParameterDeclarations", {
-+            snapshot: this.snapshotId,
-+            project: this.projectId,
-+            symbol: symbol.id,
-+            location: enclosingDeclaration ? getNodeId(enclosingDeclaration) : undefined,
-+            flags,
-+        });
-+        if (!encoded?.length) return [];
-+        return encoded.map(data => decodeNode(new Uint8Array(Buffer.from(data, "base64"))));
-+    }
-+
-     async signatureToSignatureDeclaration(signature: Signature, kind: SyntaxKind, enclosingDeclaration?: Node, flags?: NodeBuilderFlags): Promise<Node | undefined> {
-         const binaryData = await this.client.apiRequestBinary("signatureToSignatureDeclaration", {
              snapshot: this.snapshotId,
-@@ -1082,6 +1564,16 @@ export class Checker {
-         return decodeNode(binaryData) as Node;
+             project: this.projectId,
+-            signature: signature.id,
+-            kind,
++            type: type.id,
+             location: enclosingDeclaration ? getNodeId(enclosingDeclaration) : undefined,
+             flags,
+         });
+         if (!binaryData) return undefined;
+-        return decodeNode(binaryData) as Node;
++        return decodeNode(binaryData);
      }
  
+-    async typeToString(type: Type, enclosingDeclaration?: Node, flags?: number): Promise<string> {
+-        return this.client.apiRequest<string>("typeToString", {
++    async symbolToTypeParameterDeclarations(symbol: Symbol, enclosingDeclaration?: Node, flags?: number): Promise<Node[]> {
++        const encoded = await this.client.apiRequest<string[] | undefined>("symbolToTypeParameterDeclarations", {
+             snapshot: this.snapshotId,
+             project: this.projectId,
+-            type: type.id,
++            symbol: symbol.id,
+             location: enclosingDeclaration ? getNodeId(enclosingDeclaration) : undefined,
+             flags,
+         });
++        if (!encoded?.length) return [];
++        return encoded.map(data => decodeNode(new Uint8Array(Buffer.from(data, "base64"))));
+     }
+ 
+-    async isContextSensitive(node: Node): Promise<boolean> {
+-        return this.client.apiRequest<boolean>("isContextSensitive", {
++    async signatureToSignatureDeclaration(signature: Signature, kind: SyntaxKind, enclosingDeclaration?: Node, flags?: NodeBuilderFlags): Promise<Node | undefined> {
++        const binaryData = await this.client.apiRequestBinary("signatureToSignatureDeclaration", {
+             snapshot: this.snapshotId,
+             project: this.projectId,
+-            location: getNodeId(node),
++            signature: signature.id,
++            kind,
++            location: enclosingDeclaration ? getNodeId(enclosingDeclaration) : undefined,
++            flags,
+         });
++        if (!binaryData) return undefined;
++        return decodeNode(binaryData) as Node;
+     }
+ 
+-    async isArrayType(type: Type): Promise<boolean> {
 +    async signatureToString(signature: Signature, enclosingDeclaration?: Node, flags?: number): Promise<string> {
 +        return this.client.apiRequest<string>("signatureToString", {
 +            snapshot: this.snapshotId,
@@ -610,17 +648,32 @@ index 27b3ad932..595c1aa11 100644
 +        });
 +    }
 +
-     async typeToString(type: Type, enclosingDeclaration?: Node, flags?: number): Promise<string> {
-         return this.client.apiRequest<string>("typeToString", {
++    async typeToString(type: Type, enclosingDeclaration?: Node, flags?: number): Promise<string> {
++        return this.client.apiRequest<string>("typeToString", {
++            snapshot: this.snapshotId,
++            project: this.projectId,
++            type: type.id,
++            location: enclosingDeclaration ? getNodeId(enclosingDeclaration) : undefined,
++            flags,
++        });
++    }
++
++    async isContextSensitive(node: Node): Promise<boolean> {
++        return this.client.apiRequest<boolean>("isContextSensitive", {
++            snapshot: this.snapshotId,
++            project: this.projectId,
++            location: getNodeId(node),
++        });
++    }
++
++    async isArrayType(type: Type): Promise<boolean> {
+         return this.client.apiRequest<boolean>("isArrayType", {
              snapshot: this.snapshotId,
-@@ -1116,10 +1608,507 @@ export class Checker {
+             project: this.projectId,
+@@ -1116,6 +1621,552 @@ export class Checker {
          });
      }
  
--    async getReturnTypeOfSignature(signature: Signature): Promise<Type | undefined> {
--        const data = await this.client.apiRequest<TypeResponse | null>("getReturnTypeOfSignature", {
--            snapshot: this.snapshotId,
--            project: this.projectId,
 +    private _intrinsicSymbols: { undefinedSymbol: Symbol | undefined; argumentsSymbol: Symbol | undefined; unknownSymbol: Symbol | undefined } | undefined;
 +
 +    /**
@@ -1073,6 +1126,55 @@ index 27b3ad932..595c1aa11 100644
 +        return decodeNode(binaryData);
 +    }
 +
++    async getExactOptionalProperties(type: Type): Promise<readonly Symbol[]> {
++        const data = await this.client.apiRequest<SymbolResponse[] | null>("getExactOptionalProperties", {
++            snapshot: this.snapshotId,
++            project: this.projectId,
++            type: type.id,
++        });
++        return data ? data.map(d => this.objectRegistry.getOrCreateSymbol(d)) : [];
++    }
++
++    async getJsxNamespace(location?: Node): Promise<string> {
++        const data = await this.client.apiRequest<string | null>("getJsxNamespace", {
++            snapshot: this.snapshotId,
++            project: this.projectId,
++            location: location ? getNodeId(location) : undefined,
++        });
++        return data ?? "";
++    }
++
++    async getJsxFragmentFactory(location: Node): Promise<string> {
++        const data = await this.client.apiRequest<string | null>("getJsxFragmentFactory", {
++            snapshot: this.snapshotId,
++            project: this.projectId,
++            location: getNodeId(location),
++        });
++        return data ?? "";
++    }
++
++    async getParameterIdentifierInfoAtPosition(
++        signature: Signature,
++        position: number,
++    ): Promise<{ parameter: NodeHandle; parameterName: string; isRestParameter: boolean; } | undefined> {
++        const data = await this.client.apiRequest<{
++            parameter?: string;
++            parameterName: string;
++            isRestParameter: boolean;
++        } | null>("getParameterIdentifierInfoAtPosition", {
++            snapshot: this.snapshotId,
++            project: this.projectId,
++            signature: signature.id,
++            position,
++        });
++        if (!data) return undefined;
++        return {
++            parameter: data.parameter ? new NodeHandle(data.parameter) : undefined as unknown as NodeHandle,
++            parameterName: data.parameterName,
++            isRestParameter: !!data.isRestParameter,
++        };
++    }
++
 +    async isSymbolAccessible(
 +        symbol: Symbol,
 +        enclosingDeclaration: Node | undefined,
@@ -1118,14 +1220,10 @@ index 27b3ad932..595c1aa11 100644
 +        return data ? data.map(d => this.objectRegistry.getOrCreateSymbol(d)) : [];
 +    }
 +
-+    async getReturnTypeOfSignature(signature: Signature): Promise<Type | undefined> {
-+        const data = await this.client.apiRequest<TypeResponse | null>("getReturnTypeOfSignature", {
-+            snapshot: this.snapshotId,
-+            project: this.projectId,
-             signature: signature.id,
-         });
-         return data ? this.objectRegistry.getOrCreateType(data) : undefined;
-@@ -1187,12 +2176,37 @@ export class Checker {
+     async getReturnTypeOfSignature(signature: Signature): Promise<Type | undefined> {
+         const data = await this.client.apiRequest<TypeResponse | null>("getReturnTypeOfSignature", {
+             snapshot: this.snapshotId,
+@@ -1187,12 +2238,37 @@ export class Checker {
              type: type.id,
          });
          if (!data) return [];
@@ -1166,7 +1264,7 @@ index 27b3ad932..595c1aa11 100644
      }
  
      /**
-@@ -1281,6 +2295,15 @@ export class Checker {
+@@ -1281,6 +2357,15 @@ export class Checker {
          return data ? data.map(d => this.objectRegistry.getOrCreateSymbol(d)) : [];
      }
  
@@ -1182,7 +1280,7 @@ index 27b3ad932..595c1aa11 100644
      async getMemberInModuleExports(symbol: Symbol, name: string): Promise<Symbol | undefined> {
          const data = await this.client.apiRequest<SymbolResponse | null>("getMemberInModuleExports", {
              snapshot: this.snapshotId,
-@@ -1291,6 +2314,15 @@ export class Checker {
+@@ -1291,6 +2376,15 @@ export class Checker {
          return data ? this.objectRegistry.getOrCreateSymbol(data) : undefined;
      }
  
@@ -1198,7 +1296,7 @@ index 27b3ad932..595c1aa11 100644
      async getJsDocTagsOfSymbol(symbol: Symbol): Promise<readonly JSDocTagInfo[]> {
          const data = await this.client.apiRequest<JSDocTagInfo[] | null>("getJsDocTags", {
              snapshot: this.snapshotId,
-@@ -1321,6 +2353,23 @@ export class Checker {
+@@ -1321,6 +2415,23 @@ export class Checker {
      }
  }
  
@@ -1222,7 +1320,7 @@ index 27b3ad932..595c1aa11 100644
  export interface PrintNodeOptions {
      preserveSourceNewlines?: boolean;
      neverAsciiEscape?: boolean;
-@@ -1445,7 +2494,8 @@ class TypeObject implements Type {
+@@ -1445,7 +2556,8 @@ class TypeObject implements Type {
      readonly id: number;
      readonly flags: TypeFlags;
      readonly objectFlags!: ObjectFlags;
@@ -1232,7 +1330,7 @@ index 27b3ad932..595c1aa11 100644
      readonly value!: string | number | boolean | bigint;
      readonly intrinsicName!: string;
      readonly isThisType!: boolean;
-@@ -1477,7 +2527,7 @@ class TypeObject implements Type {
+@@ -1477,7 +2589,7 @@ class TypeObject implements Type {
          this.id = data.id;
          this.flags = data.flags;
          if (data.objectFlags !== undefined) this.objectFlags = data.objectFlags;
@@ -1241,7 +1339,7 @@ index 27b3ad932..595c1aa11 100644
          if (data.value != null) {
              // BigInt literal values are serialized as decimal strings (e.g. "-123") because
              // JSON cannot represent bigint. Decode them back into a real bigint here.
-@@ -1509,7 +2559,7 @@ class TypeObject implements Type {
+@@ -1509,7 +2621,7 @@ class TypeObject implements Type {
      }
  
      async getSymbol(): Promise<Symbol | undefined> {
@@ -1250,7 +1348,7 @@ index 27b3ad932..595c1aa11 100644
      }
  
      async getAliasSymbol(): Promise<Symbol | undefined> {
-@@ -1559,7 +2609,7 @@ class TypeObject implements Type {
+@@ -1559,7 +2671,7 @@ class TypeObject implements Type {
      }
  
      async getIndexType(): Promise<Type> {
@@ -1259,7 +1357,7 @@ index 27b3ad932..595c1aa11 100644
      }
  
      async getCheckType(): Promise<Type> {
-@@ -1741,36 +2791,60 @@ export class Signature {
+@@ -1741,36 +2853,60 @@ export class Signature {
  
      readonly id: number;
      readonly declaration?: NodeHandle | undefined;
@@ -1334,7 +1432,7 @@ index 27b3ad932..595c1aa11 100644
  
      get hasRestParameter(): boolean {
 diff --git a/_packages/native-preview/src/api/sync/api.ts b/_packages/native-preview/src/api/sync/api.ts
-index 9381d5122..c25fe16b1 100644
+index 9381d5122..efc3843ae 100644
 --- a/_packages/native-preview/src/api/sync/api.ts
 +++ b/_packages/native-preview/src/api/sync/api.ts
 @@ -57,6 +57,9 @@ import type {
@@ -1862,10 +1960,47 @@ index 9381d5122..c25fe16b1 100644
      resolveName(
          name: string,
          meaning: SymbolFlags,
-@@ -959,6 +1395,15 @@ export class Checker {
-         return data ? this.objectRegistry.getOrCreateType(data) : undefined;
-     }
- 
+@@ -923,205 +1359,899 @@ export class Checker {
+             position: !isNode && location ? (location as DocumentPosition).position : undefined,
+             excludeGlobals,
+         });
+-        return data ? this.objectRegistry.getOrCreateSymbol(data) : undefined;
++        return data ? this.objectRegistry.getOrCreateSymbol(data) : undefined;
++    }
++
++    getResolvedSymbol(node: Identifier): Symbol | undefined {
++        const text = node.text;
++        if (!text) return undefined;
++        return this.resolveName(text, SymbolFlags.Value | SymbolFlags.ExportValue, node);
++    }
++
++    getContextualType(node: Expression): Type | undefined {
++        const data = this.client.apiRequest<TypeResponse | null>("getContextualType", {
++            snapshot: this.snapshotId,
++            project: this.projectId,
++            location: getNodeId(node),
++        });
++        return data ? this.objectRegistry.getOrCreateType(data) : undefined;
++    }
++
++    getBaseTypeOfLiteralType(type: Type): Type | undefined {
++        const data = this.client.apiRequest<TypeResponse | null>("getBaseTypeOfLiteralType", {
++            snapshot: this.snapshotId,
++            project: this.projectId,
++            type: type.id,
++        });
++        return data ? this.objectRegistry.getOrCreateType(data) : undefined;
++    }
++
++    getNonNullableType(type: Type): Type | undefined {
++        const data = this.client.apiRequest<TypeResponse | null>("getNonNullableType", {
++            snapshot: this.snapshotId,
++            project: this.projectId,
++            type: type.id,
++        });
++        return data ? this.objectRegistry.getOrCreateType(data) : undefined;
++    }
++
 +    getNonOptionalType(type: Type): Type | undefined {
 +        const data = this.client.apiRequest<TypeResponse | null>("getNonOptionalType", {
 +            snapshot: this.snapshotId,
@@ -1875,13 +2010,51 @@ index 9381d5122..c25fe16b1 100644
 +        return data ? this.objectRegistry.getOrCreateType(data) : undefined;
 +    }
 +
-     getTypeFromTypeNode(node: TypeNode): Type | undefined {
-         const data = this.client.apiRequest<TypeResponse | null>("getTypeFromTypeNode", {
-             snapshot: this.snapshotId,
-@@ -1004,6 +1449,97 @@ export class Checker {
-         });
-     }
- 
++    getTypeFromTypeNode(node: TypeNode): Type | undefined {
++        const data = this.client.apiRequest<TypeResponse | null>("getTypeFromTypeNode", {
++            snapshot: this.snapshotId,
++            project: this.projectId,
++            location: getNodeId(node),
++        });
++        return data ? this.objectRegistry.getOrCreateType(data) : undefined;
++    }
++
++    getWidenedType(type: Type): Type | undefined {
++        const data = this.client.apiRequest<TypeResponse | null>("getWidenedType", {
++            snapshot: this.snapshotId,
++            project: this.projectId,
++            type: type.id,
++        });
++        return data ? this.objectRegistry.getOrCreateType(data) : undefined;
++    }
++
++    getParameterType(signature: Signature, index: number): Type | undefined {
++        const data = this.client.apiRequest<TypeResponse | null>("getParameterType", {
++            snapshot: this.snapshotId,
++            project: this.projectId,
++            signature: signature.id,
++            index,
++        });
++        return data ? this.objectRegistry.getOrCreateType(data) : undefined;
++    }
++
++    isArrayLikeType(type: Type): boolean {
++        return this.client.apiRequest<boolean>("isArrayLikeType", {
++            snapshot: this.snapshotId,
++            project: this.projectId,
++            type: type.id,
++        });
++    }
++
++    isTypeAssignableTo(source: Type, target: Type): boolean {
++        return this.client.apiRequest<boolean>("isTypeAssignableTo", {
++            snapshot: this.snapshotId,
++            project: this.projectId,
++            source: source.id,
++            target: target.id,
++        });
++    }
++
 +    getUnionType(types: readonly Type[], unionReduction: number = 1): Type | undefined {
 +        if (types.length === 0) {
 +            return this.getNeverType();
@@ -1973,21 +2146,96 @@ index 9381d5122..c25fe16b1 100644
 +        };
 +    }
 +
-     getShorthandAssignmentValueSymbol(node: Node): Symbol | undefined {
-         const data = this.client.apiRequest<SymbolResponse | null>("getShorthandAssignmentValueSymbol", {
-             snapshot: this.snapshotId,
-@@ -1077,12 +1613,36 @@ export class Checker {
-         return decodeNode(binaryData) as TypeNode;
-     }
- 
--    signatureToSignatureDeclaration(signature: Signature, kind: SyntaxKind, enclosingDeclaration?: Node, flags?: NodeBuilderFlags): Node | undefined {
--        const binaryData = this.client.apiRequestBinary("signatureToSignatureDeclaration", {
++    getShorthandAssignmentValueSymbol(node: Node): Symbol | undefined {
++        const data = this.client.apiRequest<SymbolResponse | null>("getShorthandAssignmentValueSymbol", {
++            snapshot: this.snapshotId,
++            project: this.projectId,
++            location: getNodeId(node),
++        });
++        return data ? this.objectRegistry.getOrCreateSymbol(data) : undefined;
++    }
++
++    getTypeOfSymbolAtLocation(symbol: Symbol, location: Node): Type | undefined {
++        const data = this.client.apiRequest<TypeResponse | null>("getTypeOfSymbolAtLocation", {
++            snapshot: this.snapshotId,
++            project: this.projectId,
++            symbol: symbol.id,
++            location: getNodeId(location),
++        });
++        return data ? this.objectRegistry.getOrCreateType(data) : undefined;
++    }
++
++    private getIntrinsicType(method: string): Type {
++        const data = this.client.apiRequest<TypeResponse>(method, {
++            snapshot: this.snapshotId,
++            project: this.projectId,
++        });
++        return this.objectRegistry.getOrCreateType(data);
++    }
++
++    getAnyType(): Type {
++        return this.getIntrinsicType("getAnyType");
++    }
++    getPromiseType(): Type {
++        return this.getIntrinsicType("getPromiseType");
++    }
++    getPromiseLikeType(): Type {
++        return this.getIntrinsicType("getPromiseLikeType");
++    }
++    getAnyAsyncIterableType(): Type | undefined {
++        const data = this.client.apiRequest<TypeResponse | null>("getAnyAsyncIterableType", {
++            snapshot: this.snapshotId,
++            project: this.projectId,
++        });
++        return data ? this.objectRegistry.getOrCreateType(data) : undefined;
++    }
++    getStringType(): Type {
++        return this.getIntrinsicType("getStringType");
++    }
++    getNumberType(): Type {
++        return this.getIntrinsicType("getNumberType");
++    }
++    getBooleanType(): Type {
++        return this.getIntrinsicType("getBooleanType");
++    }
++    getVoidType(): Type {
++        return this.getIntrinsicType("getVoidType");
++    }
++    getUndefinedType(): Type {
++        return this.getIntrinsicType("getUndefinedType");
++    }
++    getNullType(): Type {
++        return this.getIntrinsicType("getNullType");
++    }
++    getNeverType(): Type {
++        return this.getIntrinsicType("getNeverType");
++    }
++    getUnknownType(): Type {
++        return this.getIntrinsicType("getUnknownType");
++    }
++    getBigIntType(): Type {
++        return this.getIntrinsicType("getBigIntType");
++    }
++    getESSymbolType(): Type {
++        return this.getIntrinsicType("getESSymbolType");
++    }
++
++    typeToTypeNode(type: Type, enclosingDeclaration?: Node, flags?: number): TypeNode | undefined {
++        const binaryData = this.client.apiRequestBinary("typeToTypeNode", {
++            snapshot: this.snapshotId,
++            project: this.projectId,
++            type: type.id,
++            location: enclosingDeclaration ? getNodeId(enclosingDeclaration) : undefined,
++            flags,
++        });
++        if (!binaryData) return undefined;
++        return decodeNode(binaryData) as TypeNode;
++    }
++
 +    typeParameterToDeclaration(type: Type, enclosingDeclaration?: Node, flags?: number): Node | undefined {
 +        const binaryData = this.client.apiRequestBinary("typeParameterToDeclaration", {
-             snapshot: this.snapshotId,
-             project: this.projectId,
--            signature: signature.id,
--            kind,
++            snapshot: this.snapshotId,
++            project: this.projectId,
 +            type: type.id,
 +            location: enclosingDeclaration ? getNodeId(enclosingDeclaration) : undefined,
 +            flags,
@@ -2014,13 +2262,13 @@ index 9381d5122..c25fe16b1 100644
 +            project: this.projectId,
 +            signature: signature.id,
 +            kind,
-             location: enclosingDeclaration ? getNodeId(enclosingDeclaration) : undefined,
-             flags,
-         });
-@@ -1090,6 +1650,16 @@ export class Checker {
-         return decodeNode(binaryData) as Node;
-     }
- 
++            location: enclosingDeclaration ? getNodeId(enclosingDeclaration) : undefined,
++            flags,
++        });
++        if (!binaryData) return undefined;
++        return decodeNode(binaryData) as Node;
++    }
++
 +    signatureToString(signature: Signature, enclosingDeclaration?: Node, flags?: number): string {
 +        return this.client.apiRequest<string>("signatureToString", {
 +            snapshot: this.snapshotId,
@@ -2031,13 +2279,40 @@ index 9381d5122..c25fe16b1 100644
 +        });
 +    }
 +
-     typeToString(type: Type, enclosingDeclaration?: Node, flags?: number): string {
-         return this.client.apiRequest<string>("typeToString", {
-             snapshot: this.snapshotId,
-@@ -1124,6 +1694,504 @@ export class Checker {
-         });
-     }
- 
++    typeToString(type: Type, enclosingDeclaration?: Node, flags?: number): string {
++        return this.client.apiRequest<string>("typeToString", {
++            snapshot: this.snapshotId,
++            project: this.projectId,
++            type: type.id,
++            location: enclosingDeclaration ? getNodeId(enclosingDeclaration) : undefined,
++            flags,
++        });
++    }
++
++    isContextSensitive(node: Node): boolean {
++        return this.client.apiRequest<boolean>("isContextSensitive", {
++            snapshot: this.snapshotId,
++            project: this.projectId,
++            location: getNodeId(node),
++        });
++    }
++
++    isArrayType(type: Type): boolean {
++        return this.client.apiRequest<boolean>("isArrayType", {
++            snapshot: this.snapshotId,
++            project: this.projectId,
++            type: type.id,
++        });
++    }
++
++    isTupleType(type: Type): boolean {
++        return this.client.apiRequest<boolean>("isTupleType", {
++            snapshot: this.snapshotId,
++            project: this.projectId,
++            type: type.id,
++        });
++    }
++
 +    private _intrinsicSymbols: { undefinedSymbol: Symbol | undefined; argumentsSymbol: Symbol | undefined; unknownSymbol: Symbol | undefined } | undefined;
 +
 +    /**
@@ -2313,150 +2588,247 @@ index 9381d5122..c25fe16b1 100644
 +        return !!this.client.apiRequest<boolean>("isLibType", {
 +            snapshot: this.snapshotId, project: this.projectId, type: type.id,
 +        });
-+    }
-+
+     }
+ 
+-    getResolvedSymbol(node: Identifier): Symbol | undefined {
+-        const text = node.text;
+-        if (!text) return undefined;
+-        return this.resolveName(text, SymbolFlags.Value | SymbolFlags.ExportValue, node);
 +    symbolIsValue(symbol: Symbol): boolean {
 +        return !!this.client.apiRequest<boolean>("symbolIsValue", {
 +            snapshot: this.snapshotId, project: this.projectId, symbol: symbol.id,
 +        });
-+    }
-+
+     }
+ 
+-    getContextualType(node: Expression): Type | undefined {
+-        const data = this.client.apiRequest<TypeResponse | null>("getContextualType", {
+-            snapshot: this.snapshotId,
+-            project: this.projectId,
+-            location: getNodeId(node),
 +    requiresAddingImplicitUndefined(node: Node): boolean {
 +        return !!this.client.apiRequest<boolean>("requiresAddingImplicitUndefined", {
 +            snapshot: this.snapshotId, project: this.projectId, location: getNodeId(node),
-+        });
-+    }
-+
+         });
+-        return data ? this.objectRegistry.getOrCreateType(data) : undefined;
+     }
+ 
+-    getBaseTypeOfLiteralType(type: Type): Type | undefined {
+-        const data = this.client.apiRequest<TypeResponse | null>("getBaseTypeOfLiteralType", {
+-            snapshot: this.snapshotId,
+-            project: this.projectId,
+-            type: type.id,
 +    getTypeOnlyAliasDeclaration(symbol: Symbol): NodeHandle | undefined {
 +        const data = this.client.apiRequest<string | null>("getTypeOnlyAliasDeclaration", {
 +            snapshot: this.snapshotId, project: this.projectId, symbol: symbol.id,
-+        });
+         });
+-        return data ? this.objectRegistry.getOrCreateType(data) : undefined;
 +        return data ? new NodeHandle(data) : undefined;
-+    }
-+
+     }
+ 
+-    getNonNullableType(type: Type): Type | undefined {
+-        const data = this.client.apiRequest<TypeResponse | null>("getNonNullableType", {
+-            snapshot: this.snapshotId,
+-            project: this.projectId,
+-            type: type.id,
 +    resolveExternalModuleName(moduleSpecifier: Node): Symbol | undefined {
 +        const data = this.client.apiRequest<SymbolResponse | null>("resolveExternalModuleName", {
 +            snapshot: this.snapshotId, project: this.projectId, location: getNodeId(moduleSpecifier),
-+        });
+         });
+-        return data ? this.objectRegistry.getOrCreateType(data) : undefined;
 +        return data ? this.objectRegistry.getOrCreateSymbol(data) : undefined;
-+    }
-+
+     }
+ 
+-    getTypeFromTypeNode(node: TypeNode): Type | undefined {
+-        const data = this.client.apiRequest<TypeResponse | null>("getTypeFromTypeNode", {
+-            snapshot: this.snapshotId,
+-            project: this.projectId,
+-            location: getNodeId(node),
 +    getPropertySymbolOfDestructuringAssignment(location: Node): Symbol | undefined {
 +        const data = this.client.apiRequest<SymbolResponse | null>("getPropertySymbolOfDestructuringAssignment", {
 +            snapshot: this.snapshotId, project: this.projectId, location: getNodeId(location),
-+        });
+         });
+-        return data ? this.objectRegistry.getOrCreateType(data) : undefined;
 +        return data ? this.objectRegistry.getOrCreateSymbol(data) : undefined;
-+    }
-+
+     }
+ 
+-    getWidenedType(type: Type): Type | undefined {
+-        const data = this.client.apiRequest<TypeResponse | null>("getWidenedType", {
 +    getSuggestedSymbolForNonexistentProperty(name: Node, containingType: Type): Symbol | undefined {
 +        const data = this.client.apiRequest<SymbolResponse | null>("getSuggestedSymbolForNonexistentProperty", {
-+            snapshot: this.snapshotId,
-+            project: this.projectId,
+             snapshot: this.snapshotId,
+             project: this.projectId,
+-            type: type.id,
 +            location: getNodeId(name),
 +            type: containingType.id,
-+        });
+         });
+-        return data ? this.objectRegistry.getOrCreateType(data) : undefined;
 +        return data ? this.objectRegistry.getOrCreateSymbol(data) : undefined;
-+    }
-+
+     }
+ 
+-    getParameterType(signature: Signature, index: number): Type | undefined {
+-        const data = this.client.apiRequest<TypeResponse | null>("getParameterType", {
 +    getSuggestedSymbolForNonexistentClassMember(name: string, baseType: Type): Symbol | undefined {
 +        const data = this.client.apiRequest<SymbolResponse | null>("getSuggestedSymbolForNonexistentClassMember", {
-+            snapshot: this.snapshotId,
-+            project: this.projectId,
+             snapshot: this.snapshotId,
+             project: this.projectId,
+-            signature: signature.id,
+-            index,
 +            name,
 +            type: baseType.id,
-+        });
+         });
+-        return data ? this.objectRegistry.getOrCreateType(data) : undefined;
 +        return data ? this.objectRegistry.getOrCreateSymbol(data) : undefined;
-+    }
-+
+     }
+ 
+-    isArrayLikeType(type: Type): boolean {
+-        return this.client.apiRequest<boolean>("isArrayLikeType", {
 +    getSuggestedSymbolForNonexistentJSXAttribute(name: string, containingType: Type): Symbol | undefined {
 +        const data = this.client.apiRequest<SymbolResponse | null>("getSuggestedSymbolForNonexistentJSXAttribute", {
-+            snapshot: this.snapshotId,
-+            project: this.projectId,
+             snapshot: this.snapshotId,
+             project: this.projectId,
+-            type: type.id,
 +            name,
 +            type: containingType.id,
-+        });
+         });
 +        return data ? this.objectRegistry.getOrCreateSymbol(data) : undefined;
-+    }
-+
+     }
+ 
+-    isTypeAssignableTo(source: Type, target: Type): boolean {
+-        return this.client.apiRequest<boolean>("isTypeAssignableTo", {
 +    getSuggestedSymbolForNonexistentModule(name: Node, targetModule: Symbol): Symbol | undefined {
 +        const data = this.client.apiRequest<SymbolResponse | null>("getSuggestedSymbolForNonexistentModule", {
-+            snapshot: this.snapshotId,
-+            project: this.projectId,
+             snapshot: this.snapshotId,
+             project: this.projectId,
+-            source: source.id,
+-            target: target.id,
 +            location: getNodeId(name),
 +            symbol: targetModule.id,
-+        });
+         });
 +        return data ? this.objectRegistry.getOrCreateSymbol(data) : undefined;
-+    }
-+
+     }
+ 
+-    getShorthandAssignmentValueSymbol(node: Node): Symbol | undefined {
+-        const data = this.client.apiRequest<SymbolResponse | null>("getShorthandAssignmentValueSymbol", {
 +    getSuggestedSymbolForNonexistentSymbol(location: Node, name: string, meaning: number): Symbol | undefined {
 +        const data = this.client.apiRequest<SymbolResponse | null>("getSuggestedSymbolForNonexistentSymbol", {
-+            snapshot: this.snapshotId,
-+            project: this.projectId,
+             snapshot: this.snapshotId,
+             project: this.projectId,
+-            location: getNodeId(node),
 +            location: getNodeId(location),
 +            name,
 +            meaning,
-+        });
-+        return data ? this.objectRegistry.getOrCreateSymbol(data) : undefined;
-+    }
-+
+         });
+         return data ? this.objectRegistry.getOrCreateSymbol(data) : undefined;
+     }
+ 
+-    getTypeOfSymbolAtLocation(symbol: Symbol, location: Node): Type | undefined {
+-        const data = this.client.apiRequest<TypeResponse | null>("getTypeOfSymbolAtLocation", {
 +    symbolToExpression(symbol: Symbol, meaning: number, enclosingDeclaration?: Node, flags?: number, internalFlags?: number): Node | undefined {
 +        const binaryData = this.client.apiRequestBinary("symbolToExpression", {
-+            snapshot: this.snapshotId,
-+            project: this.projectId,
-+            symbol: symbol.id,
+             snapshot: this.snapshotId,
+             project: this.projectId,
+             symbol: symbol.id,
+-            location: getNodeId(location),
 +            meaning,
 +            location: enclosingDeclaration ? getNodeId(enclosingDeclaration) : undefined,
 +            flags,
 +            internalFlags,
-+        });
+         });
+-        return data ? this.objectRegistry.getOrCreateType(data) : undefined;
 +        if (!binaryData) return undefined;
 +        return decodeNode(binaryData);
-+    }
-+
+     }
+ 
+-    private getIntrinsicType(method: string): Type {
+-        const data = this.client.apiRequest<TypeResponse>(method, {
 +    symbolToNode(symbol: Symbol, meaning: number, enclosingDeclaration?: Node, flags?: number, internalFlags?: number): Node | undefined {
 +        const binaryData = this.client.apiRequestBinary("symbolToNode", {
-+            snapshot: this.snapshotId,
-+            project: this.projectId,
+             snapshot: this.snapshotId,
+             project: this.projectId,
 +            symbol: symbol.id,
 +            meaning,
 +            location: enclosingDeclaration ? getNodeId(enclosingDeclaration) : undefined,
 +            flags,
 +            internalFlags,
-+        });
+         });
+-        return this.objectRegistry.getOrCreateType(data);
+-    }
+-
+-    getAnyType(): Type {
+-        return this.getIntrinsicType("getAnyType");
+-    }
+-    getStringType(): Type {
+-        return this.getIntrinsicType("getStringType");
+-    }
+-    getNumberType(): Type {
+-        return this.getIntrinsicType("getNumberType");
+-    }
+-    getBooleanType(): Type {
+-        return this.getIntrinsicType("getBooleanType");
+-    }
+-    getVoidType(): Type {
+-        return this.getIntrinsicType("getVoidType");
+-    }
+-    getUndefinedType(): Type {
+-        return this.getIntrinsicType("getUndefinedType");
+-    }
+-    getNullType(): Type {
+-        return this.getIntrinsicType("getNullType");
+-    }
+-    getNeverType(): Type {
+-        return this.getIntrinsicType("getNeverType");
+-    }
+-    getUnknownType(): Type {
+-        return this.getIntrinsicType("getUnknownType");
+-    }
+-    getBigIntType(): Type {
+-        return this.getIntrinsicType("getBigIntType");
+-    }
+-    getESSymbolType(): Type {
+-        return this.getIntrinsicType("getESSymbolType");
 +        if (!binaryData) return undefined;
 +        return decodeNode(binaryData);
-+    }
-+
+     }
+ 
+-    typeToTypeNode(type: Type, enclosingDeclaration?: Node, flags?: number): TypeNode | undefined {
+-        const binaryData = this.client.apiRequestBinary("typeToTypeNode", {
 +    symbolToEntityName(symbol: Symbol, meaning: number, enclosingDeclaration?: Node, flags?: number, internalFlags?: number): Node | undefined {
 +        const binaryData = this.client.apiRequestBinary("symbolToEntityName", {
-+            snapshot: this.snapshotId,
-+            project: this.projectId,
+             snapshot: this.snapshotId,
+             project: this.projectId,
+-            type: type.id,
 +            symbol: symbol.id,
 +            meaning,
-+            location: enclosingDeclaration ? getNodeId(enclosingDeclaration) : undefined,
-+            flags,
+             location: enclosingDeclaration ? getNodeId(enclosingDeclaration) : undefined,
+             flags,
 +            internalFlags,
-+        });
-+        if (!binaryData) return undefined;
+         });
+         if (!binaryData) return undefined;
+-        return decodeNode(binaryData) as TypeNode;
 +        return decodeNode(binaryData);
-+    }
-+
+     }
+ 
+-    signatureToSignatureDeclaration(signature: Signature, kind: SyntaxKind, enclosingDeclaration?: Node, flags?: NodeBuilderFlags): Node | undefined {
+-        const binaryData = this.client.apiRequestBinary("signatureToSignatureDeclaration", {
 +    typePredicateToTypePredicateNode(
 +        predicate: TypePredicate,
 +        enclosingDeclaration?: Node,
 +        flags?: number,
 +    ): Node | undefined {
 +        const binaryData = this.client.apiRequestBinary("typePredicateToTypePredicateNode", {
-+            snapshot: this.snapshotId,
-+            project: this.projectId,
+             snapshot: this.snapshotId,
+             project: this.projectId,
+-            signature: signature.id,
+-            kind,
 +            kind: predicate.kind,
 +            parameterIndex: predicate.parameterIndex ?? 0,
 +            parameterName: predicate.parameterName,
 +            type: predicate.type?.id,
-+            location: enclosingDeclaration ? getNodeId(enclosingDeclaration) : undefined,
-+            flags,
-+        });
-+        if (!binaryData) return undefined;
+             location: enclosingDeclaration ? getNodeId(enclosingDeclaration) : undefined,
+             flags,
+         });
+         if (!binaryData) return undefined;
+-        return decodeNode(binaryData) as Node;
 +        return decodeNode(binaryData);
 +    }
 +
@@ -2489,6 +2861,68 @@ index 9381d5122..c25fe16b1 100644
 +        });
 +        if (!binaryData) return undefined;
 +        return decodeNode(binaryData);
+     }
+ 
+-    typeToString(type: Type, enclosingDeclaration?: Node, flags?: number): string {
+-        return this.client.apiRequest<string>("typeToString", {
++    getExactOptionalProperties(type: Type): readonly Symbol[] {
++        const data = this.client.apiRequest<SymbolResponse[] | null>("getExactOptionalProperties", {
+             snapshot: this.snapshotId,
+             project: this.projectId,
+             type: type.id,
+-            location: enclosingDeclaration ? getNodeId(enclosingDeclaration) : undefined,
+-            flags,
+         });
++        return data ? data.map(d => this.objectRegistry.getOrCreateSymbol(d)) : [];
+     }
+ 
+-    isContextSensitive(node: Node): boolean {
+-        return this.client.apiRequest<boolean>("isContextSensitive", {
++    getJsxNamespace(location?: Node): string {
++        const data = this.client.apiRequest<string | null>("getJsxNamespace", {
+             snapshot: this.snapshotId,
+             project: this.projectId,
+-            location: getNodeId(node),
++            location: location ? getNodeId(location) : undefined,
+         });
++        return data ?? "";
+     }
+ 
+-    isArrayType(type: Type): boolean {
+-        return this.client.apiRequest<boolean>("isArrayType", {
++    getJsxFragmentFactory(location: Node): string {
++        const data = this.client.apiRequest<string | null>("getJsxFragmentFactory", {
+             snapshot: this.snapshotId,
+             project: this.projectId,
+-            type: type.id,
++            location: getNodeId(location),
+         });
++        return data ?? "";
+     }
+ 
+-    isTupleType(type: Type): boolean {
+-        return this.client.apiRequest<boolean>("isTupleType", {
++    getParameterIdentifierInfoAtPosition(
++        signature: Signature,
++        position: number,
++    ): { parameter: NodeHandle; parameterName: string; isRestParameter: boolean; } | undefined {
++        const data = this.client.apiRequest<{
++            parameter?: string;
++            parameterName: string;
++            isRestParameter: boolean;
++        } | null>("getParameterIdentifierInfoAtPosition", {
+             snapshot: this.snapshotId,
+             project: this.projectId,
+-            type: type.id,
++            signature: signature.id,
++            position,
++        });
++        if (!data) return undefined;
++        return {
++            parameter: data.parameter ? new NodeHandle(data.parameter) : undefined as unknown as NodeHandle,
++            parameterName: data.parameterName,
++            isRestParameter: !!data.isRestParameter,
++        };
 +    }
 +
 +    isSymbolAccessible(
@@ -2532,14 +2966,12 @@ index 9381d5122..c25fe16b1 100644
 +    getAugmentedPropertiesOfType(type: Type): readonly Symbol[] {
 +        const data = this.client.apiRequest<SymbolResponse[] | null>("getAugmentedPropertiesOfType", {
 +            snapshot: this.snapshotId, project: this.projectId, type: type.id,
-+        });
+         });
 +        return data ? data.map(d => this.objectRegistry.getOrCreateSymbol(d)) : [];
-+    }
-+
+     }
+ 
      getReturnTypeOfSignature(signature: Signature): Type | undefined {
-         const data = this.client.apiRequest<TypeResponse | null>("getReturnTypeOfSignature", {
-             snapshot: this.snapshotId,
-@@ -1195,12 +2263,37 @@ export class Checker {
+@@ -1195,12 +2325,37 @@ export class Checker {
              type: type.id,
          });
          if (!data) return [];
@@ -2580,7 +3012,7 @@ index 9381d5122..c25fe16b1 100644
      }
  
      /**
-@@ -1289,6 +2382,24 @@ export class Checker {
+@@ -1289,6 +2444,24 @@ export class Checker {
          return data ? data.map(d => this.objectRegistry.getOrCreateSymbol(d)) : [];
      }
  
@@ -2605,7 +3037,7 @@ index 9381d5122..c25fe16b1 100644
      getMemberInModuleExports(symbol: Symbol, name: string): Symbol | undefined {
          const data = this.client.apiRequest<SymbolResponse | null>("getMemberInModuleExports", {
              snapshot: this.snapshotId,
-@@ -1299,6 +2410,15 @@ export class Checker {
+@@ -1299,6 +2472,15 @@ export class Checker {
          return data ? this.objectRegistry.getOrCreateSymbol(data) : undefined;
      }
  
@@ -2621,7 +3053,7 @@ index 9381d5122..c25fe16b1 100644
      getJsDocTagsOfSymbol(symbol: Symbol): readonly JSDocTagInfo[] {
          const data = this.client.apiRequest<JSDocTagInfo[] | null>("getJsDocTags", {
              snapshot: this.snapshotId,
-@@ -1335,6 +2455,23 @@ export interface PrintNodeOptions {
+@@ -1335,6 +2517,23 @@ export interface PrintNodeOptions {
      terminateUnterminatedLiterals?: boolean;
  }
  
@@ -2645,7 +3077,7 @@ index 9381d5122..c25fe16b1 100644
  export class Emitter {
      private client: Client;
  
-@@ -1352,6 +2489,25 @@ export class Emitter {
+@@ -1352,6 +2551,25 @@ export class Emitter {
      }
  }
  
@@ -2671,7 +3103,7 @@ index 9381d5122..c25fe16b1 100644
  export class NodeHandle {
      readonly index: number;
      readonly kind: SyntaxKind;
-@@ -1360,7 +2516,7 @@ export class NodeHandle {
+@@ -1360,7 +2578,7 @@ export class NodeHandle {
      constructor(handle: string) {
          const parsed = parseNodeHandle(handle);
          this.index = parsed.index;
@@ -2680,7 +3112,7 @@ index 9381d5122..c25fe16b1 100644
          this.path = parsed.path;
      }
  
-@@ -1402,11 +2558,21 @@ export class Symbol {
+@@ -1402,11 +2620,21 @@ export class Symbol {
      readonly name: string;
      readonly flags: SymbolFlags;
      readonly checkFlags: number;
@@ -2705,7 +3137,7 @@ index 9381d5122..c25fe16b1 100644
      constructor(data: SymbolResponse, objectRegistry: SnapshotObjectRegistry) {
          this.objectRegistry = objectRegistry;
  
-@@ -1414,15 +2580,71 @@ export class Symbol {
+@@ -1414,15 +2642,71 @@ export class Symbol {
          this.name = data.name;
          this.flags = data.flags;
          this.checkFlags = data.checkFlags;
@@ -2781,7 +3213,7 @@ index 9381d5122..c25fe16b1 100644
      }
  
      getMembers(): readonly Symbol[] {
-@@ -1453,7 +2675,8 @@ class TypeObject implements Type {
+@@ -1453,7 +2737,8 @@ class TypeObject implements Type {
      readonly id: number;
      readonly flags: TypeFlags;
      readonly objectFlags!: ObjectFlags;
@@ -2791,7 +3223,7 @@ index 9381d5122..c25fe16b1 100644
      readonly value!: string | number | boolean | bigint;
      readonly intrinsicName!: string;
      readonly isThisType!: boolean;
-@@ -1485,7 +2708,7 @@ class TypeObject implements Type {
+@@ -1485,7 +2770,7 @@ class TypeObject implements Type {
          this.id = data.id;
          this.flags = data.flags;
          if (data.objectFlags !== undefined) this.objectFlags = data.objectFlags;
@@ -2800,7 +3232,7 @@ index 9381d5122..c25fe16b1 100644
          if (data.value != null) {
              // BigInt literal values are serialized as decimal strings (e.g. "-123") because
              // JSON cannot represent bigint. Decode them back into a real bigint here.
-@@ -1516,8 +2739,17 @@ class TypeObject implements Type {
+@@ -1516,8 +2801,17 @@ class TypeObject implements Type {
          this.falseType = false;
      }
  
@@ -2819,7 +3251,7 @@ index 9381d5122..c25fe16b1 100644
      }
  
      getAliasSymbol(): Symbol | undefined {
-@@ -1567,7 +2799,7 @@ class TypeObject implements Type {
+@@ -1567,7 +2861,7 @@ class TypeObject implements Type {
      }
  
      getIndexType(): Type {
@@ -2828,7 +3260,7 @@ index 9381d5122..c25fe16b1 100644
      }
  
      getCheckType(): Type {
-@@ -1749,36 +2981,94 @@ export class Signature {
+@@ -1749,36 +3043,94 @@ export class Signature {
  
      readonly id: number;
      readonly declaration?: NodeHandle | undefined;
@@ -2980,7 +3412,7 @@ index 8c91df63e..b7f1d9967 100644
      const docFiles = {
          "/tsconfig.json": JSON.stringify({ compilerOptions: { strict: true } }),
 diff --git a/internal/api/proto.go b/internal/api/proto.go
-index 952b572a6..7a4663cfa 100644
+index 952b572a6..70d9f111b 100644
 --- a/internal/api/proto.go
 +++ b/internal/api/proto.go
 @@ -56,32 +56,57 @@ func parseProjectHandle(handle ProjectID) tspath.Path {
@@ -3070,7 +3502,7 @@ index 952b572a6..7a4663cfa 100644
  	MethodGetCheckTypeOfType           Method = "getCheckTypeOfType"
  	MethodGetExtendsTypeOfType         Method = "getExtendsTypeOfType"
  	MethodGetBaseTypeOfType            Method = "getBaseTypeOfType"
-@@ -108,44 +133,105 @@ const (
+@@ -108,44 +133,112 @@ const (
  	MethodGetTargetOfSignature         Method = "getTargetOfSignature"
  
  	// Checker methods
@@ -3211,10 +3643,17 @@ index 952b572a6..7a4663cfa 100644
 +	MethodSymbolToEntityName                          Method = "symbolToEntityName"
 +	MethodTypePredicateToTypePredicateNode            Method = "typePredicateToTypePredicateNode"
 +	MethodIndexInfoToIndexSignatureDeclaration        Method = "indexInfoToIndexSignatureDeclaration"
++	MethodGetPromiseType                              Method = "getPromiseType"
++	MethodGetPromiseLikeType                          Method = "getPromiseLikeType"
++	MethodGetAnyAsyncIterableType                     Method = "getAnyAsyncIterableType"
++	MethodGetExactOptionalProperties                  Method = "getExactOptionalProperties"
++	MethodGetJsxNamespace                             Method = "getJsxNamespace"
++	MethodGetJsxFragmentFactory                       Method = "getJsxFragmentFactory"
++	MethodGetParameterIdentifierInfoAtPosition        Method = "getParameterIdentifierInfoAtPosition"
  
  	// Reference methods
  	MethodGetReferencesToSymbolInFile Method = "getReferencesToSymbolInFile"
-@@ -166,7 +252,9 @@ const (
+@@ -166,7 +259,9 @@ const (
  	MethodGetConfigFileParsingDiagnostics Method = "getConfigFileParsingDiagnostics"
  
  	// Emitter methods
@@ -3225,7 +3664,7 @@ index 952b572a6..7a4663cfa 100644
  
  	// Intrinsic type getters
  	MethodGetAnyType       Method = "getAnyType"
-@@ -193,6 +281,10 @@ type InitializeResponse struct {
+@@ -193,6 +288,10 @@ type InitializeResponse struct {
  	UseCaseSensitiveFileNames bool `json:"useCaseSensitiveFileNames"`
  	// CurrentDirectory is the server's current working directory.
  	CurrentDirectory string `json:"currentDirectory"`
@@ -3236,7 +3675,7 @@ index 952b572a6..7a4663cfa 100644
  }
  
  // DocumentIdentifier identifies a document by either a file name (plain string) or a URI object.
-@@ -309,6 +401,35 @@ type UpdateSnapshotParams struct {
+@@ -309,6 +408,35 @@ type UpdateSnapshotParams struct {
  	// CloseFiles lists files to release in the new snapshot. A file is only fully
  	// closed once every API client that opened it closes it.
  	CloseFiles []DocumentIdentifier `json:"closeFiles,omitempty"`
@@ -3272,7 +3711,7 @@ index 952b572a6..7a4663cfa 100644
  }
  
  // ProjectFileChanges describes what source files changed within a single project.
-@@ -343,32 +464,53 @@ type UpdateSnapshotResponse struct {
+@@ -343,32 +471,53 @@ type UpdateSnapshotResponse struct {
  }
  
  var unmarshalers = map[Method]func([]byte) (any, error){
@@ -3347,7 +3786,7 @@ index 952b572a6..7a4663cfa 100644
  
  	MethodGetSymbolOfType:               unmarshallerFor[GetTypePropertyParams],
  	MethodGetTargetOfType:               unmarshallerFor[GetTypePropertyParams],
-@@ -394,69 +536,132 @@ var unmarshalers = map[Method]func([]byte) (any, error){
+@@ -394,69 +543,139 @@ var unmarshalers = map[Method]func([]byte) (any, error){
  	MethodGetThisParameterOfSignature:  unmarshallerFor[GetSignaturePropertyParams],
  	MethodGetTargetOfSignature:         unmarshallerFor[GetSignaturePropertyParams],
  
@@ -3511,6 +3950,13 @@ index 952b572a6..7a4663cfa 100644
 +	MethodSymbolToEntityName:                          unmarshallerFor[SymbolToNodeBuilderParams],
 +	MethodTypePredicateToTypePredicateNode:            unmarshallerFor[TypePredicateToTypePredicateNodeParams],
 +	MethodIndexInfoToIndexSignatureDeclaration:        unmarshallerFor[IndexInfoToIndexSignatureDeclarationParams],
++	MethodGetPromiseType:                             unmarshallerFor[GetIntrinsicTypeParams],
++	MethodGetPromiseLikeType:                         unmarshallerFor[GetIntrinsicTypeParams],
++	MethodGetAnyAsyncIterableType:                    unmarshallerFor[GetIntrinsicTypeParams],
++	MethodGetExactOptionalProperties:                 unmarshallerFor[CheckerTypeParams],
++	MethodGetJsxNamespace:                            unmarshallerFor[CheckerNodeOptionalParams],
++	MethodGetJsxFragmentFactory:                      unmarshallerFor[CheckerNodeParams],
++	MethodGetParameterIdentifierInfoAtPosition:       unmarshallerFor[GetParameterIdentifierInfoAtPositionParams],
 +	MethodGetReferencesToSymbolInFile:         unmarshallerFor[GetReferencesToSymbolInFileParams],
 +	MethodGetReferencedSymbolsForNode:         unmarshallerFor[GetReferencedSymbolsForNodeParams],
 +	MethodGetSignatureUsages:                  unmarshallerFor[GetSignatureUsagesParams],
@@ -3543,7 +3989,7 @@ index 952b572a6..7a4663cfa 100644
  }
  
  type ParseConfigFileParams struct {
-@@ -509,6 +714,36 @@ type GetSymbolAtPositionParams struct {
+@@ -509,6 +728,36 @@ type GetSymbolAtPositionParams struct {
  	Position uint32             `json:"position"`
  }
  
@@ -3580,7 +4026,7 @@ index 952b572a6..7a4663cfa 100644
  type GetSymbolsAtPositionsParams struct {
  	Snapshot  SnapshotID         `json:"snapshot"`
  	Project   ProjectID          `json:"project"`
-@@ -751,6 +986,47 @@ type GetSourceFileNamesParams struct {
+@@ -751,6 +1000,47 @@ type GetSourceFileNamesParams struct {
  	Project  ProjectID  `json:"project"`
  }
  
@@ -3628,7 +4074,7 @@ index 952b572a6..7a4663cfa 100644
  type ResolveNameParams struct {
  	Snapshot       SnapshotID          `json:"snapshot"`
  	Project        ProjectID           `json:"project"`
-@@ -775,6 +1051,13 @@ type GetSymbolPropertyParams struct {
+@@ -775,6 +1065,13 @@ type GetSymbolPropertyParams struct {
  	Symbol   SymbolID   `json:"objectId"`
  }
  
@@ -3642,7 +4088,7 @@ index 952b572a6..7a4663cfa 100644
  // GetSignaturePropertyParams is used for all signature sub-property endpoints.
  type GetSignaturePropertyParams struct {
  	Snapshot  SnapshotID  `json:"snapshot"`
-@@ -887,6 +1170,13 @@ type GetNonNullableTypeParams struct {
+@@ -887,6 +1184,13 @@ type GetNonNullableTypeParams struct {
  	Type     TypeID     `json:"type"`
  }
  
@@ -3656,7 +4102,7 @@ index 952b572a6..7a4663cfa 100644
  // GetTypeFromTypeNodeParams are the parameters for the getTypeFromTypeNode method.
  type GetTypeFromTypeNodeParams struct {
  	Snapshot SnapshotID `json:"snapshot"`
-@@ -916,6 +1206,74 @@ type IsArrayLikeTypeParams struct {
+@@ -916,6 +1220,74 @@ type IsArrayLikeTypeParams struct {
  	Type     TypeID     `json:"type"`
  }
  
@@ -3731,7 +4177,7 @@ index 952b572a6..7a4663cfa 100644
  // IsTypeAssignableToParams checks assignability between two types.
  type IsTypeAssignableToParams struct {
  	Snapshot SnapshotID `json:"snapshot"`
-@@ -937,6 +1295,47 @@ type GetResolvedSignatureParams struct {
+@@ -937,6 +1309,47 @@ type GetResolvedSignatureParams struct {
  	Location NodeHandle `json:"location"`
  }
  
@@ -3779,7 +4225,7 @@ index 952b572a6..7a4663cfa 100644
  type GetTypeAtLocationParams struct {
  	Snapshot SnapshotID `json:"snapshot"`
  	Project  ProjectID  `json:"project"`
-@@ -972,6 +1371,24 @@ type TypeToTypeNodeParams struct {
+@@ -972,6 +1385,24 @@ type TypeToTypeNodeParams struct {
  	Flags    int32      `json:"flags,omitempty"`
  }
  
@@ -3804,7 +4250,7 @@ index 952b572a6..7a4663cfa 100644
  // SignatureToSignatureDeclarationParams are the parameters for the signatureToSignatureDeclaration method.
  type SignatureToSignatureDeclarationParams struct {
  	Snapshot  SnapshotID  `json:"snapshot"`
-@@ -982,6 +1399,15 @@ type SignatureToSignatureDeclarationParams struct {
+@@ -982,6 +1413,15 @@ type SignatureToSignatureDeclarationParams struct {
  	Flags     int32       `json:"flags,omitempty"`
  }
  
@@ -3820,7 +4266,37 @@ index 952b572a6..7a4663cfa 100644
  // PrintNodeParams are the parameters for the printNode method.
  type PrintNodeParams struct {
  	Data                          string `json:"data"` // base64-encoded binary AST data
-@@ -1034,6 +1460,225 @@ type JSDocTagInfo struct {
+@@ -1020,6 +1460,29 @@ type CheckerNodeParams struct {
+ 	Location NodeHandle `json:"location"`
+ }
+ 
++// CheckerNodeOptionalParams are parameters for checker methods with an optional node.
++type CheckerNodeOptionalParams struct {
++	Snapshot SnapshotID `json:"snapshot"`
++	Project  ProjectID  `json:"project"`
++	Location NodeHandle `json:"location,omitempty"`
++}
++
++// GetParameterIdentifierInfoAtPositionParams are parameters for getParameterIdentifierInfoAtPosition.
++type GetParameterIdentifierInfoAtPositionParams struct {
++	Snapshot  SnapshotID  `json:"snapshot"`
++	Project   ProjectID   `json:"project"`
++	Signature SignatureID `json:"signature"`
++	Position  int32       `json:"position"`
++}
++
++// ParameterIdentifierInfoResponse is the JSON shape for getParameterIdentifierInfoAtPosition.
++// parameter is a NodeHandle for the Identifier (stock: Identifier, not Symbol).
++type ParameterIdentifierInfoResponse struct {
++	Parameter       NodeHandle `json:"parameter,omitempty"`
++	ParameterName   string     `json:"parameterName"`
++	IsRestParameter bool       `json:"isRestParameter"`
++}
++
+ // CheckerSymbolParams are parameters for checker methods that operate on a symbol.
+ type CheckerSymbolParams struct {
+ 	Snapshot SnapshotID `json:"snapshot"`
+@@ -1034,6 +1497,225 @@ type JSDocTagInfo struct {
  	Text string `json:"text,omitempty"`
  }
  
@@ -4046,7 +4522,7 @@ index 952b572a6..7a4663cfa 100644
  // CheckerSignatureParams are parameters for checker methods that operate on a signature.
  type CheckerSignatureParams struct {
  	Snapshot  SnapshotID  `json:"snapshot"`
-@@ -1051,10 +1696,13 @@ type TypePredicateResponse struct {
+@@ -1051,10 +1733,13 @@ type TypePredicateResponse struct {
  
  // IndexInfoResponse represents a single index signature.
  type IndexInfoResponse struct {
@@ -4064,7 +4540,7 @@ index 952b572a6..7a4663cfa 100644
  }
  
  // SourceFileResponse contains the binary-encoded AST data for a source file.
-@@ -1070,6 +1718,68 @@ type GetDiagnosticsParams struct {
+@@ -1070,6 +1755,68 @@ type GetDiagnosticsParams struct {
  	File     *DocumentIdentifier `json:"file,omitempty"`
  }
  
@@ -4134,7 +4610,7 @@ index 952b572a6..7a4663cfa 100644
  type GetProjectDiagnosticsParams struct {
  	Snapshot SnapshotID `json:"snapshot"`
 diff --git a/internal/api/session.go b/internal/api/session.go
-index b350c6334..bb195e995 100644
+index b350c6334..7e8de569f 100644
 --- a/internal/api/session.go
 +++ b/internal/api/session.go
 @@ -4,6 +4,7 @@ import (
@@ -4579,7 +5055,7 @@ index b350c6334..bb195e995 100644
  	case string(MethodGetJSDocTags):
  		return s.handleGetJSDocTags(ctx, parsed.(*CheckerSymbolParams))
  	case string(MethodGetDocumentationComment):
-@@ -681,6 +993,98 @@ func (s *Session) HandleRequest(ctx context.Context, method string, params json.
+@@ -681,6 +993,112 @@ func (s *Session) HandleRequest(ctx context.Context, method string, params json.
  		return s.handleIsArrayType(ctx, parsed.(*CheckerTypeParams))
  	case string(MethodIsTupleType):
  		return s.handleIsTupleType(ctx, parsed.(*CheckerTypeParams))
@@ -4675,10 +5151,24 @@ index b350c6334..bb195e995 100644
 +		return s.handleTypePredicateToTypePredicateNode(ctx, parsed.(*TypePredicateToTypePredicateNodeParams))
 +	case string(MethodIndexInfoToIndexSignatureDeclaration):
 +		return s.handleIndexInfoToIndexSignatureDeclaration(ctx, parsed.(*IndexInfoToIndexSignatureDeclarationParams))
++	case string(MethodGetPromiseType):
++		return s.handleGetIntrinsicType(ctx, parsed.(*GetIntrinsicTypeParams), (*checker.Checker).GetPromiseType)
++	case string(MethodGetPromiseLikeType):
++		return s.handleGetIntrinsicType(ctx, parsed.(*GetIntrinsicTypeParams), (*checker.Checker).GetPromiseLikeType)
++	case string(MethodGetAnyAsyncIterableType):
++		return s.handleGetAnyAsyncIterableType(ctx, parsed.(*GetIntrinsicTypeParams))
++	case string(MethodGetExactOptionalProperties):
++		return s.handleGetExactOptionalProperties(ctx, parsed.(*CheckerTypeParams))
++	case string(MethodGetJsxNamespace):
++		return s.handleGetJsxNamespace(ctx, parsed.(*CheckerNodeOptionalParams))
++	case string(MethodGetJsxFragmentFactory):
++		return s.handleGetJsxFragmentFactory(ctx, parsed.(*CheckerNodeParams))
++	case string(MethodGetParameterIdentifierInfoAtPosition):
++		return s.handleGetParameterIdentifierInfoAtPosition(ctx, parsed.(*GetParameterIdentifierInfoAtPositionParams))
  	case string(MethodGetAnyType):
  		return s.handleGetIntrinsicType(ctx, parsed.(*GetIntrinsicTypeParams), (*checker.Checker).GetAnyType)
  	case string(MethodGetStringType):
-@@ -709,6 +1113,10 @@ func (s *Session) HandleRequest(ctx context.Context, method string, params json.
+@@ -709,6 +1127,10 @@ func (s *Session) HandleRequest(ctx context.Context, method string, params json.
  		return s.handleGetBindDiagnostics(ctx, parsed.(*GetDiagnosticsParams))
  	case string(MethodGetSemanticDiagnostics):
  		return s.handleGetSemanticDiagnostics(ctx, parsed.(*GetDiagnosticsParams))
@@ -4689,7 +5179,7 @@ index b350c6334..bb195e995 100644
  	case string(MethodGetSuggestionDiagnostics):
  		return s.handleGetSuggestionDiagnostics(ctx, parsed.(*GetDiagnosticsParams))
  	case string(MethodGetDeclarationDiagnostics):
-@@ -777,6 +1185,7 @@ func (s *Session) handleInitialize(ctx context.Context) (*InitializeResponse, er
+@@ -777,6 +1199,7 @@ func (s *Session) handleInitialize(ctx context.Context) (*InitializeResponse, er
  	return &InitializeResponse{
  		UseCaseSensitiveFileNames: s.projectSession.FS().UseCaseSensitiveFileNames(),
  		CurrentDirectory:          s.projectSession.GetCurrentDirectory(),
@@ -4697,7 +5187,7 @@ index b350c6334..bb195e995 100644
  	}, nil
  }
  
-@@ -793,6 +1202,17 @@ func (s *Session) handleUpdateSnapshot(ctx context.Context, params *UpdateSnapsh
+@@ -793,6 +1216,17 @@ func (s *Session) handleUpdateSnapshot(ctx context.Context, params *UpdateSnapsh
  	s.updateMu.Lock()
  	defer s.updateMu.Unlock()
  
@@ -4715,7 +5205,7 @@ index b350c6334..bb195e995 100644
  	fileChanges := s.toFileChangeSummary(params.FileChanges)
  
  	apiRequest := &project.APISnapshotRequest{}
-@@ -844,6 +1264,7 @@ func (s *Session) handleUpdateSnapshot(ctx context.Context, params *UpdateSnapsh
+@@ -844,6 +1278,7 @@ func (s *Session) handleUpdateSnapshot(ctx context.Context, params *UpdateSnapsh
  
  	// Close files: only release a ref we currently hold.
  	var closedFiles []tspath.Path
@@ -4723,7 +5213,7 @@ index b350c6334..bb195e995 100644
  	for _, f := range params.CloseFiles {
  		path := s.toPath(f.ToURI(s.projectSession.GetCurrentDirectory()).FileName())
  		if !s.openFiles.Has(path) {
-@@ -854,6 +1275,68 @@ func (s *Session) handleUpdateSnapshot(ctx context.Context, params *UpdateSnapsh
+@@ -854,6 +1289,68 @@ func (s *Session) handleUpdateSnapshot(ctx context.Context, params *UpdateSnapsh
  		}
  		apiRequest.CloseFiles.Add(path)
  		closedFiles = append(closedFiles, path)
@@ -4792,7 +5282,7 @@ index b350c6334..bb195e995 100644
  	}
  
  	// Even when nothing is opened or closed, APIUpdate ensures all projects and
-@@ -898,6 +1381,7 @@ func (s *Session) handleUpdateSnapshot(ctx context.Context, params *UpdateSnapsh
+@@ -898,6 +1395,7 @@ func (s *Session) handleUpdateSnapshot(ctx context.Context, params *UpdateSnapsh
  			snapshot:          snapshot,
  			refCount:          1,
  			symbolRegistry:    make(map[SymbolID]*ast.Symbol),
@@ -4800,7 +5290,7 @@ index b350c6334..bb195e995 100644
  			projectRegistries: make(map[ProjectID]*projectRegistryData),
  		}
  		s.snapshots[handle] = sd
-@@ -919,6 +1403,29 @@ func (s *Session) handleUpdateSnapshot(ctx context.Context, params *UpdateSnapsh
+@@ -919,6 +1417,29 @@ func (s *Session) handleUpdateSnapshot(ctx context.Context, params *UpdateSnapsh
  		changes = computeSnapshotChanges(prevSD.snapshot, snapshot)
  	}
  
@@ -4830,7 +5320,7 @@ index b350c6334..bb195e995 100644
  	return &UpdateSnapshotResponse{
  		Snapshot: handle,
  		Projects: projectResponses,
-@@ -1018,8 +1525,8 @@ func (s *Session) handleGetSourceFile(ctx context.Context, params *GetSourceFile
+@@ -1018,8 +1539,8 @@ func (s *Session) handleGetSourceFile(ctx context.Context, params *GetSourceFile
  		return nil, nil
  	}
  
@@ -4841,7 +5331,7 @@ index b350c6334..bb195e995 100644
  	if err != nil {
  		return nil, fmt.Errorf("failed to encode source file: %w", err)
  	}
-@@ -1033,6 +1540,27 @@ func (s *Session) handleGetSourceFile(ctx context.Context, params *GetSourceFile
+@@ -1033,6 +1554,27 @@ func (s *Session) handleGetSourceFile(ctx context.Context, params *GetSourceFile
  	}, nil
  }
  
@@ -4869,7 +5359,7 @@ index b350c6334..bb195e995 100644
  // handleGetSourceFileNames returns file names of all source files in a project.
  func (s *Session) handleGetSourceFileNames(ctx context.Context, params *GetSourceFileNamesParams) ([]string, error) {
  	sd, err := s.getSnapshotData(params.Snapshot)
-@@ -1053,210 +1581,258 @@ func (s *Session) handleGetSourceFileNames(ctx context.Context, params *GetSourc
+@@ -1053,210 +1595,258 @@ func (s *Session) handleGetSourceFileNames(ctx context.Context, params *GetSourc
  	return result, nil
  }
  
@@ -5263,7 +5753,7 @@ index b350c6334..bb195e995 100644
  	if symbol == nil {
  		return nil, nil
  	}
-@@ -1264,50 +1840,114 @@ func (s *Session) handleResolveName(ctx context.Context, params *ResolveNamePara
+@@ -1264,50 +1854,114 @@ func (s *Session) handleResolveName(ctx context.Context, params *ResolveNamePara
  	return setup.newSymbolResponse(symbol), nil
  }
  
@@ -5398,7 +5888,7 @@ index b350c6334..bb195e995 100644
  	setup, err := s.setupChecker(ctx, params.Snapshot, params.Project)
  	if err != nil {
  		return nil, err
-@@ -1322,23 +1962,23 @@ func (s *Session) handleGetTypeAtLocation(ctx context.Context, params *GetTypeAt
+@@ -1322,23 +1976,23 @@ func (s *Session) handleGetTypeAtLocation(ctx context.Context, params *GetTypeAt
  		return nil, nil
  	}
  
@@ -5428,7 +5918,7 @@ index b350c6334..bb195e995 100644
  	for i, loc := range params.Locations {
  		node, err := setup.sd.resolveNodeHandle(setup.program, loc)
  		if err != nil {
-@@ -1347,35 +1987,32 @@ func (s *Session) handleGetTypeAtLocations(ctx context.Context, params *GetTypeA
+@@ -1347,35 +2001,32 @@ func (s *Session) handleGetTypeAtLocations(ctx context.Context, params *GetTypeA
  		if node == nil {
  			continue
  		}
@@ -5474,7 +5964,7 @@ index b350c6334..bb195e995 100644
  	if t == nil {
  		return nil, nil
  	}
-@@ -1383,27 +2020,24 @@ func (s *Session) handleGetTypeAtPosition(ctx context.Context, params *GetTypeAt
+@@ -1383,27 +2034,24 @@ func (s *Session) handleGetTypeAtPosition(ctx context.Context, params *GetTypeAt
  	return setup.newTypeResponse(t), nil
  }
  
@@ -5512,7 +6002,7 @@ index b350c6334..bb195e995 100644
  		if t != nil {
  			results[i] = setup.newTypeResponse(t)
  		}
-@@ -1412,332 +2046,2167 @@ func (s *Session) handleGetTypesAtPositions(ctx context.Context, params *GetType
+@@ -1412,374 +2060,2392 @@ func (s *Session) handleGetTypesAtPositions(ctx context.Context, params *GetType
  	return results, nil
  }
  
@@ -5657,10 +6147,8 @@ index b350c6334..bb195e995 100644
 +		}
 +	}
 +	return resp, nil
- }
- 
--func (s *Session) handleGetOuterTypeParametersOfType(_ context.Context, params *GetTypePropertyParams) ([]*TypeResponse, error) {
--	return s.resolveTypeArrayPropertyOfType(params, func(t *checker.Type) []*checker.Type { return t.AsInterfaceType().OuterTypeParameters() })
++}
++
 +// handleGetSignaturesOfType returns the call or construct signatures of a type.
 +func (s *Session) handleGetSignaturesOfType(ctx context.Context, params *GetSignaturesOfTypeParams) ([]*SignatureResponse, error) {
 +	setup, err := s.setupChecker(ctx, params.Snapshot, params.Project)
@@ -5681,10 +6169,8 @@ index b350c6334..bb195e995 100644
 +	}
 +
 +	return results, nil
- }
- 
--func (s *Session) handleGetLocalTypeParametersOfType(_ context.Context, params *GetTypePropertyParams) ([]*TypeResponse, error) {
--	return s.resolveTypeArrayPropertyOfType(params, func(t *checker.Type) []*checker.Type { return t.AsInterfaceType().LocalTypeParameters() })
++}
++
 +// handleGetResolvedSignature returns the resolved signature of a call-like expression.
 +func (s *Session) handleGetResolvedSignature(ctx context.Context, params *GetResolvedSignatureParams) (*SignatureResponse, error) {
 +	setup, err := s.setupChecker(ctx, params.Snapshot, params.Project)
@@ -5703,15 +6189,8 @@ index b350c6334..bb195e995 100644
 +
 +	sig := setup.checker.GetResolvedSignature(node)
 +	return setup.newSignatureResponse(sig), nil
- }
- 
--func (s *Session) handleGetAliasTypeArgumentsOfType(_ context.Context, params *GetTypePropertyParams) ([]*TypeResponse, error) {
--	return s.resolveTypeArrayPropertyOfType(params, func(t *checker.Type) []*checker.Type {
--		if t.Alias() == nil {
--			return nil
--		}
--		return t.Alias().TypeArguments()
--	})
++}
++
 +// handleGetResolvedSignatureForSignatureHelp resolves a call-like expression
 +// under CheckMode.IsForSignatureHelp (with resolved-signature cache cleared).
 +// ArgumentCount -1 means undefined → use the call's argument-list length
@@ -5745,12 +6224,8 @@ index b350c6334..bb195e995 100644
 +		resp.Candidates[i] = setup.newSignatureResponse(c)
 +	}
 +	return resp, nil
- }
- 
--func (s *Session) handleGetAliasSymbolOfType(_ context.Context, params *GetTypePropertyParams) (*SymbolResponse, error) {
--	return s.resolveSymbolPropertyOfType(params, func(t *checker.Type) *ast.Symbol {
--		if t.Alias() == nil {
--			return nil
++}
++
 +// handleGetExpandedParameters expands a signature's parameters (including
 +// union/rest expansion). Returns nested SymbolID groups; symbols are
 +// registered so the client can materialize them via getSymbolsDeclarations.
@@ -5775,16 +6250,12 @@ index b350c6334..bb195e995 100644
 +		ids := make([]SymbolID, len(group))
 +		for j, sym := range group {
 +			ids[j] = setup.sd.registerSymbol(sym)
- 		}
--		return t.Alias().Symbol()
--	})
++		}
 +		result[i] = ids
 +	}
 +	return result, nil
- }
- 
--func (s *Session) handleGetObjectTypeOfType(_ context.Context, params *GetTypePropertyParams) (*TypeResponse, error) {
--	return s.resolveTypePropertyOfType(params, func(t *checker.Type) *checker.Type { return t.AsIndexedAccessType().ObjectType() })
++}
++
 +// handleHasEffectiveRestParameter reports whether a signature has an effective rest parameter.
 +func (s *Session) handleHasEffectiveRestParameter(ctx context.Context, params *HasEffectiveRestParameterParams) (bool, error) {
 +	setup, err := s.setupChecker(ctx, params.Snapshot, params.Project)
@@ -5801,10 +6272,8 @@ index b350c6334..bb195e995 100644
 +		return false, nil
 +	}
 +	return setup.checker.HasEffectiveRestParameter(sig), nil
- }
- 
--func (s *Session) handleGetIndexTypeOfType(_ context.Context, params *GetTypePropertyParams) (*TypeResponse, error) {
--	return s.resolveTypePropertyOfType(params, func(t *checker.Type) *checker.Type { return t.AsIndexedAccessType().IndexType() })
++}
++
 +// handleGetLocalTypeParametersOfClassOrInterfaceOrTypeAlias returns the local
 +// type parameters of a class/interface/type-alias symbol. Empty → nil
 +// (stock undefined).
@@ -5832,10 +6301,8 @@ index b350c6334..bb195e995 100644
 +		results[i] = setup.newTypeResponse(t)
 +	}
 +	return results, nil
- }
- 
--func (s *Session) handleGetCheckTypeOfType(_ context.Context, params *GetTypePropertyParams) (*TypeResponse, error) {
--	return s.resolveTypePropertyOfType(params, func(t *checker.Type) *checker.Type { return t.AsConditionalType().CheckType() })
++}
++
 +// handleGetContextualTypeForObjectLiteralElement returns the contextual type
 +// for an object-literal element (property/method/shorthand/spread).
 +func (s *Session) handleGetContextualTypeForObjectLiteralElement(ctx context.Context, params *GetContextualTypeForObjectLiteralElementParams) (*TypeResponse, error) {
@@ -7214,8 +7681,10 @@ index b350c6334..bb195e995 100644
 +	}
 +
 +	return setup.checker.IsArrayType(t), nil
-+}
-+
+ }
+ 
+-func (s *Session) handleGetOuterTypeParametersOfType(_ context.Context, params *GetTypePropertyParams) ([]*TypeResponse, error) {
+-	return s.resolveTypeArrayPropertyOfType(params, func(t *checker.Type) []*checker.Type { return t.AsInterfaceType().OuterTypeParameters() })
 +// handleIsTupleType returns whether a type is a tuple type.
 +func (s *Session) handleIsTupleType(ctx context.Context, params *CheckerTypeParams) (bool, error) {
 +	setup, err := s.setupChecker(ctx, params.Snapshot, params.Project)
@@ -7230,8 +7699,10 @@ index b350c6334..bb195e995 100644
 +	}
 +
 +	return checker.IsTupleType(t), nil
-+}
-+
+ }
+ 
+-func (s *Session) handleGetLocalTypeParametersOfType(_ context.Context, params *GetTypePropertyParams) ([]*TypeResponse, error) {
+-	return s.resolveTypeArrayPropertyOfType(params, func(t *checker.Type) []*checker.Type { return t.AsInterfaceType().LocalTypeParameters() })
 +// handleGetIntrinsicSymbols returns the checker's intrinsic symbols
 +// (undefinedSymbol / argumentsSymbol / unknownSymbol) so clients can implement
 +// isUndefinedSymbol-style predicates as local id comparisons.
@@ -7247,8 +7718,12 @@ index b350c6334..bb195e995 100644
 +		ArgumentsSymbol: setup.newSymbolResponse(setup.checker.GetArgumentsSymbol()),
 +		UnknownSymbol:   setup.newSymbolResponse(setup.checker.GetUnknownSymbol()),
 +	}, nil
-+}
-+
+ }
+ 
+-func (s *Session) handleGetAliasTypeArgumentsOfType(_ context.Context, params *GetTypePropertyParams) ([]*TypeResponse, error) {
+-	return s.resolveTypeArrayPropertyOfType(params, func(t *checker.Type) []*checker.Type {
+-		if t.Alias() == nil {
+-			return nil
 +// handleIsDeclarationVisible reports whether a declaration node is visible for
 +// declaration-emit purposes (TypeChecker.isDeclarationVisible in Strada).
 +func (s *Session) handleIsDeclarationVisible(ctx context.Context, params *CheckerNodeParams) (bool, error) {
@@ -7290,7 +7765,9 @@ index b350c6334..bb195e995 100644
 +		container, err = setup.sd.resolveNodeHandle(setup.program, params.Container)
 +		if err != nil {
 +			return nil, err
-+		}
+ 		}
+-		return t.Alias().TypeArguments()
+-	})
 +	}
 +
 +	t := setup.checker.TryGetThisTypeAtEx(node, params.IncludeGlobalThis, container)
@@ -7355,11 +7832,8 @@ index b350c6334..bb195e995 100644
 +		return nil, nil
 +	}
 +	return setup.newTypeResponse(t), nil
- }
- 
--func (s *Session) handleGetExtendsTypeOfType(_ context.Context, params *GetTypePropertyParams) (*TypeResponse, error) {
--	return s.resolveTypePropertyOfType(params, func(t *checker.Type) *checker.Type { return t.AsConditionalType().ExtendsType() })
--}
++}
++
 +// handleGetExportsAndPropertiesOfModule returns module exports plus export=
 +// value properties (stock getExportsAndPropertiesOfModule).
 +func (s *Session) handleGetExportsAndPropertiesOfModule(ctx context.Context, params *CheckerSymbolParams) ([]*SymbolResponse, error) {
@@ -7368,10 +7842,7 @@ index b350c6334..bb195e995 100644
 +		return nil, err
 +	}
 +	defer setup.done()
- 
--func (s *Session) handleGetBaseTypeOfType(_ context.Context, params *GetTypePropertyParams) (*TypeResponse, error) {
--	return s.resolveTypePropertyOfType(params, func(t *checker.Type) *checker.Type { return t.AsSubstitutionType().BaseType() })
--}
++
 +	symbol, err := setup.resolveSymbolHandle(params.Symbol)
 +	if err != nil {
 +		return nil, err
@@ -7379,13 +7850,230 @@ index b350c6334..bb195e995 100644
 +	if symbol == nil {
 +		return nil, nil
 +	}
- 
--func (s *Session) handleGetConstraintOfType(_ context.Context, params *GetTypePropertyParams) (*TypeResponse, error) {
--	return s.resolveTypePropertyOfType(params, func(t *checker.Type) *checker.Type { return t.AsSubstitutionType().SubstConstraint() })
++
 +	exports := setup.checker.GetExportsAndPropertiesOfModule(symbol)
 +	results := make([]*SymbolResponse, len(exports))
 +	for i, exp := range exports {
 +		results[i] = setup.newSymbolResponse(exp)
++	}
++	return results, nil
++}
++
++// handleGetJsxIntrinsicTagNamesAt returns JSX.IntrinsicElements properties at a location.
++func (s *Session) handleGetJsxIntrinsicTagNamesAt(ctx context.Context, params *CheckerNodeParams) ([]*SymbolResponse, error) {
++	setup, err := s.setupChecker(ctx, params.Snapshot, params.Project)
++	if err != nil {
++		return nil, err
++	}
++	defer setup.done()
++
++	node, err := setup.sd.resolveNodeHandle(setup.program, params.Location)
++	if err != nil {
++		return nil, err
++	}
++	if node == nil {
++		return nil, nil
++	}
++
++	syms := setup.checker.GetJsxIntrinsicTagNamesAt(node)
++	results := make([]*SymbolResponse, len(syms))
++	for i, sym := range syms {
++		results[i] = setup.newSymbolResponse(sym)
++	}
++	return results, nil
++}
++
++// handleIsPropertyAccessible reports whether a property is accessible from a node.
++func (s *Session) handleIsPropertyAccessible(ctx context.Context, params *IsPropertyAccessibleParams) (bool, error) {
++	setup, err := s.setupChecker(ctx, params.Snapshot, params.Project)
++	if err != nil {
++		return false, err
++	}
++	defer setup.done()
++
++	node, err := setup.sd.resolveNodeHandle(setup.program, params.Location)
++	if err != nil {
++		return false, err
++	}
++	if node == nil {
++		return false, nil
++	}
++
++	t, err := setup.resolveTypeHandle(params.Type)
++	if err != nil {
++		return false, err
++	}
++
++	symbol, err := setup.resolveSymbolHandle(params.Symbol)
++	if err != nil {
++		return false, err
++	}
++	if symbol == nil {
++		return false, nil
++	}
++
++	return setup.checker.IsPropertyAccessible(node, params.IsSuper, params.IsWrite, t, symbol), nil
++}
++
++// handleGetAccessibleSymbolChain returns an accessible alias chain, or nil when
++// no chain exists (stock undefined — not an empty array).
++func (s *Session) handleGetAccessibleSymbolChain(ctx context.Context, params *GetAccessibleSymbolChainParams) ([]*SymbolResponse, error) {
++	setup, err := s.setupChecker(ctx, params.Snapshot, params.Project)
++	if err != nil {
++		return nil, err
++	}
++	defer setup.done()
++
++	symbol, err := setup.resolveSymbolHandle(params.Symbol)
++	if err != nil {
++		return nil, err
++	}
++	if symbol == nil {
++		return nil, nil
++	}
++
++	var enclosing *ast.Node
++	if params.EnclosingDeclaration != "" {
++		enclosing, err = setup.sd.resolveNodeHandle(setup.program, params.EnclosingDeclaration)
++		if err != nil {
++			return nil, err
++		}
++	}
++
++	chain := setup.checker.GetAccessibleSymbolChain(symbol, enclosing, ast.SymbolFlags(params.Meaning), params.UseOnlyExternalAliasing)
++	// Stock returns undefined when no chain exists — Go may yield nil or empty
++	// slice; both must marshal as JSON null so the JS client returns undefined
++	// (not []). A real empty chain does not occur for accessible lookups.
++	if len(chain) == 0 {
++		return nil, nil
++	}
++	results := make([]*SymbolResponse, len(chain))
++	for i, sym := range chain {
++		results[i] = setup.newSymbolResponse(sym)
++	}
++	return results, nil
++}
++
++// handleGetContextualTypeForArgumentAtIndex returns the contextual type of a
++// call-like argument at the given index.
++func (s *Session) handleGetContextualTypeForArgumentAtIndex(ctx context.Context, params *GetContextualTypeForArgumentAtIndexParams) (*TypeResponse, error) {
++	setup, err := s.setupChecker(ctx, params.Snapshot, params.Project)
++	if err != nil {
++		return nil, err
++	}
++	defer setup.done()
++
++	node, err := setup.sd.resolveNodeHandle(setup.program, params.Location)
++	if err != nil {
++		return nil, err
++	}
++	if node == nil {
++		return nil, nil
++	}
++
++	t := setup.checker.GetContextualTypeForArgumentAtIndex(node, int(params.ArgIndex))
++	if t == nil {
++		return nil, nil
++	}
++	return setup.newTypeResponse(t), nil
++}
++
++// handleGetContextualTypeForJsxAttribute returns the contextual type of a JSX
++// attribute (Go has no contextFlags; LS callers omit flags).
++func (s *Session) handleGetContextualTypeForJsxAttribute(ctx context.Context, params *CheckerNodeParams) (*TypeResponse, error) {
++	setup, err := s.setupChecker(ctx, params.Snapshot, params.Project)
++	if err != nil {
++		return nil, err
++	}
++	defer setup.done()
++
++	node, err := setup.sd.resolveNodeHandle(setup.program, params.Location)
++	if err != nil {
++		return nil, err
++	}
++	if node == nil {
++		return nil, nil
++	}
++
++	t := setup.checker.GetContextualTypeForJsxAttribute(node)
++	if t == nil {
++		return nil, nil
++	}
++	return setup.newTypeResponse(t), nil
+ }
+ 
+-func (s *Session) handleGetAliasSymbolOfType(_ context.Context, params *GetTypePropertyParams) (*SymbolResponse, error) {
+-	return s.resolveSymbolPropertyOfType(params, func(t *checker.Type) *ast.Symbol {
+-		if t.Alias() == nil {
+-			return nil
+-		}
+-		return t.Alias().Symbol()
+-	})
+-}
++// handleIsValidPropertyAccess reports whether a property name is valid on a node.
++func (s *Session) handleIsValidPropertyAccess(ctx context.Context, params *IsValidPropertyAccessParams) (bool, error) {
++	setup, err := s.setupChecker(ctx, params.Snapshot, params.Project)
++	if err != nil {
++		return false, err
++	}
++	defer setup.done()
+ 
+-func (s *Session) handleGetObjectTypeOfType(_ context.Context, params *GetTypePropertyParams) (*TypeResponse, error) {
+-	return s.resolveTypePropertyOfType(params, func(t *checker.Type) *checker.Type { return t.AsIndexedAccessType().ObjectType() })
+-}
++	node, err := setup.sd.resolveNodeHandle(setup.program, params.Location)
++	if err != nil {
++		return false, err
++	}
++	if node == nil {
++		return false, nil
++	}
+ 
+-func (s *Session) handleGetIndexTypeOfType(_ context.Context, params *GetTypePropertyParams) (*TypeResponse, error) {
+-	return s.resolveTypePropertyOfType(params, func(t *checker.Type) *checker.Type { return t.AsIndexedAccessType().IndexType() })
++	return setup.checker.IsValidPropertyAccess(node, params.PropertyName), nil
+ }
+ 
+-func (s *Session) handleGetCheckTypeOfType(_ context.Context, params *GetTypePropertyParams) (*TypeResponse, error) {
+-	return s.resolveTypePropertyOfType(params, func(t *checker.Type) *checker.Type { return t.AsConditionalType().CheckType() })
+-}
++// handleGetCandidateSignaturesForStringLiteralCompletions returns candidate
++// signatures for string-literal argument completions.
++func (s *Session) handleGetCandidateSignaturesForStringLiteralCompletions(ctx context.Context, params *GetCandidateSignaturesForStringLiteralCompletionsParams) ([]*SignatureResponse, error) {
++	setup, err := s.setupChecker(ctx, params.Snapshot, params.Project)
++	if err != nil {
++		return nil, err
++	}
++	defer setup.done()
+ 
+-func (s *Session) handleGetExtendsTypeOfType(_ context.Context, params *GetTypePropertyParams) (*TypeResponse, error) {
+-	return s.resolveTypePropertyOfType(params, func(t *checker.Type) *checker.Type { return t.AsConditionalType().ExtendsType() })
+-}
++	call, err := setup.sd.resolveNodeHandle(setup.program, params.Call)
++	if err != nil {
++		return nil, err
++	}
++	if call == nil {
++		return nil, nil
++	}
+ 
+-func (s *Session) handleGetBaseTypeOfType(_ context.Context, params *GetTypePropertyParams) (*TypeResponse, error) {
+-	return s.resolveTypePropertyOfType(params, func(t *checker.Type) *checker.Type { return t.AsSubstitutionType().BaseType() })
+-}
++	editing, err := setup.sd.resolveNodeHandle(setup.program, params.EditingArgument)
++	if err != nil {
++		return nil, err
++	}
++	if editing == nil {
++		return nil, nil
++	}
+ 
+-func (s *Session) handleGetConstraintOfType(_ context.Context, params *GetTypePropertyParams) (*TypeResponse, error) {
+-	return s.resolveTypePropertyOfType(params, func(t *checker.Type) *checker.Type { return t.AsSubstitutionType().SubstConstraint() })
++	sigs := setup.checker.GetCandidateSignaturesForStringLiteralCompletions(call, editing)
++	results := make([]*SignatureResponse, len(sigs))
++	for i, sig := range sigs {
++		results[i] = setup.newSignatureResponse(sig)
 +	}
 +	return results, nil
  }
@@ -7393,8 +8081,9 @@ index b350c6334..bb195e995 100644
 -func (s *Session) handleGetTypeParametersOfSignature(_ context.Context, params *GetSignaturePropertyParams) ([]*TypeResponse, error) {
 -	return s.resolveTypeArrayPropertyOfSignature(params, (*checker.Signature).TypeParameters)
 -}
-+// handleGetJsxIntrinsicTagNamesAt returns JSX.IntrinsicElements properties at a location.
-+func (s *Session) handleGetJsxIntrinsicTagNamesAt(ctx context.Context, params *CheckerNodeParams) ([]*SymbolResponse, error) {
++// handleGetSymbolsOfParameterPropertyDeclaration returns the parameter and
++// property symbols for a parameter-property declaration (length-2 array).
++func (s *Session) handleGetSymbolsOfParameterPropertyDeclaration(ctx context.Context, params *GetSymbolsOfParameterPropertyDeclarationParams) ([]*SymbolResponse, error) {
 +	setup, err := s.setupChecker(ctx, params.Snapshot, params.Project)
 +	if err != nil {
 +		return nil, err
@@ -7414,270 +8103,19 @@ index b350c6334..bb195e995 100644
  
 -func (s *Session) handleGetThisParameterOfSignature(_ context.Context, params *GetSignaturePropertyParams) (*SymbolResponse, error) {
 -	return s.resolveSymbolPropertyOfSignature(params, (*checker.Signature).ThisParameter)
-+	syms := setup.checker.GetJsxIntrinsicTagNamesAt(node)
-+	results := make([]*SymbolResponse, len(syms))
-+	for i, sym := range syms {
-+		results[i] = setup.newSymbolResponse(sym)
-+	}
-+	return results, nil
- }
- 
--func (s *Session) handleGetTargetOfSignature(_ context.Context, params *GetSignaturePropertyParams) (*SignatureResponse, error) {
--	return s.resolveSignaturePropertyOfSignature(params, (*checker.Signature).Target)
--}
-+// handleIsPropertyAccessible reports whether a property is accessible from a node.
-+func (s *Session) handleIsPropertyAccessible(ctx context.Context, params *IsPropertyAccessibleParams) (bool, error) {
-+	setup, err := s.setupChecker(ctx, params.Snapshot, params.Project)
-+	if err != nil {
-+		return false, err
-+	}
-+	defer setup.done()
- 
--// resolveTypePropertyOfType resolves a type property of type `Type` and returns a type response.
--func (s *Session) resolveTypePropertyOfType(params *GetTypePropertyParams, getter func(*checker.Type) *checker.Type) (*TypeResponse, error) {
--	sd, err := s.getSnapshotData(params.Snapshot)
-+	node, err := setup.sd.resolveNodeHandle(setup.program, params.Location)
- 	if err != nil {
--		return nil, err
-+		return false, err
-+	}
-+	if node == nil {
-+		return false, nil
- 	}
- 
--	t, err := sd.resolveTypeHandle(params.Project, params.Type)
-+	t, err := setup.resolveTypeHandle(params.Type)
- 	if err != nil {
--		return nil, err
-+		return false, err
- 	}
- 
--	result := getter(t)
--	if result == nil {
--		return nil, nil
-+	symbol, err := setup.resolveSymbolHandle(params.Symbol)
-+	if err != nil {
-+		return false, err
-+	}
-+	if symbol == nil {
-+		return false, nil
- 	}
- 
--	return sd.newTypeResponse(params.Project, result), nil
-+	return setup.checker.IsPropertyAccessible(node, params.IsSuper, params.IsWrite, t, symbol), nil
- }
- 
--// resolveTypeArrayPropertyOfType resolves a type property of an array of types and returns an array of type responses.
--func (s *Session) resolveTypeArrayPropertyOfType(params *GetTypePropertyParams, getter func(*checker.Type) []*checker.Type) ([]*TypeResponse, error) {
--	sd, err := s.getSnapshotData(params.Snapshot)
-+// handleGetAccessibleSymbolChain returns an accessible alias chain, or nil when
-+// no chain exists (stock undefined — not an empty array).
-+func (s *Session) handleGetAccessibleSymbolChain(ctx context.Context, params *GetAccessibleSymbolChainParams) ([]*SymbolResponse, error) {
-+	setup, err := s.setupChecker(ctx, params.Snapshot, params.Project)
- 	if err != nil {
- 		return nil, err
- 	}
-+	defer setup.done()
- 
--	t, err := sd.resolveTypeHandle(params.Project, params.Type)
-+	symbol, err := setup.resolveSymbolHandle(params.Symbol)
- 	if err != nil {
- 		return nil, err
- 	}
--
--	types := getter(t)
--	if len(types) == 0 {
-+	if symbol == nil {
- 		return nil, nil
- 	}
- 
--	results := make([]*TypeResponse, len(types))
--	for i, sub := range types {
--		results[i] = sd.newTypeResponse(params.Project, sub)
-+	var enclosing *ast.Node
-+	if params.EnclosingDeclaration != "" {
-+		enclosing, err = setup.sd.resolveNodeHandle(setup.program, params.EnclosingDeclaration)
-+		if err != nil {
-+			return nil, err
-+		}
-+	}
-+
-+	chain := setup.checker.GetAccessibleSymbolChain(symbol, enclosing, ast.SymbolFlags(params.Meaning), params.UseOnlyExternalAliasing)
-+	// Stock returns undefined when no chain exists — Go may yield nil or empty
-+	// slice; both must marshal as JSON null so the JS client returns undefined
-+	// (not []). A real empty chain does not occur for accessible lookups.
-+	if len(chain) == 0 {
-+		return nil, nil
-+	}
-+	results := make([]*SymbolResponse, len(chain))
-+	for i, sym := range chain {
-+		results[i] = setup.newSymbolResponse(sym)
- 	}
- 	return results, nil
- }
- 
--// resolveSymbolPropertyOfType resolves a type property of type `Symbol` and returns a symbol response.
--func (s *Session) resolveSymbolPropertyOfType(params *GetTypePropertyParams, getter func(*checker.Type) *ast.Symbol) (*SymbolResponse, error) {
--	sd, err := s.getSnapshotData(params.Snapshot)
-+// handleGetContextualTypeForArgumentAtIndex returns the contextual type of a
-+// call-like argument at the given index.
-+func (s *Session) handleGetContextualTypeForArgumentAtIndex(ctx context.Context, params *GetContextualTypeForArgumentAtIndexParams) (*TypeResponse, error) {
-+	setup, err := s.setupChecker(ctx, params.Snapshot, params.Project)
- 	if err != nil {
- 		return nil, err
- 	}
-+	defer setup.done()
- 
--	t, err := sd.resolveTypeHandle(params.Project, params.Type)
-+	node, err := setup.sd.resolveNodeHandle(setup.program, params.Location)
- 	if err != nil {
- 		return nil, err
- 	}
-+	if node == nil {
-+		return nil, nil
-+	}
- 
--	result := getter(t)
--	if result == nil {
-+	t := setup.checker.GetContextualTypeForArgumentAtIndex(node, int(params.ArgIndex))
-+	if t == nil {
- 		return nil, nil
- 	}
--	return sd.newSymbolResponse(result), nil
-+	return setup.newTypeResponse(t), nil
- }
- 
--// resolveSymbolTablePropertyOfSymbol resolves a symbol property of type `Symbol` and returns a symbol response.
--func (s *Session) resolveSymbolPropertyOfSymbol(params *GetSymbolPropertyParams, getter func(*ast.Symbol) *ast.Symbol) (*SymbolResponse, error) {
--	sd, err := s.getSnapshotData(params.Snapshot)
-+// handleGetContextualTypeForJsxAttribute returns the contextual type of a JSX
-+// attribute (Go has no contextFlags; LS callers omit flags).
-+func (s *Session) handleGetContextualTypeForJsxAttribute(ctx context.Context, params *CheckerNodeParams) (*TypeResponse, error) {
-+	setup, err := s.setupChecker(ctx, params.Snapshot, params.Project)
- 	if err != nil {
- 		return nil, err
- 	}
-+	defer setup.done()
- 
--	symbol, err := sd.resolveSymbolHandle(params.Symbol)
-+	node, err := setup.sd.resolveNodeHandle(setup.program, params.Location)
- 	if err != nil {
- 		return nil, err
- 	}
-+	if node == nil {
-+		return nil, nil
-+	}
- 
--	result := getter(symbol)
--	if result == nil {
-+	t := setup.checker.GetContextualTypeForJsxAttribute(node)
-+	if t == nil {
- 		return nil, nil
- 	}
--	return sd.newSymbolResponse(result), nil
-+	return setup.newTypeResponse(t), nil
- }
- 
--// resolveSymbolTablePropertyOfSymbol resolves a symbol property of type `SymbolTable` and returns an array of symbol responses.
--func (s *Session) resolveSymbolTablePropertyOfSymbol(params *GetSymbolPropertyParams, getter func(*ast.Symbol) ast.SymbolTable) ([]*SymbolResponse, error) {
--	sd, err := s.getSnapshotData(params.Snapshot)
-+// handleIsValidPropertyAccess reports whether a property name is valid on a node.
-+func (s *Session) handleIsValidPropertyAccess(ctx context.Context, params *IsValidPropertyAccessParams) (bool, error) {
-+	setup, err := s.setupChecker(ctx, params.Snapshot, params.Project)
-+	if err != nil {
-+		return false, err
-+	}
-+	defer setup.done()
-+
-+	node, err := setup.sd.resolveNodeHandle(setup.program, params.Location)
-+	if err != nil {
-+		return false, err
-+	}
-+	if node == nil {
-+		return false, nil
-+	}
-+
-+	return setup.checker.IsValidPropertyAccess(node, params.PropertyName), nil
-+}
-+
-+// handleGetCandidateSignaturesForStringLiteralCompletions returns candidate
-+// signatures for string-literal argument completions.
-+func (s *Session) handleGetCandidateSignaturesForStringLiteralCompletions(ctx context.Context, params *GetCandidateSignaturesForStringLiteralCompletionsParams) ([]*SignatureResponse, error) {
-+	setup, err := s.setupChecker(ctx, params.Snapshot, params.Project)
- 	if err != nil {
- 		return nil, err
- 	}
-+	defer setup.done()
- 
--	symbol, err := sd.resolveSymbolHandle(params.Symbol)
-+	call, err := setup.sd.resolveNodeHandle(setup.program, params.Call)
- 	if err != nil {
- 		return nil, err
- 	}
-+	if call == nil {
-+		return nil, nil
-+	}
- 
--	symbolTable := getter(symbol)
--	if symbolTable == nil || len(symbolTable) == 0 {
-+	editing, err := setup.sd.resolveNodeHandle(setup.program, params.EditingArgument)
-+	if err != nil {
-+		return nil, err
-+	}
-+	if editing == nil {
- 		return nil, nil
- 	}
- 
--	results := make([]*SymbolResponse, 0, len(symbolTable))
--	for _, sub := range symbolTable {
--		results = append(results, sd.newSymbolResponse(sub))
-+	sigs := setup.checker.GetCandidateSignaturesForStringLiteralCompletions(call, editing)
-+	results := make([]*SignatureResponse, len(sigs))
-+	for i, sig := range sigs {
-+		results[i] = setup.newSignatureResponse(sig)
- 	}
- 	return results, nil
- }
- 
--// resolveSymbolArrayPropertyOfSignature resolves a signature property of an array of symbols and returns an array of symbol responses.
--func (s *Session) resolveSymbolArrayPropertyOfSignature(params *GetSignaturePropertyParams, getter func(*checker.Signature) []*ast.Symbol) ([]*SymbolResponse, error) {
--	sd, err := s.getSnapshotData(params.Snapshot)
-+// handleGetSymbolsOfParameterPropertyDeclaration returns the parameter and
-+// property symbols for a parameter-property declaration (length-2 array).
-+func (s *Session) handleGetSymbolsOfParameterPropertyDeclaration(ctx context.Context, params *GetSymbolsOfParameterPropertyDeclarationParams) ([]*SymbolResponse, error) {
-+	setup, err := s.setupChecker(ctx, params.Snapshot, params.Project)
- 	if err != nil {
- 		return nil, err
- 	}
-+	defer setup.done()
- 
--	sig, err := sd.resolveSignatureHandle(params.Project, params.Signature)
-+	node, err := setup.sd.resolveNodeHandle(setup.program, params.Location)
- 	if err != nil {
- 		return nil, err
- 	}
--
--	symbols := getter(sig)
--	if len(symbols) == 0 {
-+	if node == nil {
- 		return nil, nil
- 	}
- 
--	results := make([]*SymbolResponse, len(symbols))
--	for i, sym := range symbols {
--		results[i] = sd.newSymbolResponse(sym)
 +	paramSym, propSym := setup.checker.GetSymbolsOfParameterPropertyDeclaration(node, params.ParameterName)
 +	return []*SymbolResponse{
 +		setup.newSymbolResponse(paramSym),
 +		setup.newSymbolResponse(propSym),
 +	}, nil
-+}
-+
+ }
+ 
+-func (s *Session) handleGetTargetOfSignature(_ context.Context, params *GetSignaturePropertyParams) (*SignatureResponse, error) {
+-	return s.resolveSignaturePropertyOfSignature(params, (*checker.Signature).Target)
 +func materializeIndexInfo(setup checkerSetup, info *checker.IndexInfo) *IndexInfoResponse {
 +	if info == nil {
 +		return nil
- 	}
--	return results, nil
++	}
 +	resp := &IndexInfoResponse{
 +		KeyType:    *setup.newTypeResponse(info.KeyType()),
 +		ValueType:  *setup.newTypeResponse(info.ValueType()),
@@ -7692,8 +8130,8 @@ index b350c6334..bb195e995 100644
 +	return resp
  }
  
--// resolveSymbolPropertyOfSignature resolves a signature property of type `Symbol` and returns a symbol response.
--func (s *Session) resolveSymbolPropertyOfSignature(params *GetSignaturePropertyParams, getter func(*checker.Signature) *ast.Symbol) (*SymbolResponse, error) {
+-// resolveTypePropertyOfType resolves a type property of type `Type` and returns a type response.
+-func (s *Session) resolveTypePropertyOfType(params *GetTypePropertyParams, getter func(*checker.Type) *checker.Type) (*TypeResponse, error) {
 -	sd, err := s.getSnapshotData(params.Snapshot)
 +// handleGetAwaitedType returns the awaited type of a promise-like type.
 +func (s *Session) handleGetAwaitedType(ctx context.Context, params *CheckerTypeParams) (*TypeResponse, error) {
@@ -7703,22 +8141,24 @@ index b350c6334..bb195e995 100644
  	}
 +	defer setup.done()
  
--	sig, err := sd.resolveSignatureHandle(params.Project, params.Signature)
+-	t, err := sd.resolveTypeHandle(params.Project, params.Type)
 +	t, err := setup.resolveTypeHandle(params.Type)
  	if err != nil {
  		return nil, err
  	}
  
--	result := getter(sig)
+-	result := getter(t)
 +	result := setup.checker.GetAwaitedType(t)
  	if result == nil {
  		return nil, nil
  	}
--	return sd.newSymbolResponse(result), nil
+-
+-	return sd.newTypeResponse(params.Project, result), nil
 +	return setup.newTypeResponse(result), nil
  }
  
--func (s *Session) resolveTypeArrayPropertyOfSignature(params *GetSignaturePropertyParams, getter func(signature *checker.Signature) []*checker.Type) ([]*TypeResponse, error) {
+-// resolveTypeArrayPropertyOfType resolves a type property of an array of types and returns an array of type responses.
+-func (s *Session) resolveTypeArrayPropertyOfType(params *GetTypePropertyParams, getter func(*checker.Type) []*checker.Type) ([]*TypeResponse, error) {
 -	sd, err := s.getSnapshotData(params.Snapshot)
 +// handleGetNullableType returns type with null/undefined flags added.
 +func (s *Session) handleGetNullableType(ctx context.Context, params *GetNullableTypeParams) (*TypeResponse, error) {
@@ -7728,13 +8168,13 @@ index b350c6334..bb195e995 100644
  	}
 +	defer setup.done()
  
--	sig, err := sd.resolveSignatureHandle(params.Project, params.Signature)
+-	t, err := sd.resolveTypeHandle(params.Project, params.Type)
 +	t, err := setup.resolveTypeHandle(params.Type)
  	if err != nil {
  		return nil, err
  	}
  
--	types := getter(sig)
+-	types := getter(t)
 -	if len(types) == 0 {
 +	result := setup.checker.GetNullableType(t, checker.TypeFlags(params.Flags))
 +	if result == nil {
@@ -7742,30 +8182,188 @@ index b350c6334..bb195e995 100644
  	}
 +	return setup.newTypeResponse(result), nil
 +}
-+
+ 
+-	results := make([]*TypeResponse, len(types))
+-	for i, sub := range types {
+-		results[i] = sd.newTypeResponse(params.Project, sub)
 +// handleIsNullableType reports whether a type is nullable.
 +func (s *Session) handleIsNullableType(ctx context.Context, params *CheckerTypeParams) (bool, error) {
 +	setup, err := s.setupChecker(ctx, params.Snapshot, params.Project)
 +	if err != nil {
 +		return false, err
-+	}
+ 	}
+-	return results, nil
 +	defer setup.done()
- 
--	results := make([]*TypeResponse, len(types))
--	for i, sub := range types {
--		results[i] = sd.newTypeResponse(params.Project, sub)
++
 +	t, err := setup.resolveTypeHandle(params.Type)
 +	if err != nil {
 +		return false, err
- 	}
--	return results, nil
++	}
 +	return setup.checker.IsNullableType(t), nil
  }
  
--func (s *Session) resolveSignaturePropertyOfSignature(params *GetSignaturePropertyParams, getter func(*checker.Signature) *checker.Signature) (*SignatureResponse, error) {
+-// resolveSymbolPropertyOfType resolves a type property of type `Symbol` and returns a symbol response.
+-func (s *Session) resolveSymbolPropertyOfType(params *GetTypePropertyParams, getter func(*checker.Type) *ast.Symbol) (*SymbolResponse, error) {
 -	sd, err := s.getSnapshotData(params.Snapshot)
 +// handleGetElementTypeOfArrayType returns the element type of an array type.
 +func (s *Session) handleGetElementTypeOfArrayType(ctx context.Context, params *CheckerTypeParams) (*TypeResponse, error) {
++	setup, err := s.setupChecker(ctx, params.Snapshot, params.Project)
+ 	if err != nil {
+ 		return nil, err
+ 	}
++	defer setup.done()
+ 
+-	t, err := sd.resolveTypeHandle(params.Project, params.Type)
++	t, err := setup.resolveTypeHandle(params.Type)
+ 	if err != nil {
+ 		return nil, err
+ 	}
+ 
+-	result := getter(t)
++	result := setup.checker.GetElementTypeOfArrayType(t)
+ 	if result == nil {
+ 		return nil, nil
+ 	}
+-	return sd.newSymbolResponse(result), nil
++	return setup.newTypeResponse(result), nil
+ }
+ 
+-// resolveSymbolTablePropertyOfSymbol resolves a symbol property of type `Symbol` and returns a symbol response.
+-func (s *Session) resolveSymbolPropertyOfSymbol(params *GetSymbolPropertyParams, getter func(*ast.Symbol) *ast.Symbol) (*SymbolResponse, error) {
+-	sd, err := s.getSnapshotData(params.Snapshot)
++// handleGetIndexInfoOfType returns the index info for a type by IndexKind.
++func (s *Session) handleGetIndexInfoOfType(ctx context.Context, params *GetIndexKindParams) (*IndexInfoResponse, error) {
++	setup, err := s.setupChecker(ctx, params.Snapshot, params.Project)
+ 	if err != nil {
+ 		return nil, err
+ 	}
++	defer setup.done()
+ 
+-	symbol, err := sd.resolveSymbolHandle(params.Symbol)
++	t, err := setup.resolveTypeHandle(params.Type)
+ 	if err != nil {
+ 		return nil, err
+ 	}
+ 
+-	result := getter(symbol)
++	return materializeIndexInfo(setup, setup.checker.GetIndexInfoOfTypeByKind(t, params.Kind)), nil
++}
++
++// handleGetIndexTypeOfTypeForKind returns the index type for a type by IndexKind.
++func (s *Session) handleGetIndexTypeOfTypeForKind(ctx context.Context, params *GetIndexKindParams) (*TypeResponse, error) {
++	setup, err := s.setupChecker(ctx, params.Snapshot, params.Project)
++	if err != nil {
++		return nil, err
++	}
++	defer setup.done()
++
++	t, err := setup.resolveTypeHandle(params.Type)
++	if err != nil {
++		return nil, err
++	}
++
++	result := setup.checker.GetIndexTypeOfTypeByKind(t, params.Kind)
+ 	if result == nil {
+ 		return nil, nil
+ 	}
+-	return sd.newSymbolResponse(result), nil
++	return setup.newTypeResponse(result), nil
+ }
+ 
+-// resolveSymbolTablePropertyOfSymbol resolves a symbol property of type `SymbolTable` and returns an array of symbol responses.
+-func (s *Session) resolveSymbolTablePropertyOfSymbol(params *GetSymbolPropertyParams, getter func(*ast.Symbol) ast.SymbolTable) ([]*SymbolResponse, error) {
+-	sd, err := s.getSnapshotData(params.Snapshot)
++// handleGetTypeOfPropertyOfType returns the type of a named property on a type.
++func (s *Session) handleGetTypeOfPropertyOfType(ctx context.Context, params *GetPropertyOfTypeParams) (*TypeResponse, error) {
++	setup, err := s.setupChecker(ctx, params.Snapshot, params.Project)
+ 	if err != nil {
+ 		return nil, err
+ 	}
++	defer setup.done()
+ 
+-	symbol, err := sd.resolveSymbolHandle(params.Symbol)
++	t, err := setup.resolveTypeHandle(params.Type)
+ 	if err != nil {
+ 		return nil, err
+ 	}
+ 
+-	symbolTable := getter(symbol)
+-	if symbolTable == nil || len(symbolTable) == 0 {
++	result := setup.checker.GetTypeOfPropertyOfType(t, params.Name)
++	if result == nil {
+ 		return nil, nil
+ 	}
+-
+-	results := make([]*SymbolResponse, 0, len(symbolTable))
+-	for _, sub := range symbolTable {
+-		results = append(results, sd.newSymbolResponse(sub))
+-	}
+-	return results, nil
++	return setup.newTypeResponse(result), nil
+ }
+ 
+-// resolveSymbolArrayPropertyOfSignature resolves a signature property of an array of symbols and returns an array of symbol responses.
+-func (s *Session) resolveSymbolArrayPropertyOfSignature(params *GetSignaturePropertyParams, getter func(*checker.Signature) []*ast.Symbol) ([]*SymbolResponse, error) {
+-	sd, err := s.getSnapshotData(params.Snapshot)
++// handleGetTypeOfPropertyOfContextualType returns the type of a named property of a contextual type.
++func (s *Session) handleGetTypeOfPropertyOfContextualType(ctx context.Context, params *GetPropertyOfTypeParams) (*TypeResponse, error) {
++	setup, err := s.setupChecker(ctx, params.Snapshot, params.Project)
+ 	if err != nil {
+ 		return nil, err
+ 	}
++	defer setup.done()
+ 
+-	sig, err := sd.resolveSignatureHandle(params.Project, params.Signature)
++	t, err := setup.resolveTypeHandle(params.Type)
+ 	if err != nil {
+ 		return nil, err
+ 	}
+ 
+-	symbols := getter(sig)
+-	if len(symbols) == 0 {
++	result := setup.checker.GetTypeOfPropertyOfContextualType(t, params.Name)
++	if result == nil {
+ 		return nil, nil
+ 	}
++	return setup.newTypeResponse(result), nil
++}
+ 
+-	results := make([]*SymbolResponse, len(symbols))
+-	for i, sym := range symbols {
+-		results[i] = sd.newSymbolResponse(sym)
++// handleFillMissingTypeArguments fills missing type arguments using defaults.
++func (s *Session) handleFillMissingTypeArguments(ctx context.Context, params *FillMissingTypeArgumentsParams) ([]*TypeResponse, error) {
++	setup, err := s.setupChecker(ctx, params.Snapshot, params.Project)
++	if err != nil {
++		return nil, err
++	}
++	defer setup.done()
++
++	typeArgs, err := setup.resolveTypeHandles(params.TypeArguments)
++	if err != nil {
++		return nil, err
++	}
++	typeParams, err := setup.resolveTypeHandles(params.TypeParameters)
++	if err != nil {
++		return nil, err
++	}
++
++	filled := setup.checker.FillMissingTypeArguments(typeArgs, typeParams, int(params.MinTypeArgumentCount), params.IsJavaScriptImplicitAny)
++	if filled == nil {
++		return []*TypeResponse{}, nil
++	}
++	results := make([]*TypeResponse, len(filled))
++	for i, t := range filled {
++		results[i] = setup.newTypeResponse(t)
+ 	}
+ 	return results, nil
+ }
+ 
+-// resolveSymbolPropertyOfSignature resolves a signature property of type `Symbol` and returns a symbol response.
+-func (s *Session) resolveSymbolPropertyOfSignature(params *GetSignaturePropertyParams, getter func(*checker.Signature) *ast.Symbol) (*SymbolResponse, error) {
+-	sd, err := s.getSnapshotData(params.Snapshot)
++// handleGetWidenedLiteralType returns the widened literal type.
++func (s *Session) handleGetWidenedLiteralType(ctx context.Context, params *CheckerTypeParams) (*TypeResponse, error) {
 +	setup, err := s.setupChecker(ctx, params.Snapshot, params.Project)
  	if err != nil {
  		return nil, err
@@ -7779,265 +8377,139 @@ index b350c6334..bb195e995 100644
  	}
  
 -	result := getter(sig)
-+	result := setup.checker.GetElementTypeOfArrayType(t)
- 	if result == nil {
- 		return nil, nil
- 	}
--	return sd.newSignatureResponse(params.Project, result), nil
-+	return setup.newTypeResponse(result), nil
- }
- 
--// handleGetContextualType returns the contextual type for a node.
--func (s *Session) handleGetContextualType(ctx context.Context, params *GetContextualTypeParams) (*TypeResponse, error) {
-+// handleGetIndexInfoOfType returns the index info for a type by IndexKind.
-+func (s *Session) handleGetIndexInfoOfType(ctx context.Context, params *GetIndexKindParams) (*IndexInfoResponse, error) {
- 	setup, err := s.setupChecker(ctx, params.Snapshot, params.Project)
- 	if err != nil {
- 		return nil, err
- 	}
- 	defer setup.done()
- 
--	node, err := setup.sd.resolveNodeHandle(setup.program, params.Location)
-+	t, err := setup.resolveTypeHandle(params.Type)
- 	if err != nil {
- 		return nil, err
- 	}
--	if node == nil {
--		return nil, nil
-+
-+	return materializeIndexInfo(setup, setup.checker.GetIndexInfoOfTypeByKind(t, params.Kind)), nil
-+}
-+
-+// handleGetIndexTypeOfTypeForKind returns the index type for a type by IndexKind.
-+func (s *Session) handleGetIndexTypeOfTypeForKind(ctx context.Context, params *GetIndexKindParams) (*TypeResponse, error) {
-+	setup, err := s.setupChecker(ctx, params.Snapshot, params.Project)
-+	if err != nil {
-+		return nil, err
- 	}
-+	defer setup.done()
- 
--	t := setup.checker.GetContextualType(node, checker.ContextFlagsNone)
--	if t == nil {
--		return nil, nil
-+	t, err := setup.resolveTypeHandle(params.Type)
-+	if err != nil {
-+		return nil, err
- 	}
- 
--	return setup.newTypeResponse(t), nil
-+	result := setup.checker.GetIndexTypeOfTypeByKind(t, params.Kind)
-+	if result == nil {
-+		return nil, nil
-+	}
-+	return setup.newTypeResponse(result), nil
- }
- 
--// handleGetBaseTypeOfLiteralType returns the base type of a literal type (e.g. number for 42).
--func (s *Session) handleGetBaseTypeOfLiteralType(ctx context.Context, params *GetBaseTypeOfLiteralTypeParams) (*TypeResponse, error) {
-+// handleGetTypeOfPropertyOfType returns the type of a named property on a type.
-+func (s *Session) handleGetTypeOfPropertyOfType(ctx context.Context, params *GetPropertyOfTypeParams) (*TypeResponse, error) {
- 	setup, err := s.setupChecker(ctx, params.Snapshot, params.Project)
- 	if err != nil {
- 		return nil, err
-@@ -1749,16 +4218,15 @@ func (s *Session) handleGetBaseTypeOfLiteralType(ctx context.Context, params *Ge
- 		return nil, err
- 	}
- 
--	result := setup.checker.GetBaseTypeOfLiteralType(t)
-+	result := setup.checker.GetTypeOfPropertyOfType(t, params.Name)
- 	if result == nil {
- 		return nil, nil
- 	}
--
- 	return setup.newTypeResponse(result), nil
- }
- 
--// handleGetNonNullableType returns the type with null and undefined removed.
--func (s *Session) handleGetNonNullableType(ctx context.Context, params *GetNonNullableTypeParams) (*TypeResponse, error) {
-+// handleGetTypeOfPropertyOfContextualType returns the type of a named property of a contextual type.
-+func (s *Session) handleGetTypeOfPropertyOfContextualType(ctx context.Context, params *GetPropertyOfTypeParams) (*TypeResponse, error) {
- 	setup, err := s.setupChecker(ctx, params.Snapshot, params.Project)
- 	if err != nil {
- 		return nil, err
-@@ -1770,40 +4238,43 @@ func (s *Session) handleGetNonNullableType(ctx context.Context, params *GetNonNu
- 		return nil, err
- 	}
- 
--	result := setup.checker.GetNonNullableType(t)
-+	result := setup.checker.GetTypeOfPropertyOfContextualType(t, params.Name)
- 	if result == nil {
- 		return nil, nil
- 	}
--
- 	return setup.newTypeResponse(result), nil
- }
- 
--// handleGetTypeFromTypeNode returns the type for a type node.
--func (s *Session) handleGetTypeFromTypeNode(ctx context.Context, params *GetTypeFromTypeNodeParams) (*TypeResponse, error) {
-+// handleFillMissingTypeArguments fills missing type arguments using defaults.
-+func (s *Session) handleFillMissingTypeArguments(ctx context.Context, params *FillMissingTypeArgumentsParams) ([]*TypeResponse, error) {
- 	setup, err := s.setupChecker(ctx, params.Snapshot, params.Project)
- 	if err != nil {
- 		return nil, err
- 	}
- 	defer setup.done()
- 
--	node, err := setup.sd.resolveNodeHandle(setup.program, params.Location)
-+	typeArgs, err := setup.resolveTypeHandles(params.TypeArguments)
- 	if err != nil {
- 		return nil, err
- 	}
--	if node == nil {
--		return nil, nil
-+	typeParams, err := setup.resolveTypeHandles(params.TypeParameters)
-+	if err != nil {
-+		return nil, err
- 	}
- 
--	t := setup.checker.GetTypeFromTypeNode(node)
--	if t == nil {
--		return nil, nil
-+	filled := setup.checker.FillMissingTypeArguments(typeArgs, typeParams, int(params.MinTypeArgumentCount), params.IsJavaScriptImplicitAny)
-+	if filled == nil {
-+		return []*TypeResponse{}, nil
- 	}
--
--	return setup.newTypeResponse(t), nil
-+	results := make([]*TypeResponse, len(filled))
-+	for i, t := range filled {
-+		results[i] = setup.newTypeResponse(t)
-+	}
-+	return results, nil
- }
- 
--// handleGetWidenedType returns the widened type.
--func (s *Session) handleGetWidenedType(ctx context.Context, params *GetWidenedTypeParams) (*TypeResponse, error) {
-+// handleGetWidenedLiteralType returns the widened literal type.
-+func (s *Session) handleGetWidenedLiteralType(ctx context.Context, params *CheckerTypeParams) (*TypeResponse, error) {
- 	setup, err := s.setupChecker(ctx, params.Snapshot, params.Project)
- 	if err != nil {
- 		return nil, err
-@@ -1815,41 +4286,55 @@ func (s *Session) handleGetWidenedType(ctx context.Context, params *GetWidenedTy
- 		return nil, err
- 	}
- 
--	result := setup.checker.GetWidenedType(t)
 +	result := setup.checker.GetWidenedLiteralType(t)
  	if result == nil {
  		return nil, nil
  	}
--
- 	return setup.newTypeResponse(result), nil
+-	return sd.newSymbolResponse(result), nil
++	return setup.newTypeResponse(result), nil
  }
  
--// handleGetParameterType returns the type of a parameter at a given index in a signature.
--func (s *Session) handleGetParameterType(ctx context.Context, params *GetParameterTypeParams) (*TypeResponse, error) {
+-func (s *Session) resolveTypeArrayPropertyOfSignature(params *GetSignaturePropertyParams, getter func(signature *checker.Signature) []*checker.Type) ([]*TypeResponse, error) {
+-	sd, err := s.getSnapshotData(params.Snapshot)
 +// handleGetUnmatchedProperties returns properties on target unmatched by source.
 +func (s *Session) handleGetUnmatchedProperties(ctx context.Context, params *GetUnmatchedPropertiesParams) ([]*SymbolResponse, error) {
- 	setup, err := s.setupChecker(ctx, params.Snapshot, params.Project)
++	setup, err := s.setupChecker(ctx, params.Snapshot, params.Project)
  	if err != nil {
  		return nil, err
  	}
- 	defer setup.done()
++	defer setup.done()
  
--	sig, err := setup.resolveSignatureHandle(params.Signature)
+-	sig, err := sd.resolveSignatureHandle(params.Project, params.Signature)
 +	source, err := setup.resolveTypeHandle(params.Source)
+ 	if err != nil {
+ 		return nil, err
+ 	}
+-
+-	types := getter(sig)
+-	if len(types) == 0 {
+-		return nil, nil
++	target, err := setup.resolveTypeHandle(params.Target)
 +	if err != nil {
 +		return nil, err
-+	}
-+	target, err := setup.resolveTypeHandle(params.Target)
- 	if err != nil {
- 		return nil, err
  	}
  
--	if params.Index < 0 {
--		return nil, fmt.Errorf("%w: invalid parameter index", ErrClientError)
+-	results := make([]*TypeResponse, len(types))
+-	for i, sub := range types {
+-		results[i] = sd.newTypeResponse(params.Project, sub)
 +	props := setup.checker.GetUnmatchedProperties(source, target, params.RequireOptionalProperties, params.MatchDiscriminantProperties)
 +	results := make([]*SymbolResponse, len(props))
 +	for i, prop := range props {
 +		results[i] = setup.newSymbolResponse(prop)
  	}
-+	return results, nil
-+}
+ 	return results, nil
+ }
  
--	t := setup.checker.GetTypeAtPosition(sig, int(params.Index))
--	if t == nil {
--		return nil, nil
+-func (s *Session) resolveSignaturePropertyOfSignature(params *GetSignaturePropertyParams, getter func(*checker.Signature) *checker.Signature) (*SignatureResponse, error) {
+-	sd, err := s.getSnapshotData(params.Snapshot)
 +// handleIsEmptyAnonymousObjectType reports whether a type is an empty anonymous object.
 +func (s *Session) handleIsEmptyAnonymousObjectType(ctx context.Context, params *CheckerTypeParams) (bool, error) {
 +	setup, err := s.setupChecker(ctx, params.Snapshot, params.Project)
 +	if err != nil {
 +		return false, err
- 	}
++	}
 +	defer setup.done()
- 
--	return setup.newTypeResponse(t), nil
++
 +	t, err := setup.resolveTypeHandle(params.Type)
 +	if err != nil {
 +		return false, err
 +	}
 +	return setup.checker.IsEmptyAnonymousObjectType(t), nil
- }
- 
--// handleIsArrayLikeType returns whether a type is array-like.
--func (s *Session) handleIsArrayLikeType(ctx context.Context, params *IsArrayLikeTypeParams) (bool, error) {
-+// handleIsLibType reports whether a type is declared in a lib file.
-+func (s *Session) handleIsLibType(ctx context.Context, params *CheckerTypeParams) (bool, error) {
- 	setup, err := s.setupChecker(ctx, params.Snapshot, params.Project)
- 	if err != nil {
- 		return false, err
-@@ -1860,69 +4345,98 @@ func (s *Session) handleIsArrayLikeType(ctx context.Context, params *IsArrayLike
- 	if err != nil {
- 		return false, err
- 	}
--
--	return setup.checker.IsArrayLikeType(t), nil
-+	return setup.checker.IsLibType(t), nil
- }
- 
--// handleIsTypeAssignableTo returns whether source is assignable to target.
--func (s *Session) handleIsTypeAssignableTo(ctx context.Context, params *IsTypeAssignableToParams) (bool, error) {
-+// handleSymbolIsValue reports whether a symbol is a value.
-+func (s *Session) handleSymbolIsValue(ctx context.Context, params *CheckerSymbolParams) (bool, error) {
- 	setup, err := s.setupChecker(ctx, params.Snapshot, params.Project)
- 	if err != nil {
- 		return false, err
- 	}
- 	defer setup.done()
- 
--	source, err := setup.resolveTypeHandle(params.Source)
-+	symbol, err := setup.resolveSymbolHandle(params.Symbol)
- 	if err != nil {
- 		return false, err
- 	}
--	target, err := setup.resolveTypeHandle(params.Target)
-+	if symbol == nil {
-+		return false, nil
-+	}
-+	return setup.checker.SymbolIsValue(symbol), nil
 +}
 +
-+// handleRequiresAddingImplicitUndefined reports whether a parameter needs implicit undefined.
-+func (s *Session) handleRequiresAddingImplicitUndefined(ctx context.Context, params *CheckerNodeParams) (bool, error) {
++// handleIsLibType reports whether a type is declared in a lib file.
++func (s *Session) handleIsLibType(ctx context.Context, params *CheckerTypeParams) (bool, error) {
 +	setup, err := s.setupChecker(ctx, params.Snapshot, params.Project)
- 	if err != nil {
- 		return false, err
- 	}
-+	defer setup.done()
- 
--	return setup.checker.IsTypeAssignableTo(source, target), nil
-+	node, err := setup.sd.resolveNodeHandle(setup.program, params.Location)
 +	if err != nil {
 +		return false, err
 +	}
-+	if node == nil {
-+		return false, nil
++	defer setup.done()
++
++	t, err := setup.resolveTypeHandle(params.Type)
++	if err != nil {
++		return false, err
 +	}
++	return setup.checker.IsLibType(t), nil
++}
++
++// handleSymbolIsValue reports whether a symbol is a value.
++func (s *Session) handleSymbolIsValue(ctx context.Context, params *CheckerSymbolParams) (bool, error) {
++	setup, err := s.setupChecker(ctx, params.Snapshot, params.Project)
+ 	if err != nil {
+-		return nil, err
++		return false, err
+ 	}
++	defer setup.done()
+ 
+-	sig, err := sd.resolveSignatureHandle(params.Project, params.Signature)
++	symbol, err := setup.resolveSymbolHandle(params.Symbol)
+ 	if err != nil {
+-		return nil, err
++		return false, err
+ 	}
+-
+-	result := getter(sig)
+-	if result == nil {
+-		return nil, nil
++	if symbol == nil {
++		return false, nil
+ 	}
+-	return sd.newSignatureResponse(params.Project, result), nil
++	return setup.checker.SymbolIsValue(symbol), nil
+ }
+ 
+-// handleGetContextualType returns the contextual type for a node.
+-func (s *Session) handleGetContextualType(ctx context.Context, params *GetContextualTypeParams) (*TypeResponse, error) {
++// handleRequiresAddingImplicitUndefined reports whether a parameter needs implicit undefined.
++func (s *Session) handleRequiresAddingImplicitUndefined(ctx context.Context, params *CheckerNodeParams) (bool, error) {
+ 	setup, err := s.setupChecker(ctx, params.Snapshot, params.Project)
+ 	if err != nil {
+-		return nil, err
++		return false, err
+ 	}
+ 	defer setup.done()
+ 
+ 	node, err := setup.sd.resolveNodeHandle(setup.program, params.Location)
+ 	if err != nil {
+-		return nil, err
++		return false, err
+ 	}
+ 	if node == nil {
+-		return nil, nil
+-	}
+-
+-	t := setup.checker.GetContextualType(node, checker.ContextFlagsNone)
+-	if t == nil {
+-		return nil, nil
++		return false, nil
+ 	}
+-
+-	return setup.newTypeResponse(t), nil
 +	return setup.checker.RequiresAddingImplicitUndefined(node), nil
  }
  
--// handleGetShorthandAssignmentValueSymbol returns the value symbol of a shorthand property assignment.
--func (s *Session) handleGetShorthandAssignmentValueSymbol(ctx context.Context, params *GetTypeAtLocationParams) (*SymbolResponse, error) {
+-// handleGetBaseTypeOfLiteralType returns the base type of a literal type (e.g. number for 42).
+-func (s *Session) handleGetBaseTypeOfLiteralType(ctx context.Context, params *GetBaseTypeOfLiteralTypeParams) (*TypeResponse, error) {
 +// handleGetTypeOnlyAliasDeclaration returns the type-only alias declaration for a symbol.
 +func (s *Session) handleGetTypeOnlyAliasDeclaration(ctx context.Context, params *CheckerSymbolParams) (any, error) {
  	setup, err := s.setupChecker(ctx, params.Snapshot, params.Project)
@@ -8046,29 +8518,28 @@ index b350c6334..bb195e995 100644
  	}
  	defer setup.done()
  
--	node, err := setup.sd.resolveNodeHandle(setup.program, params.Location)
+-	t, err := setup.resolveTypeHandle(params.Type)
 +	symbol, err := setup.resolveSymbolHandle(params.Symbol)
  	if err != nil {
  		return nil, err
  	}
--	if node == nil {
+-
+-	result := setup.checker.GetBaseTypeOfLiteralType(t)
+-	if result == nil {
 +	if symbol == nil {
  		return nil, nil
  	}
  
--	symbol := setup.checker.GetShorthandAssignmentValueSymbol(node)
--	if symbol == nil {
+-	return setup.newTypeResponse(result), nil
 +	node := setup.checker.GetTypeOnlyAliasDeclaration(symbol)
 +	if node == nil {
- 		return nil, nil
- 	}
--
--	return setup.newSymbolResponse(symbol), nil
++		return nil, nil
++	}
 +	return setup.sd.nodeHandleFrom(node), nil
  }
  
--// handleGetTypeOfSymbolAtLocation returns the narrowed type of a symbol at a specific location.
--func (s *Session) handleGetTypeOfSymbolAtLocation(ctx context.Context, params *GetTypeOfSymbolAtLocationParams) (*TypeResponse, error) {
+-// handleGetNonNullableType returns the type with null and undefined removed.
+-func (s *Session) handleGetNonNullableType(ctx context.Context, params *GetNonNullableTypeParams) (*TypeResponse, error) {
 +// handleResolveExternalModuleName resolves an external module name to a symbol.
 +func (s *Session) handleResolveExternalModuleName(ctx context.Context, params *CheckerNodeParams) (*SymbolResponse, error) {
  	setup, err := s.setupChecker(ctx, params.Snapshot, params.Project)
@@ -8077,37 +8548,38 @@ index b350c6334..bb195e995 100644
  	}
  	defer setup.done()
  
--	symbol, err := setup.resolveSymbolHandle(params.Symbol)
+-	t, err := setup.resolveTypeHandle(params.Type)
 +	node, err := setup.sd.resolveNodeHandle(setup.program, params.Location)
  	if err != nil {
  		return nil, err
  	}
+-
+-	result := setup.checker.GetNonNullableType(t)
+-	if result == nil {
 +	if node == nil {
+ 		return nil, nil
+ 	}
+ 
+-	return setup.newTypeResponse(result), nil
++	symbol := setup.checker.ResolveExternalModuleName(node)
++	if symbol == nil {
 +		return nil, nil
 +	}
-+
-+	symbol := setup.checker.ResolveExternalModuleName(node)
- 	if symbol == nil {
- 		return nil, nil
- 	}
 +	return setup.newSymbolResponse(symbol), nil
-+}
-+
+ }
+ 
+-// handleGetTypeFromTypeNode returns the type for a type node.
+-func (s *Session) handleGetTypeFromTypeNode(ctx context.Context, params *GetTypeFromTypeNodeParams) (*TypeResponse, error) {
 +// handleGetPropertySymbolOfDestructuringAssignment returns the property symbol at a destructuring assignment location.
 +func (s *Session) handleGetPropertySymbolOfDestructuringAssignment(ctx context.Context, params *CheckerNodeParams) (*SymbolResponse, error) {
-+	setup, err := s.setupChecker(ctx, params.Snapshot, params.Project)
-+	if err != nil {
-+		return nil, err
-+	}
-+	defer setup.done()
- 
- 	node, err := setup.sd.resolveNodeHandle(setup.program, params.Location)
+ 	setup, err := s.setupChecker(ctx, params.Snapshot, params.Project)
  	if err != nil {
-@@ -1932,93 +4446,146 @@ func (s *Session) handleGetTypeOfSymbolAtLocation(ctx context.Context, params *G
+ 		return nil, err
+@@ -1794,98 +4460,121 @@ func (s *Session) handleGetTypeFromTypeNode(ctx context.Context, params *GetType
  		return nil, nil
  	}
  
--	t := setup.checker.GetTypeOfSymbolAtLocation(symbol, node)
+-	t := setup.checker.GetTypeFromTypeNode(node)
 -	if t == nil {
 +	symbol := setup.checker.GetPropertySymbolOfDestructuringAssignment(node)
 +	if symbol == nil {
@@ -8118,8 +8590,8 @@ index b350c6334..bb195e995 100644
 +	return setup.newSymbolResponse(symbol), nil
  }
  
--// handleTypeToTypeNode converts a Type to a TypeNode AST and returns it as binary-encoded data.
--func (s *Session) handleTypeToTypeNode(ctx context.Context, params *TypeToTypeNodeParams) (any, error) {
+-// handleGetWidenedType returns the widened type.
+-func (s *Session) handleGetWidenedType(ctx context.Context, params *GetWidenedTypeParams) (*TypeResponse, error) {
 +// handleIsSymbolAccessible reports symbol accessibility from an enclosing declaration.
 +func (s *Session) handleIsSymbolAccessible(ctx context.Context, params *IsSymbolAccessibleParams) (*SymbolAccessibilityResultResponse, error) {
  	setup, err := s.setupChecker(ctx, params.Snapshot, params.Project)
@@ -8133,48 +8605,55 @@ index b350c6334..bb195e995 100644
  	if err != nil {
  		return nil, err
  	}
+-
+-	result := setup.checker.GetWidenedType(t)
+-	if result == nil {
 +	if symbol == nil {
-+		return nil, nil
-+	}
+ 		return nil, nil
+ 	}
  
--	var enclosingDeclaration *ast.Node
--	if params.Location != "" {
--		enclosingDeclaration, err = setup.sd.resolveNodeHandle(setup.program, params.Location)
+-	return setup.newTypeResponse(result), nil
 +	var enclosing *ast.Node
 +	if params.EnclosingDeclaration != "" {
 +		enclosing, err = setup.sd.resolveNodeHandle(setup.program, params.EnclosingDeclaration)
- 		if err != nil {
- 			return nil, err
- 		}
- 	}
- 
--	typeNode := setup.checker.TypeToTypeNode(t, enclosingDeclaration, nodebuilder.Flags(params.Flags), nil)
--	if typeNode == nil {
++		if err != nil {
++			return nil, err
++		}
++	}
++
 +	result := setup.checker.IsSymbolAccessible(symbol, enclosing, ast.SymbolFlags(params.Meaning), params.ShouldComputeAliasesToMakeVisible)
 +	return &SymbolAccessibilityResultResponse{
 +		Accessibility:   int32(result.Accessibility),
 +		ErrorSymbolName: result.ErrorSymbolName,
 +		ErrorModuleName: result.ErrorModuleName,
 +	}, nil
-+}
-+
+ }
+ 
+-// handleGetParameterType returns the type of a parameter at a given index in a signature.
+-func (s *Session) handleGetParameterType(ctx context.Context, params *GetParameterTypeParams) (*TypeResponse, error) {
 +// handleGetIndexInfosOfIndexSymbol returns index infos for an index symbol.
 +func (s *Session) handleGetIndexInfosOfIndexSymbol(ctx context.Context, params *GetIndexInfosOfIndexSymbolParams) ([]*IndexInfoResponse, error) {
-+	setup, err := s.setupChecker(ctx, params.Snapshot, params.Project)
-+	if err != nil {
-+		return nil, err
-+	}
-+	defer setup.done()
-+
+ 	setup, err := s.setupChecker(ctx, params.Snapshot, params.Project)
+ 	if err != nil {
+ 		return nil, err
+ 	}
+ 	defer setup.done()
+ 
+-	sig, err := setup.resolveSignatureHandle(params.Signature)
 +	symbol, err := setup.resolveSymbolHandle(params.Symbol)
-+	if err != nil {
-+		return nil, err
-+	}
+ 	if err != nil {
+ 		return nil, err
+ 	}
+-
+-	if params.Index < 0 {
+-		return nil, fmt.Errorf("%w: invalid parameter index", ErrClientError)
 +	if symbol == nil {
- 		return nil, nil
++		return nil, nil
  	}
  
--	data, _, err := encoder.EncodeNode(typeNode.AsNode(), nil)
+-	t := setup.checker.GetTypeAtPosition(sig, int(params.Index))
+-	if t == nil {
+-		return nil, nil
 +	var siblings []*ast.Symbol
 +	if len(params.SiblingSymbols) > 0 {
 +		siblings = make([]*ast.Symbol, len(params.SiblingSymbols))
@@ -8185,111 +8664,153 @@ index b350c6334..bb195e995 100644
 +			}
 +			siblings[i] = sym
 +		}
-+	}
-+
+ 	}
+ 
+-	return setup.newTypeResponse(t), nil
 +	infos := setup.checker.GetIndexInfosOfIndexSymbol(symbol, siblings)
 +	results := make([]*IndexInfoResponse, len(infos))
 +	for i, info := range infos {
 +		results[i] = materializeIndexInfo(setup, info)
 +	}
 +	return results, nil
-+}
-+
+ }
+ 
+-// handleIsArrayLikeType returns whether a type is array-like.
+-func (s *Session) handleIsArrayLikeType(ctx context.Context, params *IsArrayLikeTypeParams) (bool, error) {
 +// handleContainsArgumentsReference reports whether a node contains an arguments reference.
 +func (s *Session) handleContainsArgumentsReference(ctx context.Context, params *CheckerNodeParams) (bool, error) {
-+	setup, err := s.setupChecker(ctx, params.Snapshot, params.Project)
+ 	setup, err := s.setupChecker(ctx, params.Snapshot, params.Project)
  	if err != nil {
--		return nil, fmt.Errorf("failed to encode type node: %w", err)
-+		return false, err
+ 		return false, err
  	}
-+	defer setup.done()
+ 	defer setup.done()
  
--	if s.useBinaryResponses {
--		return RawBinary(data), nil
+-	t, err := setup.resolveTypeHandle(params.Type)
 +	node, err := setup.sd.resolveNodeHandle(setup.program, params.Location)
-+	if err != nil {
-+		return false, err
+ 	if err != nil {
+ 		return false, err
  	}
--	return &SourceFileResponse{
--		Data: base64.StdEncoding.EncodeToString(data),
--	}, nil
+-
+-	return setup.checker.IsArrayLikeType(t), nil
 +	if node == nil {
 +		return false, nil
 +	}
 +	return setup.checker.ContainsArgumentsReference(node), nil
  }
  
--func (s *Session) handleSignatureToSignatureDeclaration(ctx context.Context, params *SignatureToSignatureDeclarationParams) (any, error) {
+-// handleIsTypeAssignableTo returns whether source is assignable to target.
+-func (s *Session) handleIsTypeAssignableTo(ctx context.Context, params *IsTypeAssignableToParams) (bool, error) {
 +// handleGetAugmentedPropertiesOfType returns augmented (apparent) properties of a type.
 +func (s *Session) handleGetAugmentedPropertiesOfType(ctx context.Context, params *CheckerTypeParams) ([]*SymbolResponse, error) {
+ 	setup, err := s.setupChecker(ctx, params.Snapshot, params.Project)
+ 	if err != nil {
+-		return false, err
++		return nil, err
+ 	}
+ 	defer setup.done()
+ 
+-	source, err := setup.resolveTypeHandle(params.Source)
+-	if err != nil {
+-		return false, err
+-	}
+-	target, err := setup.resolveTypeHandle(params.Target)
++	t, err := setup.resolveTypeHandle(params.Type)
+ 	if err != nil {
+-		return false, err
++		return nil, err
+ 	}
+ 
+-	return setup.checker.IsTypeAssignableTo(source, target), nil
++	props := setup.checker.GetAugmentedPropertiesOfType(t)
++	results := make([]*SymbolResponse, len(props))
++	for i, prop := range props {
++		results[i] = setup.newSymbolResponse(prop)
++	}
++	return results, nil
+ }
+ 
+-// handleGetShorthandAssignmentValueSymbol returns the value symbol of a shorthand property assignment.
+-func (s *Session) handleGetShorthandAssignmentValueSymbol(ctx context.Context, params *GetTypeAtLocationParams) (*SymbolResponse, error) {
++func (s *Session) handleGetSuggestedSymbolForNonexistentProperty(ctx context.Context, params *GetSuggestedSymbolForNonexistentPropertyParams) (*SymbolResponse, error) {
+ 	setup, err := s.setupChecker(ctx, params.Snapshot, params.Project)
+ 	if err != nil {
+ 		return nil, err
+@@ -1899,116 +4588,110 @@ func (s *Session) handleGetShorthandAssignmentValueSymbol(ctx context.Context, p
+ 	if node == nil {
+ 		return nil, nil
+ 	}
+-
+-	symbol := setup.checker.GetShorthandAssignmentValueSymbol(node)
++	t, err := setup.resolveTypeHandle(params.Type)
++	if err != nil {
++		return nil, err
++	}
++	symbol := setup.checker.GetSuggestedSymbolForNonexistentProperty(node, t)
+ 	if symbol == nil {
+ 		return nil, nil
+ 	}
+-
+ 	return setup.newSymbolResponse(symbol), nil
+ }
+ 
+-// handleGetTypeOfSymbolAtLocation returns the narrowed type of a symbol at a specific location.
+-func (s *Session) handleGetTypeOfSymbolAtLocation(ctx context.Context, params *GetTypeOfSymbolAtLocationParams) (*TypeResponse, error) {
++func (s *Session) handleGetSuggestedSymbolForNonexistentClassMember(ctx context.Context, params *GetSuggestedSymbolForNonexistentClassMemberParams) (*SymbolResponse, error) {
  	setup, err := s.setupChecker(ctx, params.Snapshot, params.Project)
  	if err != nil {
  		return nil, err
  	}
  	defer setup.done()
  
--	sig, err := setup.resolveSignatureHandle(params.Signature)
+-	symbol, err := setup.resolveSymbolHandle(params.Symbol)
 +	t, err := setup.resolveTypeHandle(params.Type)
  	if err != nil {
  		return nil, err
  	}
- 
--	var enclosingDeclaration *ast.Node
--	if params.Location != "" {
--		enclosingDeclaration, err = setup.sd.resolveNodeHandle(setup.program, params.Location)
--		if err != nil {
--			return nil, err
--		}
-+	props := setup.checker.GetAugmentedPropertiesOfType(t)
-+	results := make([]*SymbolResponse, len(props))
-+	for i, prop := range props {
-+		results[i] = setup.newSymbolResponse(prop)
++	symbol := setup.checker.GetSuggestedSymbolForNonexistentClassMember(params.Name, t)
+ 	if symbol == nil {
+ 		return nil, nil
  	}
-+	return results, nil
++	return setup.newSymbolResponse(symbol), nil
 +}
  
--	node := setup.checker.SignatureToSignatureDeclaration(sig, ast.Kind(params.Kind), enclosingDeclaration, nodebuilder.Flags(params.Flags))
-+func (s *Session) handleGetSuggestedSymbolForNonexistentProperty(ctx context.Context, params *GetSuggestedSymbolForNonexistentPropertyParams) (*SymbolResponse, error) {
+-	node, err := setup.sd.resolveNodeHandle(setup.program, params.Location)
++func (s *Session) handleGetSuggestedSymbolForNonexistentJSXAttribute(ctx context.Context, params *GetSuggestedSymbolForNonexistentJSXAttributeParams) (*SymbolResponse, error) {
 +	setup, err := s.setupChecker(ctx, params.Snapshot, params.Project)
-+	if err != nil {
-+		return nil, err
-+	}
+ 	if err != nil {
+ 		return nil, err
+ 	}
+-	if node == nil {
+-		return nil, nil
+-	}
 +	defer setup.done()
-+
-+	node, err := setup.sd.resolveNodeHandle(setup.program, params.Location)
+ 
+-	t := setup.checker.GetTypeOfSymbolAtLocation(symbol, node)
+-	if t == nil {
++	t, err := setup.resolveTypeHandle(params.Type)
 +	if err != nil {
 +		return nil, err
 +	}
- 	if node == nil {
++	symbol := setup.checker.GetSuggestedSymbolForNonexistentJSXAttribute(params.Name, t)
++	if symbol == nil {
  		return nil, nil
  	}
 -
--	data, _, err := encoder.EncodeNode(node.AsNode(), nil)
-+	t, err := setup.resolveTypeHandle(params.Type)
- 	if err != nil {
--		return nil, fmt.Errorf("failed to encode signature declaration: %w", err)
-+		return nil, err
- 	}
--
--	if s.useBinaryResponses {
--		return RawBinary(data), nil
-+	symbol := setup.checker.GetSuggestedSymbolForNonexistentProperty(node, t)
-+	if symbol == nil {
-+		return nil, nil
- 	}
--	return &SourceFileResponse{
--		Data: base64.StdEncoding.EncodeToString(data),
--	}, nil
+-	return setup.newTypeResponse(t), nil
 +	return setup.newSymbolResponse(symbol), nil
  }
  
--// handleTypeToString converts a Type to its string representation.
--func (s *Session) handleTypeToString(ctx context.Context, params *TypeToTypeNodeParams) (any, error) {
-+func (s *Session) handleGetSuggestedSymbolForNonexistentClassMember(ctx context.Context, params *GetSuggestedSymbolForNonexistentClassMemberParams) (*SymbolResponse, error) {
+-// handleTypeToTypeNode converts a Type to a TypeNode AST and returns it as binary-encoded data.
+-func (s *Session) handleTypeToTypeNode(ctx context.Context, params *TypeToTypeNodeParams) (any, error) {
++func (s *Session) handleGetSuggestedSymbolForNonexistentModule(ctx context.Context, params *GetSuggestedSymbolForNonexistentModuleParams) (*SymbolResponse, error) {
  	setup, err := s.setupChecker(ctx, params.Snapshot, params.Project)
  	if err != nil {
  		return nil, err
-@@ -2029,178 +4596,227 @@ func (s *Session) handleTypeToString(ctx context.Context, params *TypeToTypeNode
+ 	}
+ 	defer setup.done()
+ 
+-	t, err := setup.resolveTypeHandle(params.Type)
++	node, err := setup.sd.resolveNodeHandle(setup.program, params.Location)
  	if err != nil {
  		return nil, err
  	}
@@ -8302,74 +8823,27 @@ index b350c6334..bb195e995 100644
 -		}
 -	}
 -
--	if params.Flags != 0 {
--		return setup.checker.TypeToStringEx(t, enclosingDeclaration, checker.TypeFormatFlags(params.Flags), nil), nil
-+	symbol := setup.checker.GetSuggestedSymbolForNonexistentClassMember(params.Name, t)
-+	if symbol == nil {
-+		return nil, nil
- 	}
--	return setup.checker.TypeToStringEx(t, enclosingDeclaration, checker.TypeFormatFlagsAllowUniqueESSymbolType|checker.TypeFormatFlagsUseAliasDefinedOutsideCurrentScope, nil), nil
-+	return setup.newSymbolResponse(symbol), nil
- }
- 
--// handlePrintNode decodes a binary-encoded AST node and prints it to text.
--func (s *Session) handlePrintNode(_ context.Context, params *PrintNodeParams) (string, error) {
--	data, err := base64.StdEncoding.DecodeString(params.Data)
-+func (s *Session) handleGetSuggestedSymbolForNonexistentJSXAttribute(ctx context.Context, params *GetSuggestedSymbolForNonexistentJSXAttributeParams) (*SymbolResponse, error) {
-+	setup, err := s.setupChecker(ctx, params.Snapshot, params.Project)
- 	if err != nil {
--		return "", fmt.Errorf("%w: invalid base64 data: %w", ErrClientError, err)
-+		return nil, err
- 	}
-+	defer setup.done()
- 
--	node, err := encoder.DecodeNodes(data)
-+	t, err := setup.resolveTypeHandle(params.Type)
- 	if err != nil {
--		return "", fmt.Errorf("%w: failed to decode AST: %w", ErrClientError, err)
-+		return nil, err
- 	}
--
--	p := printer.NewPrinter(printer.PrinterOptions{
--		PreserveSourceNewlines:        params.PreserveSourceNewlines,
--		NeverAsciiEscape:              params.NeverAsciiEscape,
--		TerminateUnterminatedLiterals: params.TerminateUnterminatedLiterals,
--	}, printer.PrintHandlers{}, nil)
--	return p.Emit(node, nil), nil
-+	symbol := setup.checker.GetSuggestedSymbolForNonexistentJSXAttribute(params.Name, t)
-+	if symbol == nil {
-+		return nil, nil
-+	}
-+	return setup.newSymbolResponse(symbol), nil
- }
- 
--// handleGetIntrinsicType returns an intrinsic type (any, string, number, etc.).
--func (s *Session) handleGetIntrinsicType(ctx context.Context, params *GetIntrinsicTypeParams, getter func(*checker.Checker) *checker.Type) (*TypeResponse, error) {
-+func (s *Session) handleGetSuggestedSymbolForNonexistentModule(ctx context.Context, params *GetSuggestedSymbolForNonexistentModuleParams) (*SymbolResponse, error) {
- 	setup, err := s.setupChecker(ctx, params.Snapshot, params.Project)
- 	if err != nil {
- 		return nil, err
- 	}
- 	defer setup.done()
- 
--	t := getter(setup.checker)
--	if t == nil {
-+	node, err := setup.sd.resolveNodeHandle(setup.program, params.Location)
-+	if err != nil {
-+		return nil, err
-+	}
+-	typeNode := setup.checker.TypeToTypeNode(t, enclosingDeclaration, nodebuilder.Flags(params.Flags), nil)
+-	if typeNode == nil {
 +	if node == nil {
  		return nil, nil
  	}
 -
--	return setup.newTypeResponse(t), nil
+-	data, _, err := encoder.EncodeNode(typeNode.AsNode(), nil)
 +	mod, err := setup.resolveSymbolHandle(params.Symbol)
-+	if err != nil {
+ 	if err != nil {
+-		return nil, fmt.Errorf("failed to encode type node: %w", err)
 +		return nil, err
-+	}
+ 	}
+-
+-	if s.useBinaryResponses {
+-		return RawBinary(data), nil
 +	if mod == nil {
 +		return nil, nil
-+	}
+ 	}
+-	return &SourceFileResponse{
+-		Data: base64.StdEncoding.EncodeToString(data),
+-	}, nil
 +	symbol := setup.checker.GetSuggestedSymbolForNonexistentModule(node, mod)
 +	if symbol == nil {
 +		return nil, nil
@@ -8377,23 +8851,27 @@ index b350c6334..bb195e995 100644
 +	return setup.newSymbolResponse(symbol), nil
  }
  
--// handleIsContextSensitive returns whether a node is context-sensitive.
--func (s *Session) handleIsContextSensitive(ctx context.Context, params *GetContextualTypeParams) (bool, error) {
+-func (s *Session) handleSignatureToSignatureDeclaration(ctx context.Context, params *SignatureToSignatureDeclarationParams) (any, error) {
 +func (s *Session) handleGetSuggestedSymbolForNonexistentSymbol(ctx context.Context, params *GetSuggestedSymbolForNonexistentSymbolParams) (*SymbolResponse, error) {
  	setup, err := s.setupChecker(ctx, params.Snapshot, params.Project)
  	if err != nil {
--		return false, err
-+		return nil, err
+ 		return nil, err
  	}
  	defer setup.done()
  
- 	node, err := setup.sd.resolveNodeHandle(setup.program, params.Location)
+-	sig, err := setup.resolveSignatureHandle(params.Signature)
++	node, err := setup.sd.resolveNodeHandle(setup.program, params.Location)
  	if err != nil {
--		return false, err
-+		return nil, err
+ 		return nil, err
  	}
- 	if node == nil {
--		return false, nil
+-
+-	var enclosingDeclaration *ast.Node
+-	if params.Location != "" {
+-		enclosingDeclaration, err = setup.sd.resolveNodeHandle(setup.program, params.Location)
+-		if err != nil {
+-			return nil, err
+-		}
++	if node == nil {
 +		return nil, nil
 +	}
 +	symbol := setup.checker.GetSuggestedSymbolForNonexistentSymbol(node, params.Name, ast.SymbolFlags(params.Meaning))
@@ -8403,25 +8881,28 @@ index b350c6334..bb195e995 100644
 +	return setup.newSymbolResponse(symbol), nil
 +}
  
--	return setup.checker.IsContextSensitive(node), nil
+-	node := setup.checker.SignatureToSignatureDeclaration(sig, ast.Kind(params.Kind), enclosingDeclaration, nodebuilder.Flags(params.Flags))
 +func (s *Session) encodeBuiltNode(node *ast.Node, what string) (any, error) {
-+	if node == nil {
-+		return nil, nil
-+	}
+ 	if node == nil {
+ 		return nil, nil
+ 	}
+-
+-	data, _, err := encoder.EncodeNode(node.AsNode(), nil)
 +	data, _, err := encoder.EncodeNode(node, nil)
-+	if err != nil {
+ 	if err != nil {
+-		return nil, fmt.Errorf("failed to encode signature declaration: %w", err)
 +		return nil, fmt.Errorf("failed to encode %s: %w", what, err)
-+	}
-+	if s.useBinaryResponses {
-+		return RawBinary(data), nil
-+	}
-+	return &SourceFileResponse{
-+		Data: base64.StdEncoding.EncodeToString(data),
-+	}, nil
+ 	}
+-
+ 	if s.useBinaryResponses {
+ 		return RawBinary(data), nil
+ 	}
+@@ -2017,190 +4700,239 @@ func (s *Session) handleSignatureToSignatureDeclaration(ctx context.Context, par
+ 	}, nil
  }
  
--// handleGetReturnTypeOfSignature returns the return type of a signature.
--func (s *Session) handleGetReturnTypeOfSignature(ctx context.Context, params *CheckerSignatureParams) (*TypeResponse, error) {
+-// handleTypeToString converts a Type to its string representation.
+-func (s *Session) handleTypeToString(ctx context.Context, params *TypeToTypeNodeParams) (any, error) {
 +func (s *Session) handleSymbolToExpression(ctx context.Context, params *SymbolToNodeBuilderParams) (any, error) {
  	setup, err := s.setupChecker(ctx, params.Snapshot, params.Project)
  	if err != nil {
@@ -8429,10 +8910,128 @@ index b350c6334..bb195e995 100644
  	}
  	defer setup.done()
  
--	sig, err := setup.resolveSignatureHandle(params.Signature)
+-	t, err := setup.resolveTypeHandle(params.Type)
 +	symbol, err := setup.resolveSymbolHandle(params.Symbol)
  	if err != nil {
  		return nil, err
+ 	}
+-
+-	var enclosingDeclaration *ast.Node
++	var enclosing *ast.Node
+ 	if params.Location != "" {
+-		enclosingDeclaration, err = setup.sd.resolveNodeHandle(setup.program, params.Location)
++		enclosing, err = setup.sd.resolveNodeHandle(setup.program, params.Location)
+ 		if err != nil {
+ 			return nil, err
+ 		}
+ 	}
+-
+-	if params.Flags != 0 {
+-		return setup.checker.TypeToStringEx(t, enclosingDeclaration, checker.TypeFormatFlags(params.Flags), nil), nil
+-	}
+-	return setup.checker.TypeToStringEx(t, enclosingDeclaration, checker.TypeFormatFlagsAllowUniqueESSymbolType|checker.TypeFormatFlagsUseAliasDefinedOutsideCurrentScope, nil), nil
+-}
+-
+-// handlePrintNode decodes a binary-encoded AST node and prints it to text.
+-func (s *Session) handlePrintNode(_ context.Context, params *PrintNodeParams) (string, error) {
+-	data, err := base64.StdEncoding.DecodeString(params.Data)
+-	if err != nil {
+-		return "", fmt.Errorf("%w: invalid base64 data: %w", ErrClientError, err)
+-	}
+-
+-	node, err := encoder.DecodeNodes(data)
+-	if err != nil {
+-		return "", fmt.Errorf("%w: failed to decode AST: %w", ErrClientError, err)
+-	}
+-
+-	p := printer.NewPrinter(printer.PrinterOptions{
+-		PreserveSourceNewlines:        params.PreserveSourceNewlines,
+-		NeverAsciiEscape:              params.NeverAsciiEscape,
+-		TerminateUnterminatedLiterals: params.TerminateUnterminatedLiterals,
+-	}, printer.PrintHandlers{}, nil)
+-	return p.Emit(node, nil), nil
++	node := setup.checker.SymbolToExpression(symbol, ast.SymbolFlags(params.Meaning), enclosing, nodebuilder.Flags(params.Flags), nodebuilder.InternalFlags(params.InternalFlags))
++	return s.encodeBuiltNode(node, "symbolToExpression")
+ }
+ 
+-// handleGetIntrinsicType returns an intrinsic type (any, string, number, etc.).
+-func (s *Session) handleGetIntrinsicType(ctx context.Context, params *GetIntrinsicTypeParams, getter func(*checker.Checker) *checker.Type) (*TypeResponse, error) {
++func (s *Session) handleSymbolToNode(ctx context.Context, params *SymbolToNodeBuilderParams) (any, error) {
+ 	setup, err := s.setupChecker(ctx, params.Snapshot, params.Project)
+ 	if err != nil {
+ 		return nil, err
+ 	}
+ 	defer setup.done()
+ 
+-	t := getter(setup.checker)
+-	if t == nil {
+-		return nil, nil
++	symbol, err := setup.resolveSymbolHandle(params.Symbol)
++	if err != nil {
++		return nil, err
+ 	}
+-
+-	return setup.newTypeResponse(t), nil
++	var enclosing *ast.Node
++	if params.Location != "" {
++		enclosing, err = setup.sd.resolveNodeHandle(setup.program, params.Location)
++		if err != nil {
++			return nil, err
++		}
++	}
++	node := setup.checker.SymbolToNode(symbol, ast.SymbolFlags(params.Meaning), enclosing, nodebuilder.Flags(params.Flags), nodebuilder.InternalFlags(params.InternalFlags))
++	return s.encodeBuiltNode(node, "symbolToNode")
+ }
+ 
+-// handleIsContextSensitive returns whether a node is context-sensitive.
+-func (s *Session) handleIsContextSensitive(ctx context.Context, params *GetContextualTypeParams) (bool, error) {
++func (s *Session) handleSymbolToEntityName(ctx context.Context, params *SymbolToNodeBuilderParams) (any, error) {
+ 	setup, err := s.setupChecker(ctx, params.Snapshot, params.Project)
+ 	if err != nil {
+-		return false, err
++		return nil, err
+ 	}
+ 	defer setup.done()
+ 
+-	node, err := setup.sd.resolveNodeHandle(setup.program, params.Location)
++	symbol, err := setup.resolveSymbolHandle(params.Symbol)
+ 	if err != nil {
+-		return false, err
++		return nil, err
+ 	}
+-	if node == nil {
+-		return false, nil
++	var enclosing *ast.Node
++	if params.Location != "" {
++		enclosing, err = setup.sd.resolveNodeHandle(setup.program, params.Location)
++		if err != nil {
++			return nil, err
++		}
+ 	}
+-
+-	return setup.checker.IsContextSensitive(node), nil
++	node := setup.checker.SymbolToEntityName(symbol, ast.SymbolFlags(params.Meaning), enclosing, nodebuilder.Flags(params.Flags), nodebuilder.InternalFlags(params.InternalFlags))
++	return s.encodeBuiltNode(node, "symbolToEntityName")
+ }
+ 
+-// handleGetReturnTypeOfSignature returns the return type of a signature.
+-func (s *Session) handleGetReturnTypeOfSignature(ctx context.Context, params *CheckerSignatureParams) (*TypeResponse, error) {
++func (s *Session) handleTypePredicateToTypePredicateNode(ctx context.Context, params *TypePredicateToTypePredicateNodeParams) (any, error) {
+ 	setup, err := s.setupChecker(ctx, params.Snapshot, params.Project)
+ 	if err != nil {
+ 		return nil, err
+ 	}
+ 	defer setup.done()
+ 
+-	sig, err := setup.resolveSignatureHandle(params.Signature)
+-	if err != nil {
+-		return nil, err
++	var t *checker.Type
++	if params.Type != 0 {
++		t, err = setup.resolveTypeHandle(params.Type)
++		if err != nil {
++			return nil, err
++		}
  	}
 -
 -	t := setup.checker.GetReturnTypeOfSignature(sig)
@@ -8447,110 +9046,6 @@ index b350c6334..bb195e995 100644
  	}
 -
 -	return setup.newTypeResponse(t), nil
-+	node := setup.checker.SymbolToExpression(symbol, ast.SymbolFlags(params.Meaning), enclosing, nodebuilder.Flags(params.Flags), nodebuilder.InternalFlags(params.InternalFlags))
-+	return s.encodeBuiltNode(node, "symbolToExpression")
- }
- 
--// handleGetRestTypeOfSignature returns the rest type of a signature.
--func (s *Session) handleGetRestTypeOfSignature(ctx context.Context, params *CheckerSignatureParams) (*TypeResponse, error) {
-+func (s *Session) handleSymbolToNode(ctx context.Context, params *SymbolToNodeBuilderParams) (any, error) {
- 	setup, err := s.setupChecker(ctx, params.Snapshot, params.Project)
- 	if err != nil {
- 		return nil, err
- 	}
- 	defer setup.done()
- 
--	sig, err := setup.resolveSignatureHandle(params.Signature)
-+	symbol, err := setup.resolveSymbolHandle(params.Symbol)
- 	if err != nil {
- 		return nil, err
- 	}
--
--	t := setup.checker.GetRestTypeOfSignature(sig)
--	if t == nil {
--		return nil, nil
-+	var enclosing *ast.Node
-+	if params.Location != "" {
-+		enclosing, err = setup.sd.resolveNodeHandle(setup.program, params.Location)
-+		if err != nil {
-+			return nil, err
-+		}
- 	}
--
--	return setup.newTypeResponse(t), nil
-+	node := setup.checker.SymbolToNode(symbol, ast.SymbolFlags(params.Meaning), enclosing, nodebuilder.Flags(params.Flags), nodebuilder.InternalFlags(params.InternalFlags))
-+	return s.encodeBuiltNode(node, "symbolToNode")
- }
- 
--// handleGetTypePredicateOfSignature returns the type predicate of a signature.
--func (s *Session) handleGetTypePredicateOfSignature(ctx context.Context, params *CheckerSignatureParams) (*TypePredicateResponse, error) {
-+func (s *Session) handleSymbolToEntityName(ctx context.Context, params *SymbolToNodeBuilderParams) (any, error) {
- 	setup, err := s.setupChecker(ctx, params.Snapshot, params.Project)
- 	if err != nil {
- 		return nil, err
- 	}
- 	defer setup.done()
- 
--	sig, err := setup.resolveSignatureHandle(params.Signature)
-+	symbol, err := setup.resolveSymbolHandle(params.Symbol)
- 	if err != nil {
- 		return nil, err
- 	}
--
--	pred := setup.checker.GetTypePredicateOfSignature(sig)
--	if pred == nil {
--		return nil, nil
--	}
--
--	resp := &TypePredicateResponse{
--		Kind:           int32(pred.Kind()),
--		ParameterIndex: pred.ParameterIndex(),
--		ParameterName:  pred.ParameterName(),
--	}
--	if pred.Type() != nil {
--		resp.Type = setup.newTypeResponse(pred.Type())
-+	var enclosing *ast.Node
-+	if params.Location != "" {
-+		enclosing, err = setup.sd.resolveNodeHandle(setup.program, params.Location)
-+		if err != nil {
-+			return nil, err
-+		}
- 	}
--
--	return resp, nil
-+	node := setup.checker.SymbolToEntityName(symbol, ast.SymbolFlags(params.Meaning), enclosing, nodebuilder.Flags(params.Flags), nodebuilder.InternalFlags(params.InternalFlags))
-+	return s.encodeBuiltNode(node, "symbolToEntityName")
- }
- 
--// handleIsArrayType returns whether a type is Array<T> or ReadonlyArray<T>.
--func (s *Session) handleIsArrayType(ctx context.Context, params *CheckerTypeParams) (bool, error) {
-+func (s *Session) handleTypePredicateToTypePredicateNode(ctx context.Context, params *TypePredicateToTypePredicateNodeParams) (any, error) {
- 	setup, err := s.setupChecker(ctx, params.Snapshot, params.Project)
- 	if err != nil {
--		return false, err
-+		return nil, err
- 	}
- 	defer setup.done()
- 
--	t, err := setup.resolveTypeHandle(params.Type)
--	if err != nil {
--		return false, err
-+	var t *checker.Type
-+	if params.Type != 0 {
-+		t, err = setup.resolveTypeHandle(params.Type)
-+		if err != nil {
-+			return nil, err
-+		}
- 	}
--
--	return setup.checker.IsArrayType(t), nil
-+	var enclosing *ast.Node
-+	if params.Location != "" {
-+		enclosing, err = setup.sd.resolveNodeHandle(setup.program, params.Location)
-+		if err != nil {
-+			return nil, err
-+		}
-+	}
 +	node := setup.checker.TypePredicateToTypePredicateNodeFromParts(
 +		checker.TypePredicateKind(params.Kind),
 +		params.ParameterName,
@@ -8562,24 +9057,20 @@ index b350c6334..bb195e995 100644
 +	return s.encodeBuiltNode(node, "typePredicateToTypePredicateNode")
  }
  
--// handleIsTupleType returns whether a type is a tuple type.
--func (s *Session) handleIsTupleType(ctx context.Context, params *CheckerTypeParams) (bool, error) {
+-// handleGetRestTypeOfSignature returns the rest type of a signature.
+-func (s *Session) handleGetRestTypeOfSignature(ctx context.Context, params *CheckerSignatureParams) (*TypeResponse, error) {
 +func (s *Session) handleIndexInfoToIndexSignatureDeclaration(ctx context.Context, params *IndexInfoToIndexSignatureDeclarationParams) (any, error) {
  	setup, err := s.setupChecker(ctx, params.Snapshot, params.Project)
  	if err != nil {
--		return false, err
-+		return nil, err
+ 		return nil, err
  	}
  	defer setup.done()
  
--	t, err := setup.resolveTypeHandle(params.Type)
+-	sig, err := setup.resolveSignatureHandle(params.Signature)
 +	keyType, err := setup.resolveTypeHandle(params.KeyType)
- 	if err != nil {
--		return false, err
++	if err != nil {
 +		return nil, err
- 	}
--
--	return checker.IsTupleType(t), nil
++	}
 +	valueType, err := setup.resolveTypeHandle(params.ValueType)
 +	if err != nil {
 +		return nil, err
@@ -8602,10 +9093,141 @@ index b350c6334..bb195e995 100644
 +		keyType, valueType, params.IsReadonly, declaration, enclosing, nodebuilder.Flags(params.Flags),
 +	)
 +	return s.encodeBuiltNode(node, "indexInfoToIndexSignatureDeclaration")
++}
++
++// handleGetAnyAsyncIterableType returns AsyncIterable<any,any,any> or nil.
++func (s *Session) handleGetAnyAsyncIterableType(ctx context.Context, params *GetIntrinsicTypeParams) (*TypeResponse, error) {
++	setup, err := s.setupChecker(ctx, params.Snapshot, params.Project)
+ 	if err != nil {
+ 		return nil, err
+ 	}
++	defer setup.done()
+ 
+-	t := setup.checker.GetRestTypeOfSignature(sig)
++	t := setup.checker.GetAnyAsyncIterableType()
+ 	if t == nil {
+ 		return nil, nil
+ 	}
+-
+ 	return setup.newTypeResponse(t), nil
+ }
+ 
+-// handleGetTypePredicateOfSignature returns the type predicate of a signature.
+-func (s *Session) handleGetTypePredicateOfSignature(ctx context.Context, params *CheckerSignatureParams) (*TypePredicateResponse, error) {
++// handleGetExactOptionalProperties returns optional properties that contain the missing type.
++func (s *Session) handleGetExactOptionalProperties(ctx context.Context, params *CheckerTypeParams) ([]*SymbolResponse, error) {
+ 	setup, err := s.setupChecker(ctx, params.Snapshot, params.Project)
+ 	if err != nil {
+ 		return nil, err
+ 	}
+ 	defer setup.done()
+ 
+-	sig, err := setup.resolveSignatureHandle(params.Signature)
++	t, err := setup.resolveTypeHandle(params.Type)
+ 	if err != nil {
+ 		return nil, err
+ 	}
+ 
+-	pred := setup.checker.GetTypePredicateOfSignature(sig)
+-	if pred == nil {
+-		return nil, nil
++	props := setup.checker.GetExactOptionalProperties(t)
++	results := make([]*SymbolResponse, len(props))
++	for i, prop := range props {
++		results[i] = setup.newSymbolResponse(prop)
+ 	}
++	return results, nil
++}
+ 
+-	resp := &TypePredicateResponse{
+-		Kind:           int32(pred.Kind()),
+-		ParameterIndex: pred.ParameterIndex(),
+-		ParameterName:  pred.ParameterName(),
+-	}
+-	if pred.Type() != nil {
+-		resp.Type = setup.newTypeResponse(pred.Type())
++// handleGetJsxNamespace returns the JSX namespace string for an optional location.
++func (s *Session) handleGetJsxNamespace(ctx context.Context, params *CheckerNodeOptionalParams) (string, error) {
++	setup, err := s.setupChecker(ctx, params.Snapshot, params.Project)
++	if err != nil {
++		return "", err
+ 	}
++	defer setup.done()
+ 
+-	return resp, nil
++	var location *ast.Node
++	if params.Location != "" {
++		location, err = setup.sd.resolveNodeHandle(setup.program, params.Location)
++		if err != nil {
++			return "", err
++		}
++	}
++	return setup.checker.GetJsxNamespace(location), nil
+ }
+ 
+-// handleIsArrayType returns whether a type is Array<T> or ReadonlyArray<T>.
+-func (s *Session) handleIsArrayType(ctx context.Context, params *CheckerTypeParams) (bool, error) {
++// handleGetJsxFragmentFactory returns the JSX fragment factory name for a location.
++func (s *Session) handleGetJsxFragmentFactory(ctx context.Context, params *CheckerNodeParams) (string, error) {
+ 	setup, err := s.setupChecker(ctx, params.Snapshot, params.Project)
+ 	if err != nil {
+-		return false, err
++		return "", err
+ 	}
+ 	defer setup.done()
+ 
+-	t, err := setup.resolveTypeHandle(params.Type)
++	node, err := setup.sd.resolveNodeHandle(setup.program, params.Location)
+ 	if err != nil {
+-		return false, err
++		return "", err
+ 	}
+-
+-	return setup.checker.IsArrayType(t), nil
++	if node == nil {
++		return "", nil
++	}
++	return setup.checker.GetJsxFragmentFactory(node), nil
+ }
+ 
+-// handleIsTupleType returns whether a type is a tuple type.
+-func (s *Session) handleIsTupleType(ctx context.Context, params *CheckerTypeParams) (bool, error) {
++// handleGetParameterIdentifierInfoAtPosition returns parameter identifier info at an argument position.
++func (s *Session) handleGetParameterIdentifierInfoAtPosition(ctx context.Context, params *GetParameterIdentifierInfoAtPositionParams) (*ParameterIdentifierInfoResponse, error) {
+ 	setup, err := s.setupChecker(ctx, params.Snapshot, params.Project)
+ 	if err != nil {
+-		return false, err
++		return nil, err
+ 	}
+ 	defer setup.done()
+ 
+-	t, err := setup.resolveTypeHandle(params.Type)
++	sig, err := setup.resolveSignatureHandle(params.Signature)
+ 	if err != nil {
+-		return false, err
++		return nil, err
++	}
++	if sig == nil {
++		return nil, nil
+ 	}
+ 
+-	return checker.IsTupleType(t), nil
++	info := setup.checker.GetParameterIdentifierInfoAtPosition(sig, int(params.Position))
++	if info == nil {
++		return nil, nil
++	}
++	resp := &ParameterIdentifierInfoResponse{
++		ParameterName:   info.ParameterName,
++		IsRestParameter: info.IsRestParameter,
++	}
++	if info.Parameter != nil {
++		resp.Parameter = setup.sd.nodeHandleFrom(info.Parameter)
++	}
++	return resp, nil
  }
  
  // handleGetBaseTypes returns the base types of an interface/class type.
-@@ -2303,6 +4919,51 @@ func (s *Session) handleGetIndexInfosOfType(ctx context.Context, params *Checker
+@@ -2303,6 +5035,51 @@ func (s *Session) handleGetIndexInfosOfType(ctx context.Context, params *Checker
  		}
  		if info.Declaration() != nil {
  			results[i].Declaration = setup.sd.nodeHandleFrom(info.Declaration())
@@ -8657,7 +9279,7 @@ index b350c6334..bb195e995 100644
  		}
  	}
  
-@@ -2517,6 +5178,73 @@ func (s *Session) handleGetExportsOfModule(ctx context.Context, params *CheckerS
+@@ -2517,6 +5294,73 @@ func (s *Session) handleGetExportsOfModule(ctx context.Context, params *CheckerS
  	return results, nil
  }
  
@@ -8731,7 +9353,7 @@ index b350c6334..bb195e995 100644
  // handleGetMemberInModuleExports returns an export by name from a module symbol.
  func (s *Session) handleGetMemberInModuleExports(ctx context.Context, params *GetMemberInModuleExportsParams) (*SymbolResponse, error) {
  	setup, err := s.setupChecker(ctx, params.Snapshot, params.Project)
-@@ -2868,7 +5596,6 @@ func (s *Session) handleGetBindDiagnostics(ctx context.Context, params *GetDiagn
+@@ -2868,7 +5712,6 @@ func (s *Session) handleGetBindDiagnostics(ctx context.Context, params *GetDiagn
  
  // handleGetSemanticDiagnostics returns semantic diagnostics for a file or all files.
  func (s *Session) handleGetSemanticDiagnostics(ctx context.Context, params *GetDiagnosticsParams) ([]*DiagnosticResponse, error) {
@@ -8739,7 +9361,7 @@ index b350c6334..bb195e995 100644
  	sd, err := s.getSnapshotData(params.Snapshot)
  	if err != nil {
  		return nil, err
-@@ -2884,10 +5611,150 @@ func (s *Session) handleGetSemanticDiagnostics(ctx context.Context, params *GetD
+@@ -2884,10 +5727,150 @@ func (s *Session) handleGetSemanticDiagnostics(ctx context.Context, params *GetD
  		return nil, err
  	}
  
@@ -8890,7 +9512,7 @@ index b350c6334..bb195e995 100644
  // handleGetSuggestionDiagnostics returns suggestion diagnostics for a file or all files.
  func (s *Session) handleGetSuggestionDiagnostics(ctx context.Context, params *GetDiagnosticsParams) ([]*DiagnosticResponse, error) {
  	ctx = core.WithCheckerLifetime(ctx, core.CheckerLifetimeDiagnostics)
-@@ -2966,7 +5833,6 @@ func (s *Session) handleGetProgramDiagnostics(ctx context.Context, params *GetPr
+@@ -2966,7 +5949,6 @@ func (s *Session) handleGetProgramDiagnostics(ctx context.Context, params *GetPr
  
  // handleGetGlobalDiagnostics returns global (non-file-specific) semantic diagnostics.
  func (s *Session) handleGetGlobalDiagnostics(ctx context.Context, params *GetProjectDiagnosticsParams) ([]*DiagnosticResponse, error) {
@@ -8898,7 +9520,7 @@ index b350c6334..bb195e995 100644
  	sd, err := s.getSnapshotData(params.Snapshot)
  	if err != nil {
  		return nil, err
-@@ -2983,11 +5849,27 @@ func (s *Session) handleGetGlobalDiagnostics(ctx context.Context, params *GetPro
+@@ -2983,11 +5965,27 @@ func (s *Session) handleGetGlobalDiagnostics(ctx context.Context, params *GetPro
  	}
  
  	// Global diagnostics are accumulated lazily by the project's checker pool as
@@ -8931,7 +9553,7 @@ index b350c6334..bb195e995 100644
  
  	diags := core.Filter(proj.GetProjectDiagnostics(ctx), func(d *ast.Diagnostic) bool {
  		return d.File() == nil
-@@ -3184,3 +6066,24 @@ func (s *Session) handleGetReferencedSymbolsForNode(ctx context.Context, params
+@@ -3184,3 +6182,24 @@ func (s *Session) handleGetReferencedSymbolsForNode(ctx context.Context, params
  	}
  	return result, nil
  }

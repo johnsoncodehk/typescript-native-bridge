@@ -6341,6 +6341,112 @@ export function createTsgoChecker(program: any): any {
                 return undefined;
             }
         },
+        // ── Misc batch 2+5+6 (Promise / B-combo / JSX / inlay) ──
+        getPromiseType(): any {
+            ensureProject();
+            const t = project.checker.getPromiseType();
+            if (t) fixupType(t);
+            return t;
+        },
+        getPromiseLikeType(): any {
+            ensureProject();
+            const t = project.checker.getPromiseLikeType();
+            if (t) fixupType(t);
+            return t;
+        },
+        getAnyAsyncIterableType(): any {
+            ensureProject();
+            const t = project.checker.getAnyAsyncIterableType();
+            if (t) fixupType(t);
+            return t;
+        },
+        getExactOptionalProperties(type: any): any[] {
+            if (!type) return [];
+            ensureProject();
+            try {
+                const props = project.checker.getExactOptionalProperties(type) ?? [];
+                // addOptionalPropertyUndefined mutates valueDeclaration.type via
+                // textChanges; RemoteNode declarations are read-only → remap to host.
+                return props.map((p: any) => refineNavSymbol(p));
+            } catch { return []; }
+        },
+        getJsxNamespace(location?: any): string {
+            ensureProject();
+            let tsgoLocation: any;
+            if (location && typeof location.getStart === "function") {
+                const sf = location.getSourceFile?.();
+                if (sf?.fileName) {
+                    try {
+                        tsgoLocation = findTsgoNodeAtPosition(
+                            sf.fileName,
+                            location.getStart(sf),
+                            location.kind,
+                            location.getEnd(sf),
+                        );
+                    } catch { /* optional */ }
+                }
+            } else if (location && typeof location.id === "number") {
+                tsgoLocation = location;
+            }
+            try {
+                return project.checker.getJsxNamespace(tsgoLocation) ?? "";
+            } catch { return ""; }
+        },
+        getJsxFragmentFactory(location: any): string {
+            if (!location) return "";
+            ensureProject();
+            let tsgoLocation: any;
+            if (typeof location.getStart === "function") {
+                const sf = location.getSourceFile?.();
+                if (sf?.fileName) {
+                    try {
+                        tsgoLocation = findTsgoNodeAtPosition(
+                            sf.fileName,
+                            location.getStart(sf),
+                            location.kind,
+                            location.getEnd(sf),
+                        );
+                    } catch { return ""; }
+                }
+            } else if (typeof location.id === "number" || typeof location.resolve === "function") {
+                tsgoLocation = location;
+            }
+            if (!tsgoLocation) return "";
+            try {
+                return project.checker.getJsxFragmentFactory(tsgoLocation) ?? "";
+            } catch { return ""; }
+        },
+        getParameterIdentifierInfoAtPosition(signature: any, position: number): any {
+            if (!signature) return undefined;
+            ensureProject();
+            let info: any;
+            try {
+                info = project.checker.getParameterIdentifierInfoAtPosition(signature, position);
+            } catch { return undefined; }
+            if (!info) return undefined;
+            let parameter = info.parameter;
+            if (parameter && typeof parameter.resolve === "function") {
+                const resolved = parameter.resolve(project);
+                if (resolved) {
+                    // Prefer host Identifier when the declaration file is host-bound
+                    // (interactive inlay displayParts need createTextSpanFromNode).
+                    parameter = remapDeclarationToHost(resolved, (fileName: string) => {
+                        try {
+                            const host = hostForOverlaySyncLocal();
+                            const overlayCtx = programCtx?.overlayHostCtx;
+                            if (!host || !overlayCtx?.options || !fileName) return undefined;
+                            const hostFile = resolveHostFileName(fileName, host);
+                            return sourceFileFromHostSnapshot(host, hostFile, hostFile, overlayCtx.options.target ?? 99);
+                        } catch { return undefined; }
+                    });
+                }
+            }
+            return {
+                parameter,
+                parameterName: info.parameterName,
+                isRestParameter: !!info.isRestParameter,
+            };
+        },
         getModuleSymbolForSourceFile(sourceFile: any): any {
             if (!sourceFile) return undefined;
             if (sourceFile.symbol) return sourceFile.symbol;
@@ -7009,7 +7115,7 @@ const _tnbCheckerCoverage = {
     isEmptyAnonymousObjectType: "adapter",
     getReturnTypeOfSignature: "adapter",
     getParameterType: "tsgo",
-    getParameterIdentifierInfoAtPosition: "throw",
+    getParameterIdentifierInfoAtPosition: "adapter",
     getNullableType: "adapter",
     getNonNullableType: "adapter",
     getNonOptionalType: "adapter",
@@ -7110,9 +7216,9 @@ const _tnbCheckerCoverage = {
     createArrayType: "throw",
     getElementTypeOfArrayType: "adapter",
     createPromiseType: "throw",
-    getPromiseType: "throw",
-    getPromiseLikeType: "throw",
-    getAnyAsyncIterableType: "throw",
+    getPromiseType: "adapter",
+    getPromiseLikeType: "adapter",
+    getAnyAsyncIterableType: "adapter",
     isTypeAssignableTo: "adapter",
     createAnonymousType: "throw",
     createSignature: "throw",
@@ -7137,11 +7243,11 @@ const _tnbCheckerCoverage = {
     isTupleType: "tsgo",
     isArrayLikeType: "adapter",
     isTypeInvalidDueToUnionDiscriminant: "adapter",
-    getExactOptionalProperties: "throw",
+    getExactOptionalProperties: "adapter",
     getAllPossiblePropertiesOfTypes: "adapter",
     resolveName: "adapter",
-    getJsxNamespace: "throw",
-    getJsxFragmentFactory: "throw",
+    getJsxNamespace: "adapter",
+    getJsxFragmentFactory: "adapter",
     getAccessibleSymbolChain: "adapter",
     getTypePredicateOfSignature: "tsgo",
     resolveExternalModuleName: "adapter",

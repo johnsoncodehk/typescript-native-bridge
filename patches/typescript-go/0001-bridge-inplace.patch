@@ -706,10 +706,18 @@ index ac37c863d..70618dee2 100644
  	case ast.KindVariableDeclaration, ast.KindParameter, ast.KindPropertyDeclaration, ast.KindPropertySignature, ast.KindBindingElement:
  		return c.getContextualTypeForInitializerExpression(node, contextFlags)
 diff --git a/internal/checker/exports.go b/internal/checker/exports.go
-index dca835399..06fc7ee45 100644
+index dca835399..fee83453c 100644
 --- a/internal/checker/exports.go
 +++ b/internal/checker/exports.go
-@@ -298,6 +298,43 @@ func (c *Checker) GetIndexInfosOfType(t *Type) []*IndexInfo {
+@@ -3,6 +3,7 @@ package checker
+ import (
+ 	"github.com/microsoft/typescript-go/internal/ast"
+ 	"github.com/microsoft/typescript-go/internal/core"
++	"github.com/microsoft/typescript-go/internal/debug"
+ 	"github.com/microsoft/typescript-go/internal/diagnostics"
+ )
+ 
+@@ -298,6 +299,43 @@ func (c *Checker) GetIndexInfosOfType(t *Type) []*IndexInfo {
  	return c.getIndexInfosOfType(t)
  }
  
@@ -753,7 +761,7 @@ index dca835399..06fc7ee45 100644
  func (c *Checker) IsContextSensitive(node *ast.Node) bool {
  	return c.isContextSensitive(node)
  }
-@@ -341,3 +378,71 @@ func (c *Checker) RemoveMissingOrUndefinedType(t *Type) *Type {
+@@ -341,3 +379,185 @@ func (c *Checker) RemoveMissingOrUndefinedType(t *Type) *Type {
  func (c *Checker) GetWidenedType(t *Type) *Type {
  	return c.getWidenedType(t)
  }
@@ -824,6 +832,120 @@ index dca835399..06fc7ee45 100644
 +
 +func (c *Checker) GetSuggestedSymbolForNonexistentSymbol(location *ast.Node, outerName string, meaning ast.SymbolFlags) *ast.Symbol {
 +	return c.getSuggestedSymbolForNonexistentSymbol(location, outerName, meaning)
++}
++
++func (c *Checker) GetPromiseType() *Type {
++	return c.getGlobalPromiseType()
++}
++
++func (c *Checker) GetPromiseLikeType() *Type {
++	return c.getGlobalPromiseLikeType()
++}
++
++// GetAnyAsyncIterableType returns AsyncIterable<any, any, any>, or nil when the
++// global AsyncIterable type is missing (stock checker.ts getAnyAsyncIterableType).
++func (c *Checker) GetAnyAsyncIterableType() *Type {
++	t := c.getGlobalAsyncIterableType()
++	if t == c.emptyGenericType {
++		return nil
++	}
++	return c.createTypeFromGenericGlobalType(t, []*Type{c.anyType, c.anyType, c.anyType})
++}
++
++// GetExactOptionalProperties returns optional properties whose type contains
++// the missing type (stock checker.ts getExactOptionalProperties).
++func (c *Checker) GetExactOptionalProperties(t *Type) []*ast.Symbol {
++	props := c.GetPropertiesOfType(t)
++	var result []*ast.Symbol
++	for _, prop := range props {
++		if c.containsMissingType(c.getTypeOfSymbol(prop)) {
++			result = append(result, prop)
++		}
++	}
++	return result
++}
++
++// ParameterIdentifierInfo is the stock getParameterIdentifierInfoAtPosition result.
++type ParameterIdentifierInfo struct {
++	Parameter       *ast.IdentifierNode
++	ParameterName   string
++	IsRestParameter bool
++}
++
++// GetParameterIdentifierInfoAtPosition returns the parameter identifier info at
++// the given argument position (stock checker.ts; previously ls/inlay_hints.go).
++func (c *Checker) GetParameterIdentifierInfoAtPosition(signature *Signature, pos int) *ParameterIdentifierInfo {
++	if signature == nil {
++		return nil
++	}
++	parameters := signature.Parameters()
++	paramCount := len(parameters) - core.IfElse(signature.HasRestParameter(), 1, 0)
++	if pos < paramCount {
++		param := parameters[pos]
++		paramId := getParameterDeclarationIdentifier(param)
++		if paramId == nil {
++			return nil
++		}
++		return &ParameterIdentifierInfo{
++			Parameter:       paramId,
++			ParameterName:   param.Name,
++			IsRestParameter: false,
++		}
++	}
++
++	var restParameter *ast.Symbol
++	var restId *ast.IdentifierNode
++	if paramCount < len(parameters) {
++		restParameter = parameters[paramCount]
++		restId = getParameterDeclarationIdentifier(restParameter)
++	}
++	if restId == nil {
++		return nil
++	}
++
++	restType := c.GetTypeOfSymbol(restParameter)
++	if restType.IsTupleType() {
++		associatedNames := make([]*ast.Node, 0, len(restType.Target().AsTupleType().ElementInfos()))
++		for _, elementInfo := range restType.Target().AsTupleType().ElementInfos() {
++			labeledElement := elementInfo.LabeledDeclaration()
++			associatedNames = append(associatedNames, labeledElement)
++		}
++		index := pos - paramCount
++		if index < len(associatedNames) {
++			associatedName := associatedNames[index]
++			if associatedName != nil {
++				debug.Assert(ast.IsIdentifier(associatedName.Name()))
++				var isRestTupleElement bool
++				if ast.IsNamedTupleMember(associatedName) {
++					isRestTupleElement = associatedName.AsNamedTupleMember().DotDotDotToken != nil
++				} else {
++					isRestTupleElement = associatedName.AsParameterDeclaration().DotDotDotToken != nil
++				}
++				return &ParameterIdentifierInfo{
++					Parameter:       associatedName.Name(),
++					ParameterName:   associatedName.Name().Text(),
++					IsRestParameter: isRestTupleElement,
++				}
++			}
++		}
++		return nil
++	}
++
++	if pos == paramCount {
++		return &ParameterIdentifierInfo{
++			Parameter:       restId,
++			ParameterName:   restParameter.Name,
++			IsRestParameter: true,
++		}
++	}
++	return nil
++}
++
++func getParameterDeclarationIdentifier(symbol *ast.Symbol) *ast.IdentifierNode {
++	if symbol.ValueDeclaration != nil && ast.IsParameterDeclaration(symbol.ValueDeclaration) && ast.IsIdentifier(symbol.ValueDeclaration.Name()) {
++		return symbol.ValueDeclaration.Name()
++	}
++	return nil
 +}
 diff --git a/internal/checker/nodebuilderimpl.go b/internal/checker/nodebuilderimpl.go
 index 188da07aa..de823b4e7 100644
@@ -1124,6 +1246,115 @@ index 49ffb3003..196ce4c84 100644
  	}
  	to := &toProgramSnapshot{
  		program:    program,
+diff --git a/internal/ls/inlay_hints.go b/internal/ls/inlay_hints.go
+index a1923826c..aa562b80d 100644
+--- a/internal/ls/inlay_hints.go
++++ b/internal/ls/inlay_hints.go
+@@ -177,15 +177,15 @@ func (s *inlayHintState) visitCallOrNewExpression(expr *ast.CallOrNewExpression)
+ 			}
+ 		}
+ 
+-		identifierInfo := s.getParameterIdentifierInfoAtPosition(signature, signatureParamPos)
++		identifierInfo := s.checker.GetParameterIdentifierInfoAtPosition(signature, signatureParamPos)
+ 		signatureParamPos = signatureParamPos + core.IfElse(spreadArgs > 0, spreadArgs, 1)
+ 		if identifierInfo == nil {
+ 			return
+ 		}
+ 
+-		parameter := identifierInfo.parameter
+-		parameterName := identifierInfo.name
+-		isFirstVariadicArgument := identifierInfo.isRestParameter
++		parameter := identifierInfo.Parameter
++		parameterName := identifierInfo.ParameterName
++		isFirstVariadicArgument := identifierInfo.IsRestParameter
+ 		parameterNameNotSameAsArgument := s.preferences.IncludeInlayParameterNameHintsWhenArgumentMatchesName.IsTrue() ||
+ 			!identifierOrAccessExpressionPostfixMatchesParameterName(arg, parameterName)
+ 		if !parameterNameNotSameAsArgument && !isFirstVariadicArgument {
+@@ -802,84 +802,6 @@ func (s *inlayHintState) getLiteralText(node *ast.LiteralLikeNode) string {
+ 	return node.Text()
+ }
+ 
+-type parameterInfo struct {
+-	parameter       *ast.IdentifierNode
+-	name            string
+-	isRestParameter bool
+-}
+-
+-func (s *inlayHintState) getParameterIdentifierInfoAtPosition(signature *checker.Signature, pos int) *parameterInfo {
+-	parameters := signature.Parameters()
+-	paramCount := len(parameters) - core.IfElse(signature.HasRestParameter(), 1, 0)
+-	if pos < paramCount {
+-		param := parameters[pos]
+-		paramId := getParameterDeclarationIdentifier(param)
+-		if paramId == nil {
+-			return nil
+-		}
+-		return &parameterInfo{
+-			parameter:       paramId,
+-			name:            paramId.Text(),
+-			isRestParameter: false,
+-		}
+-	}
+-
+-	var restParameter *ast.Symbol
+-	var restId *ast.IdentifierNode
+-	if paramCount < len(parameters) {
+-		restParameter = parameters[paramCount]
+-		restId = getParameterDeclarationIdentifier(restParameter)
+-	}
+-	if restId == nil {
+-		return nil
+-	}
+-
+-	restType := s.checker.GetTypeOfSymbol(restParameter)
+-	if restType.IsTupleType() {
+-		associatedNames := make([]*ast.Node, 0, len(restType.Target().AsTupleType().ElementInfos()))
+-		for _, elementInfo := range restType.Target().AsTupleType().ElementInfos() {
+-			labeledElement := elementInfo.LabeledDeclaration()
+-			associatedNames = append(associatedNames, labeledElement)
+-		}
+-		index := pos - paramCount
+-		if index < len(associatedNames) {
+-			associatedName := associatedNames[index]
+-			if associatedName != nil {
+-				debug.Assert(ast.IsIdentifier(associatedName.Name()))
+-				var isRestTupleElement bool
+-				if ast.IsNamedTupleMember(associatedName) {
+-					isRestTupleElement = associatedName.AsNamedTupleMember().DotDotDotToken != nil
+-				} else {
+-					isRestTupleElement = associatedName.AsParameterDeclaration().DotDotDotToken != nil
+-				}
+-				return &parameterInfo{
+-					parameter:       associatedName.Name(),
+-					name:            associatedName.Name().Text(),
+-					isRestParameter: isRestTupleElement,
+-				}
+-			}
+-		}
+-
+-		return nil
+-	}
+-
+-	if pos == paramCount {
+-		return &parameterInfo{
+-			parameter:       restId,
+-			name:            restParameter.Name,
+-			isRestParameter: true,
+-		}
+-	}
+-	return nil
+-}
+-
+-func getParameterDeclarationIdentifier(symbol *ast.Symbol) *ast.IdentifierNode {
+-	if symbol.ValueDeclaration != nil && ast.IsParameterDeclaration(symbol.ValueDeclaration) && ast.IsIdentifier(symbol.ValueDeclaration.Name()) {
+-		return symbol.ValueDeclaration.Name()
+-	}
+-	return nil
+-}
+-
+ func identifierOrAccessExpressionPostfixMatchesParameterName(expr *ast.Expression, parameterName string) bool {
+ 	if ast.IsIdentifier(expr) {
+ 		return expr.Text() == parameterName
 diff --git a/internal/module/resolver.go b/internal/module/resolver.go
 index cad204f5b..c8966680b 100644
 --- a/internal/module/resolver.go
