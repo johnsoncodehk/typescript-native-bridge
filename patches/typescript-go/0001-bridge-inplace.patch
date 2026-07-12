@@ -1,3 +1,29 @@
+diff --git a/_packages/native-preview/src/api/async/client.ts b/_packages/native-preview/src/api/async/client.ts
+index 4215a3ea4..a1e65179d 100644
+--- a/_packages/native-preview/src/api/async/client.ts
++++ b/_packages/native-preview/src/api/async/client.ts
+@@ -74,7 +74,8 @@ export class Client {
+             }
+ 
+             this.process = spawn(resolveExePath(options), args, {
+-                stdio: ["pipe", "pipe", "inherit"],
++                stdio: ["pipe", "pipe", "pipe"],
++                detached: false,
+             });
+ 
+             this.process.once("error", error => {
+@@ -82,6 +83,11 @@ export class Client {
+             });
+ 
+             this.process.once("spawn", () => {
++                // stderr is piped (not inherited) so ResetStdio on the parent
++                // never shares a TTY/fd with the child; unref so it does not
++                // keep the parent event loop alive.
++                (this.process?.stderr as { unref?: () => void } | null | undefined)?.unref?.();
++                this.process?.unref();
+                 this.connected = true;
+                 resolve();
+             });
 diff --git a/_packages/native-preview/src/api/node/node.generated.ts b/_packages/native-preview/src/api/node/node.generated.ts
 index ff74677b3..d2915344c 100644
 --- a/_packages/native-preview/src/api/node/node.generated.ts
@@ -471,6 +497,71 @@ index 4ccc3047d..135e6e3e8 100644
  /**
   * A diagnostic message from the TypeScript compiler.
   */
+diff --git a/_packages/native-preview/src/api/syncChannel.ts b/_packages/native-preview/src/api/syncChannel.ts
+index 7b73d5670..10c4911bc 100644
+--- a/_packages/native-preview/src/api/syncChannel.ts
++++ b/_packages/native-preview/src/api/syncChannel.ts
+@@ -136,7 +136,8 @@ export class SyncRpcChannel {
+             // real C-runtime fd backed by a proper HANDLE.
+             const pipePath = `\\\\.\\pipe\\tsgo-sync-${process.pid}-${Date.now()}`;
+             this.child = spawn(exe, [...args, "--pipe", pipePath], {
+-                stdio: ["ignore", "ignore", "inherit"],
++                stdio: ["ignore", "ignore", "ignore"],
++                detached: false,
+             });
+ 
+             // Retry openSync until the child creates the named pipe.
+@@ -165,12 +166,17 @@ export class SyncRpcChannel {
+         }
+         else {
+             // POSIX: use stdio pipe file descriptors directly.
++            // stderr must NOT inherit the parent's fd — sharing a TTY/pipe with
++            // the parent lets Node's SignalExit/ResetStdio storm fcntl on the
++            // shared fd when the embedded/sibling Go runtime is present.
+             this.child = spawn(exe, args, {
+-                stdio: ["pipe", "pipe", "inherit"],
++                stdio: ["pipe", "pipe", "pipe"],
++                detached: false,
+             });
+ 
+             const stdout = this.child.stdout! as StdoutWithHandle;
+             const stdin = this.child.stdin! as StdinWithHandle;
++            const stderr = this.child.stderr as StdoutWithHandle | null;
+ 
+             this.readFd = stdout._handle.fd;
+             this.writeFd = stdin._handle.fd;
+@@ -178,6 +184,7 @@ export class SyncRpcChannel {
+             if (typeof this.readFd !== "number" || this.readFd < 0 || typeof this.writeFd !== "number" || this.writeFd < 0) {
+                 stdout.destroy();
+                 stdin.destroy();
++                stderr?.destroy();
+                 this.child.kill();
+                 throw new Error(
+                     "SyncRpcChannel: could not obtain pipe file descriptors.",
+@@ -193,11 +200,13 @@ export class SyncRpcChannel {
+             stdout._handle.setBlocking?.(true);
+             stdin._handle.setBlocking?.(true);
+ 
+-            // Prevent Node's event-loop from reading stdout or keeping the
+-            // process alive – we will use fs.readSync exclusively.
++            // Prevent Node's event-loop from reading stdout/stderr or keeping
++            // the process alive – we will use fs.readSync exclusively.
+             stdout.pause();
+             stdout.unref();
+             stdin.unref();
++            stderr?.pause();
++            stderr?.unref();
+         }
+ 
+         // Track for auto-cleanup on process exit.
+@@ -243,6 +252,7 @@ export class SyncRpcChannel {
+             // and no longer prevent the event loop from draining.
+             this.child.stdout?.destroy();
+             this.child.stdin?.destroy();
++            this.child.stderr?.destroy();
+             this.child.kill();
+             this.readFd = -1;
+             this.writeFd = -1;
 diff --git a/_packages/native-preview/src/ast/ast.ts b/_packages/native-preview/src/ast/ast.ts
 index c12a7953e..990984aab 100644
 --- a/_packages/native-preview/src/ast/ast.ts

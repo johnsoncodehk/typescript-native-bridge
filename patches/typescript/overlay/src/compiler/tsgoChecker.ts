@@ -210,10 +210,64 @@ function _rpcTraceExit(id: number, method: string): void {
     fs.appendFileSync(_rpcTraceLog, `${Date.now()} EXIT ${id} ${method}\n`);
 }
 
+/** True when this process is a tsserver entry (IDE / harness), not tsc/vue-tsc. */
+function isTsserverProcess(): boolean {
+    const script = process.argv[1] ?? "";
+    if (/(?:^|[/\\])_?tsserver\.(?:js|cjs|mjs)$/.test(script)) return true;
+    // VS Code / Volar fork with --useNodeIpc even if the script path is wrapped.
+    if (process.argv.includes("--useNodeIpc")) return true;
+    return false;
+}
+
+/**
+ * Install JS SIGTERM/SIGINT/SIGHUP handlers so Node's C++ SignalExit/ResetStdio
+ * never runs in signal context alongside the embedded Go runtime (see loadBridgeDeps).
+ * Idempotent via proc.signalExitBypassInstalled.
+ */
+function installSignalExitBypass(proc: TnbBridgeProcessState): void {
+    if (proc.signalExitBypassInstalled) return;
+    if (process.env.TNB_SIGNAL_EXIT_BYPASS === "0") return;
+    if (!(process.env.TNB_SIGNAL_EXIT_BYPASS === "1"
+        || process.env.VITEST
+        || process.env.JEST_WORKER_ID
+        || isTsserverProcess())) {
+        return;
+    }
+    proc.signalExitBypassInstalled = true;
+    const disposeBridgeBestEffort = () => {
+        // Dispose the koffi BridgeClient session. SyncRpcChannel (if used)
+        // kills its children via the process `exit` hook fired by process.exit.
+        try {
+            tnbBridgeProcessState().api?.close?.();
+        }
+        catch { /* best-effort */ }
+        try {
+            _api?.close?.();
+        }
+        catch { /* best-effort */ }
+    };
+    const signals = ["SIGTERM", "SIGINT", "SIGHUP"] as const;
+    for (const sig of signals) {
+        if (process.listenerCount(sig) === 0) {
+            process.on(sig, () => {
+                disposeBridgeBestEffort();
+                // tsserver: exit 0 (handout). test runners: keep 128+n
+                // so harnesses that inspect signal exit codes still work.
+                if (process.env.VITEST || process.env.JEST_WORKER_ID) {
+                    const n = sig === "SIGHUP" ? 1 : sig === "SIGINT" ? 2 : 15;
+                    process.exit(128 + n);
+                }
+                process.exit(0);
+            });
+        }
+    }
+}
+
 function loadBridgeDeps(): void {
     const proc = tnbBridgeProcessState();
     if (proc.koffi) {
         hydrateBridgeModuleLocals(proc);
+        installSignalExitBypass(proc);
         return;
     }
     const path = require("path") as typeof import("path");
@@ -261,31 +315,13 @@ function loadBridgeDeps(): void {
     proc.koffi = _koffi;
     proc.sync = _sync;
     proc.bridgeFns = _bridgeFns;
-    // ── SignalExit bypass (test runners only) ──
-    // Node's C++ SIGTERM/SIGINT handler (node::SignalExit) runs ResetStdio in
-    // signal context; combined with the embedded Go runtime this can spin
-    // forever (fstat/fcntl/tcsetattr EINTR storm) and pin an unkillable
-    // orphan. Installing a JS listener makes libuv take over the sigaction —
-    // its handler only writes to a pipe, deferring all work to the event
-    // loop, so ResetStdio never executes in signal context.
+    // ── SignalExit bypass (tsserver + test runners) ──
+    // See installSignalExitBypass. Stock tsserver has no SIGTERM/SIGHUP
+    // listeners (nodeServer listen uses disconnect/stdin-close → process.exit);
+    // we only install when none exist so we never override foreign handlers.
     // NOTE: never touch SIGURG from JS — that would replace the Go runtime's
-    // own handler.
-    if (!proc.signalExitBypassInstalled
-        && process.env.TNB_SIGNAL_EXIT_BYPASS !== "0"
-        && (process.env.TNB_SIGNAL_EXIT_BYPASS === "1"
-            || process.env.VITEST
-            || process.env.JEST_WORKER_ID)) {
-        proc.signalExitBypassInstalled = true;
-        const signals = ["SIGTERM", "SIGINT", "SIGHUP"] as const;
-        for (const sig of signals) {
-            if (process.listenerCount(sig) === 0) {
-                process.on(sig, () => {
-                    const n = sig === "SIGHUP" ? 1 : sig === "SIGINT" ? 2 : 15;
-                    process.exit(128 + n);
-                });
-            }
-        }
-    }
+    // own handler. Harness parent-watch (TNB_PARENT_PID) is independent.
+    installSignalExitBypass(proc);
     if (_rpcTraceLog) {
         const fs = require("fs") as typeof import("fs");
         fs.appendFileSync(
