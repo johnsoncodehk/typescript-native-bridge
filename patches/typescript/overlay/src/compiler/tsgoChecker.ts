@@ -3215,12 +3215,42 @@ function installNodeHandleHooks(s: any): void {
         "jsDoc",
         // Scalar fields rules read directly off declaration nodes.
         "text", "flags", "modifierFlags", "operator", "keywordToken", "isExportEquals",
+        // Binding/identity: createDefinitionFromSignatureDeclaration reads
+        // decl.symbol (IndexInfo.declaration / Signature.declaration handles).
+        "symbol",
     ];
     for (const f of STRUCTURAL_FIELDS) {
         if (!Object.getOwnPropertyDescriptor(proto, f)) {
             Object.defineProperty(proto, f, {
                 configurable: true,
                 get() { return resolveSelf(this)?.[f]; },
+            });
+        }
+    }
+    // RemoteNode AST encoding omits binder symbols. Signature.declaration /
+    // named declarations still need .symbol for createDefinitionFromSignatureDeclaration.
+    // Fall back to checker.getSymbolAtLocation(node.name) when the resolved
+    // node has no own symbol (FunctionDeclaration / MethodDeclaration / etc.).
+    {
+        const desc = Object.getOwnPropertyDescriptor(proto, "symbol");
+        if (desc?.get) {
+            const prevGet = desc.get;
+            Object.defineProperty(proto, "symbol", {
+                configurable: true,
+                get() {
+                    const own = prevGet.call(this);
+                    if (own) return own;
+                    const n = resolveSelf(this);
+                    const project = _currentProjectRef.project;
+                    if (!n || !project?.checker) return undefined;
+                    try {
+                        const nameNode = n.name;
+                        if (nameNode) {
+                            return project.checker.getSymbolAtLocation(nameNode);
+                        }
+                    } catch { /* best-effort */ }
+                    return undefined;
+                },
             });
         }
     }
@@ -5185,6 +5215,24 @@ export function createTsgoChecker(program: any): any {
             if (!tsgoNode || tsgoNode.kind !== node.kind) return false;
             return !!project.checker.isOptionalParameter(tsgoNode);
         },
+        // symbolDisplay / references: whether a signature decl is the overload
+        // implementation body. Host SignatureDeclaration → tsgo mirror.
+        isImplementationOfOverload(node: any): boolean {
+            if (!node) return false;
+            const sf = node.getSourceFile?.();
+            if (!sf?.fileName) return false;
+            let start: number | undefined;
+            let end: number | undefined;
+            try {
+                start = node.getStart(sf);
+                end = node.getEnd(sf);
+            } catch { return false; }
+            if (typeof start !== "number") return false;
+            ensureProject();
+            const tsgoNode = findTsgoNodeAtPosition(sf.fileName, start, node.kind, end);
+            if (!tsgoNode || tsgoNode.kind !== node.kind) return false;
+            return !!project.checker.isImplementationOfOverload(tsgoNode);
+        },
         // SymbolDisplay resolves a type parameter's owning signature from its
         // declaration ("(type parameter) T in pick<...>"). Declarations reaching
         // here are JS-side AST nodes (post declaration-remap); map to the tsgo
@@ -5580,6 +5628,43 @@ export function createTsgoChecker(program: any): any {
             ensureProject();
             if (!type) return [];
             return project.checker.getIndexInfosOfType(type) ?? [];
+        },
+        // goToDefinition / references / rename: index-signature infos at a
+        // property-access name. Host Identifier → tsgo mirror; undefined vs []
+        // must match stock (non-PA-name → undefined).
+        getIndexInfosAtLocation(node: any): readonly any[] | undefined {
+            if (!node) return undefined;
+            const sf = node.getSourceFile?.();
+            if (!sf?.fileName) return undefined;
+            let start: number | undefined;
+            let end: number | undefined;
+            try {
+                start = node.getStart(sf);
+                end = node.getEnd(sf);
+            } catch { return undefined; }
+            if (typeof start !== "number") return undefined;
+            ensureProject();
+            const tsgoNode = findTsgoNodeAtPosition(sf.fileName, start, node.kind, end);
+            if (!tsgoNode || tsgoNode.kind !== node.kind) return undefined;
+            const infos = project.checker.getIndexInfosAtLocation(tsgoNode);
+            // Stock returns undefined (not []) for non-PA-name; preserve that.
+            if (infos == null) return undefined;
+            // Declaration NodeHandles carry .symbol from IndexInfoResponse.symbol
+            // (attached in native-preview materializeIndexInfo). Resolve to RemoteNode
+            // so createDefinitionFromSignatureDeclaration can read positions/name.
+            return infos.map((info: any) => {
+                const decl = info?.declaration;
+                if (decl && typeof decl.resolve === "function") {
+                    const resolved = decl.resolve(project);
+                    if (resolved) {
+                        if (decl.symbol && !resolved.symbol) {
+                            Object.defineProperty(resolved, "symbol", { value: decl.symbol, configurable: true });
+                        }
+                        return { ...info, declaration: resolved };
+                    }
+                }
+                return info;
+            });
         },
         getTypeArguments(type: any): readonly any[] {
             ensureProject();
@@ -6090,7 +6175,7 @@ const _tnbCheckerCoverage = {
     typeParameterToDeclaration: "adapter",
     getSymbolsInScope: "adapter",
     getSymbolAtLocation: "adapter",
-    getIndexInfosAtLocation: "throw",
+    getIndexInfosAtLocation: "adapter",
     getSymbolsOfParameterPropertyDeclaration: "throw",
     getShorthandAssignmentValueSymbol: "adapter",
     getExportSpecifierLocalTargetSymbol: "adapter",
@@ -6124,7 +6209,7 @@ const _tnbCheckerCoverage = {
     hasEffectiveRestParameter: "adapter",
     containsArgumentsReference: "throw",
     getSignatureFromDeclaration: "adapter",
-    isImplementationOfOverload: "throw",
+    isImplementationOfOverload: "adapter",
     isUndefinedSymbol: "adapter",
     isArgumentsSymbol: "adapter",
     isUnknownSymbol: "adapter",

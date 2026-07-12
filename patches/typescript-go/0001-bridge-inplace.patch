@@ -705,6 +705,54 @@ index ac37c863d..70618dee2 100644
  	switch parent.Kind {
  	case ast.KindVariableDeclaration, ast.KindParameter, ast.KindPropertyDeclaration, ast.KindPropertySignature, ast.KindBindingElement:
  		return c.getContextualTypeForInitializerExpression(node, contextFlags)
+diff --git a/internal/checker/exports.go b/internal/checker/exports.go
+index dca835399..699f305fc 100644
+--- a/internal/checker/exports.go
++++ b/internal/checker/exports.go
+@@ -298,6 +298,43 @@ func (c *Checker) GetIndexInfosOfType(t *Type) []*IndexInfo {
+ 	return c.getIndexInfosOfType(t)
+ }
+ 
++// GetSymbolOfDeclaration returns the symbol bound to a declaration node.
++func (c *Checker) GetSymbolOfDeclaration(node *ast.Node) *ast.Symbol {
++	if node == nil {
++		return nil
++	}
++	return c.getSymbolOfDeclaration(node)
++}
++
++// GetIndexInfosAtLocation mirrors stock getIndexInfosAtLocation.
++// Returns (nil, false) when node is not a property-access name (stock: undefined).
++// Returns (infos, true) otherwise — infos may be empty.
++func (c *Checker) GetIndexInfosAtLocation(node *ast.Node) ([]*IndexInfo, bool) {
++	if ast.IsIdentifier(node) && ast.IsPropertyAccessExpression(node.Parent) && node.Parent.Name() == node {
++		keyType := c.getLiteralTypeFromPropertyName(node)
++		objectType := c.getTypeOfExpression(node.Parent.Expression())
++		var result []*IndexInfo
++		for _, t := range objectType.Distributed() {
++			result = append(result, c.getApplicableIndexInfos(t, keyType)...)
++		}
++		if result == nil {
++			result = []*IndexInfo{}
++		}
++		return result, true
++	}
++	return nil, false
++}
++
++// IsImplementationOfOverload reports whether a signature declaration is the
++// implementation body of an overload set (stock TypeChecker.isImplementationOfOverload).
++// Logic lives on EmitResolver; thin Checker wrapper matches isOptionalParameter shape.
++func (c *Checker) IsImplementationOfOverload(node *ast.Node) bool {
++	if node == nil {
++		return false
++	}
++	return c.GetEmitResolver().IsImplementationOfOverload(node)
++}
++
+ func (c *Checker) IsContextSensitive(node *ast.Node) bool {
+ 	return c.isContextSensitive(node)
+ }
 diff --git a/internal/checker/nodebuilderimpl.go b/internal/checker/nodebuilderimpl.go
 index 188da07aa..de823b4e7 100644
 --- a/internal/checker/nodebuilderimpl.go
