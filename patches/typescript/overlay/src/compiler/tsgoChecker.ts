@@ -20,6 +20,7 @@ import { createSourceFile } from "./parser.js";
 import { SyntaxKind, SymbolFlags, NodeFlags, JSDocParsingMode, ModuleKind, StructureIsReused, EmitHint, EmitFlags, type Path, type Program, type TypeChecker } from "./types.js";
 import { getBuildInfoText, getTsBuildInfoEmitOutputFilePath, createPrinterWithRemoveComments } from "./emitter.js";
 import { usingSingleLineStringWriter } from "./utilities.js";
+import { getParseTreeNode, isFunctionLike } from "./utilitiesPublic.js";
 import { setEmitFlags, addEmitFlags } from "./factory/emitNode.js";
 import { getModeForResolutionAtIndex } from "./program.js";
 import { installTsgoBackedSourceFileLoader, inferScriptKind, createSkeletonSourceFile, getTsgoBackedSourceFile } from "./tsgoBackedSourceFile.js";
@@ -4169,6 +4170,35 @@ export function createTsgoChecker(program: any): any {
     }
 
     /**
+     * Map a host AST node to its tsgo mirror. Stock TypeChecker entry points
+     * (getTypeAtLocation / getSignatureFromDeclaration) call getParseTreeNode
+     * first so synthesized transform clones still resolve via `.original`.
+     * Without that walk, convertToAsyncFunction's renameCollidingVarNames clone
+     * misses the tsgo index (pos may be -1 / no fileName) and early-returns.
+     */
+    function resolveHostNodeToTsgo(node: any, nodeTest?: (n: any) => boolean): any {
+        if (!node) return undefined;
+        const parseNode = getParseTreeNode(node, nodeTest as any);
+        const target = parseNode ?? (!nodeTest ? node : undefined);
+        if (!target) return undefined;
+        const sf = target.getSourceFile?.();
+        if (!sf?.fileName) return undefined;
+        // Synthesized nodes that never linked an original have no source span.
+        if (typeof target.pos === "number" && target.pos < 0) return undefined;
+        let start: number;
+        let end: number;
+        try {
+            start = typeof target.getStart === "function" ? target.getStart(sf) : target.pos;
+            end = typeof target.getEnd === "function" ? target.getEnd(sf) : target.end;
+        }
+        catch {
+            return undefined;
+        }
+        if (typeof start !== "number" || typeof end !== "number" || start < 0) return undefined;
+        return findTsgoNodeAtPosition(sf.fileName, start, target.kind, end);
+    }
+
+    /**
      * Map a host enclosingDeclaration to its tsgo mirror for NodeBuilder
      * context. signatureHelp's contextual invocations pass *tokens* (e.g. the
      * OpenParenToken of `onEvent(`), which never appear in the tsgo node index
@@ -5152,12 +5182,20 @@ export function createTsgoChecker(program: any): any {
         // ── Node-based hot queries (find tsgo node → use tsgo's own API) ──
         getTypeAtLocation(node: any): any {
             ensureProject();
-            const sf = node.getSourceFile?.();
-            if (!sf) return undefined;
+            // Stock (checker.ts:1714-1716): getParseTreeNode(nodeIn) then
+            // getTypeOfNode, else errorType. Walk original before position map.
             return memoGet(nodeTypeCache, node, () => {
                 const t0 = process.env.TSGO_PROFILE === "1" ? Date.now() : 0;
-                const tsgoNode = findTsgoNodeAtPosition(sf.fileName, node.getStart(sf), node.kind, node.getEnd(sf));
-                if (!tsgoNode) { if (process.env.TSGO_PROFILE === "1") { const d = Date.now() - t0; _stats.queryCount++; _stats.queryMs += d; _stats.getTypeCount++; _stats.getTypeMs += d; } return undefined; }
+                const tsgoNode = resolveHostNodeToTsgo(node);
+                if (!tsgoNode) {
+                    // Stock returns errorType (TypeFlags.Any intrinsic "error").
+                    // Prefer getErrorType when wired; else getAnyType (same flags).
+                    const fallback = typeof project.checker.getErrorType === "function"
+                        ? project.checker.getErrorType()
+                        : project.checker.getAnyType?.();
+                    if (process.env.TSGO_PROFILE === "1") { const d = Date.now() - t0; _stats.queryCount++; _stats.queryMs += d; _stats.getTypeCount++; _stats.getTypeMs += d; }
+                    return fallback;
+                }
                 const r = computeGetTypeAtLocation(tsgoNode);
                 if (process.env.TSGO_PROFILE === "1") { const d = Date.now() - t0; _stats.queryCount++; _stats.queryMs += d; _stats.getTypeCount++; _stats.getTypeMs += d; }
                 return r;
@@ -5527,9 +5565,8 @@ export function createTsgoChecker(program: any): any {
         getSignatureFromDeclaration(declaration: any): any {
             if (!declaration) return undefined;
             ensureProject();
-            const sf = declaration.getSourceFile?.();
-            if (!sf?.fileName) return undefined;
-            const tsgoNode = findTsgoNodeAtPosition(sf.fileName, declaration.getStart(sf), declaration.kind, declaration.getEnd(sf));
+            // Stock (checker.ts:1796-1798): getParseTreeNode(declarationIn, isFunctionLike).
+            const tsgoNode = resolveHostNodeToTsgo(declaration, isFunctionLike);
             if (!tsgoNode) return undefined;
             return project.checker.getSignatureFromDeclaration(tsgoNode);
         },
@@ -6637,9 +6674,9 @@ export function createTsgoChecker(program: any): any {
             flags: number,
         ): any {
             ensureProject();
-            // Design: Go createSignatureFromParts ignores decl/typeParams/this/predicate.
-            // Consuming sites mostly pass undefined; returnValueCorrect may pass real
-            // declaration/typeParams/thisParameter — reported as deviation, still assemble.
+            // Go createSignatureFromParts now accepts typeParameters (+ optional
+            // thisParameter). declaration / typePredicate still omitted — Node /
+            // TypePredicate wire forms are not in this RPC (deviation).
             const materialized: any[] = [];
             for (const p of parameters ?? []) {
                 if (p?.__tnbPlaceholder) {
@@ -6658,11 +6695,29 @@ export function createTsgoChecker(program: any): any {
                     if (rpcSym && typeof rpcSym.id === "number") materialized.push(rpcSym);
                 }
             }
+            const typeParamHandles: any[] = [];
+            if (typeParameters) {
+                for (const tp of typeParameters) {
+                    if (tp && typeof tp.id === "number") typeParamHandles.push(tp);
+                }
+            }
+            let thisParamRemote: any;
+            if (thisParameter) {
+                if (typeof thisParameter.id === "number") thisParamRemote = thisParameter;
+                else {
+                    const rpcSym = resolveRpcSymbol(thisParameter);
+                    if (rpcSym && typeof rpcSym.id === "number") thisParamRemote = rpcSym;
+                }
+            }
+            void declaration;
+            void typePredicate;
             const sig = project.checker.createSignatureFromParts(
                 materialized,
                 returnType,
                 minArgumentCount ?? 0,
                 flags ?? 0,
+                typeParamHandles,
+                thisParamRemote,
             );
             return sig;
         },
@@ -6835,10 +6890,39 @@ export function createTsgoChecker(program: any): any {
             return getRpcExportsOfModule(mod);
         },
 
-        // ── Diagnostics — empty for PoC ──
+        // ── Diagnostics ──
+        // Stock TypeChecker.getDiagnostics(sourceFile) runs semantic check for
+        // that file. addMissingAwait (isMissingAwaitError) needs relatedInfo
+        // code 1308 on the span — previously stubbed to [] and short-circuited.
+        // Delegate to the same Go semantic(+syntactic) pipeline Program uses.
+        // Deviation: sourceFile undefined → [] (stock = whole program); consumers
+        // of this path (addMissingAwait) always pass a SourceFile.
         getSuggestionDiagnostics(): readonly any[] { return []; },
         getGlobalDiagnostics(): readonly any[] { return []; },
-        getDiagnostics(): readonly any[] { return []; },
+        getDiagnostics(sourceFile?: any, _cancellationToken?: any): readonly any[] {
+            if (!sourceFile?.fileName) return [];
+            ensureProject();
+            if (!project?.program) return [];
+            const fileArg = toTsgoFileName(sourceFile.fileName);
+            const getSf = (fn: string) => {
+                const host = toHostFileName(fn);
+                if (
+                    host === sourceFile.fileName
+                    || fn === sourceFile.fileName
+                    || fn === fileArg
+                    || host === toHostFileName(sourceFile.fileName)
+                ) {
+                    return sourceFile;
+                }
+                // Related info may point at other files; return a minimal
+                // skeleton so convertTsgoDiagnostic doesn't NPE on .file.
+                return createSkeletonSourceFile(host, "", options.target ?? 99, inferScriptKind(host));
+            };
+            return [
+                ...mapTsgoDiagnostics(project.program.getSyntacticDiagnostics?.(fileArg), getSf),
+                ...mapTsgoDiagnostics(project.program.getSemanticDiagnostics?.(fileArg), getSf),
+            ];
+        },
         getAmbientModules(): readonly any[] {
             ensureProject();
             try {

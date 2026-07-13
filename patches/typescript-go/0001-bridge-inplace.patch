@@ -797,7 +797,7 @@ index ac37c863d..70618dee2 100644
  	case ast.KindVariableDeclaration, ast.KindParameter, ast.KindPropertyDeclaration, ast.KindPropertySignature, ast.KindBindingElement:
  		return c.getContextualTypeForInitializerExpression(node, contextFlags)
 diff --git a/internal/checker/exports.go b/internal/checker/exports.go
-index dca835399..bd81d5593 100644
+index dca835399..5495377d5 100644
 --- a/internal/checker/exports.go
 +++ b/internal/checker/exports.go
 @@ -3,6 +3,7 @@ package checker
@@ -852,7 +852,7 @@ index dca835399..bd81d5593 100644
  func (c *Checker) IsContextSensitive(node *ast.Node) bool {
  	return c.isContextSensitive(node)
  }
-@@ -341,3 +379,249 @@ func (c *Checker) RemoveMissingOrUndefinedType(t *Type) *Type {
+@@ -341,3 +379,256 @@ func (c *Checker) RemoveMissingOrUndefinedType(t *Type) *Type {
  func (c *Checker) GetWidenedType(t *Type) *Type {
  	return c.getWidenedType(t)
  }
@@ -1061,11 +1061,18 @@ index dca835399..bd81d5593 100644
 +}
 +
 +// CreateSignatureFromParts assembles a Signature via newSignature
-+// (checker.go:25163). Declaration / typeParams / thisParam / typePredicate are
-+// omitted (stock consumers in this batch pass undefined for those, or only need
-+// parameters+returnType for assignability).
-+func (c *Checker) CreateSignatureFromParts(parameters []*ast.Symbol, returnType *Type, minArgumentCount int, flags SignatureFlags) *Signature {
-+	return c.newSignature(flags, nil /*declaration*/, nil /*typeParameters*/, nil /*thisParameter*/, parameters, returnType, nil /*resolvedTypePredicate*/, minArgumentCount)
++// (checker.go:25163). typeParameters / thisParameter are forwarded when
++// provided (returnValueCorrect generic isFunctionType path). declaration /
++// typePredicate remain omitted (no Node / TypePredicate wire in this RPC).
++func (c *Checker) CreateSignatureFromParts(
++	parameters []*ast.Symbol,
++	returnType *Type,
++	minArgumentCount int,
++	flags SignatureFlags,
++	typeParameters []*Type,
++	thisParameter *ast.Symbol,
++) *Signature {
++	return c.newSignature(flags, nil /*declaration*/, typeParameters, thisParameter, parameters, returnType, nil /*resolvedTypePredicate*/, minArgumentCount)
 +}
 +
 +// IndexInfoPart is the wire shape for createAnonymousTypeFromParts index infos.
