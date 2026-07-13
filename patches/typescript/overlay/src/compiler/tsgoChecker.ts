@@ -1390,12 +1390,13 @@ function symbolParentOf(symbol: any): any {
  * when an enclosingDeclaration is provided (node builder: chain is built iff
  * `context.enclosingDeclaration || UseFullyQualifiedType`) and
  * DoNotIncludeSymbolChain is not set. Quickinfo passes the source file →
- * "Indexed.prop"; renameInfo passes nothing → bare "Foo". Skip SourceFile /
- * module containers — stock's node builder omits those for property display.
- * Enum members stay bare ("Red"): fixAddMissingMember builds
- * `createPropertyAccessExpression(enumExpr, symbolToString(member))` and a
- * dotted string ("Color.Red") becomes an illegal Identifier that crashes
- * formatting ("Token end is child end").
+ * "Indexed.prop" / "Color.Red"; renameInfo and fixAddMissingMember pass
+ * nothing (or DoNotIncludeSymbolChain) → bare "Foo" / "Red". Skip
+ * SourceFile / module containers — stock's node builder omits those for
+ * property display. Enum parents ARE included for EnumMember (quickinfo
+ * `(enum member) Color.Red = 1`); bare calls stay bare so
+ * `createPropertyAccessExpression(enumExpr, symbolToString(member))` in
+ * fixAddMissingMember does not become an illegal Identifier.
  */
 function symbolToStringWithChain(symbol: any, enclosing?: any, flags?: number): string {
     const name = symbolDisplayNameOf(symbol);
@@ -1406,15 +1407,18 @@ function symbolToStringWithChain(symbol: any, enclosing?: any, flags?: number): 
     if (flags != null && (flags & SymbolFormatFlags.DoNotIncludeSymbolChain)) {
         return name;
     }
+    // EnumMember is not Property-flagged; include it so enclosing quickinfo
+    // can form `Color.Red`. Module parents stay omitted below.
     const propertyLike = SymbolFlags.Property | SymbolFlags.Method | SymbolFlags.Accessor
-        | SymbolFlags.GetAccessor | SymbolFlags.SetAccessor;
+        | SymbolFlags.GetAccessor | SymbolFlags.SetAccessor | SymbolFlags.EnumMember;
     if (!((symbol.flags ?? 0) & propertyLike)) {
         return name;
     }
     const parent = symbolParentOf(symbol);
     if (!parent) return name;
     // Module/source-file parents: stock omits them for property FQN display.
-    if (parent.flags & (SymbolFlags.Module | SymbolFlags.ValueModule | SymbolFlags.NamespaceModule | SymbolFlags.Enum | SymbolFlags.ConstEnum | SymbolFlags.RegularEnum)) {
+    // Enum parents are kept for EnumMember (see above).
+    if (parent.flags & (SymbolFlags.Module | SymbolFlags.ValueModule | SymbolFlags.NamespaceModule)) {
         return name;
     }
     const parentName = symbolDisplayNameOf(parent);
@@ -1731,6 +1735,22 @@ function remapDeclarationToHost(decl: any, getHostSf: (fileName: string) => any 
         if (name) hostNode = findHostModuleScopedDeclaration(hostSf, String(name));
     }
     if (!hostNode) return decl;
+    // findHostNodeAtPosition returns the deepest node at pos. A declaration
+    // whose getStart lands on a leading modifier resolves to that keyword
+    // token (`export class C` → ExportKeyword), not the declaration. Climb to
+    // the enclosing ancestor of the same kind as the remote declaration.
+    // decl.kind is normalized to fork SyntaxKind by the RemoteNode hooks, but
+    // accept the raw tsgo kind remap too in case a handle escaped them.
+    const wantKind = decl.kind;
+    const wantKindAlt = remapKind(decl.kind);
+    if (hostNode.kind !== wantKind && hostNode.kind !== wantKindAlt) {
+        for (let anc = hostNode.parent; anc && anc.kind !== SyntaxKind.SourceFile; anc = anc.parent) {
+            if (anc.kind === wantKind || anc.kind === wantKindAlt) {
+                hostNode = anc;
+                break;
+            }
+        }
+    }
     if (hostNode.kind === SyntaxKind.Identifier && hostNode.parent?.symbol?.declarations) {
         const parent = hostNode.parent;
         if (parent.name === hostNode || parent.propertyName === hostNode) {
@@ -3407,6 +3427,258 @@ export function createTsgoProgram(
     });
 }
 
+/**
+ * Stock binder attaches .symbol on nameless signature decls (Constructor →
+ * InternalSymbolName.Constructor, CallSignature → __call, etc.). RemoteNode
+ * AST omits binder symbols, and getSymbolAtLocation(decl) does not recover
+ * them (stock also requires getSymbolOfDeclaration / the binder slot).
+ * Recover via the containing class/interface members table, then fall back
+ * to a constructor/signature shim whose `.parent` is the container so
+ * createDefinitionFromSignatureDeclaration / symbolMatchesSignature match
+ * stock (class + constructor defs for `new GenericClass`).
+ */
+function memberSymbolDisplayName(m: any): string {
+    return unescapeTsgoSymbolName(String(m?.escapedName ?? m?.name ?? ""));
+}
+
+function collectContainerMemberSymbols(parentSym: any): any[] {
+    const out: any[] = [];
+    const seen = new Set<any>();
+    const push = (m: any) => {
+        if (!m || seen.has(m)) return;
+        seen.add(m);
+        out.push(m);
+    };
+    try {
+        if (typeof parentSym.getMembers === "function") {
+            const list = parentSym.getMembers();
+            if (list?.length) for (const m of list) push(m);
+        }
+    } catch { /* best-effort */ }
+    // Host SymbolObject (post refineNavSymbol) exposes `.members` as a Map /
+    // SymbolTable, not getMembers(). Falling back to only getMembers() missed
+    // `__constructor` and forced the class-symbol fallback (crash-safe but
+    // dropped the class-name definition for `new GenericClass`).
+    try {
+        const table = parentSym.members;
+        if (table && typeof table.values === "function") {
+            for (const m of table.values()) push(m);
+        }
+        else if (table && typeof table === "object") {
+            for (const key of Object.keys(table)) push(table[key]);
+        }
+    } catch { /* best-effort */ }
+    try {
+        if (typeof parentSym.getExports === "function") {
+            const list = parentSym.getExports();
+            if (list?.length) for (const m of list) push(m);
+        }
+    } catch { /* best-effort */ }
+    try {
+        const table = parentSym.exports;
+        if (table && typeof table.values === "function") {
+            for (const m of table.values()) push(m);
+        }
+        else if (table && typeof table === "object") {
+            for (const key of Object.keys(table)) push(table[key]);
+        }
+    } catch { /* best-effort */ }
+    return out;
+}
+
+function ensureMemberSymbolParent(member: any, parentSym: any): any {
+    if (!member || !parentSym) return member;
+    try {
+        const existing = symbolParentOf(member);
+        if (existing === parentSym) return member;
+        // Force parent to the container we resolved. A pre-existing parent with
+        // a different object identity breaks symbolMatchesSignature's
+        // `s === decl.symbol.parent` check against getRootSymbols(class).
+        Object.defineProperty(member, "parent", { value: parentSym, configurable: true });
+    } catch { /* best-effort */ }
+    return member;
+}
+
+/**
+ * goToDefinition for `new Foo` matches symbolMatchesSignature then filters
+ * definitions with `isClassDeclaration` / `isClassExpression`. Bridge class
+ * symbols often expose declaration handles whose `.kind` is still a raw tsgo
+ * value (or omit the ClassDeclaration entirely), so the filter drops the
+ * class-name span and only the constructor sigInfo remains. Re-anchor the
+ * container symbol onto the live ClassDeclaration/ClassExpression node
+ * (already kind-remapped via RemoteNode) so the stock filter keeps it.
+ */
+function ensureContainerDeclarationOnSymbol(parentSym: any, parent: any): void {
+    if (!parentSym || !parent) return;
+    // Declaration handles may still carry raw tsgo kinds; remap before the
+    // fork-kind classLike test so we don't bail on a real ClassDeclaration.
+    if (typeof parent.kind === "number") {
+        const remappedParentKind = remapKind(parent.kind);
+        if (remappedParentKind !== parent.kind) {
+            try {
+                Object.defineProperty(parent, "kind", {
+                    configurable: true,
+                    enumerable: true,
+                    writable: true,
+                    value: remappedParentKind,
+                });
+            }
+            catch {
+                try { parent.kind = remappedParentKind; } catch { /* read-only kind */ }
+            }
+        }
+    }
+    const classLike =
+        parent.kind === SyntaxKind.ClassDeclaration
+        || parent.kind === SyntaxKind.ClassExpression
+        || parent.kind === SyntaxKind.InterfaceDeclaration;
+    if (!classLike) return;
+    try {
+        // Remap raw tsgo kinds on any existing declaration handles so
+        // isClassDeclaration / isClassExpression type-guards fire.
+        const declsRaw: any[] = Array.isArray(parentSym.declarations) ? [...parentSym.declarations] : [];
+        for (const d of declsRaw) {
+            if (!d || typeof d.kind !== "number") continue;
+            const remapped = remapKind(d.kind);
+            if (remapped === d.kind) continue;
+            try {
+                Object.defineProperty(d, "kind", {
+                    configurable: true,
+                    enumerable: true,
+                    writable: true,
+                    value: remapped,
+                });
+            }
+            catch {
+                try { d.kind = remapped; } catch { /* read-only kind */ }
+            }
+        }
+        const decls = declsRaw;
+        const already = decls.some((d: any) =>
+            d === parent
+            || (d
+                && d.kind === parent.kind
+                && typeof d.pos === "number"
+                && d.pos === parent.pos
+                && d.end === parent.end),
+        );
+        if (!already) decls.unshift(parent);
+        // Prefer the remapped live node even when a stale handle was present.
+        const preferred = decls.filter((d: any) => d && d.kind === parent.kind);
+        const rest = decls.filter((d: any) => !d || d.kind !== parent.kind);
+        const next = preferred.length ? [...preferred, ...rest] : decls;
+        const hasForkClassKind = next.some((d: any) =>
+            d
+            && (d.kind === SyntaxKind.ClassDeclaration
+                || d.kind === SyntaxKind.ClassExpression
+                || d.kind === SyntaxKind.InterfaceDeclaration),
+        );
+        if (!hasForkClassKind) next.unshift(parent);
+        try {
+            parentSym.declarations = next;
+        }
+        catch {
+            Object.defineProperty(parentSym, "declarations", {
+                configurable: true,
+                enumerable: true,
+                get: () => next,
+            });
+        }
+        if (!parentSym.valueDeclaration) {
+            try { parentSym.valueDeclaration = parent; }
+            catch {
+                try {
+                    Object.defineProperty(parentSym, "valueDeclaration", {
+                        configurable: true,
+                        enumerable: true,
+                        get: () => parent,
+                    });
+                } catch { /* read-only */ }
+            }
+        }
+    } catch { /* best-effort */ }
+}
+
+/** Ensure Class/Interface symbols keep a fork-kind class-like declaration. */
+function ensureClassLikeSymbolDeclarations(sym: any): any {
+    if (!sym) return sym;
+    const flags = sym.flags ?? 0;
+    if (!(flags & (SymbolFlags.Class | SymbolFlags.Interface))) return sym;
+    try {
+        const decl = sym.valueDeclaration ?? sym.declarations?.[0];
+        if (decl) ensureContainerDeclarationOnSymbol(sym, decl);
+    } catch { /* best-effort */ }
+    return sym;
+}
+
+function namelessSignatureSymbolShim(n: any, parentSym: any, flags: number, name: string): any {
+    // Minimal Symbol-shaped object so getCombinedLocalAndExportSymbolFlags and
+    // symbolMatchesSignature (s === decl.symbol.parent) behave like stock.
+    return {
+        flags,
+        name,
+        escapedName: name,
+        parent: parentSym,
+        valueDeclaration: n,
+        declarations: [n],
+        exportSymbol: undefined,
+        getFlags() { return this.flags; },
+        getName() { return this.name; },
+        getEscapedName() { return this.escapedName; },
+        getDeclarations() { return this.declarations; },
+    };
+}
+
+function resolveNamelessDeclarationSymbol(n: any, project: any): any {
+    const parent = n.parent;
+    if (!parent || !project?.checker) return undefined;
+    let parentSym = parent.symbol;
+    if (!parentSym && parent.name) {
+        try { parentSym = project.checker.getSymbolAtLocation(parent.name); } catch { /* best-effort */ }
+    }
+    if (!parentSym) return undefined;
+    // Keep class-name definitions when symbolMatchesSignature takes the
+    // constructor branch (strict isClassDeclaration filter).
+    ensureContainerDeclarationOnSymbol(parentSym, parent);
+
+    const wantFlags =
+        n.kind === SyntaxKind.Constructor ? SymbolFlags.Constructor :
+        n.kind === SyntaxKind.ConstructSignature || n.kind === SyntaxKind.ConstructorType ? SymbolFlags.Signature :
+        n.kind === SyntaxKind.CallSignature || n.kind === SyntaxKind.FunctionType ? SymbolFlags.Signature :
+        n.kind === SyntaxKind.IndexSignature ? SymbolFlags.Signature :
+        0;
+    const wantNames = new Set<string>([
+        "__constructor", "constructor",
+        "__call", "call",
+        "__new", "new",
+        "__index", "index",
+    ]);
+    const members = collectContainerMemberSymbols(parentSym);
+    if (members.length) {
+        for (const m of members) {
+            const nm = memberSymbolDisplayName(m);
+            if (wantNames.has(nm)) return ensureMemberSymbolParent(m, parentSym);
+        }
+        if (wantFlags) {
+            for (const m of members) {
+                if (m?.flags & wantFlags) return ensureMemberSymbolParent(m, parentSym);
+            }
+        }
+    }
+    // No members table entry (rare): synthesize a constructor/signature symbol
+    // with `.parent = class` so symbolMatchesSignature still pulls the class
+    // declaration into getDefinitionAtPosition's result list.
+    if (wantFlags) {
+        const shimName =
+            n.kind === SyntaxKind.Constructor ? "__constructor" :
+            n.kind === SyntaxKind.CallSignature || n.kind === SyntaxKind.FunctionType ? "__call" :
+            n.kind === SyntaxKind.ConstructSignature || n.kind === SyntaxKind.ConstructorType ? "__new" :
+            "__index";
+        return namelessSignatureSymbolShim(n, parentSym, wantFlags, shimName);
+    }
+    return parentSym;
+}
+
 function installNodeHandleHooks(s: any): void {
     installRemoteNodeTraversalHooks();
     const proc = tnbBridgeProcessState();
@@ -3535,6 +3807,10 @@ function installNodeHandleHooks(s: any): void {
     // named declarations still need .symbol for createDefinitionFromSignatureDeclaration.
     // Fall back to checker.getSymbolAtLocation(node.name) when the resolved
     // node has no own symbol (FunctionDeclaration / MethodDeclaration / etc.).
+    // Constructors / call·construct·index signatures have no .name — stock
+    // binder still attaches decl.symbol (__constructor / __call / …). Without
+    // that, createDefinitionFromSignatureDeclaration passes undefined into
+    // getCombinedLocalAndExportSymbolFlags and crashes on .exportSymbol.
     {
         const desc = Object.getOwnPropertyDescriptor(proto, "symbol");
         if (desc?.get) {
@@ -3550,8 +3826,14 @@ function installNodeHandleHooks(s: any): void {
                     try {
                         const nameNode = n.name;
                         if (nameNode) {
-                            return project.checker.getSymbolAtLocation(nameNode);
+                            const sym = project.checker.getSymbolAtLocation(nameNode);
+                            // Class/interface containers: keep a kind-remapped
+                            // declaration on the symbol so goToDefinition's
+                            // isClassDeclaration filter keeps the class-name span.
+                            if (sym) ensureContainerDeclarationOnSymbol(sym, n);
+                            return sym;
                         }
+                        return resolveNamelessDeclarationSymbol(n, project);
                     } catch { /* best-effort */ }
                     return undefined;
                 },
@@ -5163,14 +5445,100 @@ export function createTsgoChecker(program: any): any {
     };
     const refineNavSymbol = (sym: any) => {
         if (!sym) return sym;
-        if (!_hasHostBoundFiles) return ensureSymbolContextualDocCompat(sym);
+        if (!_hasHostBoundFiles) {
+            return ensureClassLikeSymbolDeclarations(ensureSymbolContextualDocCompat(sym));
+        }
         const cached = refinedSymBySym.get(sym);
         if (cached !== undefined) return cached;
-        const refined = ensureSymbolContextualDocCompat(refineHostNavigationSymbol(sym, getHostBoundSf));
+        const refined = ensureClassLikeSymbolDeclarations(
+            ensureSymbolContextualDocCompat(refineHostNavigationSymbol(sym, getHostBoundSf)),
+        );
         if (_traceSymEnabled) traceSym(`refineNavSymbol in=${traceSymSymbol(sym)} out=${traceSymSymbol(refined)}`);
         refinedSymBySym.set(sym, refined);
         return refined;
     };
+
+    // Stock checker.getSymbolAtLocation keyword switch: most keywords →
+    // undefined; Function/Class/Default/=> resolve via parent declaration.
+    // Returns:
+    //   { action:"continue" }           — not keyword-governed; keep looking up
+    //   { action:"undefined" }          — stock returns undefined
+    //   { action:"redirect", node }     — continue lookup with this node instead
+    //   { action:"symbol", symbol }     — already resolved
+    function classifyKeywordSymbolLookup(node: any):
+        | { action: "continue" }
+        | { action: "undefined" }
+        | { action: "redirect"; node: any }
+        | { action: "symbol"; symbol: any } {
+        const kind = node?.kind;
+        switch (kind) {
+            case SyntaxKind.DefaultKeyword:
+            case SyntaxKind.FunctionKeyword:
+            case SyntaxKind.EqualsGreaterThanToken:
+            case SyntaxKind.ClassKeyword: {
+                const parent = node.parent;
+                if (!parent) return { action: "undefined" };
+                if (parent.symbol) return { action: "symbol", symbol: parent.symbol };
+                if (parent.name && parent.name !== node) return { action: "redirect", node: parent.name };
+                return { action: "undefined" };
+            }
+            case SyntaxKind.ConstructorKeyword: {
+                const ctor = node.parent;
+                if (ctor?.kind === SyntaxKind.Constructor && ctor.parent?.symbol) {
+                    return { action: "symbol", symbol: ctor.parent.symbol };
+                }
+                return { action: "undefined" };
+            }
+            case SyntaxKind.ExportKeyword: {
+                if (node.parent?.kind === SyntaxKind.ExportAssignment && node.parent.symbol) {
+                    return { action: "symbol", symbol: node.parent.symbol };
+                }
+                return { action: "undefined" };
+            }
+            // This / Super / InstanceOf / MetaProperty need the expression /
+            // special paths below — do not short-circuit.
+            case SyntaxKind.ThisKeyword:
+            case SyntaxKind.SuperKeyword:
+            case SyntaxKind.ThisType:
+            case SyntaxKind.InstanceOfKeyword:
+            case SyntaxKind.MetaProperty:
+                return { action: "continue" };
+            // Stock: ImportKeyword/NewKeyword resolve only as meta-property
+            // keywords (import.meta / new.target); an ImportDeclaration's
+            // `import` keyword is undefined, not the module symbol.
+            case SyntaxKind.ImportKeyword:
+            case SyntaxKind.NewKeyword:
+                return node.parent?.kind === SyntaxKind.MetaProperty
+                    ? { action: "continue" }
+                    : { action: "undefined" };
+            // Interpolation punctuation spans (`...${`, `}...${`, `}...`):
+            // stock's switch has no case for these tokens → undefined.
+            // Positional RPC would latch onto the neighboring interpolated
+            // identifier ((parameter) id at a `${` span).
+            case SyntaxKind.TemplateHead:
+            case SyntaxKind.TemplateMiddle:
+            case SyntaxKind.TemplateTail:
+                return { action: "undefined" };
+            // JSDocComment only (not the whole FirstJSDocNode..LastJSDocNode
+            // range): stock returns undefined for the comment container, and
+            // allowing positional/cache hits here poisons quickinfo inside
+            // param JSDoc (`/** left */ a`) after an earlier probe warms
+            // symByPos. Broader JSDoc* short-circuit breaks component-meta
+            // (JSDoc type/tag nodes still need normal resolution).
+            case SyntaxKind.JSDocComment:
+                return { action: "undefined" };
+            default:
+                // Remaining keywords (extends, as, type, interface, …): stock
+                // default branch returns undefined. Blocking positional RPC here
+                // is what restores find-refs asserts + quickinfo empty parity.
+                if (typeof kind === "number"
+                    && kind >= SyntaxKind.FirstKeyword
+                    && kind <= SyntaxKind.LastKeyword) {
+                    return { action: "undefined" };
+                }
+                return { action: "continue" };
+        }
+    }
 
     let checkerProxyRef: any;
 
@@ -5285,6 +5653,17 @@ export function createTsgoChecker(program: any): any {
             if (node.kind === SyntaxKind.PropertyAccessExpression && node.name?.getSourceFile) {
                 node = node.name;
             }
+            // Stock checker.getSymbolAtLocation (switch on node.kind): most
+            // keywords return undefined; a few resolve via the parent
+            // declaration. Never "symbol at this text position" — positional
+            // RPC would latch onto a neighboring identifier (ExtendsKeyword →
+            // type param T; AsKeyword / export / type → decl name), which
+            // breaks find-all-refs Debug.asserts and quickinfo empty-result
+            // parity with stock.
+            const kw = classifyKeywordSymbolLookup(node);
+            if (kw.action === "undefined") return undefined;
+            if (kw.action === "symbol") return refineNavSymbol(kw.symbol);
+            if (kw.action === "redirect") node = kw.node;
             const start = typeof node.pos === "number" ? node.pos : node.getStart(sf);
             const end = typeof node.end === "number" ? node.end : node.getEnd(sf);
             // traceSym arguments are built eagerly — every call site on this
@@ -5481,11 +5860,13 @@ export function createTsgoChecker(program: any): any {
             if (!symPrefetched.has(cacheName)) {
                 ensureFileSymbolsPrefetched(sf.fileName);
             }
-            cached = probeSymCache(cacheName, start, end);
-            if (cached.found) {
-                recordHit();
-                if (_traceSymEnabled) traceSym(`getSymbolAtLocation return path=cache sym=${traceSymSymbol(cached.sym)}`);
-                return cached.sym;
+            {
+                const cached = probeSymCache(cacheName, start, end);
+                if (cached.found) {
+                    recordHit();
+                    if (_traceSymEnabled) traceSym(`getSymbolAtLocation return path=cache sym=${traceSymSymbol(cached.sym)}`);
+                    return cached.sym;
+                }
             }
             // allIdentifiers prefetch is exhaustive on plain disk files; host-bound
             // virtual TS (Volar) has binder sites prefetch misses (e.g. PropertyAccess
@@ -5500,22 +5881,76 @@ export function createTsgoChecker(program: any): any {
         },
         getTypeOfSymbolAtLocation(symbol: any, location: any): any {
             ensureProject();
-            const sf = location.getSourceFile?.();
-            if (!sf) return undefined;
-            const tsgoNode = findTsgoNodeAtPosition(sf.fileName, location.getStart(sf), location.kind, location.getEnd(sf));
-            if (tsgoNode) {
-                const t = rpc().getTypeOfSymbolAtLocation(symbol, tsgoNode);
-                if (t) { fixupType(t); return t; }
+            // Stock's TypeChecker.getTypeOfSymbolAtLocation always returns a Type
+            // (never undefined). Returning undefined lets tryGetReturnTypeOfFunction
+            // crash on `type.symbol` (cluster E: typeDefinition at `return`).
+            // getErrorType/getAnyType can also be unavailable before checker
+            // intrinsics are wired (cold prefix) — synthesize a minimal Any.
+            const errorOrAny = (): any => {
+                let fallback: any;
+                try {
+                    fallback = typeof project.checker.getErrorType === "function"
+                        ? project.checker.getErrorType()
+                        : project.checker.getAnyType?.();
+                } catch { fallback = undefined; }
+                if (fallback) {
+                    fixupType(fallback);
+                    return fallback;
+                }
+                // Last resort: object shaped enough for tryGetReturnTypeOfFunction
+                // (`type.symbol === …`) and definitionFromType (`t.symbol && …`).
+                const TF = sync.TypeFlags;
+                return {
+                    flags: TF?.Any ?? 1,
+                    symbol: undefined,
+                    getFlags() { return this.flags; },
+                    getSymbol() { return undefined; },
+                    getCallSignatures() { return []; },
+                    getConstructSignatures() { return []; },
+                    getProperties() { return []; },
+                    getProperty() { return undefined; },
+                    getApparentProperties() { return []; },
+                    getStringIndexType() { return undefined; },
+                    getNumberIndexType() { return undefined; },
+                    getBaseTypes() { return []; },
+                    isUnion() { return false; },
+                    isIntersection() { return false; },
+                    isLiteral() { return false; },
+                    isStringLiteral() { return false; },
+                    isNumberLiteral() { return false; },
+                    isTypeParameter() { return false; },
+                    isClassOrInterface() { return false; },
+                    isClass() { return false; },
+                };
+            };
+            const sf = location?.getSourceFile?.();
+            if (sf) {
+                let start: number | undefined;
+                let end: number | undefined;
+                try {
+                    start = location.getStart(sf);
+                    end = location.getEnd(sf);
+                } catch { /* fall through */ }
+                if (typeof start === "number") {
+                    try {
+                        const tsgoNode = findTsgoNodeAtPosition(sf.fileName, start, location.kind, end);
+                        if (tsgoNode) {
+                            const t = rpc().getTypeOfSymbolAtLocation(symbol, tsgoNode);
+                            if (t) { fixupType(t); return t; }
+                        }
+                    } catch { /* fall through to errorType */ }
+                }
             }
             // Auto-import completion entries may query export symbols at virtual-doc
             // locations where the host AST node has no tsgo mirror yet — fall back
             // to the location-independent type.
             if (typeof project.checker.getTypeOfSymbol === "function") {
-                const t = rpc().getTypeOfSymbol(symbol);
-                if (t) fixupType(t);
-                return t;
+                try {
+                    const t = rpc().getTypeOfSymbol(symbol);
+                    if (t) { fixupType(t); return t; }
+                } catch { /* fall through to errorType */ }
             }
-            return undefined;
+            return errorOrAny();
         },
         getContextualType(node: any): any {
             ensureProject();
@@ -5630,6 +6065,27 @@ export function createTsgoChecker(program: any): any {
             const tsgoNode = findTsgoNodeAtPosition(sf.fileName, start, node.kind, end);
             if (!tsgoNode || tsgoNode.kind !== node.kind) return false;
             return !!project.checker.isImplementationOfOverload(tsgoNode);
+        },
+        // SymbolDisplay / references: enum member constant value (e.g.
+        // "(enum member) Color.Red = 1"). Host AST nodes must be mapped to
+        // tsgo RemoteNode — bare getConstantValue RPC dies in getNodeId.
+        getConstantValue(node: any): string | number | undefined {
+            if (!node) return undefined;
+            const sf = node.getSourceFile?.();
+            if (!sf?.fileName) return undefined;
+            let start: number | undefined;
+            let end: number | undefined;
+            try {
+                start = node.getStart(sf);
+                end = node.getEnd(sf);
+            } catch { return undefined; }
+            if (typeof start !== "number") return undefined;
+            ensureProject();
+            const tsgoNode = findTsgoNodeAtPosition(sf.fileName, start, node.kind, end);
+            if (!tsgoNode || tsgoNode.kind !== node.kind) return undefined;
+            try {
+                return project.checker.getConstantValue(tsgoNode);
+            } catch { return undefined; }
         },
         // SymbolDisplay resolves a type parameter's owning signature from its
         // declaration ("(type parameter) T in pick<...>"). Declarations reaching
@@ -6037,9 +6493,29 @@ export function createTsgoChecker(program: any): any {
         },
         getReturnTypeOfSignature(signature: any): any {
             ensureProject();
-            const t = project.checker.getReturnTypeOfSignature(signature);
-            if (t) fixupType(t);
-            return t;
+            if (!signature) return undefined;
+            try {
+                const t = project.checker.getReturnTypeOfSignature(signature);
+                if (t) {
+                    fixupType(t);
+                    // Some tsgo return types omit `.symbol`; definitionFromType
+                    // and tryGetReturnTypeOfFunction read it. Ensure the property
+                    // exists (value may still be undefined).
+                    if (!("symbol" in t)) {
+                        try {
+                            const sym = typeof t.getSymbol === "function" ? t.getSymbol() : undefined;
+                            Object.defineProperty(t, "symbol", {
+                                configurable: true,
+                                enumerable: true,
+                                writable: true,
+                                value: sym,
+                            });
+                        } catch { /* best-effort */ }
+                    }
+                    return t;
+                }
+            } catch { /* fall through */ }
+            return undefined;
         },
         getBaseConstraintOfType(type: any): any {
             ensureProject();
@@ -7720,7 +8196,7 @@ const _tnbCheckerCoverage = {
     isUnknownSymbol: "adapter",
     getMergedSymbol: "adapter",
     symbolIsValue: "adapter",
-    getConstantValue: "tsgo",
+    getConstantValue: "adapter",
     isValidPropertyAccess: "adapter",
     isValidPropertyAccessForCompletions: "adapter",
     getAliasedSymbol: "adapter",
