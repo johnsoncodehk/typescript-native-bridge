@@ -310,10 +310,10 @@ index 285aa0e0f..8a62dc9a4 100644
  
      get text(): string {
 diff --git a/_packages/native-preview/src/api/proto.ts b/_packages/native-preview/src/api/proto.ts
-index 656f7cc4e..0680424bc 100644
+index 656f7cc4e..5d8923230 100644
 --- a/_packages/native-preview/src/api/proto.ts
 +++ b/_packages/native-preview/src/api/proto.ts
-@@ -183,6 +183,34 @@ export interface SymbolResponse {
+@@ -183,6 +183,35 @@ export interface SymbolResponse {
      exportSymbol?: number;
  }
  
@@ -328,6 +328,7 @@ index 656f7cc4e..0680424bc 100644
 +    name: string;
 +    flags: number;
 +    checkFlags: number;
++    parent?: number;
 +}
 +
 +export interface GetResolvedReferencesInFileResponse {
@@ -348,7 +349,7 @@ index 656f7cc4e..0680424bc 100644
  export interface TypeResponse {
      id: number;
      flags: number;
-@@ -212,6 +240,35 @@ export interface TypeResponse {
+@@ -212,6 +241,35 @@ export interface TypeResponse {
      symbol?: number;
  }
  

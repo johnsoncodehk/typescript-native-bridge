@@ -305,6 +305,13 @@ function loadBridgeDeps(): void {
             ? `${process.env.GODEBUG},asyncpreemptoff=1`
             : "asyncpreemptoff=1";
     }
+    // noembed: point tsgo at TNB lib/ before dlopen. Go may snapshot environ at
+    // runtime init, so noembed.go reads TNB_LIB_PATH via libc getenv (live), which
+    // sees this setenv as long as it happens before koffi.load below.
+    // External non-empty override wins — do not clobber a pre-set path.
+    if (!process.env.TNB_LIB_PATH) {
+        process.env.TNB_LIB_PATH = path.join(packageRoot, "lib");
+    }
     const lib = _koffi.load(resolvedBridge);
     _bridgeFns = {
         BridgeNewSession: lib.func("char *BridgeNewSession(char *cwd)"),
@@ -452,7 +459,8 @@ class MiniSourceFileCache {
     private stableByPath = new Map<string, { key: any; hash: any; file: any }>();
 
     private static isStableDeclarationPath(p: string): boolean {
-        return p.endsWith(".d.ts") && (p.includes("/node_modules/") || p.includes("bundled://") || isBundledLibPath(p));
+        // noembed: lib paths are real packageRoot/lib/*.d.ts (no bundled://).
+        return p.endsWith(".d.ts") && (p.includes("/node_modules/") || p.includes("bundled://") || isBundledLibPath(p) || isHostLibFile(p));
     }
 
     getRetained(p: string, snapshotId: any, projectId: any): any {

@@ -16,7 +16,7 @@ fs.mkdirSync(nativeDir, { recursive: true });
 
 const r = spawnSync(
 	"go",
-	["build", "-buildmode=c-shared", "-o", outPath, "bridge.go"],
+	["build", "-tags=noembed", "-buildmode=c-shared", "-o", outPath, "bridge.go"],
 	{ cwd: bridgeDir, stdio: "inherit" },
 );
 if (r.status !== 0) process.exit(r.status ?? 1);

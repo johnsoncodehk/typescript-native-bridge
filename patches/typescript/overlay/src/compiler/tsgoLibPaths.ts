@@ -1,5 +1,5 @@
-// Map tsgo bundled lib paths (bundled:///libs/lib.es5.d.ts) to the fork's
-// on-disk lib/ tree so tsserver ScriptInfo keys match real files.
+// Host↔tsgo lib path helpers. Under noembed, tsgo reads packageRoot/lib from disk
+// (TNB_LIB_PATH); toTsgoFileName is identity. bundled:/// helpers remain defensive.
 
 /* eslint-disable @typescript-eslint/no-require-imports */
 
@@ -51,8 +51,9 @@ export function resolveHostFileName(fileName: string, host?: { getCurrentDirecto
     return path.normalize(path.resolve(cwd, normalized));
 }
 
+/** Identity under noembed — tsgo reads packageRoot/lib (or TNB_LIB_PATH) from disk. */
 export function toTsgoFileName(fileName: string): string {
-    return hostPathToBundledLibPath(fileName) ?? fileName;
+    return fileName;
 }
 
 export function isHostLibFile(fileName: string): boolean {
