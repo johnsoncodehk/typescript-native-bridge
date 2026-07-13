@@ -2332,6 +2332,24 @@ function installRemoteNodeTraversalHooks(): void {
                 get(this: any) { return this.defaultType; },
             });
         }
+        // Boundary invariant: file names visible to JS consumers are host
+        // paths. RemoteSourceFile.fileName reads the wire string, which is
+        // bundled:///libs/lib.*.d.ts for tsgo's embedded libs — leaking that
+        // into e.g. DefinitionInfo.fileName crashes tsserver span mapping
+        // (goto definition on lib members). NodeHandle.getSourceFile() already
+        // resolves to host names; align the decoded-node path. RPC identity is
+        // unaffected: node ids embed sourceFile.path (raw wire path), and
+        // tsgo-facing lookups renormalize via toTsgoFileName.
+        const RemoteSourceFile = nodeModule.RemoteSourceFile;
+        const fileNameDesc = RemoteSourceFile?.prototype
+            && Object.getOwnPropertyDescriptor(RemoteSourceFile.prototype, "fileName");
+        if (fileNameDesc?.get) {
+            const rawGet = fileNameDesc.get;
+            Object.defineProperty(RemoteSourceFile.prototype, "fileName", {
+                configurable: true,
+                get(this: any) { return toHostFileName(rawGet.call(this)); },
+            });
+        }
         proc.remoteNodeTraversalPatched = true;
     } catch { /* native-preview not built yet */ }
 }
