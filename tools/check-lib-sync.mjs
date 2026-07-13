@@ -83,10 +83,46 @@ if (fs.existsSync(libTs) && fs.existsSync(libTsc)) {
 	}
 }
 
+// 4. bundled libs ↔ lib/*.d.ts byte sync (intersection only; asymmetry is informational)
+const bundledDir = path.join(root, "typescript-go", "internal", "bundled", "libs");
+const libDir = path.join(root, "lib");
+if (!fs.existsSync(bundledDir)) {
+	fail(`missing bundled libs: ${path.relative(root, bundledDir)}`);
+} else if (!fs.existsSync(libDir)) {
+	fail(`missing lib/: ${path.relative(root, libDir)} — run npm run build:lib`);
+} else {
+	const bundledNames = new Set(
+		fs.readdirSync(bundledDir).filter((n) => n.startsWith("lib") && n.endsWith(".d.ts")),
+	);
+	const libNames = new Set(
+		fs.readdirSync(libDir).filter((n) => n.startsWith("lib") && n.endsWith(".d.ts")),
+	);
+	const onlyBundled = [...bundledNames].filter((n) => !libNames.has(n)).sort();
+	const onlyLib = [...libNames].filter((n) => !bundledNames.has(n)).sort();
+	const intersection = [...bundledNames].filter((n) => libNames.has(n)).sort();
+	const drifted = [];
+	for (const name of intersection) {
+		const a = fs.readFileSync(path.join(bundledDir, name));
+		const b = fs.readFileSync(path.join(libDir, name));
+		if (!a.equals(b)) drifted.push(name);
+	}
+	if (drifted.length) {
+		fail(
+			`lib/*.d.ts drifted from typescript-go bundled libs (${drifted.length}): ${drifted.join(", ")} — run npm run build:lib`,
+		);
+	} else if (onlyBundled.length || onlyLib.length) {
+		console.log(
+			`check:lib-sync asymmetry (ok): bundled-only=[${onlyBundled.join(", ")}] lib-only=[${onlyLib.join(", ")}]`,
+		);
+	} else {
+		console.log(`check:lib-sync bundled libs: intersection=${intersection.length} byte-identical, asymmetry=[]`);
+	}
+}
+
 if (errors.length) {
 	console.error("check:lib-sync failed:\n");
 	for (const e of errors) console.error(`  • ${e}`);
 	process.exit(1);
 }
 
-console.log("check:lib-sync ok (overlay, submodule, lib/typescript.js, lib/_tsc.js)");
+console.log("check:lib-sync ok (overlay, submodule, lib/typescript.js, lib/_tsc.js, bundled libs)");
