@@ -17,7 +17,7 @@
 import * as ts from "./_namespaces/ts.js";
 import { bindSourceFile } from "./binder.js";
 import { createSourceFile } from "./parser.js";
-import { SyntaxKind, SymbolFlags, NodeFlags, JSDocParsingMode, ModuleKind, StructureIsReused, EmitHint, EmitFlags, type Path, type Program, type TypeChecker } from "./types.js";
+import { SyntaxKind, SymbolFlags, SymbolFormatFlags, NodeFlags, JSDocParsingMode, ModuleKind, StructureIsReused, EmitHint, EmitFlags, type Path, type Program, type TypeChecker } from "./types.js";
 import { getBuildInfoText, getTsBuildInfoEmitOutputFilePath, createPrinterWithRemoveComments } from "./emitter.js";
 import { usingSingleLineStringWriter } from "./utilities.js";
 import { getParseTreeNode, isFunctionLike } from "./utilitiesPublic.js";
@@ -1376,6 +1376,51 @@ function symbolParentOf(symbol: any): any {
         try { return symbol.getParent(); } catch { return undefined; }
     }
     return undefined;
+}
+/**
+ * Stock symbolToString/writeSymbol include the accessible parent chain only
+ * when an enclosingDeclaration is provided (node builder: chain is built iff
+ * `context.enclosingDeclaration || UseFullyQualifiedType`) and
+ * DoNotIncludeSymbolChain is not set. Quickinfo passes the source file →
+ * "Indexed.prop"; renameInfo passes nothing → bare "Foo". Skip SourceFile /
+ * module containers — stock's node builder omits those for property display.
+ * Enum members stay bare ("Red"): fixAddMissingMember builds
+ * `createPropertyAccessExpression(enumExpr, symbolToString(member))` and a
+ * dotted string ("Color.Red") becomes an illegal Identifier that crashes
+ * formatting ("Token end is child end").
+ */
+function symbolToStringWithChain(symbol: any, enclosing?: any, flags?: number): string {
+    const name = symbolDisplayNameOf(symbol);
+    if (!name) return "";
+    if (!enclosing) {
+        return name;
+    }
+    if (flags != null && (flags & SymbolFormatFlags.DoNotIncludeSymbolChain)) {
+        return name;
+    }
+    const propertyLike = SymbolFlags.Property | SymbolFlags.Method | SymbolFlags.Accessor
+        | SymbolFlags.GetAccessor | SymbolFlags.SetAccessor;
+    if (!((symbol.flags ?? 0) & propertyLike)) {
+        return name;
+    }
+    const parent = symbolParentOf(symbol);
+    if (!parent) return name;
+    // Module/source-file parents: stock omits them for property FQN display.
+    if (parent.flags & (SymbolFlags.Module | SymbolFlags.ValueModule | SymbolFlags.NamespaceModule | SymbolFlags.Enum | SymbolFlags.ConstEnum | SymbolFlags.RegularEnum)) {
+        return name;
+    }
+    const parentName = symbolDisplayNameOf(parent);
+    if (!parentName || parentName.startsWith('"') || parentName.startsWith("'")) {
+        return name;
+    }
+    // Internal container names (__object, __type, ...) are excluded from the
+    // stock symbol chain (rename displayName is bare "aaaBbb"); only
+    // getFullyQualifiedName includes them. Same "__"-not-"___" shape test as
+    // isReservedExportMemberName.
+    if (isReservedExportMemberName(parentName)) {
+        return name;
+    }
+    return `${parentName}.${name}`;
 }
 function isReservedExportMemberName(name: string): boolean {
     return name.length >= 2 && name.charCodeAt(0) === 95 /* _ */ && name.charCodeAt(1) === 95 && name.charCodeAt(2) !== 95;
@@ -5263,13 +5308,15 @@ export function createTsgoChecker(program: any): any {
             // (search.includes → contains). On Volar host-bound virtual files the
             // binder SymbolObject is the canonical identity; tsgo bridge Symbol
             // instances for the same site break getRelatedSymbol.
+            // Always run refineNavSymbol (remap + canonicalizeSymbolToHostIdentity):
+            // returning raw rpc-canonical locals while getRootSymbols() refinesthem
+            // to host identity makes search.includes(root) fail (destruct refs /
+            // extract free-var).
             if (_hasHostBoundFiles && sf.__tnbHostBound && !isCrossFileImportExportName(node)) {
                 const hostSym = getHostBoundSymbolAtLocation(node);
                 if (hostSym) {
                     const rpcSym = resolveRpcSymbol(hostSym);
-                    const refined = rpcSym
-                        ? ensureSymbolContextualDocCompat(remapSymbolDeclarationsToHost(rpcSym, getHostBoundSf))
-                        : refineNavSymbol(hostSym);
+                    const refined = refineNavSymbol(rpcSym ?? hostSym);
                     storeSymCache(cacheName, start, end, refined);
                     recordHit();
                     if (_traceSymEnabled) {
@@ -5786,9 +5833,9 @@ export function createTsgoChecker(program: any): any {
             if (!predicate) return "";
             return usingSingleLineStringWriter(writer => checkerProxyRef.writeTypePredicate(predicate, enclosingDeclaration, flags, writer));
         },
-        writeSymbol(symbol: any, _enclosing?: any, _meaning?: number, _flags?: number, writer?: any): void {
+        writeSymbol(symbol: any, enclosing?: any, _meaning?: number, flags?: number, writer?: any): void {
             if (!symbol || !writer) return;
-            const text = symbolDisplayNameOf(symbol);
+            const text = symbolToStringWithChain(symbol, enclosing, flags);
             if (text) writer.writeSymbol?.(text, symbol);
         },
         writeSignature(signature: any, _enclosing?: any, flags?: number, _kind?: any, writer?: any): void {
@@ -5802,8 +5849,8 @@ export function createTsgoChecker(program: any): any {
         // definition names) reduce to the unescaped symbol name qualified by
         // the parent chain — both symbol kinds (host SymbolObject and bridge
         // Symbol) carry name/parent, so this is served uniformly in JS.
-        symbolToString(symbol: any): string {
-            return symbolDisplayNameOf(symbol);
+        symbolToString(symbol: any, enclosing?: any, _meaning?: number, flags?: number): string {
+            return symbolToStringWithChain(symbol, enclosing, flags);
         },
         getFullyQualifiedName(symbol: any): string {
             let name = symbolDisplayNameOf(symbol);
@@ -7032,9 +7079,10 @@ export function createTsgoChecker(program: any): any {
                     }
                     if (sym) {
                         const rpcSym = resolveRpcSymbol(sym);
-                        const refined = rpcSym
-                            ? ensureSymbolContextualDocCompat(remapSymbolDeclarationsToHost(rpcSym, getHostBoundSf))
-                            : refineNavSymbol(sym);
+                        // Same as getSymbolAtLocation host-first: must canonicalize
+                        // to host binder identity so findAllReferences search.includes
+                        // matches getRootSymbols/refineNavSymbol results.
+                        const refined = refineNavSymbol(rpcSym ?? sym);
                         if (_traceSymEnabled) {
                             traceSym(
                                 `getShorthandAssignmentValueSymbol path=host-fast source=${rpcSym ? "rpc-canonical" : "host-only"} `
@@ -7426,26 +7474,61 @@ export function createTsgoChecker(program: any): any {
         getEmitResolver: () => ({ getExternalModuleIndicator: () => false }),
         resolveName(name: string, location: any, meaning: number, excludeGlobals?: boolean): any {
             ensureProject();
-            let tsgoLocation: any = location;
+            let tsgoLocation: any = undefined;
             if (location && typeof location.getStart === "function") {
-                const sf = location.getSourceFile?.();
+                const sf = location.kind === SyntaxKind.SourceFile
+                    ? location
+                    : location.getSourceFile?.();
                 if (sf?.fileName) {
-                    const tsgoNode = findTsgoNodeAtPosition(
-                        sf.fileName,
-                        location.getStart(sf),
-                        location.kind,
-                        location.getEnd(sf),
-                    );
-                    if (tsgoNode) tsgoLocation = tsgoNode;
+                    // SourceFile scopes must map to the tsgo SourceFile root — a
+                    // positional deepest-node hit at 0 can land inside the first
+                    // statement and make resolveName see nested locals (extract
+                    // free-var falsely treats parameters as in global scope).
+                    if (location.kind === SyntaxKind.SourceFile) {
+                        tsgoLocation = getTsgoSourceFile(sf.fileName) ?? undefined;
+                    }
+                    else {
+                        tsgoLocation = findTsgoNodeAtPosition(
+                            sf.fileName,
+                            location.getStart(sf),
+                            location.kind,
+                            location.getEnd(sf),
+                        );
+                    }
                 }
             }
-            try {
-                const sym = project.checker.resolveName(name, meaning >>> 0, tsgoLocation, excludeGlobals);
-                if (sym) return refineNavSymbol(sym);
-            } catch {
-                // fall through to host-bound AST
+            if (tsgoLocation) {
+                try {
+                    const sym = project.checker.resolveName(name, meaning >>> 0, tsgoLocation, excludeGlobals);
+                    if (sym) {
+                        const refined = refineNavSymbol(sym);
+                        if (_traceSymEnabled) {
+                            traceSym(
+                                `resolveName name=${JSON.stringify(name)} meaning=${meaning >>> 0} `
+                                + `locKind=${traceSymKind(location?.kind)} tsgoKind=${traceSymKind(tsgoLocation?.kind)} `
+                                + `→ ${traceSymSymbol(refined)}`,
+                            );
+                        }
+                        return refined;
+                    }
+                } catch {
+                    // fall through to host-bound AST
+                }
             }
-            return refineNavSymbol(resolveNameOnHostBoundAst(name, location) ?? undefined);
+            // Host lexical resolve (file/block scopes) — mirrors stock when the
+            // Go location map is missing or returns nothing visible.
+            const hostSym = location?.getSourceFile?.()?.__tnbHostBound
+                ? resolveEntityNameOnHostBoundAst(String(name), location, meaning >>> 0)
+                : resolveNameOnHostBoundAst(name, location);
+            const hostResolved = refineNavSymbol(hostSym ?? undefined);
+            if (_traceSymEnabled) {
+                traceSym(
+                    `resolveName name=${JSON.stringify(name)} meaning=${meaning >>> 0} `
+                    + `locKind=${traceSymKind(location?.kind)} tsgoKind=${traceSymKind(tsgoLocation?.kind)} `
+                    + `→ ${traceSymSymbol(hostResolved)} (host-fallback)`,
+                );
+            }
+            return hostResolved;
         },
 
         // ── Counts (for getProgramDiagnostics etc.) ──
