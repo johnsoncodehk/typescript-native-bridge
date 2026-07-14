@@ -1394,6 +1394,16 @@ function applySingleLineEmitFlagsToTypeSubtree(node: any): void {
  * multiline callers clear SingleLine on TypeLiterals; others keep SingleLine.
  */
 const TypeFormatFlagsMultilineObjectLiterals = 1 << 10;
+/**
+ * tsgo TypeFormatFlags.WriteCallStyleSignature (1<<27). Stock JS picks
+ * CallSignature whenever signatureToString's `kind` arg is not Construct
+ * (services always pass kind=undefined via signatureToDisplayParts). tsgo
+ * instead keys off SignatureFlags.Construct unless this flag is set — without
+ * it, construct sigs print as `new <T>(...)` while stock prints `<T>(...)`.
+ */
+const TypeFormatFlagsWriteCallStyleSignature = 1 << 27;
+/** SignatureKind.Construct — only value that should keep construct print style. */
+const SignatureKindConstruct = 1;
 function clearTypeLiteralSingleLineEmitFlags(node: any): void {
     if (!node) return;
     if (node.kind === SyntaxKind.TypeLiteral && node.emitNode) {
@@ -6399,6 +6409,15 @@ export function createTsgoChecker(program: any): any {
             if (kw.action === "undefined") return undefined;
             if (kw.action === "symbol") return finish(refineNavSymbol(kw.symbol));
             if (kw.action === "redirect") node = kw.node;
+            // Stock getSymbolAtLocation switch: NamedTupleMember falls through to
+            // default → undefined. Positional RPC on the member span (`value: T`)
+            // latches onto the element-type identifier (type param T); SymbolDisplay
+            // then sets kind="type parameter" with empty displayParts (Type meaning
+            // absent at the NamedTupleMember location). QI should use the type
+            // fallback path → displayString "T" like stock.
+            if (node.kind === SyntaxKind.NamedTupleMember) {
+                return undefined;
+            }
             const start = typeof node.pos === "number" ? node.pos : node.getStart(sf);
             const end = typeof node.end === "number" ? node.end : node.getEnd(sf);
             // traceSym arguments are built eagerly — every call site on this
@@ -6903,9 +6922,13 @@ export function createTsgoChecker(program: any): any {
             applyWriteTypeEmitFlagsForFormat(typeNode, flags);
             return hostifyDecodedTypeNode(typeNode);
         },
-        typeToString(type: any, _enclosing?: any, flags?: number): string {
+        // Stock typeToString → NodeBuilder uses enclosingDeclaration for
+        // alias/`typeof`/indexed-access reuse (UseAliasDefinedOutsideCurrentScope
+        // alone is not enough for annotation reuse). Map host → tsgo mirror.
+        typeToString(type: any, enclosing?: any, flags?: number): string {
             ensureProject();
-            return project.checker.typeToString(type, undefined, flags);
+            const tsgoLocation = mapHostEnclosingToTsgo(enclosing);
+            return project.checker.typeToString(type, tsgoLocation, flags);
         },
         // SymbolDisplay formats type-parameter-typed variables via the checker
         // nodebuilder ("const row: Row extends BaseRow"). The tsgo RPC decodes
@@ -6914,18 +6937,7 @@ export function createTsgoChecker(program: any): any {
         typeParameterToDeclaration(parameter: any, enclosingDeclaration?: any, flags?: number): any {
             if (!parameter) return undefined;
             ensureProject();
-            let tsgoLocation: any;
-            if (enclosingDeclaration && typeof enclosingDeclaration.getStart === "function") {
-                const sf = enclosingDeclaration.getSourceFile?.();
-                if (sf?.fileName) {
-                    tsgoLocation = findTsgoNodeAtPosition(
-                        sf.fileName,
-                        enclosingDeclaration.getStart(sf),
-                        enclosingDeclaration.kind,
-                        enclosingDeclaration.getEnd(sf),
-                    );
-                }
-            }
+            const tsgoLocation = mapHostEnclosingToTsgo(enclosingDeclaration);
             const node = project.checker.typeParameterToDeclaration(parameter, tsgoLocation, flags);
             if (node?.name && parameter?.symbol) {
                 node.name.symbol = parameter.symbol;
@@ -6945,18 +6957,7 @@ export function createTsgoChecker(program: any): any {
             ensureProject();
             const rpcSym = resolveRpcSymbol(symbol);
             if (!rpcSym) return undefined;
-            let tsgoLocation: any;
-            if (enclosingDeclaration && typeof enclosingDeclaration.getStart === "function") {
-                const sf = enclosingDeclaration.getSourceFile?.();
-                if (sf?.fileName) {
-                    tsgoLocation = findTsgoNodeAtPosition(
-                        sf.fileName,
-                        enclosingDeclaration.getStart(sf),
-                        enclosingDeclaration.kind,
-                        enclosingDeclaration.getEnd(sf),
-                    );
-                }
-            }
+            const tsgoLocation = mapHostEnclosingToTsgo(enclosingDeclaration);
             const nodes = project.checker.symbolToTypeParameterDeclarations(rpcSym, tsgoLocation, flags) ?? [];
             const list: any = nodes.slice();
             list.pos = -1;
@@ -7012,18 +7013,7 @@ export function createTsgoChecker(program: any): any {
         writeType(type: any, enclosingDeclaration?: any, flags?: number, writer?: any): void {
             if (!type || !writer) return;
             ensureProject();
-            let tsgoLocation: any;
-            if (enclosingDeclaration && typeof enclosingDeclaration.getStart === "function") {
-                const sf = enclosingDeclaration.getSourceFile?.();
-                if (sf?.fileName) {
-                    tsgoLocation = findTsgoNodeAtPosition(
-                        sf.fileName,
-                        enclosingDeclaration.getStart(sf),
-                        enclosingDeclaration.kind,
-                        enclosingDeclaration.getEnd(sf),
-                    );
-                }
-            }
+            const tsgoLocation = mapHostEnclosingToTsgo(enclosingDeclaration);
             const typeNode = project.checker.typeToTypeNode(type, tsgoLocation, flags);
             if (typeNode) {
                 attachTypeParameterSymbolsFromType(type, typeNode);
@@ -7039,18 +7029,7 @@ export function createTsgoChecker(program: any): any {
         writeTypePredicate(predicate: any, enclosingDeclaration?: any, flags?: number, writer?: any): void {
             if (!predicate || !writer) return;
             ensureProject();
-            let tsgoLocation: any;
-            if (enclosingDeclaration && typeof enclosingDeclaration.getStart === "function") {
-                const sf = enclosingDeclaration.getSourceFile?.();
-                if (sf?.fileName) {
-                    tsgoLocation = findTsgoNodeAtPosition(
-                        sf.fileName,
-                        enclosingDeclaration.getStart(sf),
-                        enclosingDeclaration.kind,
-                        enclosingDeclaration.getEnd(sf),
-                    );
-                }
-            }
+            const tsgoLocation = mapHostEnclosingToTsgo(enclosingDeclaration);
             const typeNode = predicate.type
                 ? project.checker.typeToTypeNode(predicate.type, tsgoLocation, flags)
                 : undefined;
@@ -7067,10 +7046,12 @@ export function createTsgoChecker(program: any): any {
             const text = symbolToStringWithChain(symbol, enclosing, flags);
             if (text) writer.writeSymbol?.(text, symbol);
         },
-        writeSignature(signature: any, _enclosing?: any, flags?: number, _kind?: any, writer?: any): void {
+        // Stock writeSignature → signatureToString(enclosing, flags, kind).
+        // Map enclosing; pass kind so call-style is preserved (see signatureToString).
+        writeSignature(signature: any, enclosing?: any, flags?: number, kind?: any, writer?: any): void {
             if (!signature || !writer) return;
             ensureProject();
-            const text = checkerProxyRef.signatureToString(signature, undefined, flags) ?? "";
+            const text = checkerProxyRef.signatureToString(signature, enclosing, flags, kind) ?? "";
             if (text) writer.write?.(text);
         },
         // tsgo has no symbolToString/getFullyQualifiedName RPC. Stock semantics
@@ -7123,12 +7104,18 @@ export function createTsgoChecker(program: any): any {
                 return [];
             }
         },
-        signatureToString(signature: any, _enclosingDeclaration?: any, flags?: number): string {
+        signatureToString(signature: any, enclosingDeclaration?: any, flags?: number, kind?: number): string {
             ensureProject();
             if (!signature || typeof signature.id !== "number") return "";
-            // The enclosing declaration is a host node with no tsgo handle; tsgo's
-            // printer resolves scope from the signature declaration itself.
-            return project.checker.signatureToString(signature, undefined, flags) ?? "";
+            const tsgoLocation = mapHostEnclosingToTsgo(enclosingDeclaration);
+            // Stock: ConstructSignature only when kind===SignatureKind.Construct.
+            // tsgo: Construct when signature.flags&Construct unless WriteCallStyleSignature.
+            // Services signatureToDisplayParts always passes kind=undefined → call style.
+            let effectiveFlags = flags ?? 0;
+            if (kind !== SignatureKindConstruct) {
+                effectiveFlags |= TypeFormatFlagsWriteCallStyleSignature;
+            }
+            return project.checker.signatureToString(signature, tsgoLocation, effectiveFlags) ?? "";
         },
         getPropertiesOfType(type: any): readonly any[] {
             ensureProject();

@@ -737,24 +737,32 @@ for (const key of compareKeys) {
 
 log(`pre-classify SUMMARY match=${match} diff=${diff} docdiff=${docdiff} diagmsg=${diagmsg} skip=${skip}`);
 
-for (let i = 0; i < diffs.length; i++) {
-	const d = diffs[i];
-	log(`replay ${i + 1}/${diffs.length} ${d.key}`);
-	try {
-		const tnbR = await replaySingle('TNB', tnbPath, tnbEnv, d.op);
-		const stockR = await replaySingle('STOCK', stockPath, {}, d.op);
-		const isDiag = d.key.startsWith('diag:');
-		const replayCmp = isDiag ? compareDiag(tnbR, stockR) : compareNav(d.op.cmd, tnbR, stockR);
-		d.seqClass = replayCmp.kind === 'MATCH' ? 'SEQ-ONLY' : 'ALWAYS';
-		d.replay = {
-			tnb: tnbR?.rawSnippet ?? truncate(tnbR),
-			stock: stockR?.rawSnippet ?? truncate(stockR),
-			replayKind: replayCmp.kind,
-			replayDetail: replayCmp.detail,
-		};
-	} catch (err) {
-		d.seqClass = 'ALWAYS';
-		d.replay = { error: err?.message ?? String(err) };
+// SIM_NAV_SKIP_CLASSIFY=1: stop after pre-classify SUMMARY (FACTS: classify
+// replay has stalled/SDK-disconnected three consecutive rounds). Diffs are
+// written without seqClass/replay.
+const skipClassify = process.env.SIM_NAV_SKIP_CLASSIFY === '1' || process.env.SIM_NAV_SKIP_CLASSIFY === 'true';
+if (skipClassify) {
+	log(`SIM_NAV_SKIP_CLASSIFY=1 — skipping classify replay (${diffs.length} diffs unclassified)`);
+} else {
+	for (let i = 0; i < diffs.length; i++) {
+		const d = diffs[i];
+		log(`replay ${i + 1}/${diffs.length} ${d.key}`);
+		try {
+			const tnbR = await replaySingle('TNB', tnbPath, tnbEnv, d.op);
+			const stockR = await replaySingle('STOCK', stockPath, {}, d.op);
+			const isDiag = d.key.startsWith('diag:');
+			const replayCmp = isDiag ? compareDiag(tnbR, stockR) : compareNav(d.op.cmd, tnbR, stockR);
+			d.seqClass = replayCmp.kind === 'MATCH' ? 'SEQ-ONLY' : 'ALWAYS';
+			d.replay = {
+				tnb: tnbR?.rawSnippet ?? truncate(tnbR),
+				stock: stockR?.rawSnippet ?? truncate(stockR),
+				replayKind: replayCmp.kind,
+				replayDetail: replayCmp.detail,
+			};
+		} catch (err) {
+			d.seqClass = 'ALWAYS';
+			d.replay = { error: err?.message ?? String(err) };
+		}
 	}
 }
 
