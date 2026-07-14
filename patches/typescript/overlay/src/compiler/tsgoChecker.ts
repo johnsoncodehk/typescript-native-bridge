@@ -17,7 +17,7 @@
 import * as ts from "./_namespaces/ts.js";
 import { bindSourceFile } from "./binder.js";
 import { createSourceFile } from "./parser.js";
-import { SyntaxKind, SymbolFlags, SymbolFormatFlags, NodeFlags, JSDocParsingMode, ModuleKind, StructureIsReused, EmitHint, EmitFlags, type Path, type Program, type TypeChecker } from "./types.js";
+import { SyntaxKind, SymbolFlags, SymbolFormatFlags, NodeFlags, ModifierFlags, JSDocParsingMode, ModuleKind, StructureIsReused, EmitHint, EmitFlags, type Path, type Program, type TypeChecker } from "./types.js";
 import { getBuildInfoText, getTsBuildInfoEmitOutputFilePath, createPrinterWithRemoveComments } from "./emitter.js";
 import { usingSingleLineStringWriter } from "./utilities.js";
 import { getParseTreeNode, isFunctionLike } from "./utilitiesPublic.js";
@@ -602,6 +602,32 @@ let _languageServiceHost: any | undefined;
  * entirely — it would just iterate declarations and bail at getHostSf.
  */
 let _hasHostBoundFiles = false;
+/** Light-stub vs full SourceFile materialization counters (Soft-P′ proof). */
+let _tnbLightStubCreations = 0;
+let _tnbFullSfMaterializations = 0;
+
+/** @internal Dump / reset Soft-P′ materialization counters (env-gated readers). */
+export function tnbGetSourceFileMaterializeStats(reset = false): { lightStub: number; full: number } {
+    const out = { lightStub: _tnbLightStubCreations, full: _tnbFullSfMaterializations };
+    if (reset) {
+        _tnbLightStubCreations = 0;
+        _tnbFullSfMaterializations = 0;
+    }
+    return out;
+}
+
+/** tsserver fork pipes stderr — mirror Soft-P′ stats to a file the parent can read. */
+function tnbLogSfMaterialize(line: string): void {
+    if (process.env.TNB_SF_MATERIALIZE_STATS !== "1") return;
+    // eslint-disable-next-line no-console
+    console.error(line);
+    try {
+        const file = process.env.TNB_SF_MATERIALIZE_FILE || "/tmp/tnb-sf-materialize.jsonl";
+        const fs = require("fs") as typeof import("fs");
+        fs.appendFileSync(file, line + "\n");
+    }
+    catch { /* best-effort */ }
+}
 
 /** @internal */
 export function tnbSetLanguageServiceHost(host: any): void {
@@ -958,13 +984,57 @@ function sourceFileFromHostSnapshot(host: any, hostFileName: string, requestFile
 }
 
 /** Ensure host SourceFiles expose stable path metadata for LS + module path completion. */
+/**
+ * Soft-P′: stock `Program.collectExternalModuleReferences` fills `SourceFile.imports`.
+ * Host-bound LS files never pass through that path. Assigning `imports: []` here poisoned
+ * importTracker.forEachImport — when `imports !== undefined` it iterates the array and
+ * NEVER falls through to statement scanning, so closed/open importer files look import-less
+ * and FAR never finds cross-file import sites even when getExportInfo succeeds.
+ */
+function ensureHostSourceFileModuleRefs(sf: any): void {
+    if (!sf) return;
+    // Real imports already collected — keep. Empty `[]` may be Soft-P′ poison from an
+    // earlier attachHostSourceFileMetadata; rebuild from statements.
+    if (sf.imports && sf.imports.length > 0) return;
+    const imports: any[] = [];
+    for (const statement of sf.statements ?? []) {
+        const kind = statement?.kind;
+        if (kind === SyntaxKind.ImportDeclaration || kind === SyntaxKind.ExportDeclaration) {
+            const spec = statement.moduleSpecifier;
+            if (
+                spec
+                && typeof spec.text === "string"
+                && spec.text.length
+                && (spec.kind === SyntaxKind.StringLiteral || spec.kind === SyntaxKind.NoSubstitutionTemplateLiteral)
+            ) {
+                imports.push(spec);
+            }
+        }
+        else if (kind === SyntaxKind.ImportEqualsDeclaration) {
+            const ref = statement.moduleReference;
+            if (ref?.kind === SyntaxKind.ExternalModuleReference) {
+                const expr = ref.expression;
+                if (
+                    expr
+                    && typeof expr.text === "string"
+                    && expr.text.length
+                    && (expr.kind === SyntaxKind.StringLiteral || expr.kind === SyntaxKind.NoSubstitutionTemplateLiteral)
+                ) {
+                    imports.push(expr);
+                }
+            }
+        }
+    }
+    sf.imports = imports;
+}
+
 function attachHostSourceFileMetadata(sf: any, hostFileName: string): any {
     const canon = canonicalSourceFilePath(hostFileName);
     sf.fileName = hostFileName;
     sf.originalFileName = hostFileName;
     sf.path = canon as Path;
     sf.resolvedPath = canon as Path;
-    if (!sf.imports) sf.imports = [];
+    ensureHostSourceFileModuleRefs(sf);
     if (!sf.moduleAugmentations) sf.moduleAugmentations = [];
     // Stock sets ambientModuleNames in collectExternalModuleReferences (program
     // construction), which the thin program skips. The export-map cache's
@@ -988,9 +1058,14 @@ function hostHasScriptSnapshot(host: any, requestFileName: string, hostFileName:
 function ensureHostSourceFileBound(sf: any, options: any): void {
     if (!sf || sf.__tnbHostBound) return;
     if (!isOverlayCandidatePath(sf.fileName)) return;
-    if (sf.symbol !== undefined) { sf.__tnbHostBound = true; return; }
+    if (sf.symbol !== undefined) {
+        sf.__tnbHostBound = true;
+        ensureHostSourceFileModuleRefs(sf);
+        return;
+    }
     try { bindSourceFile(sf, options); } catch { /* best-effort */ }
     sf.__tnbHostBound = true;
+    ensureHostSourceFileModuleRefs(sf);
 }
 // A genuine host AST node (stock-parsed + bound) vs a tsgo NodeHandle. Both
 // carry a numeric `kind` and a `getSourceFile()` (installNodeHandleHooks patches
@@ -1816,11 +1891,284 @@ function remapSymbolDeclarationsToHost(symbol: any, getHostSf: (fileName: string
     }
     return symbol;
 }
+/**
+ * True for external-module symbols: stock `isExternalModuleSymbol` requires
+ * Module flags and an escapedName that starts with `"`.
+ */
+function isExternalModuleLikeSymbol(sym: any): boolean {
+    if (!sym || !((sym.flags ?? 0) & SymbolFlags.Module)) return false;
+    const name = String(sym.escapedName ?? sym.name ?? "");
+    return name.length > 0 && name.charCodeAt(0) === 0x22; /* " */
+}
+
+function hostModuleSymbolFromSourceFileName(
+    fileName: string | undefined,
+    getHostSf: (fileName: string) => any | undefined,
+): any | undefined {
+    if (!fileName) return undefined;
+    const hostSf = getHostSf(fileName);
+    if (hostSf?.symbol && isExternalModuleLikeSymbol(hostSf.symbol)) return hostSf.symbol;
+    return undefined;
+}
+
+/**
+ * Climb to an enclosing `declare module "X"` / augmentation. Ambient exports
+ * (e.g. `GlobalComponents` under `"vue"`) must parent to that module — not
+ * the containing SourceFile's file-path module.
+ */
+function enclosingStringAmbientModuleSymbol(node: any): any | undefined {
+    for (let cur = node; cur; cur = cur.parent) {
+        if (cur.kind === SyntaxKind.ModuleDeclaration) {
+            const name = cur.name;
+            if (name && name.kind === SyntaxKind.StringLiteral) {
+                const modSym = cur.symbol;
+                if (modSym && isExternalModuleLikeSymbol(modSym)) return modSym;
+                // Binder may lag; synthesize nothing — fall through to file.
+                if (modSym) return modSym;
+            }
+        }
+        if (cur.kind === SyntaxKind.SourceFile) break;
+    }
+    return undefined;
+}
+
+function externalModuleEscapedName(sym: any): string {
+    return String(sym?.escapedName ?? sym?.name ?? "");
+}
+
+/** True when two external-module symbols name the same logical module. */
+function sameExternalModuleIdentity(a: any, b: any): boolean {
+    if (!a || !b) return false;
+    if (a === b) return true;
+    if (a.id != null && b.id != null && a.id === b.id) return true;
+    const an = externalModuleEscapedName(a);
+    const bn = externalModuleEscapedName(b);
+    return an.length > 0 && an === bn;
+}
+
+/**
+ * Resolve the exporting module's host symbol from a symbol's declarations.
+ * Prefer enclosing string ambient modules over the containing SourceFile
+ * (augmentation parents are `"vue"`, not `"…/fixture.vue"`). Falls back to
+ * escapedName path forms for bare module symbols whose declarations are remote.
+ */
+function resolveHostExternalModuleSymbol(
+    symbol: any,
+    getHostSf: (fileName: string) => any | undefined,
+): any | undefined {
+    if (!symbol) return undefined;
+    try {
+        const decls: readonly any[] | undefined = symbol.declarations;
+        if (decls?.length) {
+            for (const d of decls) {
+                const ambient = enclosingStringAmbientModuleSymbol(d);
+                if (ambient && isExternalModuleLikeSymbol(ambient)) return ambient;
+                const sf = d?.kind === SyntaxKind.SourceFile ? d : d?.getSourceFile?.();
+                const hostMod = hostModuleSymbolFromSourceFileName(sf?.fileName, getHostSf);
+                if (hostMod) return hostMod;
+                if (sf?.symbol && isExternalModuleLikeSymbol(sf.symbol)) return sf.symbol;
+            }
+        }
+    }
+    catch { /* best-effort */ }
+    if (isExternalModuleLikeSymbol(symbol)) {
+        const raw = String(symbol.escapedName ?? symbol.name ?? "");
+        if (raw.length >= 2 && raw.charCodeAt(0) === 0x22 && raw.charCodeAt(raw.length - 1) === 0x22) {
+            const bare = raw.slice(1, -1);
+            // Package / ambient names (`"vue"`) are not disk paths — do not
+            // invent host file modules for them.
+            if (!bare.includes("/") && !bare.includes("\\") && !/\.(ts|tsx|js|jsx|mts|cts|d\.ts)$/.test(bare)) {
+                return undefined;
+            }
+            for (const candidate of [bare, bare + ".ts", bare + ".tsx", bare + ".d.ts", bare + ".js", bare + ".jsx"]) {
+                const hostMod = hostModuleSymbolFromSourceFileName(candidate, getHostSf);
+                if (hostMod) return hostMod;
+            }
+        }
+    }
+    return undefined;
+}
+
+/**
+ * True when a declaration is itself an export form or carries the Export
+ * modifier — stock `getImportOrExportSymbol` uses the same signals.
+ */
+function declarationHasExportModifier(decl: any): boolean {
+    if (!decl) return false;
+    const kind = decl.kind;
+    if (
+        kind === SyntaxKind.ExportSpecifier
+        || kind === SyntaxKind.ExportAssignment
+        || kind === SyntaxKind.NamespaceExport
+        || kind === SyntaxKind.ExportDeclaration
+    ) {
+        return true;
+    }
+    try {
+        if (typeof (ts as any).hasSyntacticModifier === "function"
+            && (ts as any).hasSyntacticModifier(decl, ModifierFlags.Export)) {
+            return true;
+        }
+    }
+    catch { /* best-effort */ }
+    const mods = decl.modifiers;
+    if (mods) {
+        for (const m of mods) {
+            if (m.kind === SyntaxKind.ExportKeyword) return true;
+        }
+    }
+    const cached = decl.modifierFlagsCache;
+    if (typeof cached === "number" && (cached & ModifierFlags.Export)) return true;
+    return false;
+}
+
+/** True when `symbol` is the (or the local side of the) export named in `moduleSym.exports`. */
+function symbolIsInModuleExportsTable(moduleSym: any, symbol: any): boolean {
+    if (!moduleSym?.exports || !symbol) return false;
+    const key = symbol.escapedName ?? symbol.name;
+    if (key == null || key === "") return false;
+    let entry: any;
+    try {
+        entry = typeof moduleSym.exports.get === "function" ? moduleSym.exports.get(key) : undefined;
+    }
+    catch { return false; }
+    if (!entry) return false;
+    if (entry === symbol) return true;
+    const es = symbol.exportSymbol;
+    if (es && typeof es === "object" && es === entry) return true;
+    if (entry.exportSymbol === symbol) return true;
+    if (entry.id != null && symbol.id != null && entry.id === symbol.id) return true;
+    return false;
+}
+
+/**
+ * Narrowed S′ gate: only module exports get parent forced to the external
+ * module symbol. Properties / locals keep stock parents (`__type`, `__object`,
+ * class/interface containers) so rename fullDisplayName stays correct.
+ */
+function isModuleExportForParentRewrite(symbol: any, moduleSym: any | undefined): boolean {
+    const es = symbol.exportSymbol;
+    if (es && typeof es === "object") return true;
+    for (const decl of symbol.declarations ?? []) {
+        if (declarationHasExportModifier(decl)) return true;
+    }
+    if (moduleSym && symbolIsInModuleExportsTable(moduleSym, symbol)) return true;
+    return false;
+}
+
+/**
+ * May we set `symbol.parent = moduleSym`?
+ * - Non-module parents (`__type` / `__object` / class / interface): never.
+ * - Existing external-module parent: only same-identity host canonicalize
+ *   (`"vue"` must not become `"…/fixture.vue"`).
+ * - Otherwise only true module exports (see isModuleExportForParentRewrite).
+ */
+function mayRewriteSymbolParentToModule(symbol: any, moduleSym: any): boolean {
+    if (!moduleSym || !isModuleExportForParentRewrite(symbol, moduleSym)) return false;
+    const parent = symbolParentOf(symbol);
+    if (parent && typeof parent === "object") {
+        if (!isExternalModuleLikeSymbol(parent)) return false;
+        if (!sameExternalModuleIdentity(parent, moduleSym)) return false;
+    }
+    return true;
+}
+
+/**
+ * S′: restore stock invariants that `importTracker.getExportInfo` / FAR
+ * `searchForImportsOfExport` rely on:
+ * - `symbol.exportSymbol` must be an object or undefined (NOT a numeric wire handle —
+ *   a truthy number makes getImportOrExportSymbol call getExportInfo(number) → fail).
+ * - exported symbol's `.parent` must be the external module symbol, and that
+ *   identity must match `getSymbolAtLocation(moduleSpecifier)` (prefer host `sf.symbol`).
+ * Parent rewrite is gated: only true module exports; never overwrite non-module
+ * containers; never replace an ambient module parent with a different module.
+ */
+function ensureExportedSymbolModuleParent(
+    symbol: any,
+    getHostSf: (fileName: string) => any | undefined,
+): any {
+    if (!symbol) return symbol;
+
+    // Numeric wire handle: resolve via getExportSymbol() or clear so stock
+    // falls through to the hasSyntacticModifier(Export) path on `symbol` itself.
+    const rawExport = symbol.exportSymbol;
+    if (typeof rawExport === "number") {
+        let resolved: any;
+        try {
+            if (typeof symbol.getExportSymbol === "function") resolved = symbol.getExportSymbol();
+        }
+        catch { resolved = undefined; }
+        const value = resolved && typeof resolved === "object" ? resolved : undefined;
+        // Class-field `exportSymbol: number` must be deleted before redefine;
+        // a failed defineProperty leaves a truthy number and S′ stays broken.
+        try { delete (symbol as any).exportSymbol; } catch { /* best-effort */ }
+        try {
+            Object.defineProperty(symbol, "exportSymbol", {
+                value,
+                configurable: true,
+                enumerable: true,
+                writable: true,
+            });
+        }
+        catch {
+            try { symbol.exportSymbol = value; } catch { /* read-only */ }
+        }
+        // If the field is still a number, S′ wiring cannot help this symbol —
+        // callers should prefer host binder identity when available.
+        if (typeof symbol.exportSymbol === "number") {
+            if (_traceSymEnabled) {
+                traceSym(`ensureExportedSymbolModuleParent exportSymbol-still-number id=${symbol.id}`);
+            }
+        }
+    }
+
+    const exportSymObj = (() => {
+        const es = symbol.exportSymbol;
+        return es && typeof es === "object" ? es : undefined;
+    })();
+
+    let moduleSym =
+        resolveHostExternalModuleSymbol(symbol, getHostSf)
+        ?? resolveHostExternalModuleSymbol(exportSymObj, getHostSf);
+    if (!moduleSym) {
+        const parent = symbolParentOf(symbol) ?? (exportSymObj ? symbolParentOf(exportSymObj) : undefined);
+        if (parent && isExternalModuleLikeSymbol(parent)) {
+            moduleSym = resolveHostExternalModuleSymbol(parent, getHostSf) ?? parent;
+        }
+    }
+
+    if (moduleSym && mayRewriteSymbolParentToModule(symbol, moduleSym)) {
+        try {
+            Object.defineProperty(symbol, "parent", { value: moduleSym, configurable: true });
+        }
+        catch { /* best-effort */ }
+        if (exportSymObj && mayRewriteSymbolParentToModule(exportSymObj, moduleSym)) {
+            try {
+                Object.defineProperty(exportSymObj, "parent", { value: moduleSym, configurable: true });
+            }
+            catch { /* best-effort */ }
+        }
+    }
+
+    // Module symbols themselves (module-specifier lookups): canonicalize to
+    // host sf.symbol so getSymbolId matches exportSymbol.parent. Ambient /
+    // package names must not be remapped onto an unrelated file module.
+    if (isExternalModuleLikeSymbol(symbol)) {
+        const hostMod = resolveHostExternalModuleSymbol(symbol, getHostSf);
+        if (hostMod && hostMod !== symbol && sameExternalModuleIdentity(symbol, hostMod)) {
+            return hostMod;
+        }
+    }
+
+    return symbol;
+}
+
 function refineHostNavigationSymbol(symbol: any, getHostSf: (fileName: string) => any | undefined): any {
     if (!symbol) return symbol;
     let refined = resolveHostExportDefaultSymbol(symbol, getHostSf);
     refined = remapSymbolDeclarationsToHost(refined, getHostSf);
     refined = canonicalizeSymbolToHostIdentity(refined, getHostSf);
+    refined = ensureExportedSymbolModuleParent(refined, getHostSf);
     return refined;
 }
 function isCrossFileImportExportName(node: any): boolean {
@@ -1846,6 +2194,10 @@ function getHostBoundSymbolAtLocation(node: any): any | undefined {
             case SyntaxKind.VariableDeclaration:
             case SyntaxKind.FunctionDeclaration:
             case SyntaxKind.ClassDeclaration:
+            case SyntaxKind.InterfaceDeclaration:
+            case SyntaxKind.TypeAliasDeclaration:
+            case SyntaxKind.EnumDeclaration:
+            case SyntaxKind.ModuleDeclaration:
             case SyntaxKind.TypeParameter:
             case SyntaxKind.Parameter:
             case SyntaxKind.PropertyDeclaration:
@@ -2469,6 +2821,11 @@ export function createTsgoProgram(
     const preferHostSourceFiles = overlays.length > 0
         || parsedHostSourceFiles.size > 0
         || !!(lsHost as any)?.projectService;
+    // Soft-P′ FAR needs real `SourceFile.imports` for every program file, but that
+    // full materialization must be gated to tsserver (projectService). PreferHost
+    // alone also covers vue-tsc overlays — forcing getOrCreateSourceFile for the
+    // entire --build reference graph OOMs (~4–8GB) on packages/tsc typecheck.
+    const softPMaterializeAllForImportTracker = !!(lsHost as any)?.projectService;
     programCtx.pendingOverlays = overlays.length > 0 ? overlays : undefined;
     programCtx.pendingExtraFileExtensions = collectExtraFileExtensions(names, options);
     _lastExtraFileExtensions = programCtx.pendingExtraFileExtensions;
@@ -2632,6 +2989,10 @@ export function createTsgoProgram(
             ?? "1";
         const cacheKey = `${hostFileName}@${scriptVersion}`;
         if (sfCache.has(cacheKey)) return sfCache.get(cacheKey);
+        _tnbFullSfMaterializations++;
+        if (process.env.TNB_SF_MATERIALIZE_STATS === "1") {
+            tnbLogSfMaterialize(`[TNB_SF_MATERIALIZE] full+1 total soft=${_tnbLightStubCreations} full=${_tnbFullSfMaterializations} file=${hostFileName}`);
+        }
 
         // Language Service token walks need real TS AST (getChildren + parent).
         // tsgo RemoteSourceFile is for checker RPC only — never expose it here.
@@ -2817,6 +3178,10 @@ export function createTsgoProgram(
         };
         ensureFileModuleMeta(sf);
         lightSfCache.set(hostFileName, sf);
+        _tnbLightStubCreations++;
+        if (process.env.TNB_SF_MATERIALIZE_STATS === "1") {
+            tnbLogSfMaterialize(`[TNB_SF_MATERIALIZE] lightStub+1 total soft=${_tnbLightStubCreations} full=${_tnbFullSfMaterializations} file=${hostFileName}`);
+        }
         return sf;
     };
 
@@ -3069,7 +3434,12 @@ export function createTsgoProgram(
                 return sf;
             }
             const hostFileName = toHostFileName(pathStr);
-            if (fileHasHostSourceContent(pathStr, hostFileName)) {
+            // Soft-P′: tsserver (projectService) must not hand import tracker light
+            // stubs with imports:[]. Full host-bound AST keeps forEachImport able
+            // to discover closed importer files. Do NOT key this on preferHost —
+            // vue-tsc overlays set preferHost without projectService and OOM if
+            // the whole program is materialized (see softPMaterializeAllForImportTracker).
+            if (softPMaterializeAllForImportTracker || fileHasHostSourceContent(pathStr, hostFileName)) {
                 return getOrCreateSourceFile(pathStr);
             }
             return getOrCreateLightSourceFile(pathStr);
@@ -3081,19 +3451,33 @@ export function createTsgoProgram(
             // no tsserver): whole-program consumers of getSourceFiles()
             // (BuilderState, buildinfo serialization, hasErrors scans) need only
             // metadata, so light stubs skip one remote-AST fetch per program
-            // file. The host snapshots every file it reads, which would
-            // otherwise force fileHasHostSourceContent → full materialization
-            // for the entire program. Files actually linted still pull full
-            // ASTs via getSourceFile(fileName). Volar / vue-tsc keep full SFs
-            // (host overlays / parsed host files → preferHostSourceFiles), and
-            // CompilerHost builds (tsc -b) keep their previous behavior.
+            // file. Soft-P′: under tsserver projectService always materialize
+            // real host-bound SourceFiles so FAR import discovery sees imports
+            // on closed files. preferLightProgramFiles keeps stubs; vue-tsc
+            // (preferHost via overlays, no projectService) keeps content-gated
+            // materialization to avoid --build OOM.
             for (const name of names) {
                 if (isHostLibFile(name)) continue;
                 const hostFileName = toHostFileName(name);
-                const sf = !preferLightProgramFiles && fileHasHostSourceContent(name, hostFileName)
-                    ? getOrCreateSourceFile(name)
-                    : getOrCreateLightSourceFile(name);
+                let sf: any;
+                if (preferLightProgramFiles) {
+                    sf = getOrCreateLightSourceFile(name);
+                }
+                else if (softPMaterializeAllForImportTracker || fileHasHostSourceContent(name, hostFileName)) {
+                    sf = getOrCreateSourceFile(name);
+                }
+                else {
+                    sf = getOrCreateLightSourceFile(name);
+                }
                 if (sf) result.push(sf);
+            }
+            if (process.env.TNB_SF_MATERIALIZE_STATS === "1") {
+                tnbLogSfMaterialize(
+                    `[TNB_SF_MATERIALIZE] getSourceFiles n=${result.length} `
+                    + `preferHost=${preferHostSourceFiles} softPAll=${softPMaterializeAllForImportTracker} `
+                    + `preferLight=${preferLightProgramFiles} `
+                    + `soft=${_tnbLightStubCreations} full=${_tnbFullSfMaterializations}`,
+                );
             }
             return result;
         },
@@ -5446,7 +5830,12 @@ export function createTsgoChecker(program: any): any {
     const refineNavSymbol = (sym: any) => {
         if (!sym) return sym;
         if (!_hasHostBoundFiles) {
-            return ensureClassLikeSymbolDeclarations(ensureSymbolContextualDocCompat(sym));
+            // Soft-P′ path may lack host-bound remapping, but S′ still applies:
+            // numeric exportSymbol must not reach importTracker.getExportInfo.
+            return ensureExportedSymbolModuleParent(
+                ensureClassLikeSymbolDeclarations(ensureSymbolContextualDocCompat(sym)),
+                getHostBoundSf,
+            );
         }
         const cached = refinedSymBySym.get(sym);
         if (cached !== undefined) return cached;
@@ -5720,13 +6109,22 @@ export function createTsgoChecker(program: any): any {
             if (_hasHostBoundFiles && sf.__tnbHostBound && !isCrossFileImportExportName(node)) {
                 const hostSym = getHostBoundSymbolAtLocation(node);
                 if (hostSym) {
+                    // Prefer tsgo bridge identity when available so FAR
+                    // search.includes / getRelatedSymbol stay coherent across
+                    // import (RPC) ↔ local (host-first) sites. Preferring bare
+                    // host SymbolObject here made fromUse miss the def span
+                    // (bridge root ≠ host binder). S′ is restored by
+                    // refineNavSymbol → ensureExportedSymbolModuleParent
+                    // (numeric exportSymbol cleared/resolved; parent = host
+                    // module symbol matching moduleSpecifier getSymbolAtLocation).
                     const rpcSym = resolveRpcSymbol(hostSym);
                     const refined = refineNavSymbol(rpcSym ?? hostSym);
                     storeSymCache(cacheName, start, end, refined);
                     recordHit();
                     if (_traceSymEnabled) {
                         traceSym(
-                            `getSymbolAtLocation return path=host-first source=${rpcSym ? "rpc-canonical" : "host-only"} `
+                            `getSymbolAtLocation return path=host-first `
+                            + `source=${rpcSym ? "rpc-canonical" : "host-only"} `
                             + `sym=${traceSymSymbol(refined)}`,
                         );
                     }
