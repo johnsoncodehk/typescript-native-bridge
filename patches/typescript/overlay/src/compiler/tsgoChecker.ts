@@ -2232,7 +2232,28 @@ function getHostBoundSymbolAtLocation(node: any): any | undefined {
                 break;
         }
     }
-    return ensureSymbolContextualDocCompat(node.symbol);
+    // Stock checker.getSymbolAtLocation: after declaration-name handling
+    // (parent.name === node above ≈ isDeclarationNameOrImportPropertyName),
+    // the switch only resolves EntityName / this / super / meta / jsx-ns
+    // shapes; default → undefined. Unconditionally returning node.symbol
+    // here falsely surfaces binder symbols on TypeLiteral (__type) and
+    // VariableDeclaration (binding) when the caret sits past `]` — stock
+    // quickinfo stays empty, TNB reported success. Gate on the same shapes
+    // stock's switch enters; everything else lets cache/RPC decide.
+    switch (node.kind) {
+        case SyntaxKind.Identifier:
+        case SyntaxKind.PrivateIdentifier:
+        case SyntaxKind.PropertyAccessExpression:
+        case SyntaxKind.QualifiedName:
+        case SyntaxKind.ThisKeyword:
+        case SyntaxKind.SuperKeyword:
+        case SyntaxKind.ThisType:
+        case SyntaxKind.MetaProperty:
+        case SyntaxKind.JsxNamespacedName:
+            return ensureSymbolContextualDocCompat(node.symbol);
+        default:
+            return undefined;
+    }
 }
 /** ScriptKind for LS parse — host.getScriptKind is SSOT for snapshot overlays. */
 function resolveLanguageServiceScriptKind(
