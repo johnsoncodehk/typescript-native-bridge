@@ -1382,6 +1382,39 @@ function applySingleLineEmitFlagsToTypeSubtree(node: any): void {
         applySingleLineEmitFlagsToTypeSubtree(child);
     });
 }
+/**
+ * Stock NodeBuilder (checker.ts ~7416) stamps EmitFlags.SingleLine on each
+ * TypeLiteral unless NodeBuilderFlags.MultilineObjectLiterals is set.
+ * typeToDisplayParts / signatureToDisplayParts always OR
+ * TypeFormatFlags.MultilineObjectLiterals (= 1<<10, same bit) before writeType.
+ *
+ * Early bridge writeType forced SingleLine on the whole type subtree for
+ * signature-help part classification — that also crushed QI type-alias /
+ * declaration bodies that stock prints multiline. Gate on the flag instead:
+ * multiline callers clear SingleLine on TypeLiterals; others keep SingleLine.
+ */
+const TypeFormatFlagsMultilineObjectLiterals = 1 << 10;
+function clearTypeLiteralSingleLineEmitFlags(node: any): void {
+    if (!node) return;
+    if (node.kind === SyntaxKind.TypeLiteral && node.emitNode) {
+        node.emitNode.flags = (node.emitNode.flags ?? 0) & ~EmitFlags.SingleLine;
+    }
+    ts.forEachChild(node, (child: any) => {
+        clearTypeLiteralSingleLineEmitFlags(child);
+    });
+}
+function applyWriteTypeEmitFlagsForFormat(typeNode: any, flags?: number): void {
+    if (!typeNode) return;
+    if ((flags ?? 0) & TypeFormatFlagsMultilineObjectLiterals) {
+        // Stock: setEmitFlags(typeLiteral, 0) when MultilineObjectLiterals.
+        // Also skip the bridge-wide SingleLine force. Clear any SingleLine tsgo
+        // may have stamped so the host printer uses MultiLineTypeLiteralMembers.
+        clearTypeLiteralSingleLineEmitFlags(typeNode);
+    }
+    else {
+        applySingleLineEmitFlagsToTypeSubtree(typeNode);
+    }
+}
 function applySingleLineEmitFlagsToDeclaration(node: any): any {
     if (!node) return node;
     const visit = (n: any): void => {
@@ -6864,7 +6897,10 @@ export function createTsgoChecker(program: any): any {
             const typeNode = project.checker.typeToTypeNode(type, tsgoLocation, flags);
             if (!typeNode) return undefined;
             attachTypeReferenceSymbols(project.checker, type, typeNode);
-            applySingleLineEmitFlagsToTypeSubtree(typeNode);
+            // Same MultilineObjectLiterals gate as writeType (stock NodeBuilder).
+            // hostifyDecodedTypeNode re-parses via a single-line string writer for
+            // mutable AST; emit flags still matter for callers that print before hostify.
+            applyWriteTypeEmitFlagsForFormat(typeNode, flags);
             return hostifyDecodedTypeNode(typeNode);
         },
         typeToString(type: any, _enclosing?: any, flags?: number): string {
@@ -6992,7 +7028,7 @@ export function createTsgoChecker(program: any): any {
             if (typeNode) {
                 attachTypeParameterSymbolsFromType(type, typeNode);
                 attachTypeReferenceSymbols(project.checker, type, typeNode);
-                applySingleLineEmitFlagsToTypeSubtree(typeNode);
+                applyWriteTypeEmitFlagsForFormat(typeNode, flags);
                 const sourceFile = enclosingDeclaration?.getSourceFile?.();
                 getRemoveCommentsPrinter().writeNode(EmitHint.Unspecified, typeNode, sourceFile, writer);
                 return;
