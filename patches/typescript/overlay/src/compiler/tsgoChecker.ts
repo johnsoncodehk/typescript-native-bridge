@@ -1465,6 +1465,197 @@ function symbolDisplayNameOf(symbol: any): string {
     const name = unescapeTsgoSymbolName(String(raw));
     return (ts as any).unescapeLeadingUnderscores?.(name) ?? name;
 }
+
+function stripQuotedModuleName(escaped: string): string {
+    if (
+        escaped.length >= 2
+        && escaped.charCodeAt(0) === 0x22 /* " */
+        && escaped.charCodeAt(escaped.length - 1) === 0x22
+    ) {
+        return escaped.slice(1, -1);
+    }
+    return escaped;
+}
+
+function normalizePackageJsonRelativePath(p: string): string {
+    let s = p.replace(/\\/g, "/");
+    if (s.startsWith("./")) s = s.slice(2);
+    // package.json targets may carry emit extensions; binder module names do not.
+    s = s.replace(/\.(d\.)?[cm]?tsx?$/i, "").replace(/\.(mjs|cjs|js)$/i, "");
+    if (s.endsWith("/index")) s = s.slice(0, -"/index".length);
+    return s;
+}
+
+function collectPackageExportTargets(value: unknown, out: string[]): void {
+    if (typeof value === "string") {
+        out.push(value);
+        return;
+    }
+    if (Array.isArray(value)) {
+        for (const v of value) collectPackageExportTargets(v, out);
+        return;
+    }
+    if (value && typeof value === "object") {
+        for (const v of Object.values(value as Record<string, unknown>)) {
+            collectPackageExportTargets(v, out);
+        }
+    }
+}
+
+/**
+ * Stock `symbolToString` → node builder `getSpecifierForModuleSymbol` maps a
+ * file-path external module (`"…/node_modules/vue/dist/vue"`) back to the
+ * package / relative specifier (`"vue"`, `"vue/server-renderer"`, `"./b"`).
+ * FQN keeps the absolute binder name — only display mapping lives here.
+ */
+function tryPackageSpecifierFromNodeModulesPath(barePath: string): string | undefined {
+    const nm = "/node_modules/";
+    const idx = barePath.lastIndexOf(nm);
+    if (idx < 0) return undefined;
+    const after = barePath.slice(idx + nm.length);
+    // Last segment must be a real package dir, not pnpm's `.pnpm` virtual store.
+    if (!after || after.charCodeAt(0) === 0x2E /* . */) return undefined;
+    const parsed = (ts as any).parsePackageName(after) as { packageName: string; rest: string };
+    if (!parsed?.packageName) return undefined;
+    const packageName = (ts as any).getPackageNameFromTypesPackageName(parsed.packageName) as string;
+    const packageRoot = barePath.slice(0, idx + nm.length + parsed.packageName.length);
+    const fileRel = normalizePackageJsonRelativePath(parsed.rest ?? "");
+
+    let pj: any;
+    try {
+        const text = (ts as any).sys?.readFile?.(packageRoot + "/package.json");
+        if (text) pj = JSON.parse(text);
+    }
+    catch {
+        pj = undefined;
+    }
+
+    if (pj?.exports != null) {
+        if (typeof pj.exports === "string") {
+            if (!fileRel || normalizePackageJsonRelativePath(pj.exports) === fileRel) {
+                return packageName;
+            }
+        }
+        else if (typeof pj.exports === "object") {
+            for (const key of Object.keys(pj.exports)) {
+                if (key === "./package.json") continue;
+                const targets: string[] = [];
+                collectPackageExportTargets(pj.exports[key], targets);
+                for (const t of targets) {
+                    if (normalizePackageJsonRelativePath(t) !== fileRel) continue;
+                    if (key === ".") return packageName;
+                    if (key.startsWith("./")) return packageName + key.slice(1);
+                }
+            }
+        }
+    }
+    for (const field of [pj?.types, pj?.typings, pj?.main, pj?.module]) {
+        if (typeof field === "string" && normalizePackageJsonRelativePath(field) === fileRel) {
+            return packageName;
+        }
+    }
+    if (!fileRel || fileRel === "index") return packageName;
+    return `${packageName}/${fileRel}`;
+}
+
+function tryRelativeModuleSpecifier(barePath: string, enclosing: any): string | undefined {
+    const sf = enclosing?.kind === SyntaxKind.SourceFile
+        ? enclosing
+        : enclosing?.getSourceFile?.();
+    const fromFile = sf?.fileName as string | undefined;
+    if (!fromFile || typeof (ts as any).getRelativePathFromFile !== "function") return undefined;
+    // Binder module names drop the extension; try the bare path first, then
+    // common declaration suffixes so getRelativePathFromFile can resolve.
+    const candidates = [barePath, barePath + ".ts", barePath + ".tsx", barePath + ".d.ts", barePath + ".js"];
+    const getCanon = (f: string) => f;
+    for (const to of candidates) {
+        try {
+            let rel = (ts as any).getRelativePathFromFile(fromFile, to, getCanon) as string;
+            if (!rel) continue;
+            rel = (ts as any).removeFileExtension?.(rel) ?? rel;
+            if (typeof (ts as any).ensurePathIsNonModuleName === "function") {
+                rel = (ts as any).ensurePathIsNonModuleName(rel);
+            }
+            if (rel && (rel.startsWith("./") || rel.startsWith("../"))) return rel;
+        }
+        catch {
+            /* try next */
+        }
+    }
+    return undefined;
+}
+
+/** Stock getSpecifierForModuleSymbol display form, or undefined to keep binder name. */
+function moduleSymbolDisplaySpecifier(symbol: any, enclosing?: any): string | undefined {
+    if (!enclosing || !isExternalModuleLikeSymbol(symbol)) return undefined;
+    const escaped = externalModuleEscapedName(symbol);
+    if (!isFilePathModuleName(escaped)) return undefined;
+    const bare = stripQuotedModuleName(escaped).replace(/\\/g, "/");
+    if (!bare) return undefined;
+    const pkg = tryPackageSpecifierFromNodeModulesPath(bare);
+    if (pkg) return `"${pkg}"`;
+    const rel = tryRelativeModuleSpecifier(bare, enclosing);
+    if (rel) return `"${rel}"`;
+    return undefined;
+}
+
+/**
+ * Stock checker.getSymbolAtLocation only resolves StringLiteral / template
+ * literals to an external module in these contexts (JSDoc `@import` and
+ * `require()` additionally require isInJSFile). Positional / host-bound
+ * lookups that latch onto a file module at unrelated carets must stay empty
+ * so quickinfo matches stock (`No content available.`).
+ */
+function isStockExternalModuleLookupNode(node: any): boolean {
+    if (!node) return false;
+    if (node.kind === SyntaxKind.SourceFile) return true;
+    if (node.kind === SyntaxKind.ImportType) return true;
+    if (node.parent?.kind === SyntaxKind.ModuleDeclaration && node.parent.name === node) {
+        return true;
+    }
+    if (
+        node.kind !== SyntaxKind.StringLiteral
+        && node.kind !== SyntaxKind.NoSubstitutionTemplateLiteral
+    ) {
+        return false;
+    }
+    const p = node.parent;
+    if (!p) return false;
+    if (p.kind === SyntaxKind.ExternalModuleReference && p.expression === node) return true;
+    if (
+        (p.kind === SyntaxKind.ImportDeclaration || p.kind === SyntaxKind.ExportDeclaration)
+        && p.moduleSpecifier === node
+    ) {
+        return true;
+    }
+    if ((ts as any).isJSDocImportTag?.(p) && p.moduleSpecifier === node) {
+        return !!(ts as any).isInJSFile?.(node);
+    }
+    if (p.kind === SyntaxKind.CallExpression) {
+        const callee = p.expression;
+        if (callee?.kind === SyntaxKind.ImportKeyword) return true;
+        if (
+            callee?.kind === SyntaxKind.Identifier
+            && String(callee.escapedText ?? callee.text ?? "") === "require"
+        ) {
+            return !!(ts as any).isInJSFile?.(node);
+        }
+    }
+    if (
+        p.kind === SyntaxKind.LiteralType
+        && p.parent?.kind === SyntaxKind.ImportType
+        && p.parent.argument === p
+    ) {
+        return true;
+    }
+    return false;
+}
+
+function gateExternalModuleSymbolLookup(node: any, symbol: any): any {
+    if (!symbol || !isExternalModuleLikeSymbol(symbol)) return symbol;
+    return isStockExternalModuleLookupNode(node) ? symbol : undefined;
+}
+
 /** Parent symbol — host symbols hold the object; bridge symbols fetch by handle. */
 function symbolParentOf(symbol: any): any {
     if (!symbol) return undefined;
@@ -1489,6 +1680,13 @@ function symbolParentOf(symbol: any): any {
  * fixAddMissingMember does not become an illegal Identifier.
  */
 function symbolToStringWithChain(symbol: any, enclosing?: any, flags?: number): string {
+    // With enclosingDeclaration, stock's node builder remaps file-path module
+    // symbols to package/relative specifiers (QI: module "vue"); without it
+    // (and FQN) the absolute binder name is preserved.
+    if (enclosing) {
+        const moduleDisplay = moduleSymbolDisplaySpecifier(symbol, enclosing);
+        if (moduleDisplay) return moduleDisplay;
+    }
     const name = symbolDisplayNameOf(symbol);
     if (!name) return "";
     if (!enclosing) {
@@ -6155,6 +6353,8 @@ export function createTsgoChecker(program: any): any {
             if (node.kind === SyntaxKind.PropertyAccessExpression && node.name?.getSourceFile) {
                 node = node.name;
             }
+            const lookupNode = node;
+            const finish = (sym: any) => gateExternalModuleSymbolLookup(lookupNode, sym);
             // Stock checker.getSymbolAtLocation (switch on node.kind): most
             // keywords return undefined; a few resolve via the parent
             // declaration. Never "symbol at this text position" — positional
@@ -6164,7 +6364,7 @@ export function createTsgoChecker(program: any): any {
             // parity with stock.
             const kw = classifyKeywordSymbolLookup(node);
             if (kw.action === "undefined") return undefined;
-            if (kw.action === "symbol") return refineNavSymbol(kw.symbol);
+            if (kw.action === "symbol") return finish(refineNavSymbol(kw.symbol));
             if (kw.action === "redirect") node = kw.node;
             const start = typeof node.pos === "number" ? node.pos : node.getStart(sf);
             const end = typeof node.end === "number" ? node.end : node.getEnd(sf);
@@ -6191,7 +6391,7 @@ export function createTsgoChecker(program: any): any {
                 // replace the module symbol with the codegen export const, breaking
                 // getExportsOfModule (component-meta needs the module + default export).
                 if (_traceSymEnabled) traceSym(`getSymbolAtLocation return path=sourcefile sym=${traceSymSymbol(sf.symbol)}`);
-                return sf.symbol;
+                return finish(sf.symbol);
             }
             const t0 = process.env.TSGO_PROFILE === "1" ? Date.now() : 0;
             const cacheName = symCacheFileName(sf.fileName);
@@ -6241,7 +6441,7 @@ export function createTsgoChecker(program: any): any {
                             + `sym=${traceSymSymbol(refined)}`,
                         );
                     }
-                    return refined;
+                    return finish(refined);
                 }
             }
             const resolveSymbolRpc = (): any => {
@@ -6338,13 +6538,13 @@ export function createTsgoChecker(program: any): any {
                 storeSymCache(cacheName, start, end, sym);
                 recordRpc();
                 if (_traceSymEnabled) traceSym(`getSymbolAtLocation return path=rpc sym=${traceSymSymbol(sym)}`);
-                return sym;
+                return finish(sym);
             };
             let cached = probeSymCache(cacheName, start, end);
             if (cached.found) {
                 recordHit();
                 if (_traceSymEnabled) traceSym(`getSymbolAtLocation return path=cache sym=${traceSymSymbol(cached.sym)}`);
-                return cached.sym;
+                return finish(cached.sym);
             }
             // Module-specifier literals: batch-resolve every module reference
             // of the file in one RPC on first miss (import literals are the
@@ -6357,7 +6557,7 @@ export function createTsgoChecker(program: any): any {
                     if (cached.found) {
                         recordHit();
                         if (_traceSymEnabled) traceSym(`getSymbolAtLocation return path=import-prefetch sym=${traceSymSymbol(cached.sym)}`);
-                        return cached.sym;
+                        return finish(cached.sym);
                     }
                 }
             }
@@ -6376,7 +6576,7 @@ export function createTsgoChecker(program: any): any {
                 if (cached.found) {
                     recordHit();
                     if (_traceSymEnabled) traceSym(`getSymbolAtLocation return path=cache sym=${traceSymSymbol(cached.sym)}`);
-                    return cached.sym;
+                    return finish(cached.sym);
                 }
             }
             // allIdentifiers prefetch is exhaustive on plain disk files; host-bound
