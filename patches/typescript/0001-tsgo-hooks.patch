@@ -454,7 +454,7 @@ index 6034c9dfc..0c9a6178d 100644
      let computedWithoutCacheCount = 0;
      const fixes = flatMap(exportInfo, (exportInfo, i) => {
 diff --git a/src/services/completions.ts b/src/services/completions.ts
-index 28d29136d..6180faa70 100644
+index 28d29136d..c111e369a 100644
 --- a/src/services/completions.ts
 +++ b/src/services/completions.ts
 @@ -175,6 +175,7 @@ import {
@@ -564,25 +564,17 @@ index 28d29136d..6180faa70 100644
          location.getStart(),
          preferences,
          /*isForImportStatementCompletion*/ false,
-@@ -1917,12 +1955,25 @@ function createCompletionEntry(
+@@ -1917,12 +1955,18 @@ function createCompletionEntry(
  
      // Use a 'sortText' of 0' so that all symbol completion entries come before any other
      // entries (like JavaScript identifier entries).
--    const kind = SymbolDisplay.getSymbolKind(typeChecker, symbol, location);
-+    let kind: ScriptElementKind;
-+    let kindModifiers: string;
-+    if (autoImportOriginHasTargetFlags(origin)) {
-+        kind = getScriptElementKindForAutoImportFlags(origin.targetFlags);
-+        // Batch-materialized symbols may lack declarations; only then skip the
-+        // stock modifier computation (which needs declarations / alias walks).
-+        kindModifiers = symbol.declarations?.length
-+            ? SymbolDisplay.getSymbolModifiers(typeChecker, symbol)
-+            : ScriptElementKindModifier.none;
-+    }
-+    else {
-+        kind = SymbolDisplay.getSymbolKind(typeChecker, symbol, location);
-+        kindModifiers = SymbolDisplay.getSymbolModifiers(typeChecker, symbol);
-+    }
++    //
++    // Kind/modifiers must use SymbolDisplay (stock path). Deriving kind from export-map
++    // targetFlags collapses alias→function/var, Variable→var (never const), and cannot
++    // express property — that produced the vue-script-global completion parity 110-diff.
++    // targetFlags remain on the origin for filtering / Value-meaning checks only.
+     const kind = SymbolDisplay.getSymbolKind(typeChecker, symbol, location);
++    const kindModifiers = SymbolDisplay.getSymbolModifiers(typeChecker, symbol);
      const commitCharacters = (kind === ScriptElementKind.warning || kind === ScriptElementKind.string) ? [] : undefined;
      return {
          name,
@@ -592,7 +584,7 @@ index 28d29136d..6180faa70 100644
          sortText,
          source,
          hasAction: hasAction ? true : undefined,
-@@ -2677,18 +2728,20 @@ export function getCompletionEntriesFromSymbols(
+@@ -2677,18 +2721,20 @@ export function getCompletionEntriesFromSymbols(
          const symbol = symbols[i];
          const origin = symbolToOriginInfoMap?.[i];
          const info = getCompletionEntryDisplayNameForSymbol(symbol, target, origin, kind, !!jsxIdentifierExpected);
@@ -616,7 +608,7 @@ index 28d29136d..6180faa70 100644
          const entry = createCompletionEntry(
              symbol,
              sortText,
-@@ -2735,7 +2788,7 @@ export function getCompletionEntriesFromSymbols(
+@@ -2735,7 +2781,7 @@ export function getCompletionEntriesFromSymbols(
          add: name => uniques.set(name, true),
      };
  
@@ -625,7 +617,7 @@ index 28d29136d..6180faa70 100644
          let allFlags = symbol.flags;
          // export = /**/ here we want to get all meanings, so any symbol is ok
          if (location.parent && isExportAssignment(location.parent)) {
-@@ -2784,7 +2837,13 @@ export function getCompletionEntriesFromSymbols(
+@@ -2784,7 +2830,13 @@ export function getCompletionEntriesFromSymbols(
          // already has an explicit export and user only wants to user explicit
          // module imports then the global keywords will be filtered out so auto
          // import suggestions will win in the completion
@@ -640,7 +632,7 @@ index 28d29136d..6180faa70 100644
          // We only want to filter out the global keywords
          // Auto Imports are not available for scripts so this conditional is always false
          if (
-@@ -2798,6 +2857,12 @@ export function getCompletionEntriesFromSymbols(
+@@ -2798,6 +2850,12 @@ export function getCompletionEntriesFromSymbols(
          }
  
          allFlags |= getCombinedLocalAndExportSymbolFlags(symbolOrigin);
@@ -653,7 +645,7 @@ index 28d29136d..6180faa70 100644
  
          // import m = /**/ <-- It can only access namespace (if typing import = x. this would get member symbols and not namespace)
          if (isInRightSideOfInternalImportEqualsDeclaration(location)) {
-@@ -2806,9 +2871,18 @@ export function getCompletionEntriesFromSymbols(
+@@ -2806,9 +2864,18 @@ export function getCompletionEntriesFromSymbols(
  
          if (isTypeOnlyLocation) {
              // It's a type, but you can reach it by namespace.type as well
@@ -672,7 +664,7 @@ index 28d29136d..6180faa70 100644
          // expressions are value space (which includes the value namespaces)
          return !!(allFlags & SymbolFlags.Value);
      }
-@@ -3588,6 +3662,11 @@ function getCompletionData(
+@@ -3588,6 +3655,11 @@ function getCompletionData(
      let importSpecifierResolver: codefix.ImportSpecifierResolver | undefined;
      const symbolToOriginInfoMap: SymbolOriginInfoMap = [];
      const symbolToSortTextMap: SymbolSortTextMap = [];
@@ -684,7 +676,7 @@ index 28d29136d..6180faa70 100644
      const seenPropertySymbols = new Set<SymbolId>();
      const isTypeOnlyLocation = isTypeOnlyCompletion();
      const getModuleSpecifierResolutionHost = memoizeOne((isFromPackageJson: boolean) => {
-@@ -4028,13 +4107,29 @@ function getCompletionData(
+@@ -4028,13 +4100,29 @@ function getCompletionData(
  
          symbols = concatenate(symbols, typeChecker.getSymbolsInScope(scopeNode, symbolMeanings));
          Debug.assertEachIsDefined(symbols, "getSymbolsInScope() should all be defined");
@@ -715,7 +707,7 @@ index 28d29136d..6180faa70 100644
              }
              if (typeOnlyAliasNeedsPromotion && !(symbol.flags & SymbolFlags.Value)) {
                  const typeOnlyAliasDeclaration = symbol.declarations && find(symbol.declarations, isTypeOnlyImportDeclaration);
-@@ -4161,11 +4256,74 @@ function getCompletionData(
+@@ -4161,11 +4249,74 @@ function getCompletionData(
          const exportInfo = getExportInfoMap(sourceFile, host, program, preferences, cancellationToken);
          const packageJsonAutoImportProvider = host.getPackageJsonAutoImportProvider?.();
          const packageJsonFilter = detailsEntryId ? undefined : createPackageJsonImportFilter(sourceFile, preferences, host);
@@ -791,7 +783,7 @@ index 28d29136d..6180faa70 100644
              position,
              preferences,
              !!importStatementCompletion,
-@@ -4232,6 +4390,7 @@ function getCompletionData(
+@@ -4232,6 +4383,7 @@ function getCompletionData(
                              isDefaultExport,
                              moduleSymbol: exportInfo.moduleSymbol,
                              isFromPackageJson: exportInfo.isFromPackageJson,
@@ -799,7 +791,7 @@ index 28d29136d..6180faa70 100644
                          });
                      },
                  );
-@@ -4240,20 +4399,7 @@ function getCompletionData(
+@@ -4240,20 +4392,7 @@ function getCompletionData(
                  flags |= context.resolvedAny() ? CompletionInfoFlags.ResolvedModuleSpecifiers : 0;
                  flags |= context.resolvedBeyondLimit() ? CompletionInfoFlags.ResolvedModuleSpecifiersBeyondLimit : 0;
              },
@@ -821,7 +813,7 @@ index 28d29136d..6180faa70 100644
      }
  
      function pushAutoImportSymbol(symbol: Symbol, origin: SymbolOriginInfoResolvedExport | SymbolOriginInfoExport) {
-@@ -4262,6 +4408,12 @@ function getCompletionData(
+@@ -4262,6 +4401,12 @@ function getCompletionData(
              // If an auto-importable symbol is available as a global, don't add the auto import
              return;
          }
@@ -834,7 +826,7 @@ index 28d29136d..6180faa70 100644
          symbolToOriginInfoMap[symbols.length] = origin;
          symbolToSortTextMap[symbolId] = importStatementCompletion ? SortText.LocationPriority : SortText.AutoImportSuggestions;
          symbols.push(symbol);
-@@ -6089,6 +6241,23 @@ function isDeprecated(symbol: Symbol, checker: TypeChecker) {
+@@ -6089,6 +6234,23 @@ function isDeprecated(symbol: Symbol, checker: TypeChecker) {
      return !!length(declarations) && every(declarations, isDeprecatedDeclaration);
  }
  

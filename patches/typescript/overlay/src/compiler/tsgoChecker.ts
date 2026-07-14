@@ -190,25 +190,41 @@ function hydrateBridgeModuleLocals(proc: TnbBridgeProcessState): void {
     if (proc.debugAnnounced) _tnbDebugAnnounced = true;
 }
 
-// ── RPC trace (sync append before each FFI call; TNB_RPC_TRACE=1) ──
+// ── RPC / invalidation trace (default OFF; TNB_RPC_TRACE=1 or TNB_TRACE_RPC=1) ──
+// Writes ENTER/EXIT + EVENT lines to TNB_RPC_TRACE_FILE (default /tmp/tnb-rpc.log).
+// Zero overhead when unset: the flag is snapshotted once at module load.
 let _rpcTraceSeq = 0;
-const _rpcTraceLog: string = process.env.TNB_RPC_TRACE === "1"
-    ? (process.env.TNB_RPC_TRACE_FILE || "/tmp/tnb-rpc.log")
+const _rpcTraceEnabled = process.env.TNB_RPC_TRACE === "1" || process.env.TNB_TRACE_RPC === "1";
+const _rpcTraceLog: string = _rpcTraceEnabled
+    ? (process.env.TNB_RPC_TRACE_FILE || process.env.TNB_TRACE_RPC_FILE || "/tmp/tnb-rpc.log")
     : "";
+const _rpcTraceEnterTs = new Map<number, number>();
 function _rpcTraceEnter(method: string, binary: boolean, session: number): number {
     if (!_rpcTraceLog) return 0;
     const id = ++_rpcTraceSeq;
+    const now = Date.now();
+    _rpcTraceEnterTs.set(id, now);
     const fs = require("fs") as typeof import("fs");
     fs.appendFileSync(
         _rpcTraceLog,
-        `${Date.now()} ENTER ${id} pid=${process.pid} sess=${session} ${binary ? "BIN" : "JSON"} ${method}\n`,
+        `${now} ENTER ${id} pid=${process.pid} sess=${session} ${binary ? "BIN" : "JSON"} ${method}\n`,
     );
     return id;
 }
 function _rpcTraceExit(id: number, method: string): void {
     if (!_rpcTraceLog || id === 0) return;
+    const now = Date.now();
+    const t0 = _rpcTraceEnterTs.get(id);
+    _rpcTraceEnterTs.delete(id);
+    const ms = t0 != null ? now - t0 : -1;
     const fs = require("fs") as typeof import("fs");
-    fs.appendFileSync(_rpcTraceLog, `${Date.now()} EXIT ${id} ${method}\n`);
+    fs.appendFileSync(_rpcTraceLog, `${now} EXIT ${id} ${method} ms=${ms}\n`);
+}
+/** Event channel for cache invalidation / structure reuse (same env gate). */
+function _rpcTraceEvent(kind: string, detail: string): void {
+    if (!_rpcTraceLog) return;
+    const fs = require("fs") as typeof import("fs");
+    fs.appendFileSync(_rpcTraceLog, `${Date.now()} EVENT ${kind} ${detail}\n`);
 }
 
 /** True when this process is a tsserver entry (IDE / harness), not tsc/vue-tsc. */
@@ -490,10 +506,24 @@ class MiniSourceFileCache {
     invalidateChangedPaths(changes: any): void {
         const changedProjects = changes?.changedProjects;
         if (!changedProjects) return;
+        let changedN = 0;
+        let deletedN = 0;
+        const sample: string[] = [];
         for (const projKey of Object.keys(changedProjects)) {
             const c = changedProjects[projKey];
-            for (const p of c?.changedFiles ?? []) this.stableByPath.delete(p);
-            for (const p of c?.deletedFiles ?? []) this.stableByPath.delete(p);
+            for (const p of c?.changedFiles ?? []) {
+                this.stableByPath.delete(p);
+                changedN++;
+                if (sample.length < 6) sample.push(`C:${p}`);
+            }
+            for (const p of c?.deletedFiles ?? []) {
+                this.stableByPath.delete(p);
+                deletedN++;
+                if (sample.length < 6) sample.push(`D:${p}`);
+            }
+        }
+        if (changedN || deletedN) {
+            _rpcTraceEvent("MiniSourceFileCache.invalidate", `changed=${changedN} deleted=${deletedN} sample=${sample.join(",")}`);
         }
     }
     set(p: string, file: any, key: any, hash: any, snapshotId: any, projectId: any): any {
@@ -645,6 +675,11 @@ function hostForOverlaySync(): any {
 
 /** Active checker query depth — skip updateSnapshot while > 0 (avoids LS reentrancy). */
 let _checkerQueryDepth = 0;
+/**
+ * Bumped when overlay content refresh clears symbol caches. Parent memo on
+ * Symbol.prototype must not survive a new snapshot generation (direction E).
+ */
+let _tnbParentMemoEpoch = 0;
 /** Host text last pushed to tsgo per file — skip redundant updateSnapshot.
  * Process-global: it mirrors the shared tsgo session's overlay state. */
 const _syncedOverlayContentByFile: Map<string, string> = tnbBridgeProcessState().syncedOverlayContentByFile ??= new Map();
@@ -1740,6 +1775,138 @@ function symbolParentOf(symbol: any): any {
     }
     return undefined;
 }
+
+/** Own sealed `.parent` data property only — does not invoke lazy getters (no FFI). */
+function symbolOwnSealedParent(symbol: any): any {
+    if (!symbol) return undefined;
+    const own = Object.getOwnPropertyDescriptor(symbol, "parent");
+    if (!own || own.get || own.set) return undefined;
+    const parent = own.value;
+    return parent && typeof parent === "object" ? parent : undefined;
+}
+
+/** native-preview Symbol with a snapshot registry (wire id > 0). */
+function isBridgeWireSymbol(symbol: any): boolean {
+    return !!symbol
+        && typeof symbol.id === "number"
+        && symbol.id > 0
+        && !!symbol.objectRegistry;
+}
+
+/** True when a bridge symbol's wire decls live in a host-bound (.vue) SF. */
+function bridgeSymbolNeedsHostDeclRemap(
+    symbol: any,
+    getHostSf: (fileName: string) => any | undefined,
+): boolean {
+    if (!symbol || typeof symbol.hasDeclarationsResolved !== "function") return false;
+    if (!symbol.hasDeclarationsResolved()) return false;
+    let decls: any[] | undefined;
+    try { decls = symbol.declarations as any[]; }
+    catch { return false; }
+    if (!decls?.length) return false;
+    for (const d of decls) {
+        const path = d?.path ?? d?.fileName;
+        if (!path || typeof path !== "string") continue;
+        try {
+            const host = getHostSf(toHostFileName(path)) ?? getHostSf(path);
+            if (host?.__tnbHostBound) return true;
+        }
+        catch { /* continue */ }
+    }
+    return false;
+}
+
+/** True when a wire decl path is lib / node_modules / bundled .d.ts only. */
+function bridgeDeclPathIsLibOnly(path: string): boolean {
+    const p = path.replace(/\\/g, "/");
+    if (!p.endsWith(".d.ts")) return false;
+    return p.includes("/node_modules/")
+        || p.includes("bundled://")
+        || p.includes("/lib.")
+        || isBundledLibPath(p)
+        || isHostLibFile(p);
+}
+
+/**
+ * Completion Soft-P′ light-skip gate: only true when decls are resolved, live
+ * entirely in lib/node_modules .d.ts, and need no host remap.
+ *
+ * Do NOT treat "not a .vue host-bound decl" as lib-only — project .ts symbols
+ * (MyEvents in my-events.ts) would skip Soft-P′ while Alias import sites take
+ * the full path, breaking FAR identity (xfile onlySTK at the defining .ts).
+ * Unresolved decls must NOT skip — locals keep RemoteSourceFile decls and
+ * symbolHasDeclarationInSourceFile (===) marks them GlobalsOrKeywords (15).
+ */
+function bridgeSymbolConfirmedLibOnlyNoHostRemap(
+    symbol: any,
+    getHostSf: (fileName: string) => any | undefined,
+): boolean {
+    if (!symbol || typeof symbol.hasDeclarationsResolved !== "function") return false;
+    if (!symbol.hasDeclarationsResolved()) return false;
+    if (bridgeSymbolNeedsHostDeclRemap(symbol, getHostSf)) return false;
+    let decls: any[] | undefined;
+    try { decls = symbol.declarations as any[]; }
+    catch { return false; }
+    if (!decls?.length) return false;
+    for (const d of decls) {
+        const path = d?.path ?? d?.fileName;
+        if (!path || typeof path !== "string") return false;
+        if (!bridgeDeclPathIsLibOnly(path) && !bridgeDeclPathIsLibOnly(toHostFileName(path))) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/**
+ * Batch-seal `.parent` for scope wire symbols that carry a real parentHandle.
+ *
+ * Three-state parent semantics (omitzero ≠ none):
+ * 1. parentHandle > 0 and materializable → seal data property (no per-entry RPC).
+ * 2. parentHandle omitted / 0 ("unfilled") → leave native-preview lazy getter;
+ *    first read RPCs via fetchSymbol(getParentOfSymbol); proto memo caches the
+ *    result (including confirmed undefined) until snapshot epoch bumps.
+ * 3. Confirmed no parent (lazy RPC returned null) → memoized undefined; not
+ *    sealed here (payload omission alone must not invent "no parent").
+ */
+function hydrateScopeSymbolParents(symbols: readonly any[]): void {
+    if (!symbols?.length) return;
+    let registry: any;
+    const missingParentIds: number[] = [];
+    const seen = new Set<number>();
+    for (const sym of symbols) {
+        if (!isBridgeWireSymbol(sym)) continue;
+        if (!registry) registry = sym.objectRegistry;
+        const own = Object.getOwnPropertyDescriptor(sym, "parent");
+        if (own && !own.get && !own.set) continue;
+        const ph = sym.parentHandle;
+        if (typeof ph === "number" && ph !== 0) {
+            if (registry?.getSymbol?.(ph)) continue;
+            if (!seen.has(ph)) {
+                seen.add(ph);
+                missingParentIds.push(ph);
+            }
+        }
+    }
+    if (registry && missingParentIds.length && typeof registry.materializeSymbols === "function") {
+        try { registry.materializeSymbols(missingParentIds); }
+        catch { /* parent getter falls back to RPC */ }
+    }
+    for (const sym of symbols) {
+        if (!isBridgeWireSymbol(sym)) continue;
+        const own = Object.getOwnPropertyDescriptor(sym, "parent");
+        if (own && !own.get && !own.set) continue;
+        const ph = sym.parentHandle;
+        // omitzero / missing handle: not "no parent" — leave lazy getter + memo.
+        if (typeof ph !== "number" || ph === 0) continue;
+        const parent = registry?.getSymbol?.(ph);
+        if (!parent) continue; // leave lazy getter
+        try {
+            Object.defineProperty(sym, "parent", { value: parent, configurable: true });
+        }
+        catch { /* read-only */ }
+    }
+}
 /**
  * Stock symbolToString/writeSymbol include the accessible parent chain only
  * when an enclosingDeclaration is provided (node builder: chain is built iff
@@ -1976,6 +2143,76 @@ function copyScopeSymbolsFromTable(table: any, meaning: number, out: Map<string,
     }
 }
 /**
+ * Stock checker.copyLocallyVisibleExportSymbols: module exports are not all
+ * in-scope identifiers. Exclude `default` and re-export aliases so the
+ * `default` keyword completion (sortText 15) is not displaced by the module's
+ * default-export symbol (property/export, sortText 11) — vue-script-global
+ * completion parity witness.
+ */
+function isLocallyInvisibleModuleExportSymbol(symbol: any): boolean {
+    // Used only while copying a module's exports table (stock
+    // copyLocallyVisibleExportSymbols). Name `default` is always excluded
+    // here — members of interfaces/classes go through copySymbols instead.
+    const name = symbol?.escapedName ?? symbol?.name;
+    if (name === "default") return true;
+    for (const d of symbol?.declarations ?? []) {
+        if (d?.kind === SyntaxKind.ExportSpecifier || d?.kind === SyntaxKind.NamespaceExport) {
+            return true;
+        }
+    }
+    return false;
+}
+/**
+ * Post-filter for getSymbolsInScope results (tsgo+Soft-P′ may still surface
+ * the module default-export symbol). Stock copyLocallyVisibleExportSymbols
+ * excludes escapedName === InternalSymbolName.Default unconditionally.
+ *
+ * Wire scope symbols often arrive with parentHandle omitted/0 (unfilled). After
+ * hydrate leaves the lazy getter, `.parent` may still be unresolved until first
+ * read; a Module-parent-only filter misses that window and the `default`
+ * keyword completion (sortText 15) is displaced by property/export (sortText 11)
+ * — vue-script-global parity witness. Only keep a "default" member when its
+ * parent is a class/interface/type/object container (those appear via
+ * copySymbols(members) inside the type body, not as module exports).
+ */
+function isStolenDefaultKeywordScopeSymbol(symbol: any): boolean {
+    for (const d of symbol?.declarations ?? []) {
+        if (
+            d?.kind === SyntaxKind.ExportSpecifier
+            || d?.kind === SyntaxKind.NamespaceExport
+            || d?.kind === SyntaxKind.ExportAssignment
+        ) {
+            return true;
+        }
+    }
+    const name = symbol?.escapedName ?? symbol?.name;
+    if (name !== "default") return false;
+    const parentFlags = symbol?.parent?.flags ?? 0;
+    // Member-container parents: keep (rare `default` property name).
+    const memberContainer = SymbolFlags.Class | SymbolFlags.Interface
+        | SymbolFlags.TypeLiteral | SymbolFlags.ObjectLiteral;
+    if (parentFlags & memberContainer) return false;
+    // Module parent, missing parent (wire-stripped), or any other case:
+    // treat as module default export — exclude so the keyword wins.
+    return true;
+}
+function copyLocallyVisibleExportSymbolsFromTable(table: any, meaning: number, out: Map<string, any>): void {
+    if (!table || !meaning) return;
+    const add = (sym: any) => {
+        if (isLocallyInvisibleModuleExportSymbol(sym)) return;
+        if (!symbolMatchesMeaning(sym, meaning)) return;
+        const id = sym.escapedName ?? sym.name;
+        if (id && !out.has(String(id))) out.set(String(id), sym);
+    };
+    if (typeof table.forEach === "function") {
+        table.forEach((sym: any) => add(sym));
+        return;
+    }
+    if (typeof table.values === "function") {
+        for (const sym of table.values()) add(sym);
+    }
+}
+/**
  * bindSourceFile locals/exports walk for genuine host-only virtual files
  * (__tnbHostBound with no tsgo mirror). Real project files that are host-bound
  * for LS token walks still use the getSymbolsInScope RPC (globals via tsgo).
@@ -1993,12 +2230,21 @@ function getHostSymbolsInScope(location: any, meaning: number): any[] {
             case SyntaxKind.SourceFile: {
                 const sf = node;
                 if (sf.externalModuleIndicator || sf.commonJsModuleIndicator) {
-                    copyScopeSymbolsFromTable(sf.symbol?.exports, meaning, symbols);
+                    // Stock: meaning & ModuleMember + copyLocallyVisibleExportSymbols.
+                    copyLocallyVisibleExportSymbolsFromTable(
+                        sf.symbol?.exports,
+                        meaning & SymbolFlags.ModuleMember,
+                        symbols,
+                    );
                 }
                 break;
             }
             case SyntaxKind.ModuleDeclaration:
-                copyScopeSymbolsFromTable(node.symbol?.exports, meaning, symbols);
+                copyLocallyVisibleExportSymbolsFromTable(
+                    node.symbol?.exports,
+                    meaning & SymbolFlags.ModuleMember,
+                    symbols,
+                );
                 break;
             case SyntaxKind.EnumDeclaration:
                 copyScopeSymbolsFromTable(node.symbol?.exports, meaning & SymbolFlags.EnumMember, symbols);
@@ -2012,24 +2258,88 @@ function getHostSymbolsInScope(location: any, meaning: number): any[] {
 /** tsgo getSymbolsInScope can miss host-bound import bindings (e.g. type-only namespace aliases). */
 function mergeHostLocalScopeSymbols(tsgoSymbols: any[], location: any, meaning: number): any[] {
     const sf = location?.getSourceFile?.();
-    if (!sf?.__tnbHostBound) return tsgoSymbols;
-    const hostLocals = getHostSymbolsInScope(location, meaning);
-    if (!hostLocals.length) return tsgoSymbols;
-    const seen = new Set<string>();
-    for (const sym of tsgoSymbols) {
-        const id = sym.escapedName ?? sym.name;
-        if (id) seen.add(String(id));
+    // Soft-P′ disk files use __tnbSoftBound; overlays use __tnbHostBound. Both are
+    // host-parsed so declaration identity (=== sourceFile) must prefer host.
+    if (!isHostParsedSourceFile(sf)) return tsgoSymbols;
+    // getHostSymbolsInScope currently gates on __tnbHostBound; for soft-bound SFs
+    // walk locals via the same binder tables when present.
+    let hostLocals = getHostSymbolsInScope(location, meaning);
+    if (!hostLocals.length && sf.__tnbSoftBound) {
+        hostLocals = getHostSymbolsInScopeSoft(location, meaning);
     }
-    const merged = [...tsgoSymbols];
+    if (!hostLocals.length) return tsgoSymbols;
+    const hostLocalByName = new Map<string, any>();
     for (const sym of hostLocals) {
         const id = sym.escapedName ?? sym.name;
-        if (!id || seen.has(String(id))) continue;
+        if (!id) continue;
         const decls = sym.declarations ?? (sym.valueDeclaration ? [sym.valueDeclaration] : undefined);
         if (!decls?.some((d: any) => d.getSourceFile?.() === sf)) continue;
-        seen.add(String(id));
+        hostLocalByName.set(String(id), sym);
+    }
+    if (!hostLocalByName.size) return tsgoSymbols;
+    const seen = new Set<string>();
+    const merged: any[] = [];
+    // Prefer host binder identity for file-locals so stock
+    // symbolHasDeclarationInSourceFile (===) assigns LocationPriority sortText.
+    for (const sym of tsgoSymbols) {
+        const id = sym.escapedName ?? sym.name;
+        const key = id ? String(id) : "";
+        const host = key ? hostLocalByName.get(key) : undefined;
+        if (host) {
+            if (!seen.has(key)) {
+                merged.push(host);
+                seen.add(key);
+            }
+            continue;
+        }
+        merged.push(sym);
+        if (key) seen.add(key);
+    }
+    for (const [key, sym] of hostLocalByName) {
+        if (seen.has(key)) continue;
         merged.unshift(sym);
+        seen.add(key);
     }
     return merged;
+}
+
+/** Soft-bound SF local walk (same as host-bound, without __tnbHostBound gate). */
+function getHostSymbolsInScopeSoft(location: any, meaning: number): any[] {
+    const sf = location?.getSourceFile?.();
+    if (!isHostParsedSourceFile(sf)) return [];
+    if (location.flags & NodeFlags.InWithStatement) return [];
+    const symbols = new Map<string, any>();
+    let node = location;
+    while (node) {
+        if (node.locals) {
+            copyScopeSymbolsFromTable(node.locals, meaning, symbols);
+        }
+        switch (node.kind) {
+            case SyntaxKind.SourceFile: {
+                if (sf.externalModuleIndicator || sf.commonJsModuleIndicator) {
+                    copyLocallyVisibleExportSymbolsFromTable(
+                        sf.symbol?.exports,
+                        meaning & SymbolFlags.ModuleMember,
+                        symbols,
+                    );
+                }
+                break;
+            }
+            case SyntaxKind.ModuleDeclaration:
+                copyLocallyVisibleExportSymbolsFromTable(
+                    node.symbol?.exports,
+                    meaning & SymbolFlags.ModuleMember,
+                    symbols,
+                );
+                break;
+            case SyntaxKind.EnumDeclaration:
+                copyScopeSymbolsFromTable(node.symbol?.exports, meaning & SymbolFlags.EnumMember, symbols);
+                break;
+        }
+        node = node.parent;
+    }
+    symbols.delete("this");
+    return [...symbols.values()];
 }
 /** Lexical resolve on host-bound AST (mirrors checker.resolveEntityName for LS paths). */
 function resolveEntityNameOnHostBoundAst(name: string, location: any, meaning: number): any | undefined {
@@ -2382,7 +2692,7 @@ function isFilePathModuleName(escaped: string): boolean {
  */
 function mayRewriteSymbolParentToModule(symbol: any, moduleSym: any): boolean {
     if (!moduleSym || !isModuleExportForParentRewrite(symbol, moduleSym)) return false;
-    const parent = symbolParentOf(symbol);
+    const parent = symbolOwnSealedParent(symbol);
     if (parent && typeof parent === "object") {
         if (!isExternalModuleLikeSymbol(parent)) return false;
         if (!sameExternalModuleIdentity(parent, moduleSym)) {
@@ -2459,7 +2769,7 @@ function ensureExportedSymbolModuleParent(
         resolveHostExternalModuleSymbol(symbol, getHostSf)
         ?? resolveHostExternalModuleSymbol(exportSymObj, getHostSf);
     if (!moduleSym) {
-        const parent = symbolParentOf(symbol) ?? (exportSymObj ? symbolParentOf(exportSymObj) : undefined);
+        const parent = symbolOwnSealedParent(symbol) ?? (exportSymObj ? symbolOwnSealedParent(exportSymObj) : undefined);
         if (parent && isExternalModuleLikeSymbol(parent)) {
             moduleSym = resolveHostExternalModuleSymbol(parent, getHostSf) ?? parent;
         }
@@ -3098,6 +3408,7 @@ export function createTsgoProgram(
     projectReferences?: readonly any[],
     configFileParsingDiagnostics?: readonly any[],
 ): any {
+    const _tp0 = _rpcTraceLog ? Date.now() : 0;
     let configFilePath = options.configFilePath as string;
     if (!configFilePath) {
         throw new Error("createTsgoProgram: options.configFilePath is required");
@@ -3108,6 +3419,7 @@ export function createTsgoProgram(
 
     // Bridge initialize() sets _tsgoUseCaseSensitive before any path below is canonicalized.
     ensureBridgeSession();
+    if (_tp0) _rpcTraceEvent("thinProgram.t", `afterEnsureBridge ms=${Date.now()-_tp0}`);
 
     // Host script text captured once at createProgram time (safe to call
     // host.getSourceFile here — program does not exist yet; Volar injects
@@ -3179,6 +3491,7 @@ export function createTsgoProgram(
     programCtx.pendingExtraFileExtensions = collectExtraFileExtensions(names, options);
     _lastExtraFileExtensions = programCtx.pendingExtraFileExtensions;
     _hasHostBoundFiles = preferHostSourceFiles;
+    if (_tp0) _rpcTraceEvent("thinProgram.t", `afterHostOverlayCollect ms=${Date.now()-_tp0} overlays=${overlays.length} names=${names.size}`);
     // Mirror Volar proxyCreateProgram: extra extensions require allowArbitraryExtensions
     // for module resolution / auto-import in .vue virtual TS.
     if (programCtx.pendingExtraFileExtensions?.length && options.allowArbitraryExtensions !== false) {
@@ -3210,8 +3523,10 @@ export function createTsgoProgram(
     // tsserver/Volar open files incrementally (e.g. foo.vue before fixture.vue).
     // Always refresh the tsgo snapshot so overlays match the latest host content.
     _projectCache.delete(configFilePath);
+    if (_tp0) _rpcTraceEvent("thinProgram.t", `beforeCreateChecker ms=${Date.now()-_tp0}`);
 
     const checker = createTsgoChecker(thinProgramForChecker as any);
+    if (_tp0) _rpcTraceEvent("thinProgram.t", `afterCreateChecker ms=${Date.now()-_tp0}`);
 
     // The tsgo project is now created (ensureProject ran inside createTsgoChecker).
     // Access it via the module-level cache.
@@ -3271,6 +3586,12 @@ export function createTsgoProgram(
         ) {
             structureIsReused = StructureIsReused.Completely;
         }
+        _rpcTraceEvent(
+            "thinProgram.structureIsReused",
+            `value=${structureIsReused === StructureIsReused.Completely ? "Completely" : "Not"}`
+            + ` files=${shapeFileNames.length} config=${configFilePath}`,
+        );
+        if (_tp0) _rpcTraceEvent("thinProgram.t", `afterStructureReuse ms=${Date.now()-_tp0}`);
         shapeMap.set(configFilePath, { fileNames: shapeFileNames, options });
     }
 
@@ -4871,7 +5192,7 @@ export function createTsgoChecker(program: any): any {
     // object identity (tsgo symbols are id-keyed singletons via objectRegistry;
     // host-bound symbols are real TS symbol objects). Cleared on snapshot
     // refresh alongside symByPos.
-    const refinedSymBySym = new WeakMap<any, any>();
+    let refinedSymBySym = new WeakMap<any, any>();
     // Files where prefetchResolvedReferences ran — skip expensive node-tree
     // fallback on cache miss; prefetch + getSymbolAtPosition is enough.
     const symPrefetchPopulated = new Set<string>();
@@ -5135,6 +5456,13 @@ export function createTsgoChecker(program: any): any {
         // openFiles-only snapshot bumps (disk lint prefetch) must not wipe
         // symByPos between per-file batch prefetches.
         if (openFilesWithContent.length === 0) return;
+        _rpcTraceEvent(
+            "overlay.refresh.clearCaches",
+            `files=${openFilesWithContent.length} paths=${openFilesWithContent.map(f => f.fileName).join(",")}`
+            + ` symByPosFiles=${symByPos.size} symbolsInScope=${symbolsInScopeCache.size}`
+            + ` nodeType=${nodeTypeCache.size} typeOfSymbol=${typeOfSymbolCache.size}`
+            + ` properties=${propertiesCache.size}`,
+        );
         symByPos.clear();
         symPrefetched.clear();
         symPrefetchPopulated.clear();
@@ -5153,6 +5481,12 @@ export function createTsgoChecker(program: any): any {
         baseTypesCache.clear();
         _objCompletionPending = undefined;
         _objCompletionBatch = undefined;
+        // Invalidate Symbol.parent memos pinned on instances that outlive the
+        // cleared maps (Soft-P′ / host-bound may still hold Symbol refs).
+        _tnbParentMemoEpoch++;
+        // WeakMap has no clear(); drop Soft-P′/S′ memo so remapped decls cannot
+        // stick across overlay content refresh (comment claimed this already).
+        refinedSymBySym = new WeakMap();
     }
 
     function getAmbientModuleBatch(): any {
@@ -5806,6 +6140,58 @@ export function createTsgoChecker(program: any): any {
                 },
             });
         }
+        // Memoize Symbol.parent across repeated reads in one snapshot epoch.
+        // Covers confirmed-none (RPC null) so omitzero symbols pay one lazy
+        // getParentOfSymbol, not per-entry FFI. Invalidate on: parentHandle
+        // upgrade (ph key) or overlay content refresh (_tnbParentMemoEpoch).
+        // Soft-P′ instance data properties still shadow this getter.
+        // parentHandle===0 ("unfilled") stays lazy — do not seal undefined.
+        const parentDesc = Object.getOwnPropertyDescriptor(proto, "parent");
+        if (parentDesc?.get && !(parentDesc as any).__tnbParentMemo) {
+            const rawGet = parentDesc.get;
+            Object.defineProperty(proto, "parent", {
+                configurable: true,
+                enumerable: parentDesc.enumerable ?? true,
+                get() {
+                    const ph = this.parentHandle;
+                    if (
+                        Object.prototype.hasOwnProperty.call(this, "__tnbParentMemo")
+                        && this.__tnbParentMemoPh === ph
+                        && this.__tnbParentMemoEpoch === _tnbParentMemoEpoch
+                    ) {
+                        return this.__tnbParentMemo;
+                    }
+                    let result: any;
+                    try { result = rawGet.call(this); }
+                    catch { result = undefined; }
+                    try {
+                        Object.defineProperty(this, "__tnbParentMemo", {
+                            value: result,
+                            writable: true,
+                            configurable: true,
+                        });
+                        Object.defineProperty(this, "__tnbParentMemoPh", {
+                            value: ph,
+                            writable: true,
+                            configurable: true,
+                        });
+                        Object.defineProperty(this, "__tnbParentMemoEpoch", {
+                            value: _tnbParentMemoEpoch,
+                            writable: true,
+                            configurable: true,
+                        });
+                    }
+                    catch {
+                        this.__tnbParentMemo = result;
+                        this.__tnbParentMemoPh = ph;
+                        this.__tnbParentMemoEpoch = _tnbParentMemoEpoch;
+                    }
+                    return result;
+                },
+            });
+            (Object.getOwnPropertyDescriptor(proto, "parent") as any).__tnbParentMemo = true;
+        }
+
         // Stock TransientSymbol carries `links.checkFlags`; getCheckFlags reads
         // it whenever SymbolFlags.Transient is set. tsgo symbols expose raw
         // `checkFlags` (bit layout audited identical) but no `links` object, so
@@ -6232,16 +6618,42 @@ export function createTsgoChecker(program: any): any {
     };
     const refineNavSymbol = (sym: any) => {
         if (!sym) return sym;
+        const cached = refinedSymBySym.get(sym);
+        if (cached !== undefined) return cached;
+        // Completion pulls ~1000 getSymbolsInScope globals per keystroke.
+        // When host-bound (.vue) files exist, pure lib/ambient symbols with no
+        // exportSymbol/Alias and confirmed-no host-bound decls skip Soft-P′ —
+        // that was getSourceFile×N. Unresolved decls must take the full path so
+        // locals keep stock sortText (symbolHasDeclarationInSourceFile ===).
+        if (
+            _hasHostBoundFiles
+            && isBridgeWireSymbol(sym)
+            && !sym.exportSymbol
+            && !((sym.flags ?? 0) & SymbolFlags.Alias)
+            && bridgeSymbolConfirmedLibOnlyNoHostRemap(sym, getHostBoundSf)
+        ) {
+            // Pure lib/ambient globals under a vue/host-bound project.
+            // Still apply S′: skipping Soft-P′ remap is fine for completion
+            // (no host decls), but FAR `getExportInfo` needs `.parent` as the
+            // external module (`exportSymbol.parent`). Without S′, package
+            // re-exports (vue→reactivity `ref`) lose cross-`.vue` import refs.
+            const light = ensureExportedSymbolModuleParent(
+                ensureSymbolContextualDocCompat(sym),
+                getHostBoundSf,
+            );
+            refinedSymBySym.set(sym, light);
+            return light;
+        }
         if (!_hasHostBoundFiles) {
             // Soft-P′ path may lack host-bound remapping, but S′ still applies:
             // numeric exportSymbol must not reach importTracker.getExportInfo.
-            return ensureExportedSymbolModuleParent(
+            const refinedNoHost = ensureExportedSymbolModuleParent(
                 ensureClassLikeSymbolDeclarations(ensureSymbolContextualDocCompat(sym)),
                 getHostBoundSf,
             );
+            refinedSymBySym.set(sym, refinedNoHost);
+            return refinedNoHost;
         }
-        const cached = refinedSymBySym.get(sym);
-        if (cached !== undefined) return cached;
         const refined = ensureClassLikeSymbolDeclarations(
             ensureSymbolContextualDocCompat(refineHostNavigationSymbol(sym, getHostBoundSf)),
         );
@@ -6270,8 +6682,11 @@ export function createTsgoChecker(program: any): any {
             case SyntaxKind.ClassKeyword: {
                 const parent = node.parent;
                 if (!parent) return { action: "undefined" };
-                if (parent.symbol) return { action: "symbol", symbol: parent.symbol };
+                // Prefer the declaration name so Soft-P′ remapping / host identity
+                // matches Identifier lookups. parent.symbol can retain RemoteSourceFile
+                // decls that FAR filters out under documentHighlights filesToSearch.
                 if (parent.name && parent.name !== node) return { action: "redirect", node: parent.name };
+                if (parent.symbol) return { action: "symbol", symbol: parent.symbol };
                 return { action: "undefined" };
             }
             case SyntaxKind.ConstructorKeyword: {
@@ -8334,12 +8749,19 @@ export function createTsgoChecker(program: any): any {
                 tsgoNode = getTsgoSourceFile(sf.fileName);
             }
             if (tsgoNode) {
-                let result = (project.checker.getSymbolsInScope(tsgoNode, meaning >>> 0) ?? []).map(refineNavSymbol);
-                if (sf.__tnbHostBound) {
+                const raw = project.checker.getSymbolsInScope(tsgoNode, meaning >>> 0) ?? [];
+                hydrateScopeSymbolParents(raw);
+                let result = raw.map(refineNavSymbol);
+                // Host-bound overlays and Soft-P′ soft-bound open files: prefer
+                // host binder locals so completion sortText uses === sourceFile.
+                if (isHostParsedSourceFile(sf)) {
                     result = mergeHostLocalScopeSymbols(result, location, meaning).map(sym =>
                         refinedSymBySym.has(sym) ? sym : refineNavSymbol(sym),
                     );
                 }
+                // Stock never puts module-default / re-export aliases into scope;
+                // filtering them restores the `default` keyword completion slot.
+                result = result.filter((sym: any) => !isStolenDefaultKeywordScopeSymbol(sym));
                 if (process.env.TNB_SCOPE_TRACE === "1") {
                     try {
                         require("node:fs").appendFileSync(
@@ -8746,8 +9168,16 @@ export function createTsgoChecker(program: any): any {
         getRootSymbols(symbol: any): any[] {
             if (!symbol) return [];
             ensureProject();
-            // rpc() maps a resolved echo back to the caller's own symbol, so an
-            // ordinary symbol (host or tsgo) stays its own root by identity.
+            // Stock: getImmediateRootSymbols returns undefined for non-Transient
+            // (Alias included) → [symbol] by identity. Transient (mapped/union
+            // synthetic) walks. Bridge: FFI only when flags need tsgo-side walk —
+            // Transient always, Alias always (aliased/root resolution).
+            // Non-Transient|Alias: skip FFI; still Soft-P′+S′ via refineNavSymbol
+            // (bare ensureExportedSymbolModuleParent alone dropped Soft-P′).
+            const flags = (symbol.flags ?? 0) as number;
+            if (!(flags & (SymbolFlags.Transient | SymbolFlags.Alias))) {
+                return [refineNavSymbol(symbol)];
+            }
             let roots: readonly any[] | undefined;
             try {
                 roots = rpc().getRootSymbols(symbol);
