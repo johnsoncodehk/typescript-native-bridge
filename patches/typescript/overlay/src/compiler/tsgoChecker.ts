@@ -4885,6 +4885,12 @@ export function createTsgoChecker(program: any): any {
     const symbolsInScopeCache = new Map<string, any[]>();
     /** tryFindAmbientModule memo — keyed unquoted module name; null = miss. */
     const ambientModuleByNameCache = new Map<string, any | null>();
+    // getModuleExportMap batch memo shared by getAmbientModules /
+    // tryFindAmbientModule. The builder calls getAmbientModules once per
+    // source file when computing referenced files; without this memo each
+    // call is a full export-map RPC (N files × ~17ms dominated `tsc -b`).
+    // null = fetch failed; undefined = not fetched yet.
+    let ambientModuleBatchCache: any = undefined;
     // Per-file index: start position → all tsgo nodes that start there.
     // Built once per file via a single AST walk, after which every
     // findTsgoNodeAtPosition call is an O(1) map lookup + a tiny kind/end
@@ -5135,6 +5141,7 @@ export function createTsgoChecker(program: any): any {
         moduleSpecPrefetched.clear();
         symbolsInScopeCache.clear();
         ambientModuleByNameCache.clear();
+        ambientModuleBatchCache = undefined;
         symMissCountByFile.clear();
         rpcSymbolCache.clear();
         nodeTypeCache.clear();
@@ -5146,6 +5153,17 @@ export function createTsgoChecker(program: any): any {
         baseTypesCache.clear();
         _objCompletionPending = undefined;
         _objCompletionBatch = undefined;
+    }
+
+    function getAmbientModuleBatch(): any {
+        if (ambientModuleBatchCache !== undefined) return ambientModuleBatchCache ?? undefined;
+        try {
+            ambientModuleBatchCache = project.checker.getModuleExportMap?.() ?? null;
+        }
+        catch {
+            ambientModuleBatchCache = null;
+        }
+        return ambientModuleBatchCache ?? undefined;
     }
 
     function getTsgoSourceFile(fileName: string): any {
@@ -8268,13 +8286,8 @@ export function createTsgoChecker(program: any): any {
         },
         getAmbientModules(): readonly any[] {
             ensureProject();
-            try {
-                const batch = project.checker.getModuleExportMap?.();
-                return (batch?.modules ?? []).filter((m: any) => !m.moduleFileName).map((m: any) => m.moduleSymbol);
-            }
-            catch {
-                return [];
-            }
+            const batch = getAmbientModuleBatch();
+            return (batch?.modules ?? []).filter((m: any) => !m.moduleFileName).map((m: any) => m.moduleSymbol);
         },
         tryFindAmbientModule(moduleName: string): any {
             if (!moduleName) return undefined;
@@ -8284,7 +8297,7 @@ export function createTsgoChecker(program: any): any {
                 return ambientModuleByNameCache.get(key) ?? undefined;
             }
             try {
-                const batch = project.checker.getModuleExportMap?.();
+                const batch = getAmbientModuleBatch();
                 for (const mod of batch?.modules ?? []) {
                     if (mod.moduleFileName) continue;
                     const name = mod.moduleName?.replace(/^"|"$/g, "");
