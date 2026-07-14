@@ -1404,6 +1404,37 @@ const TypeFormatFlagsMultilineObjectLiterals = 1 << 10;
 const TypeFormatFlagsWriteCallStyleSignature = 1 << 27;
 /** SignatureKind.Construct — only value that should keep construct print style. */
 const SignatureKindConstruct = 1;
+/**
+ * Stock writeType → typeToString converts TypeFormatFlags → NodeBuilderFlags via
+ * `toNodeBuilderFlags(flags) | IgnoreErrors | (noTruncation ? NoTruncation : 0)`
+ * and passes maximumLength/verbosityLevel into NodeBuilder VerbosityContext.
+ *
+ * typeToDisplayParts ORs MultilineObjectLiterals | UseAliasDefinedOutsideCurrentScope
+ * and passes maximumLength (QI defaultHoverMaximumTruncationLength=500).
+ *
+ * Bridge writeType must mask to NodeBuilderFlagsMask and OR IgnoreErrors before the
+ * typeToTypeNode RPC (expects NodeBuilderFlags). maximumLength/verbosityLevel still
+ * cannot cross RPC (TypeToTypeNodeParams has no Verbosity fields) — Go defaults to
+ * maxTruncationLength=160 vs stock hover 500; that density delta is (b) in
+ * checker/nodebuilder.go VerbosityContext + api/session.go handleTypeToTypeNode.
+ * Do not fake MaxTruncationLength with NoTruncation (overshoots to 1e6).
+ */
+/** Matches TypeFormatFlags.NodeBuilderFlagsMask (types.ts). */
+const TypeFormatFlagsNodeBuilderFlagsMask =
+    (1 << 0) | (1 << 1) | (1 << 2) | (1 << 3) | (1 << 5) | (1 << 6) | (1 << 8) | (1 << 10) |
+    (1 << 11) | (1 << 12) | (1 << 13) | (1 << 14) | (1 << 20) | (1 << 23) | (1 << 25) | (1 << 28) | (1 << 29);
+/** NodeBuilderFlags.IgnoreErrors composite (Allow* recoverability bits). */
+const NodeBuilderFlagsIgnoreErrors =
+    (1 << 15) | (1 << 16) | (1 << 17) | (1 << 18) | (1 << 19) | (1 << 21) | (1 << 26);
+function toWriteTypeNodeBuilderFlags(flags?: number, _maximumLength?: number): number {
+    // Stock typeToString: toNodeBuilderFlags(flags) | IgnoreErrors | (noTruncation ? NoTruncation : 0).
+    // Preserve caller's NoTruncation bit via the mask; do NOT invent NoTruncation from
+    // maximumLength — that overshoots stock hover MaxTruncationLength (500) to Go's
+    // noTruncation budget (1e6) and inflates display past stock (see defineComponent-call).
+    // Passing MaxTruncationLength requires VerbosityContext on typeToTypeNode RPC → (b).
+    let nodeFlags = ((flags ?? 0) & TypeFormatFlagsNodeBuilderFlagsMask) | NodeBuilderFlagsIgnoreErrors;
+    return nodeFlags;
+}
 function clearTypeLiteralSingleLineEmitFlags(node: any): void {
     if (!node) return;
     if (node.kind === SyntaxKind.TypeLiteral && node.emitNode) {
@@ -7010,11 +7041,25 @@ export function createTsgoChecker(program: any): any {
         // tsgo has no writer RPC; build a TypeNode via typeToTypeNode and print
         // with the host printer so DisplayPartsSymbolWriter gets keyword/punct
         // kinds (signatureHelp return-type suffix, quickInfo, etc.).
-        writeType(type: any, enclosingDeclaration?: any, flags?: number, writer?: any): void {
+        //
+        // Stock signature: writeType(type, enclosing, flags, writer, maximumLength,
+        // verbosityLevel, out). Convert flags like typeToString; see
+        // toWriteTypeNodeBuilderFlags. verbosityLevel requires VerbosityContext on
+        // the Go NodeBuilder — not available over typeToTypeNode RPC → (b).
+        writeType(
+            type: any,
+            enclosingDeclaration?: any,
+            flags?: number,
+            writer?: any,
+            maximumLength?: number,
+            _verbosityLevel?: number,
+            _out?: any,
+        ): void {
             if (!type || !writer) return;
             ensureProject();
             const tsgoLocation = mapHostEnclosingToTsgo(enclosingDeclaration);
-            const typeNode = project.checker.typeToTypeNode(type, tsgoLocation, flags);
+            const nodeBuilderFlags = toWriteTypeNodeBuilderFlags(flags, maximumLength);
+            const typeNode = project.checker.typeToTypeNode(type, tsgoLocation, nodeBuilderFlags);
             if (typeNode) {
                 attachTypeParameterSymbolsFromType(type, typeNode);
                 attachTypeReferenceSymbols(project.checker, type, typeNode);
@@ -7023,6 +7068,8 @@ export function createTsgoChecker(program: any): any {
                 getRemoveCommentsPrinter().writeNode(EmitHint.Unspecified, typeNode, sourceFile, writer);
                 return;
             }
+            // typeToString RPC → typeToStringEx (IgnoreErrors + TypeFormatFlags). Verbosity /
+            // MaxTruncationLength still unavailable over RPC → (b).
             const text = project.checker.typeToString(type, tsgoLocation, flags) ?? "";
             writeTypeTextFallback(writer, text);
         },
@@ -7046,11 +7093,24 @@ export function createTsgoChecker(program: any): any {
             const text = symbolToStringWithChain(symbol, enclosing, flags);
             if (text) writer.writeSymbol?.(text, symbol);
         },
-        // Stock writeSignature → signatureToString(enclosing, flags, kind).
-        // Map enclosing; pass kind so call-style is preserved (see signatureToString).
-        writeSignature(signature: any, enclosing?: any, flags?: number, kind?: any, writer?: any): void {
+        // Stock writeSignature → signatureToString(enclosing, flags, kind, writer,
+        // maximumLength, verbosityLevel, out). Map enclosing; pass kind so
+        // call-style is preserved (see signatureToString). Accept but do not
+        // invent truncation flags for maximumLength — VerbosityContext is (b).
+        writeSignature(
+            signature: any,
+            enclosing?: any,
+            flags?: number,
+            kind?: any,
+            writer?: any,
+            _maximumLength?: number,
+            _verbosityLevel?: number,
+            _out?: any,
+        ): void {
             if (!signature || !writer) return;
             ensureProject();
+            // Accept maximumLength/verbosityLevel for stock signature parity; RPC
+            // signatureToString has no VerbosityContext → density tracked as (b).
             const text = checkerProxyRef.signatureToString(signature, enclosing, flags, kind) ?? "";
             if (text) writer.write?.(text);
         },
