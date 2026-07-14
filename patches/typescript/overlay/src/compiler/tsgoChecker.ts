@@ -1057,7 +1057,22 @@ function hostHasScriptSnapshot(host: any, requestFileName: string, hostFileName:
 /** Bind host-parsed SourceFiles for LS (export map, scope) — tsgo skips the TS binder. */
 function ensureHostSourceFileBound(sf: any, options: any): void {
     if (!sf || sf.__tnbHostBound) return;
-    if (!isOverlayCandidatePath(sf.fileName)) return;
+    // Soft-P′ materializes full host ASTs for closed/import-tracker files
+    // (including node_modules under tsserver projectService). Stock binder
+    // always attaches ExportSpecifier.symbol / SourceFile.symbol; without that,
+    // FAR getReferencesAtExportSpecifier Debug.checkDefined crashes and
+    // importTracker.getContainingModuleSymbol → getDirectImports(undefined)
+    // reads .id on undefined. Bind those files for binder fields only — do NOT
+    // brand __tnbHostBound (disk/node_modules keep RPC symbol identity).
+    if (!isOverlayCandidatePath(sf.fileName)) {
+        if (sf.__tnbSoftBound) return;
+        sf.__tnbSoftBound = true;
+        if (sf.symbol === undefined) {
+            try { bindSourceFile(sf, options); } catch { /* best-effort */ }
+        }
+        ensureHostSourceFileModuleRefs(sf);
+        return;
+    }
     if (sf.symbol !== undefined) {
         sf.__tnbHostBound = true;
         ensureHostSourceFileModuleRefs(sf);
@@ -1610,13 +1625,18 @@ function resolveNameOnHostBoundAst(name: string, location: any): any | undefined
     }
     return undefined;
 }
+/** True when SF was host-parsed + binder-run (overlay brand or Soft-P′ soft-bind). */
+function isHostParsedSourceFile(sf: any): boolean {
+    return !!(sf && (sf.__tnbHostBound || sf.__tnbSoftBound));
+}
 function declarationNeedsHostRemap(decl: any): boolean {
     const sf = decl?.getSourceFile?.();
-    return !!(sf && !sf.__tnbHostBound);
+    // Soft-P′ soft-bound disk files are already host AST — no remap needed.
+    return !!(sf && !isHostParsedSourceFile(sf));
 }
-/** Deepest host-bound AST node containing `pos` (Language Service snapshot coords). */
+/** Deepest host-parsed AST node containing `pos` (Language Service snapshot coords). */
 function findHostNodeAtPosition(sf: any, pos: number): any | undefined {
-    if (!sf?.__tnbHostBound || typeof pos !== "number") return undefined;
+    if (!isHostParsedSourceFile(sf) || typeof pos !== "number") return undefined;
     let best: any;
     function visit(node: any): void {
         if (pos < node.getStart(sf) || pos >= node.getEnd(sf)) return;
@@ -1627,7 +1647,7 @@ function findHostNodeAtPosition(sf: any, pos: number): any | undefined {
     return best;
 }
 function findHostNodeAtLineCharacter(hostSf: any, remoteSf: any, pos: number): any | undefined {
-    if (!hostSf?.__tnbHostBound || !remoteSf || typeof pos !== "number") return undefined;
+    if (!isHostParsedSourceFile(hostSf) || !remoteSf || typeof pos !== "number") return undefined;
     try {
         const { line, character } = remoteSf.getLineAndCharacterOfPosition(pos);
         const hostPos = hostSf.getPositionOfLineAndCharacter(line, character);
@@ -1637,7 +1657,7 @@ function findHostNodeAtLineCharacter(hostSf: any, remoteSf: any, pos: number): a
     }
 }
 function findHostModuleScopedDeclaration(hostSf: any, escapedName: string): any | undefined {
-    if (!hostSf?.__tnbHostBound || !escapedName) return undefined;
+    if (!isHostParsedSourceFile(hostSf) || !escapedName) return undefined;
     for (const stmt of hostSf.statements ?? []) {
         switch (stmt.kind) {
             case SyntaxKind.VariableStatement:
@@ -2057,10 +2077,35 @@ function isModuleExportForParentRewrite(symbol: any, moduleSym: any | undefined)
 }
 
 /**
+ * Package / ambient module names (`"vue"`) vs file-path modules
+ * (`"…/fixture.vue"`). Used to allow correcting mistaken Soft-P′ parents for
+ * `declare module` augmentations without permitting the reverse rewrite.
+ */
+function isPackageAmbientModuleName(escaped: string): boolean {
+    if (escaped.length < 3 || escaped.charCodeAt(0) !== 0x22 /* " */) return false;
+    const bare = escaped.charCodeAt(escaped.length - 1) === 0x22
+        ? escaped.slice(1, -1)
+        : escaped.slice(1);
+    return !!bare && !bare.includes("/") && !bare.includes("\\")
+        && !/\.(ts|tsx|js|jsx|mts|cts|d\.ts|vue)$/i.test(bare);
+}
+
+function isFilePathModuleName(escaped: string): boolean {
+    if (!escaped) return false;
+    const bare = escaped.charCodeAt(0) === 0x22 && escaped.charCodeAt(escaped.length - 1) === 0x22
+        ? escaped.slice(1, -1)
+        : escaped;
+    return bare.includes("/") || bare.includes("\\")
+        || /\.(ts|tsx|js|jsx|mts|cts|d\.ts|vue)$/i.test(bare);
+}
+
+/**
  * May we set `symbol.parent = moduleSym`?
  * - Non-module parents (`__type` / `__object` / class / interface): never.
  * - Existing external-module parent: only same-identity host canonicalize
- *   (`"vue"` must not become `"…/fixture.vue"`).
+ *   (`"vue"` must not become `"…/fixture.vue"`), except correcting a file-path
+ *   parent up to an enclosing package ambient (`GlobalComponents` under
+ *   `declare module 'vue'`).
  * - Otherwise only true module exports (see isModuleExportForParentRewrite).
  */
 function mayRewriteSymbolParentToModule(symbol: any, moduleSym: any): boolean {
@@ -2068,7 +2113,18 @@ function mayRewriteSymbolParentToModule(symbol: any, moduleSym: any): boolean {
     const parent = symbolParentOf(symbol);
     if (parent && typeof parent === "object") {
         if (!isExternalModuleLikeSymbol(parent)) return false;
-        if (!sameExternalModuleIdentity(parent, moduleSym)) return false;
+        if (!sameExternalModuleIdentity(parent, moduleSym)) {
+            // Augmentation exports must parent to `"vue"`, not the host .vue SF
+            // module. Soft-P′ / bind order sometimes stamps the file module first.
+            if (
+                !(
+                    isPackageAmbientModuleName(externalModuleEscapedName(moduleSym))
+                    && isFilePathModuleName(externalModuleEscapedName(parent))
+                )
+            ) {
+                return false;
+            }
+        }
     }
     return true;
 }
@@ -4034,9 +4090,32 @@ function namelessSignatureSymbolShim(n: any, parentSym: any, flags: number, name
     };
 }
 
+/**
+ * Climb paren / as / satisfies / non-null wrappers to the binding parent.
+ * Vue `generic` SFCs emit `const __VLS_export = (<T,>(…) => …);` so the
+ * signature declaration's immediate parent is ParenthesizedExpression.
+ */
+function peelExpressionWrappersForBindingParent(node: any): any {
+    let cur = node?.parent;
+    while (
+        cur
+        && (
+            cur.kind === SyntaxKind.ParenthesizedExpression
+            || cur.kind === SyntaxKind.AsExpression
+            || cur.kind === SyntaxKind.SatisfiesExpression
+            || cur.kind === SyntaxKind.NonNullExpression
+            || cur.kind === SyntaxKind.TypeAssertionExpression
+        )
+    ) {
+        cur = cur.parent;
+    }
+    return cur;
+}
+
 function resolveNamelessDeclarationSymbol(n: any, project: any): any {
-    const parent = n.parent;
-    if (!parent || !project?.checker) return undefined;
+    if (!n || !project?.checker) return undefined;
+    const parent = peelExpressionWrappersForBindingParent(n) ?? n.parent;
+    if (!parent) return undefined;
     let parentSym = parent.symbol;
     if (!parentSym && parent.name) {
         try { parentSym = project.checker.getSymbolAtLocation(parent.name); } catch { /* best-effort */ }
@@ -4046,17 +4125,21 @@ function resolveNamelessDeclarationSymbol(n: any, project: any): any {
     // constructor branch (strict isClassDeclaration filter).
     ensureContainerDeclarationOnSymbol(parentSym, parent);
 
+    const isAnonFunction =
+        n.kind === SyntaxKind.ArrowFunction || n.kind === SyntaxKind.FunctionExpression;
     const wantFlags =
         n.kind === SyntaxKind.Constructor ? SymbolFlags.Constructor :
         n.kind === SyntaxKind.ConstructSignature || n.kind === SyntaxKind.ConstructorType ? SymbolFlags.Signature :
         n.kind === SyntaxKind.CallSignature || n.kind === SyntaxKind.FunctionType ? SymbolFlags.Signature :
         n.kind === SyntaxKind.IndexSignature ? SymbolFlags.Signature :
+        isAnonFunction ? SymbolFlags.Function :
         0;
     const wantNames = new Set<string>([
         "__constructor", "constructor",
         "__call", "call",
         "__new", "new",
         "__index", "index",
+        "__function",
     ]);
     const members = collectContainerMemberSymbols(parentSym);
     if (members.length) {
@@ -4073,11 +4156,14 @@ function resolveNamelessDeclarationSymbol(n: any, project: any): any {
     // No members table entry (rare): synthesize a constructor/signature symbol
     // with `.parent = class` so symbolMatchesSignature still pulls the class
     // declaration into getDefinitionAtPosition's result list.
+    // Anonymous ArrowFunction / FunctionExpression (Vue generic functional
+    // components): stock binder uses InternalSymbolName.Function ("__function").
     if (wantFlags) {
         const shimName =
             n.kind === SyntaxKind.Constructor ? "__constructor" :
             n.kind === SyntaxKind.CallSignature || n.kind === SyntaxKind.FunctionType ? "__call" :
             n.kind === SyntaxKind.ConstructSignature || n.kind === SyntaxKind.ConstructorType ? "__new" :
+            isAnonFunction ? "__function" :
             "__index";
         return namelessSignatureSymbolShim(n, parentSym, wantFlags, shimName);
     }
@@ -4235,8 +4321,12 @@ function installNodeHandleHooks(s: any): void {
                             // Class/interface containers: keep a kind-remapped
                             // declaration on the symbol so goToDefinition's
                             // isClassDeclaration filter keeps the class-name span.
-                            if (sym) ensureContainerDeclarationOnSymbol(sym, n);
-                            return sym;
+                            if (sym) {
+                                ensureContainerDeclarationOnSymbol(sym, n);
+                                return sym;
+                            }
+                            // Named binding miss (e.g. generated __VLS_export behind
+                            // wrappers): still recover nameless function shims.
                         }
                         return resolveNamelessDeclarationSymbol(n, project);
                     } catch { /* best-effort */ }
@@ -5845,7 +5935,9 @@ export function createTsgoChecker(program: any): any {
     const getHostBoundSf = (fileName: string): any | undefined => {
         const getSourceFile = _hostProgramRef?.getSourceFile ?? program.getSourceFile;
         const sf = getSourceFile?.(fileName);
-        if (!sf?.__tnbHostBound) return undefined;
+        // Soft-P′ soft-bound disk/node_modules files carry binder fields
+        // (ExportSpecifier.symbol) without the overlay identity brand.
+        if (!isHostParsedSourceFile(sf)) return undefined;
         return sf;
     };
     const refineNavSymbol = (sym: any) => {
