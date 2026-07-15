@@ -386,10 +386,10 @@ index 656f7cc4e..5d8923230 100644
      id: number;
      flags: number;
 diff --git a/_packages/native-preview/src/api/sync/types.ts b/_packages/native-preview/src/api/sync/types.ts
-index 4ccc3047d..103d8188d 100644
+index 4ccc3047d..13fbeefcd 100644
 --- a/_packages/native-preview/src/api/sync/types.ts
 +++ b/_packages/native-preview/src/api/sync/types.ts
-@@ -321,6 +321,124 @@ export interface CompletionInfo {
+@@ -321,6 +321,134 @@ export interface CompletionInfo {
      readonly entries: readonly CompletionEntry[];
  }
  
@@ -418,6 +418,16 @@ index 4ccc3047d..103d8188d 100644
 +    readonly affectsGlobalScope?: boolean;
 +    readonly impliedNodeFormat?: number;
 +    readonly refs?: readonly string[];
++}
++
++/**
++ * One program file's syntactic + semantic diagnostics from
++ * {@link Program.getDiagnosticsBatch}. `fileName` is the tsgo file name.
++ */
++export interface FileDiagnosticsBatchEntry {
++    readonly fileName: string;
++    readonly syntactic?: readonly Diagnostic[];
++    readonly semantic?: readonly Diagnostic[];
 +}
 +
 +/** Light symbol wire shape (id/name/flags only). */

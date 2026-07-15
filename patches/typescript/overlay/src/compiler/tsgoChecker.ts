@@ -3910,6 +3910,41 @@ export function createTsgoProgram(
     const getPerFileDiagCache = (proj: any) => {
         if (!perFileDiagCache || perFileDiagCache.proj !== proj) {
             perFileDiagCache = { proj, syntactic: new Map(), semantic: new Map() };
+            // Build mode: the builder asks for both kinds for every program
+            // file (buildinfo walk + emitFilesAndReportErrors) — ~2 RPCs per
+            // file whose Go-side results are already memoized after the
+            // prefetched whole-program pass, so the cost was almost entirely
+            // per-call bridge overhead. One batch RPC fills the memo up
+            // front; files the batch does not cover (host-virtual name
+            // mismatches) still fall through to the per-file RPC below.
+            // Never batch for interactive hosts: an editor asks for one open
+            // file, not the whole program.
+            if ((options as any).tscBuild && process.env.TNB_BATCH_DIAG !== "0" && typeof proj.program.getDiagnosticsBatch === "function") {
+                try {
+                    const entries = proj.program.getDiagnosticsBatch() ?? [];
+                    if (process.env.TNB_BATCH_DIAG_DEBUG === "1") {
+                        process.stderr.write(`[batch-diag] entries=${entries.length} keys=${JSON.stringify(entries.slice(0, 3).map((e: any) => toHostFileName(e.fileName)))}\n`);
+                    }
+                    for (const entry of entries) {
+                        const hostFileName = toHostFileName(entry.fileName);
+                        const syntactic = mapTsgoDiagnostics(entry.syntactic, getDiagnosticSourceFile);
+                        const semantic = mapTsgoDiagnostics(entry.semantic, getDiagnosticSourceFile);
+                        // Builder callers pass sourceFile.fileName, which may be
+                        // the canonical (lowercased) path rather than tsgo's
+                        // original-casing name — index under both.
+                        for (const key of new Set([hostFileName, canonicalSourceFilePath(hostFileName)])) {
+                            perFileDiagCache.syntactic.set(key, syntactic);
+                            perFileDiagCache.semantic.set(key, semantic);
+                        }
+                    }
+                }
+                catch (e) {
+                    // Batch is an optimization only — per-file RPCs still serve misses.
+                    if (process.env.TNB_BATCH_DIAG_DEBUG === "1") {
+                        process.stderr.write(`[batch-diag] failed: ${(e as any)?.message}\n`);
+                    }
+                }
+            }
         }
         return perFileDiagCache;
     };
@@ -3917,6 +3952,9 @@ export function createTsgoProgram(
         const cache = getPerFileDiagCache(proj);
         let result = cache.syntactic.get(fileName);
         if (!result) {
+            if (process.env.TNB_BATCH_DIAG_DEBUG === "1") {
+                process.stderr.write(`[batch-diag] syntactic miss: ${fileName}\n`);
+            }
             result = mapTsgoDiagnostics(proj.program.getSyntacticDiagnostics?.(tsgoFileArg(fileName)), getDiagnosticSourceFile);
             cache.syntactic.set(fileName, result);
         }
