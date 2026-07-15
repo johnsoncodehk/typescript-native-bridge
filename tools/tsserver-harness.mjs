@@ -129,13 +129,19 @@ if (!globalThis.__tnbTsserverHarnessHooksInstalled) {
  */
 export function tnbHarnessEnv(extra = {}) {
 	const godebug = process.env.GODEBUG ?? '';
-	const mergedGodebug = /(?:^|,)asyncpreemptoff=1(?:,|$)/.test(godebug)
-		? godebug
-		: (godebug ? `${godebug},asyncpreemptoff=1` : 'asyncpreemptoff=1');
+	let mergedGodebug;
+	if (process.env.TNB_ALLOW_ASYNC_PREEMPT === '1' || extra?.TNB_ALLOW_ASYNC_PREEMPT === '1') {
+		// Diagnostic / hang-dump path: keep async preemption so Go watchdog goroutines run.
+		mergedGodebug = (godebug || '').replace(/(?:^|,)asyncpreemptoff=1(?=,|$)/g, '').replace(/^,/, '');
+	} else {
+		mergedGodebug = /(?:^|,)asyncpreemptoff=1(?:,|$)/.test(godebug)
+			? godebug
+			: (godebug ? `${godebug},asyncpreemptoff=1` : 'asyncpreemptoff=1');
+	}
 	return {
 		...process.env,
 		...extra,
-		GODEBUG: mergedGodebug,
+		GODEBUG: mergedGodebug || undefined,
 		TNB_GODEBUG_REEXEC: '1',
 		TNB_PARENT_PID: String(process.pid),
 	};

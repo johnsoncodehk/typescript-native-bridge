@@ -142,6 +142,29 @@ index 625a64e26..998ae64a3 100644
              return getAllFilesExcludingDefaultLibraryFile(state, programOfThisState, sourceFileWithUpdatedShape);
          }
  
+diff --git a/src/compiler/checker.ts b/src/compiler/checker.ts
+index 0567712f1..f5ed206ac 100644
+--- a/src/compiler/checker.ts
++++ b/src/compiler/checker.ts
+@@ -1166,8 +1166,16 @@ const enum ReferenceHint {
+     Decorator,
+ }
+ 
+-let nextSymbolId = 1;
+-let nextNodeId = 1;
++// TNB: tsgo bridge proxy symbols/nodes carry Go-side sequential ids (small
++// integers) in the same `.id` slot stock getSymbolId/getNodeId assigns from.
++// Mixing both id spaces in one map (e.g. completions symbolToSortTextMap)
++// caused host/bridge id collisions that nondeterministically suppressed
++// auto-import entries. Give each JS bundle its own high id band so host ids
++// can never land in the Go id range (or another bundle's band).
++const tnbIdBandState = globalThis as { __tnbIdBandBase?: number; };
++tnbIdBandState.__tnbIdBandBase = (tnbIdBandState.__tnbIdBandBase ?? 0x40000000) + 0x10000000;
++let nextSymbolId = tnbIdBandState.__tnbIdBandBase;
++let nextNodeId = tnbIdBandState.__tnbIdBandBase;
+ let nextMergeId = 1;
+ let nextFlowId = 1;
+ 
 diff --git a/src/compiler/moduleSpecifiers.ts b/src/compiler/moduleSpecifiers.ts
 index 8860677e6..f5ced72f3 100644
 --- a/src/compiler/moduleSpecifiers.ts

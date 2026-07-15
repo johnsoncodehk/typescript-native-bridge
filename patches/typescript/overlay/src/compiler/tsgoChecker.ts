@@ -4239,7 +4239,25 @@ export function createTsgoProgram(
             const proj = project;
             if (!proj?.checker || typeof proj.checker.getModuleExportMap !== "function") return undefined;
             try {
-                return proj.checker.getModuleExportMap(importingFileName ? tsgoFileArg(importingFileName) : undefined);
+                const batch = proj.checker.getModuleExportMap(importingFileName ? tsgoFileArg(importingFileName) : undefined);
+                // TEMP cont6 dump (not for commit): first divergence between export-map and completion.
+                if (process.env.TNB_C6_DUMP === "1" && batch?.modules) {
+                    try {
+                        const fs = require("node:fs") as typeof import("node:fs");
+                        const watch = new Set(["events", "node:events", "dgram", "node:dgram", "stream", "node:stream", "async_hooks", "node:async_hooks"]);
+                        const rows = [];
+                        for (const m of batch.modules) {
+                            const name = String(m.moduleName ?? "").replace(/^"|"$/g, "");
+                            if (!watch.has(name)) continue;
+                            rows.push({ name, file: m.moduleFileName || "", named: (m.namedExports ?? []).length, def: !!m.defaultExport });
+                        }
+                        fs.appendFileSync("/tmp/tnb-c6-mem-dump.jsonl", JSON.stringify({
+                            t: Date.now(), importingFileName: importingFileName ?? null,
+                            modules: batch.modules.length, rows,
+                        }) + "\n");
+                    } catch { /* ignore */ }
+                }
+                return batch;
             } catch {
                 return undefined;
             }
@@ -5204,15 +5222,20 @@ export function createTsgoChecker(program: any): any {
     const moduleSpecPrefetched = new Set<string>();
     /** getSymbolsInScope memo — keyed (file:start:end:meaning); see adapter. */
     const symbolsInScopeCache = new Map<string, any[]>();
+    // tsserver (projectService) needs full ambient export batch for exportInfoMap;
+    // vue-tsc / builder hosts without projectService use the light batch.
+    const isProjectServiceProgram = !!(programCtx?.lsHost as any)?.projectService;
     /** tryFindAmbientModule memo — keyed unquoted module name; null = miss. */
     const ambientModuleByNameCache = new Map<string, any | null>();
-    // Ambient-module batch memo shared by getAmbientModules /
-    // tryFindAmbientModule. Prefer Checker.getAmbientModules (light RPC);
-    // fall back to getModuleExportMap when the method is missing or throws.
-    // The builder calls getAmbientModules once per source file when computing
-    // referenced files; without this memo each call is a full RPC (N files ×
-    // ~17ms dominated `tsc -b`). null = fetch failed; undefined = not fetched.
+    // Light ambient-module batch for builder referenced-files (module names +
+    // declaration merge only). Prefer Checker.getAmbientModules; fall back to
+    // getModuleExportMap when the method is missing or throws. null = fetch
+    // failed; undefined = not fetched.
     let ambientModuleBatchCache: any = undefined;
+    // Checker-quality ambient symbols for tryFindAmbientModule / export-info
+    // rehydrate. Binder-only light symbols lack merged exports and can hang
+    // getAliasedSymbol when auto-import walks ambient modules.
+    let ambientModuleExportBatchCache: any = undefined;
     // Per-file index: start position → all tsgo nodes that start there.
     // Built once per file via a single AST walk, after which every
     // findTsgoNodeAtPosition call is an O(1) map lookup + a tiny kind/end
@@ -5471,6 +5494,7 @@ export function createTsgoChecker(program: any): any {
         symbolsInScopeCache.clear();
         ambientModuleByNameCache.clear();
         ambientModuleBatchCache = undefined;
+        ambientModuleExportBatchCache = undefined;
         symMissCountByFile.clear();
         rpcSymbolCache.clear();
         nodeTypeCache.clear();
@@ -5508,6 +5532,17 @@ export function createTsgoChecker(program: any): any {
             }
         }
         return ambientModuleBatchCache ?? undefined;
+    }
+
+    function getAmbientModuleExportBatch(): any {
+        if (ambientModuleExportBatchCache !== undefined) return ambientModuleExportBatchCache ?? undefined;
+        try {
+            ambientModuleExportBatchCache = project.checker.getModuleExportMap?.() ?? null;
+        }
+        catch {
+            ambientModuleExportBatchCache = null;
+        }
+        return ambientModuleExportBatchCache ?? undefined;
     }
 
     function getTsgoSourceFile(fileName: string): any {
@@ -8711,7 +8746,13 @@ export function createTsgoChecker(program: any): any {
         },
         getAmbientModules(): readonly any[] {
             ensureProject();
-            const batch = getAmbientModuleBatch();
+            // Language-service auto-import also calls getAmbientModules while
+            // populating exportInfoMap, where binder-only symbols are not
+            // sufficient (aliases need the merged export table). The light
+            // batch is reserved for non-projectService compiler/builder walks.
+            const batch = isProjectServiceProgram
+                ? getAmbientModuleExportBatch()
+                : getAmbientModuleBatch();
             return (batch?.modules ?? []).filter((m: any) => !m.moduleFileName).map((m: any) => m.moduleSymbol);
         },
         tryFindAmbientModule(moduleName: string): any {
@@ -8722,7 +8763,7 @@ export function createTsgoChecker(program: any): any {
                 return ambientModuleByNameCache.get(key) ?? undefined;
             }
             try {
-                const batch = getAmbientModuleBatch();
+                const batch = getAmbientModuleExportBatch();
                 for (const mod of batch?.modules ?? []) {
                     if (mod.moduleFileName) continue;
                     const name = mod.moduleName?.replace(/^"|"$/g, "");
