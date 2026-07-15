@@ -389,6 +389,30 @@ const _programShapeByHost = new WeakMap<object, Map<string, TnbProgramShape>>();
 // tracking sequences JS-side program rebuilds, which stay within one bundle.
 const _programShapeNoHost = new Map<string, TnbProgramShape>();
 
+// Cross-generation host SourceFile reuse for disk-stable declaration files
+// (node_modules .d.ts). Every keystroke rebuilds the thin program with a fresh
+// per-program sfCache, so services loops that walk program.getSourceFiles()
+// (auto-import codefix forEachExternalModuleToImportFrom) re-parsed + re-bound
+// every library .d.ts each edit (~750ms of the getCodeFixes wall). Content
+// stability is keyed by host getScriptVersion; a changed file gets a new
+// version and misses. Same reuse rule stock applies via oldProgram
+// (structureIsReused) — bound host ASTs are content-addressed and safe to
+// share across generations. Keyed per LS host so closed projects drop entries.
+const _hostSfStableByHost = new WeakMap<object, Map<string, { version: string; sf: any }>>();
+const _hostSfStableNoHost = new Map<string, { version: string; sf: any }>();
+function isStableHostSfPath(p: string): boolean {
+    if (process.env.TNB_DISABLE_STABLE_HOST_SF === "1") return false;
+    return p.endsWith(".d.ts") && p.includes("/node_modules/");
+}
+function getHostSfStableCache(lsHost: any): Map<string, { version: string; sf: any }> {
+    if (typeof lsHost === "object" && lsHost !== null) {
+        let m = _hostSfStableByHost.get(lsHost);
+        if (!m) { m = new Map(); _hostSfStableByHost.set(lsHost, m); }
+        return m;
+    }
+    return _hostSfStableNoHost;
+}
+
 function toCStr(s: string): Buffer {
     return Buffer.from(s + "\0", "utf8");
 }
@@ -3659,6 +3683,22 @@ export function createTsgoProgram(
             ?? "1";
         const cacheKey = `${hostFileName}@${scriptVersion}`;
         if (sfCache.has(cacheKey)) return sfCache.get(cacheKey);
+        // Disk-stable library declarations: reuse the bound host AST from the
+        // previous program generation when the script version is unchanged.
+        const stableSfCache = isStableHostSfPath(hostFileName) ? getHostSfStableCache(hostForLs()) : undefined;
+        if (stableSfCache) {
+            const hit = stableSfCache.get(hostFileName);
+            if (hit && hit.version === String(scriptVersion)) {
+                ensureHostSourceFileBound(hit.sf, options);
+                ensureTnbVersion(hit.sf, hostFileName);
+                sfCache.set(cacheKey, hit.sf);
+                return hit.sf;
+            }
+        }
+        const rememberStable = (sf: any): any => {
+            if (stableSfCache && sf) stableSfCache.set(hostFileName, { version: String(scriptVersion), sf });
+            return sf;
+        };
         _tnbFullSfMaterializations++;
         if (process.env.TNB_SF_MATERIALIZE_STATS === "1") {
             tnbLogSfMaterialize(`[TNB_SF_MATERIALIZE] full+1 total soft=${_tnbLightStubCreations} full=${_tnbFullSfMaterializations} file=${hostFileName}`);
@@ -3674,7 +3714,7 @@ export function createTsgoProgram(
                 ensureHostSourceFileBound(hostSf, options);
                 ensureTnbVersion(hostSf, hostFileName);
                 sfCache.set(cacheKey, hostSf);
-                return hostSf;
+                return rememberStable(hostSf);
             }
             if (hostHasScriptSnapshot(ls, fileName, hostFileName)) {
                 const snap = ls?.getScriptSnapshot?.(fileName) ?? ls?.getScriptSnapshot?.(hostFileName);
@@ -3685,7 +3725,7 @@ export function createTsgoProgram(
                 if (hostSf) {
                     ensureTnbVersion(hostSf, hostFileName);
                     sfCache.set(cacheKey, hostSf);
-                    return hostSf;
+                    return rememberStable(hostSf);
                 }
                 const scriptKind = resolveLanguageServiceScriptKind(ls, fileName, hostFileName, /*fromHostSnapshot*/ true);
                 const sf = attachHostSourceFileMetadata(
@@ -3694,7 +3734,7 @@ export function createTsgoProgram(
                 );
                 ensureTnbVersion(sf, hostFileName);
                 sfCache.set(cacheKey, sf);
-                return sf;
+                return rememberStable(sf);
             }
         }
 
