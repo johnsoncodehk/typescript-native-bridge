@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"slices"
 	"strings"
 
 	"github.com/microsoft/typescript-go/internal/ast"
@@ -146,12 +147,27 @@ func computeModuleExportMap(ctx context.Context, program *compiler.Program, sd *
 			})
 		})
 
+		// getExportsOfModule / resolveStructuredTypeMembers iterate Go maps —
+		// random order per process. JS-side exportInfoMap dedup is
+		// order-sensitive; sort so runs are reproducible.
+		slices.SortStableFunc(mod.NamedExports, func(a, b *ModuleExportMapNamedExport) int {
+			return strings.Compare(a.Key, b.Key)
+		})
+
 		if mod.DefaultExport != nil || len(mod.NamedExports) > 0 {
 			resp.Modules = append(resp.Modules, mod)
 		}
 	}
 
-	for _, ambient := range chk.GetAmbientModules() {
+	// GetAmbientModules iterates the globals hash map — order is randomized per
+	// process. Stock (JS Map) is insertion-ordered, and the JS-side exportInfoMap
+	// dedup is order-sensitive, so a nondeterministic module order makes whole
+	// entry groups appear/disappear across runs. Sort for determinism.
+	ambients := slices.Clone(chk.GetAmbientModules())
+	slices.SortStableFunc(ambients, func(a, b *ast.Symbol) int {
+		return strings.Compare(a.Name, b.Name)
+	})
+	for _, ambient := range ambients {
 		if ambient == nil || ambient.Name == "" {
 			continue
 		}

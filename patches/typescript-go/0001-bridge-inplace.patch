@@ -760,10 +760,18 @@ index a76d52a54..d90e35c6b 100644
  
  export function isBindingPattern(node: Node): node is BindingPattern {
 diff --git a/internal/checker/checker.go b/internal/checker/checker.go
-index ac37c863d..70618dee2 100644
+index ac37c863d..92f4436bf 100644
 --- a/internal/checker/checker.go
 +++ b/internal/checker/checker.go
-@@ -7258,7 +7258,9 @@ func importClauseFromImported(node *ast.Node) *ast.Node {
+@@ -785,6 +785,7 @@ type Checker struct {
+ 	typeofType                                  *Type
+ 	typeResolutions                             []TypeResolution
+ 	resolutionStart                             int
++	instantiatedSymbolActive                    map[*ast.Symbol]bool
+ 	inVarianceComputation                       bool
+ 	apparentArgumentCount                       *int
+ 	lastGetCombinedNodeFlagsNode                *ast.Node
+@@ -7258,7 +7259,9 @@ func importClauseFromImported(node *ast.Node) *ast.Node {
  func (c *Checker) checkUnusedInferTypeParameter(node *ast.Node) {
  	typeParameter := node.AsInferTypeNode().TypeParameter
  	if c.isUnreferencedTypeParameter(typeParameter) {
@@ -774,7 +782,7 @@ index ac37c863d..70618dee2 100644
  	}
  }
  
-@@ -7270,14 +7272,25 @@ func (c *Checker) checkUnusedTypeParameters(node *ast.Node) {
+@@ -7270,14 +7273,25 @@ func (c *Checker) checkUnusedTypeParameters(node *ast.Node) {
  	if typeParameterList == nil {
  		return
  	}
@@ -803,7 +811,106 @@ index ac37c863d..70618dee2 100644
  			}
  		}
  	}
-@@ -29105,6 +29118,9 @@ func (c *Checker) getContextualType(node *ast.Node, contextFlags ContextFlags) *
+@@ -16367,7 +16381,7 @@ func (c *Checker) GetTypeOfSymbolAtLocation(symbol *ast.Symbol, location *ast.No
+ 		// of the expression (which will reflect control flow analysis). If the expression indeed
+ 		// resolved to the given symbol, return the narrowed type.
+ 		if (ast.IsIdentifier(location) || ast.IsPrivateIdentifier(location)) &&
+-			!(ast.IsJsxTagName(location) || ast.IsJsxAttribute(location.Parent) || ast.IsJsxNamespacedName(location.Parent)) {
++			!(ast.IsJsxTagName(location) || (location.Parent != nil && (ast.IsJsxAttribute(location.Parent) || ast.IsJsxNamespacedName(location.Parent)))) {
+ 			if ast.IsRightSideOfQualifiedNameOrPropertyAccess(location) {
+ 				location = location.Parent
+ 			}
+@@ -16383,7 +16397,7 @@ func (c *Checker) GetTypeOfSymbolAtLocation(symbol *ast.Symbol, location *ast.No
+ 				}
+ 			}
+ 		}
+-		if ast.IsDeclarationName(location) && ast.IsSetAccessorDeclaration(location.Parent) && c.getAnnotatedAccessorTypeNode(location.Parent) != nil {
++		if ast.IsDeclarationName(location) && location.Parent != nil && ast.IsSetAccessorDeclaration(location.Parent) && c.getAnnotatedAccessorTypeNode(location.Parent) != nil {
+ 			return c.getWriteTypeOfAccessors(location.Parent.Symbol())
+ 		}
+ 		// The location isn't a reference to the given symbol, meaning we're being asked
+@@ -16398,13 +16412,13 @@ func (c *Checker) GetTypeOfSymbolAtLocation(symbol *ast.Symbol, location *ast.No
+ 	return c.getNonMissingTypeOfSymbol(symbol)
+ }
+ 
+-func (c *Checker) getTypeOfSymbol(symbol *ast.Symbol) *Type {
++// getTypeOfSymbolByFlags mirrors stock getTypeOfSymbol's flag dispatch after the
++// Instantiated CheckFlags branch (checker.ts). Used when Instantiated links lack
++// target/mapper (cross-checker SymbolHandle reuse) so we never chase a nil target.
++func (c *Checker) getTypeOfSymbolByFlags(symbol *ast.Symbol) *Type {
+ 	if symbol.CheckFlags&ast.CheckFlagsDeferredType != 0 {
+ 		return c.getTypeOfSymbolWithDeferredType(symbol)
+ 	}
+-	if symbol.CheckFlags&ast.CheckFlagsInstantiated != 0 {
+-		return c.getTypeOfInstantiatedSymbol(symbol)
+-	}
+ 	if symbol.CheckFlags&ast.CheckFlagsMapped != 0 {
+ 		return c.getTypeOfMappedSymbol(symbol)
+ 	}
+@@ -16429,6 +16443,20 @@ func (c *Checker) getTypeOfSymbol(symbol *ast.Symbol) *Type {
+ 	return c.errorType
+ }
+ 
++func (c *Checker) getTypeOfSymbol(symbol *ast.Symbol) *Type {
++	// No re-entrancy guard here: legitimate circular resolution flows through
++	// this function and is handled by the pushTypeResolution machinery in the
++	// per-kind getters. Cross-checker SymbolHandle pathology (nil/cyclic
++	// Instantiated targets) is guarded in getTypeOfInstantiatedSymbol instead.
++	if symbol.CheckFlags&ast.CheckFlagsDeferredType != 0 {
++		return c.getTypeOfSymbolWithDeferredType(symbol)
++	}
++	if symbol.CheckFlags&ast.CheckFlagsInstantiated != 0 {
++		return c.getTypeOfInstantiatedSymbol(symbol)
++	}
++	return c.getTypeOfSymbolByFlags(symbol)
++}
++
+ func (c *Checker) getNonMissingTypeOfSymbol(symbol *ast.Symbol) *Type {
+ 	return c.removeMissingType(c.getTypeOfSymbol(symbol), symbol.Flags&ast.SymbolFlagsOptional != 0)
+ }
+@@ -16436,7 +16464,22 @@ func (c *Checker) getNonMissingTypeOfSymbol(symbol *ast.Symbol) *Type {
+ func (c *Checker) getTypeOfInstantiatedSymbol(symbol *ast.Symbol) *Type {
+ 	links := c.valueSymbolLinks.Get(symbol)
+ 	if links.resolvedType == nil {
+-		links.resolvedType = c.instantiateType(c.getTypeOfSymbol(links.target), links.mapper)
++		// Stock: instantiateType(getTypeOfSymbol(links.target!), links.mapper).
++		// Bridge: Instantiated CheckFlags live on *ast.Symbol, but target/mapper
++		// live in per-checker valueSymbolLinks. Cross-checker SymbolHandle reuse
++		// yields empty links (nil target) or cyclic target chains — dispatch by
++		// flags instead of chasing them. Stock guarantees target is a strictly
++		// less-instantiated symbol, so neither guard ever fires on stock data.
++		if links.target == nil || c.instantiatedSymbolActive[symbol] {
++			links.resolvedType = c.getTypeOfSymbolByFlags(symbol)
++		} else {
++			if c.instantiatedSymbolActive == nil {
++				c.instantiatedSymbolActive = make(map[*ast.Symbol]bool)
++			}
++			c.instantiatedSymbolActive[symbol] = true
++			links.resolvedType = c.instantiateType(c.getTypeOfSymbol(links.target), links.mapper)
++			delete(c.instantiatedSymbolActive, symbol)
++		}
+ 	}
+ 	return links.resolvedType
+ }
+@@ -16444,7 +16487,16 @@ func (c *Checker) getTypeOfInstantiatedSymbol(symbol *ast.Symbol) *Type {
+ func (c *Checker) getWriteTypeOfInstantiatedSymbol(symbol *ast.Symbol) *Type {
+ 	links := c.valueSymbolLinks.Get(symbol)
+ 	if links.writeType == nil {
+-		links.writeType = c.instantiateType(c.getWriteTypeOfSymbol(links.target), links.mapper)
++		if links.target == nil || c.instantiatedSymbolActive[symbol] {
++			links.writeType = c.getTypeOfSymbolByFlags(symbol)
++		} else {
++			if c.instantiatedSymbolActive == nil {
++				c.instantiatedSymbolActive = make(map[*ast.Symbol]bool)
++			}
++			c.instantiatedSymbolActive[symbol] = true
++			links.writeType = c.instantiateType(c.getWriteTypeOfSymbol(links.target), links.mapper)
++			delete(c.instantiatedSymbolActive, symbol)
++		}
+ 	}
+ 	return links.writeType
+ }
+@@ -29105,6 +29157,9 @@ func (c *Checker) getContextualType(node *ast.Node, contextFlags ContextFlags) *
  		return c.contextualInfos[index].t
  	}
  	parent := node.Parent
