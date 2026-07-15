@@ -386,10 +386,10 @@ index 656f7cc4e..5d8923230 100644
      id: number;
      flags: number;
 diff --git a/_packages/native-preview/src/api/sync/types.ts b/_packages/native-preview/src/api/sync/types.ts
-index 4ccc3047d..135e6e3e8 100644
+index 4ccc3047d..103d8188d 100644
 --- a/_packages/native-preview/src/api/sync/types.ts
 +++ b/_packages/native-preview/src/api/sync/types.ts
-@@ -321,6 +321,108 @@ export interface CompletionInfo {
+@@ -321,6 +321,124 @@ export interface CompletionInfo {
      readonly entries: readonly CompletionEntry[];
  }
  
@@ -426,6 +426,22 @@ index 4ccc3047d..135e6e3e8 100644
 +    readonly name: string;
 +    readonly flags: number;
 +    readonly checkFlags: number;
++}
++
++/** Wire response for {@link Checker.getAmbientModules}. */
++export interface AmbientModulesWireResponse {
++    readonly modules: readonly {
++        readonly moduleName: string;
++        readonly moduleSymbol: LightSymbolWire;
++    }[];
++}
++
++/** Materialized lightweight ambient-module index from {@link Checker.getAmbientModules}. */
++export interface AmbientModulesBatch {
++    readonly modules: readonly {
++        readonly moduleName: string;
++        readonly moduleSymbol: Symbol;
++    }[];
 +}
 +
 +/** Wire response for {@link Program.getModuleExportMap}. */

@@ -5206,11 +5206,12 @@ export function createTsgoChecker(program: any): any {
     const symbolsInScopeCache = new Map<string, any[]>();
     /** tryFindAmbientModule memo — keyed unquoted module name; null = miss. */
     const ambientModuleByNameCache = new Map<string, any | null>();
-    // getModuleExportMap batch memo shared by getAmbientModules /
-    // tryFindAmbientModule. The builder calls getAmbientModules once per
-    // source file when computing referenced files; without this memo each
-    // call is a full export-map RPC (N files × ~17ms dominated `tsc -b`).
-    // null = fetch failed; undefined = not fetched yet.
+    // Ambient-module batch memo shared by getAmbientModules /
+    // tryFindAmbientModule. Prefer Checker.getAmbientModules (light RPC);
+    // fall back to getModuleExportMap when the method is missing or throws.
+    // The builder calls getAmbientModules once per source file when computing
+    // referenced files; without this memo each call is a full RPC (N files ×
+    // ~17ms dominated `tsc -b`). null = fetch failed; undefined = not fetched.
     let ambientModuleBatchCache: any = undefined;
     // Per-file index: start position → all tsgo nodes that start there.
     // Built once per file via a single AST walk, after which every
@@ -5492,10 +5493,19 @@ export function createTsgoChecker(program: any): any {
     function getAmbientModuleBatch(): any {
         if (ambientModuleBatchCache !== undefined) return ambientModuleBatchCache ?? undefined;
         try {
-            ambientModuleBatchCache = project.checker.getModuleExportMap?.() ?? null;
+            const getAmbient = project.checker.getAmbientModules;
+            if (typeof getAmbient === "function") {
+                ambientModuleBatchCache = getAmbient.call(project.checker) ?? null;
+            }
         }
-        catch {
-            ambientModuleBatchCache = null;
+        catch { /* fall through to export-map fallback */ }
+        if (ambientModuleBatchCache === undefined) {
+            try {
+                ambientModuleBatchCache = project.checker.getModuleExportMap?.() ?? null;
+            }
+            catch {
+                ambientModuleBatchCache = null;
+            }
         }
         return ambientModuleBatchCache ?? undefined;
     }

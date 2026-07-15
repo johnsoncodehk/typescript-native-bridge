@@ -1,5 +1,5 @@
 diff --git a/_packages/native-preview/src/api/async/api.ts b/_packages/native-preview/src/api/async/api.ts
-index 27b3ad932..68f5651e3 100644
+index 27b3ad932..3165c4db7 100644
 --- a/_packages/native-preview/src/api/async/api.ts
 +++ b/_packages/native-preview/src/api/async/api.ts
 @@ -44,6 +44,7 @@ import type {
@@ -224,10 +224,29 @@ index 27b3ad932..68f5651e3 100644
  }
  
  export class Checker {
-@@ -715,6 +874,74 @@ export class Checker {
+@@ -715,6 +874,93 @@ export class Checker {
          this.objectRegistry.clear();
      }
  
++    /** Lightweight ambient-module index (names + symbols only — no exports). */
++    async getAmbientModules(): Promise<{ modules: readonly { moduleName: string; moduleSymbol: Symbol; }[]; }> {
++        const data = await this.client.apiRequest<{ modules: readonly { moduleName: string; moduleSymbol: { id: number; name: string; flags: number; checkFlags: number; }; }[]; } | null>("getAmbientModules", {
++            snapshot: this.snapshotId,
++            project: this.projectId,
++        });
++        if (!data?.modules?.length) {
++            return { modules: [] };
++        }
++        const toSymbol = (wire: { id: number; name: string; flags: number; checkFlags: number; }) =>
++            this.objectRegistry.getOrCreateSymbol(wire);
++        return {
++            modules: data.modules.map(mod => ({
++                moduleName: mod.moduleName,
++                moduleSymbol: toSymbol(mod.moduleSymbol),
++            })),
++        };
++    }
++
 +    /** Auto-import export index for every external/ambient module in one batch. */
 +    async getModuleExportMap(importingFile?: DocumentIdentifier): Promise<{ modules: readonly { moduleFileName?: string; moduleName: string; moduleSymbol: Symbol; importableFrom?: boolean; defaultExport?: { symbol: Symbol; tableKey: string; exportKind: number; targetFlags: number; }; namedExports: readonly { symbol: Symbol; key: string; targetFlags: number; }[]; }[]; }> {
 +        const data = await this.client.apiRequest<{ modules: readonly { moduleFileName?: string; moduleName: string; moduleSymbol: { id: number; name: string; flags: number; checkFlags: number; }; importableFrom?: boolean; defaultExport?: { symbol: { id: number; name: string; flags: number; checkFlags: number; }; tableKey: string; exportKind: number; targetFlags: number; }; namedExports: readonly { symbol: { id: number; name: string; flags: number; checkFlags: number; }; key: string; targetFlags: number; }[]; }[]; } | null>("getModuleExportMap", {
@@ -299,7 +318,7 @@ index 27b3ad932..68f5651e3 100644
      getSymbolAtLocation(node: Node): Promise<Symbol | undefined>;
      getSymbolAtLocation(nodes: readonly Node[]): Promise<(Symbol | undefined)[]>;
      async getSymbolAtLocation(nodeOrNodes: Node | readonly Node[]): Promise<Symbol | (Symbol | undefined)[] | undefined> {
-@@ -755,6 +982,32 @@ export class Checker {
+@@ -755,6 +1001,32 @@ export class Checker {
          return data.map(d => d ? this.objectRegistry.getOrCreateSymbol(d) : undefined);
      }
  
@@ -332,7 +351,7 @@ index 27b3ad932..68f5651e3 100644
      getTypeOfSymbol(symbol: Symbol): Promise<Type | undefined>;
      getTypeOfSymbol(symbols: readonly Symbol[]): Promise<(Type | undefined)[]>;
      async getTypeOfSymbol(symbolOrSymbols: Symbol | readonly Symbol[]): Promise<Type | (Type | undefined)[] | undefined> {
-@@ -876,6 +1129,101 @@ export class Checker {
+@@ -876,6 +1148,101 @@ export class Checker {
          return data ? this.objectRegistry.getOrCreateSignature(data) : undefined;
      }
  
@@ -434,7 +453,7 @@ index 27b3ad932..68f5651e3 100644
      getTypeAtPosition(file: DocumentIdentifier, position: number): Promise<Type | undefined>;
      getTypeAtPosition(file: DocumentIdentifier, positions: readonly number[]): Promise<(Type | undefined)[]>;
      async getTypeAtPosition(file: DocumentIdentifier, positionOrPositions: number | readonly number[]): Promise<Type | (Type | undefined)[] | undefined> {
-@@ -897,6 +1245,16 @@ export class Checker {
+@@ -897,6 +1264,16 @@ export class Checker {
          return data.map(d => d ? this.objectRegistry.getOrCreateType(d) : undefined);
      }
  
@@ -451,7 +470,7 @@ index 27b3ad932..68f5651e3 100644
      async resolveName(
          name: string,
          meaning: SymbolFlags,
-@@ -951,6 +1309,15 @@ export class Checker {
+@@ -951,6 +1328,15 @@ export class Checker {
          return data ? this.objectRegistry.getOrCreateType(data) : undefined;
      }
  
@@ -467,7 +486,7 @@ index 27b3ad932..68f5651e3 100644
      async getTypeFromTypeNode(node: TypeNode): Promise<Type | undefined> {
          const data = await this.client.apiRequest<TypeResponse | null>("getTypeFromTypeNode", {
              snapshot: this.snapshotId,
-@@ -996,6 +1363,97 @@ export class Checker {
+@@ -996,6 +1382,97 @@ export class Checker {
          });
      }
  
@@ -565,7 +584,7 @@ index 27b3ad932..68f5651e3 100644
      async getShorthandAssignmentValueSymbol(node: Node): Promise<Symbol | undefined> {
          const data = await this.client.apiRequest<SymbolResponse | null>("getShorthandAssignmentValueSymbol", {
              snapshot: this.snapshotId,
-@@ -1026,6 +1484,22 @@ export class Checker {
+@@ -1026,6 +1503,22 @@ export class Checker {
      async getAnyType(): Promise<Type> {
          return this.getIntrinsicType("getAnyType");
      }
@@ -588,7 +607,7 @@ index 27b3ad932..68f5651e3 100644
      async getStringType(): Promise<Type> {
          return this.getIntrinsicType("getStringType");
      }
-@@ -1069,34 +1543,68 @@ export class Checker {
+@@ -1069,31 +1562,65 @@ export class Checker {
          return decodeNode(binaryData) as TypeNode;
      }
  
@@ -628,9 +647,8 @@ index 27b3ad932..68f5651e3 100644
 -        return this.client.apiRequest<boolean>("isContextSensitive", {
 +    async signatureToSignatureDeclaration(signature: Signature, kind: SyntaxKind, enclosingDeclaration?: Node, flags?: NodeBuilderFlags): Promise<Node | undefined> {
 +        const binaryData = await this.client.apiRequestBinary("signatureToSignatureDeclaration", {
-             snapshot: this.snapshotId,
-             project: this.projectId,
--            location: getNodeId(node),
++            snapshot: this.snapshotId,
++            project: this.projectId,
 +            signature: signature.id,
 +            kind,
 +            location: enclosingDeclaration ? getNodeId(enclosingDeclaration) : undefined,
@@ -662,13 +680,10 @@ index 27b3ad932..68f5651e3 100644
 +
 +    async isContextSensitive(node: Node): Promise<boolean> {
 +        return this.client.apiRequest<boolean>("isContextSensitive", {
-+            snapshot: this.snapshotId,
-+            project: this.projectId,
-+            location: getNodeId(node),
-         });
-     }
- 
-@@ -1116,6 +1624,660 @@ export class Checker {
+             snapshot: this.snapshotId,
+             project: this.projectId,
+             location: getNodeId(node),
+@@ -1116,6 +1643,660 @@ export class Checker {
          });
      }
  
@@ -1329,7 +1344,7 @@ index 27b3ad932..68f5651e3 100644
      async getReturnTypeOfSignature(signature: Signature): Promise<Type | undefined> {
          const data = await this.client.apiRequest<TypeResponse | null>("getReturnTypeOfSignature", {
              snapshot: this.snapshotId,
-@@ -1187,12 +2349,37 @@ export class Checker {
+@@ -1187,12 +2368,37 @@ export class Checker {
              type: type.id,
          });
          if (!data) return [];
@@ -1370,7 +1385,7 @@ index 27b3ad932..68f5651e3 100644
      }
  
      /**
-@@ -1281,6 +2468,15 @@ export class Checker {
+@@ -1281,6 +2487,15 @@ export class Checker {
          return data ? data.map(d => this.objectRegistry.getOrCreateSymbol(d)) : [];
      }
  
@@ -1386,7 +1401,7 @@ index 27b3ad932..68f5651e3 100644
      async getMemberInModuleExports(symbol: Symbol, name: string): Promise<Symbol | undefined> {
          const data = await this.client.apiRequest<SymbolResponse | null>("getMemberInModuleExports", {
              snapshot: this.snapshotId,
-@@ -1291,6 +2487,15 @@ export class Checker {
+@@ -1291,6 +2506,15 @@ export class Checker {
          return data ? this.objectRegistry.getOrCreateSymbol(data) : undefined;
      }
  
@@ -1402,7 +1417,7 @@ index 27b3ad932..68f5651e3 100644
      async getJsDocTagsOfSymbol(symbol: Symbol): Promise<readonly JSDocTagInfo[]> {
          const data = await this.client.apiRequest<JSDocTagInfo[] | null>("getJsDocTags", {
              snapshot: this.snapshotId,
-@@ -1321,6 +2526,23 @@ export class Checker {
+@@ -1321,6 +2545,23 @@ export class Checker {
      }
  }
  
@@ -1426,7 +1441,7 @@ index 27b3ad932..68f5651e3 100644
  export interface PrintNodeOptions {
      preserveSourceNewlines?: boolean;
      neverAsciiEscape?: boolean;
-@@ -1445,7 +2667,8 @@ class TypeObject implements Type {
+@@ -1445,7 +2686,8 @@ class TypeObject implements Type {
      readonly id: number;
      readonly flags: TypeFlags;
      readonly objectFlags!: ObjectFlags;
@@ -1436,7 +1451,7 @@ index 27b3ad932..68f5651e3 100644
      readonly value!: string | number | boolean | bigint;
      readonly intrinsicName!: string;
      readonly isThisType!: boolean;
-@@ -1477,7 +2700,7 @@ class TypeObject implements Type {
+@@ -1477,7 +2719,7 @@ class TypeObject implements Type {
          this.id = data.id;
          this.flags = data.flags;
          if (data.objectFlags !== undefined) this.objectFlags = data.objectFlags;
@@ -1445,7 +1460,7 @@ index 27b3ad932..68f5651e3 100644
          if (data.value != null) {
              // BigInt literal values are serialized as decimal strings (e.g. "-123") because
              // JSON cannot represent bigint. Decode them back into a real bigint here.
-@@ -1509,7 +2732,7 @@ class TypeObject implements Type {
+@@ -1509,7 +2751,7 @@ class TypeObject implements Type {
      }
  
      async getSymbol(): Promise<Symbol | undefined> {
@@ -1454,7 +1469,7 @@ index 27b3ad932..68f5651e3 100644
      }
  
      async getAliasSymbol(): Promise<Symbol | undefined> {
-@@ -1559,7 +2782,7 @@ class TypeObject implements Type {
+@@ -1559,7 +2801,7 @@ class TypeObject implements Type {
      }
  
      async getIndexType(): Promise<Type> {
@@ -1463,7 +1478,7 @@ index 27b3ad932..68f5651e3 100644
      }
  
      async getCheckType(): Promise<Type> {
-@@ -1741,36 +2964,60 @@ export class Signature {
+@@ -1741,36 +2983,60 @@ export class Signature {
  
      readonly id: number;
      readonly declaration?: NodeHandle | undefined;
@@ -1538,7 +1553,7 @@ index 27b3ad932..68f5651e3 100644
  
      get hasRestParameter(): boolean {
 diff --git a/_packages/native-preview/src/api/sync/api.ts b/_packages/native-preview/src/api/sync/api.ts
-index 9381d5122..8014a6543 100644
+index 9381d5122..c4a6a7419 100644
 --- a/_packages/native-preview/src/api/sync/api.ts
 +++ b/_packages/native-preview/src/api/sync/api.ts
 @@ -57,6 +57,9 @@ import type {
@@ -1551,11 +1566,13 @@ index 9381d5122..8014a6543 100644
      SignatureResponse,
      SymbolResponse,
      TypePredicateResponse,
-@@ -79,11 +82,17 @@ import type {
+@@ -79,11 +82,19 @@ import type {
      AssertsThisTypePredicate,
      BigIntLiteralType,
      BooleanLiteralType,
 +    BuilderFileGraphEntry,
++    AmbientModulesBatch,
++    AmbientModulesWireResponse,
 +    ModuleExportMapBatch,
 +    ModuleExportMapWireResponse,
 +    ModuleSpecifiersBatch,
@@ -1569,7 +1586,7 @@ index 9381d5122..8014a6543 100644
      FreshableType,
      IdentifierTypePredicate,
      IndexedAccessType,
-@@ -327,6 +336,12 @@ class SnapshotObjectRegistry {
+@@ -327,6 +338,12 @@ class SnapshotObjectRegistry {
              symbol = new Symbol(data, this);
              this.symbols.set(data.id, symbol);
          }
@@ -1582,7 +1599,7 @@ index 9381d5122..8014a6543 100644
          return symbol;
      }
  
-@@ -338,17 +353,75 @@ class SnapshotObjectRegistry {
+@@ -338,17 +355,75 @@ class SnapshotObjectRegistry {
          this.symbols.clear();
      }
  
@@ -1662,7 +1679,7 @@ index 9381d5122..8014a6543 100644
          return this.getOrCreateSymbol(data);
      }
  
-@@ -404,6 +477,14 @@ class ProjectObjectRegistry {
+@@ -404,6 +479,14 @@ class ProjectObjectRegistry {
          return this.snapshotRegistry.getSymbol(id);
      }
  
@@ -1677,7 +1694,7 @@ index 9381d5122..8014a6543 100644
      getOrCreateType(data: TypeResponse): TypeObject {
          let type = this.types.get(data.id);
          if (!type) {
-@@ -495,6 +576,18 @@ class ProjectObjectRegistry {
+@@ -495,6 +578,18 @@ class ProjectObjectRegistry {
      fetchSymbols(source: Symbol | Signature | Type, method: string, handles?: readonly number[]): readonly Symbol[] {
          return this.snapshotRegistry.fetchSymbols(source, method, handles, this.projectId);
      }
@@ -1696,7 +1713,7 @@ index 9381d5122..8014a6543 100644
  }
  
  export class Project {
-@@ -602,6 +695,20 @@ export class Program {
+@@ -602,6 +697,20 @@ export class Program {
          return data ?? [];
      }
  
@@ -1717,7 +1734,7 @@ index 9381d5122..8014a6543 100644
      /**
       * Get syntactic (parse) diagnostics for a specific file or all files.
       * @param file - Optional file to get diagnostics for. If omitted, returns diagnostics for all files.
-@@ -641,6 +748,40 @@ export class Program {
+@@ -641,6 +750,40 @@ export class Program {
          return data ?? [];
      }
  
@@ -1758,7 +1775,7 @@ index 9381d5122..8014a6543 100644
      /**
       * Get suggestion diagnostics for a specific file or all files.
       * @param file - Optional file to get diagnostics for. If omitted, returns diagnostics for all files.
-@@ -699,6 +840,71 @@ export class Program {
+@@ -699,6 +842,71 @@ export class Program {
          });
          return data ?? [];
      }
@@ -1830,10 +1847,32 @@ index 9381d5122..8014a6543 100644
  }
  
  export class Checker {
-@@ -723,6 +929,78 @@ export class Checker {
+@@ -723,6 +931,100 @@ export class Checker {
          this.objectRegistry.clear();
      }
  
++    /**
++     * Lightweight ambient-module index (module names + symbols only — no exports).
++     * Symbols are registered in the object registry as light prefetch entries.
++     */
++    getAmbientModules(): AmbientModulesBatch {
++        const data = this.client.apiRequest<AmbientModulesWireResponse | null>("getAmbientModules", {
++            snapshot: this.snapshotId,
++            project: this.projectId,
++        });
++        if (!data?.modules?.length) {
++            return { modules: [] };
++        }
++        const toSymbol = (wire: { id: number; name: string; flags: number; checkFlags: number; }) =>
++            this.objectRegistry.getOrCreateSymbol(wire);
++        return {
++            modules: data.modules.map(mod => ({
++                moduleName: mod.moduleName,
++                moduleSymbol: toSymbol(mod.moduleSymbol),
++            })),
++        };
++    }
++
 +    /**
 +     * Auto-import export index for every external/ambient module in one batch,
 +     * mirroring stock exportInfoMap populate. Symbols are registered in the
@@ -1909,7 +1948,7 @@ index 9381d5122..8014a6543 100644
      getSymbolAtLocation(node: Node): Symbol | undefined;
      getSymbolAtLocation(nodes: readonly Node[]): (Symbol | undefined)[];
      getSymbolAtLocation(nodeOrNodes: Node | readonly Node[]): Symbol | (Symbol | undefined)[] | undefined {
-@@ -763,6 +1041,49 @@ export class Checker {
+@@ -763,6 +1065,49 @@ export class Checker {
          return data.map(d => d ? this.objectRegistry.getOrCreateSymbol(d) : undefined);
      }
  
@@ -1959,7 +1998,7 @@ index 9381d5122..8014a6543 100644
      getTypeOfSymbol(symbol: Symbol): Type | undefined;
      getTypeOfSymbol(symbols: readonly Symbol[]): (Type | undefined)[];
      getTypeOfSymbol(symbolOrSymbols: Symbol | readonly Symbol[]): Type | (Type | undefined)[] | undefined {
-@@ -884,6 +1205,103 @@ export class Checker {
+@@ -884,6 +1229,103 @@ export class Checker {
          return data ? this.objectRegistry.getOrCreateSignature(data) : undefined;
      }
  
@@ -2063,7 +2102,7 @@ index 9381d5122..8014a6543 100644
      getTypeAtPosition(file: DocumentIdentifier, position: number): Type | undefined;
      getTypeAtPosition(file: DocumentIdentifier, positions: readonly number[]): (Type | undefined)[];
      getTypeAtPosition(file: DocumentIdentifier, positionOrPositions: number | readonly number[]): Type | (Type | undefined)[] | undefined {
-@@ -905,6 +1323,43 @@ export class Checker {
+@@ -905,6 +1347,43 @@ export class Checker {
          return data.map(d => d ? this.objectRegistry.getOrCreateType(d) : undefined);
      }
  
@@ -2107,7 +2146,7 @@ index 9381d5122..8014a6543 100644
      resolveName(
          name: string,
          meaning: SymbolFlags,
-@@ -936,192 +1391,997 @@ export class Checker {
+@@ -936,192 +1415,997 @@ export class Checker {
          const data = this.client.apiRequest<TypeResponse | null>("getContextualType", {
              snapshot: this.snapshotId,
              project: this.projectId,
@@ -3205,7 +3244,7 @@ index 9381d5122..8014a6543 100644
      }
  
      getReturnTypeOfSignature(signature: Signature): Type | undefined {
-@@ -1195,12 +2455,37 @@ export class Checker {
+@@ -1195,12 +2479,37 @@ export class Checker {
              type: type.id,
          });
          if (!data) return [];
@@ -3246,7 +3285,7 @@ index 9381d5122..8014a6543 100644
      }
  
      /**
-@@ -1289,6 +2574,24 @@ export class Checker {
+@@ -1289,6 +2598,24 @@ export class Checker {
          return data ? data.map(d => this.objectRegistry.getOrCreateSymbol(d)) : [];
      }
  
@@ -3271,7 +3310,7 @@ index 9381d5122..8014a6543 100644
      getMemberInModuleExports(symbol: Symbol, name: string): Symbol | undefined {
          const data = this.client.apiRequest<SymbolResponse | null>("getMemberInModuleExports", {
              snapshot: this.snapshotId,
-@@ -1299,6 +2602,15 @@ export class Checker {
+@@ -1299,6 +2626,15 @@ export class Checker {
          return data ? this.objectRegistry.getOrCreateSymbol(data) : undefined;
      }
  
@@ -3287,7 +3326,7 @@ index 9381d5122..8014a6543 100644
      getJsDocTagsOfSymbol(symbol: Symbol): readonly JSDocTagInfo[] {
          const data = this.client.apiRequest<JSDocTagInfo[] | null>("getJsDocTags", {
              snapshot: this.snapshotId,
-@@ -1335,6 +2647,23 @@ export interface PrintNodeOptions {
+@@ -1335,6 +2671,23 @@ export interface PrintNodeOptions {
      terminateUnterminatedLiterals?: boolean;
  }
  
@@ -3311,7 +3350,7 @@ index 9381d5122..8014a6543 100644
  export class Emitter {
      private client: Client;
  
-@@ -1352,6 +2681,25 @@ export class Emitter {
+@@ -1352,6 +2705,25 @@ export class Emitter {
      }
  }
  
@@ -3337,7 +3376,7 @@ index 9381d5122..8014a6543 100644
  export class NodeHandle {
      readonly index: number;
      readonly kind: SyntaxKind;
-@@ -1360,7 +2708,7 @@ export class NodeHandle {
+@@ -1360,7 +2732,7 @@ export class NodeHandle {
      constructor(handle: string) {
          const parsed = parseNodeHandle(handle);
          this.index = parsed.index;
@@ -3346,7 +3385,7 @@ index 9381d5122..8014a6543 100644
          this.path = parsed.path;
      }
  
-@@ -1402,11 +2750,21 @@ export class Symbol {
+@@ -1402,11 +2774,21 @@ export class Symbol {
      readonly name: string;
      readonly flags: SymbolFlags;
      readonly checkFlags: number;
@@ -3371,7 +3410,7 @@ index 9381d5122..8014a6543 100644
      constructor(data: SymbolResponse, objectRegistry: SnapshotObjectRegistry) {
          this.objectRegistry = objectRegistry;
  
-@@ -1414,15 +2772,80 @@ export class Symbol {
+@@ -1414,15 +2796,80 @@ export class Symbol {
          this.name = data.name;
          this.flags = data.flags;
          this.checkFlags = data.checkFlags;
@@ -3456,7 +3495,7 @@ index 9381d5122..8014a6543 100644
      }
  
      getMembers(): readonly Symbol[] {
-@@ -1453,7 +2876,8 @@ class TypeObject implements Type {
+@@ -1453,7 +2900,8 @@ class TypeObject implements Type {
      readonly id: number;
      readonly flags: TypeFlags;
      readonly objectFlags!: ObjectFlags;
@@ -3466,7 +3505,7 @@ index 9381d5122..8014a6543 100644
      readonly value!: string | number | boolean | bigint;
      readonly intrinsicName!: string;
      readonly isThisType!: boolean;
-@@ -1485,7 +2909,7 @@ class TypeObject implements Type {
+@@ -1485,7 +2933,7 @@ class TypeObject implements Type {
          this.id = data.id;
          this.flags = data.flags;
          if (data.objectFlags !== undefined) this.objectFlags = data.objectFlags;
@@ -3475,7 +3514,7 @@ index 9381d5122..8014a6543 100644
          if (data.value != null) {
              // BigInt literal values are serialized as decimal strings (e.g. "-123") because
              // JSON cannot represent bigint. Decode them back into a real bigint here.
-@@ -1516,8 +2940,17 @@ class TypeObject implements Type {
+@@ -1516,8 +2964,17 @@ class TypeObject implements Type {
          this.falseType = false;
      }
  
@@ -3494,7 +3533,7 @@ index 9381d5122..8014a6543 100644
      }
  
      getAliasSymbol(): Symbol | undefined {
-@@ -1567,7 +3000,7 @@ class TypeObject implements Type {
+@@ -1567,7 +3024,7 @@ class TypeObject implements Type {
      }
  
      getIndexType(): Type {
@@ -3503,7 +3542,7 @@ index 9381d5122..8014a6543 100644
      }
  
      getCheckType(): Type {
-@@ -1749,36 +3182,94 @@ export class Signature {
+@@ -1749,36 +3206,94 @@ export class Signature {
  
      readonly id: number;
      readonly declaration?: NodeHandle | undefined;
@@ -3655,10 +3694,10 @@ index 8c91df63e..b7f1d9967 100644
      const docFiles = {
          "/tsconfig.json": JSON.stringify({ compilerOptions: { strict: true } }),
 diff --git a/internal/api/proto.go b/internal/api/proto.go
-index 952b572a6..56d2493d4 100644
+index 952b572a6..8fa0eb97f 100644
 --- a/internal/api/proto.go
 +++ b/internal/api/proto.go
-@@ -56,32 +56,57 @@ func parseProjectHandle(handle ProjectID) tspath.Path {
+@@ -56,32 +56,58 @@ func parseProjectHandle(handle ProjectID) tspath.Path {
  const (
  	MethodRelease Method = "release"
  
@@ -3697,6 +3736,7 @@ index 952b572a6..56d2493d4 100644
 +	MethodGetSourceFile               Method = "getSourceFile"
 +	MethodGetSourceFileNames          Method = "getSourceFileNames"
 +	MethodGetBuilderFileGraph              Method = "getBuilderFileGraph"
++	MethodGetAmbientModules                Method = "getAmbientModules"
 +	MethodGetModuleExportMap               Method = "getModuleExportMap"
 +	MethodGetModuleSpecifiersBatch         Method = "getModuleSpecifiersBatch"
 +	MethodGetCompilerOptionsForFile      Method = "getCompilerOptionsForFile"
@@ -3736,7 +3776,7 @@ index 952b572a6..56d2493d4 100644
  
  	// Type sub-property methods
  	MethodGetSymbolOfType              Method = "getSymbolOfType"
-@@ -95,7 +120,7 @@ const (
+@@ -95,7 +121,7 @@ const (
  	MethodGetAliasTypeArgumentsOfType  Method = "getAliasTypeArgumentsOfType"
  	MethodGetAliasSymbolOfType         Method = "getAliasSymbolOfType"
  	MethodGetObjectTypeOfType          Method = "getObjectTypeOfType"
@@ -3745,7 +3785,7 @@ index 952b572a6..56d2493d4 100644
  	MethodGetCheckTypeOfType           Method = "getCheckTypeOfType"
  	MethodGetExtendsTypeOfType         Method = "getExtendsTypeOfType"
  	MethodGetBaseTypeOfType            Method = "getBaseTypeOfType"
-@@ -108,44 +133,120 @@ const (
+@@ -108,44 +134,120 @@ const (
  	MethodGetTargetOfSignature         Method = "getTargetOfSignature"
  
  	// Checker methods
@@ -3904,7 +3944,7 @@ index 952b572a6..56d2493d4 100644
  
  	// Reference methods
  	MethodGetReferencesToSymbolInFile Method = "getReferencesToSymbolInFile"
-@@ -166,10 +267,13 @@ const (
+@@ -166,10 +268,13 @@ const (
  	MethodGetConfigFileParsingDiagnostics Method = "getConfigFileParsingDiagnostics"
  
  	// Emitter methods
@@ -3919,7 +3959,7 @@ index 952b572a6..56d2493d4 100644
  	MethodGetStringType    Method = "getStringType"
  	MethodGetNumberType    Method = "getNumberType"
  	MethodGetBooleanType   Method = "getBooleanType"
-@@ -193,6 +297,10 @@ type InitializeResponse struct {
+@@ -193,6 +298,10 @@ type InitializeResponse struct {
  	UseCaseSensitiveFileNames bool `json:"useCaseSensitiveFileNames"`
  	// CurrentDirectory is the server's current working directory.
  	CurrentDirectory string `json:"currentDirectory"`
@@ -3930,7 +3970,7 @@ index 952b572a6..56d2493d4 100644
  }
  
  // DocumentIdentifier identifies a document by either a file name (plain string) or a URI object.
-@@ -309,6 +417,35 @@ type UpdateSnapshotParams struct {
+@@ -309,6 +418,35 @@ type UpdateSnapshotParams struct {
  	// CloseFiles lists files to release in the new snapshot. A file is only fully
  	// closed once every API client that opened it closes it.
  	CloseFiles []DocumentIdentifier `json:"closeFiles,omitempty"`
@@ -3966,7 +4006,7 @@ index 952b572a6..56d2493d4 100644
  }
  
  // ProjectFileChanges describes what source files changed within a single project.
-@@ -343,32 +480,53 @@ type UpdateSnapshotResponse struct {
+@@ -343,32 +481,54 @@ type UpdateSnapshotResponse struct {
  }
  
  var unmarshalers = map[Method]func([]byte) (any, error){
@@ -3999,6 +4039,7 @@ index 952b572a6..56d2493d4 100644
 +	MethodGetSourceFile:               unmarshallerFor[GetSourceFileParams],
 +	MethodGetSourceFileNames:          unmarshallerFor[GetSourceFileNamesParams],
 +	MethodGetBuilderFileGraph:                 unmarshallerFor[GetBuilderFileGraphParams],
++	MethodGetAmbientModules:                   unmarshallerFor[GetAmbientModulesParams],
 +	MethodGetModuleExportMap:                  unmarshallerFor[GetModuleExportMapParams],
 +	MethodGetModuleSpecifiersBatch:            unmarshallerFor[GetModuleSpecifiersBatchParams],
 +	MethodGetCompilerOptionsForFile:           unmarshallerFor[GetDiagnosticsParams],
@@ -4041,7 +4082,7 @@ index 952b572a6..56d2493d4 100644
  
  	MethodGetSymbolOfType:               unmarshallerFor[GetTypePropertyParams],
  	MethodGetTargetOfType:               unmarshallerFor[GetTypePropertyParams],
-@@ -394,69 +552,148 @@ var unmarshalers = map[Method]func([]byte) (any, error){
+@@ -394,69 +554,148 @@ var unmarshalers = map[Method]func([]byte) (any, error){
  	MethodGetThisParameterOfSignature:  unmarshallerFor[GetSignaturePropertyParams],
  	MethodGetTargetOfSignature:         unmarshallerFor[GetSignaturePropertyParams],
  
@@ -4253,7 +4294,7 @@ index 952b572a6..56d2493d4 100644
  }
  
  type ParseConfigFileParams struct {
-@@ -509,6 +746,37 @@ type GetSymbolAtPositionParams struct {
+@@ -509,6 +748,37 @@ type GetSymbolAtPositionParams struct {
  	Position uint32             `json:"position"`
  }
  
@@ -4291,7 +4332,7 @@ index 952b572a6..56d2493d4 100644
  type GetSymbolsAtPositionsParams struct {
  	Snapshot  SnapshotID         `json:"snapshot"`
  	Project   ProjectID          `json:"project"`
-@@ -751,6 +1019,47 @@ type GetSourceFileNamesParams struct {
+@@ -751,6 +1021,47 @@ type GetSourceFileNamesParams struct {
  	Project  ProjectID  `json:"project"`
  }
  
@@ -4339,7 +4380,7 @@ index 952b572a6..56d2493d4 100644
  type ResolveNameParams struct {
  	Snapshot       SnapshotID          `json:"snapshot"`
  	Project        ProjectID           `json:"project"`
-@@ -775,6 +1084,13 @@ type GetSymbolPropertyParams struct {
+@@ -775,6 +1086,13 @@ type GetSymbolPropertyParams struct {
  	Symbol   SymbolID   `json:"objectId"`
  }
  
@@ -4353,7 +4394,7 @@ index 952b572a6..56d2493d4 100644
  // GetSignaturePropertyParams is used for all signature sub-property endpoints.
  type GetSignaturePropertyParams struct {
  	Snapshot  SnapshotID  `json:"snapshot"`
-@@ -887,6 +1203,13 @@ type GetNonNullableTypeParams struct {
+@@ -887,6 +1205,13 @@ type GetNonNullableTypeParams struct {
  	Type     TypeID     `json:"type"`
  }
  
@@ -4367,7 +4408,7 @@ index 952b572a6..56d2493d4 100644
  // GetTypeFromTypeNodeParams are the parameters for the getTypeFromTypeNode method.
  type GetTypeFromTypeNodeParams struct {
  	Snapshot SnapshotID `json:"snapshot"`
-@@ -916,6 +1239,74 @@ type IsArrayLikeTypeParams struct {
+@@ -916,6 +1241,74 @@ type IsArrayLikeTypeParams struct {
  	Type     TypeID     `json:"type"`
  }
  
@@ -4442,7 +4483,7 @@ index 952b572a6..56d2493d4 100644
  // IsTypeAssignableToParams checks assignability between two types.
  type IsTypeAssignableToParams struct {
  	Snapshot SnapshotID `json:"snapshot"`
-@@ -937,6 +1328,47 @@ type GetResolvedSignatureParams struct {
+@@ -937,6 +1330,47 @@ type GetResolvedSignatureParams struct {
  	Location NodeHandle `json:"location"`
  }
  
@@ -4490,7 +4531,7 @@ index 952b572a6..56d2493d4 100644
  type GetTypeAtLocationParams struct {
  	Snapshot SnapshotID `json:"snapshot"`
  	Project  ProjectID  `json:"project"`
-@@ -972,6 +1404,24 @@ type TypeToTypeNodeParams struct {
+@@ -972,6 +1406,24 @@ type TypeToTypeNodeParams struct {
  	Flags    int32      `json:"flags,omitempty"`
  }
  
@@ -4515,7 +4556,7 @@ index 952b572a6..56d2493d4 100644
  // SignatureToSignatureDeclarationParams are the parameters for the signatureToSignatureDeclaration method.
  type SignatureToSignatureDeclarationParams struct {
  	Snapshot  SnapshotID  `json:"snapshot"`
-@@ -982,6 +1432,15 @@ type SignatureToSignatureDeclarationParams struct {
+@@ -982,6 +1434,15 @@ type SignatureToSignatureDeclarationParams struct {
  	Flags     int32       `json:"flags,omitempty"`
  }
  
@@ -4531,7 +4572,7 @@ index 952b572a6..56d2493d4 100644
  // PrintNodeParams are the parameters for the printNode method.
  type PrintNodeParams struct {
  	Data                          string `json:"data"` // base64-encoded binary AST data
-@@ -1020,6 +1479,88 @@ type CheckerNodeParams struct {
+@@ -1020,6 +1481,88 @@ type CheckerNodeParams struct {
  	Location NodeHandle `json:"location"`
  }
  
@@ -4620,7 +4661,7 @@ index 952b572a6..56d2493d4 100644
  // CheckerSymbolParams are parameters for checker methods that operate on a symbol.
  type CheckerSymbolParams struct {
  	Snapshot SnapshotID `json:"snapshot"`
-@@ -1034,6 +1575,225 @@ type JSDocTagInfo struct {
+@@ -1034,6 +1577,225 @@ type JSDocTagInfo struct {
  	Text string `json:"text,omitempty"`
  }
  
@@ -4846,7 +4887,7 @@ index 952b572a6..56d2493d4 100644
  // CheckerSignatureParams are parameters for checker methods that operate on a signature.
  type CheckerSignatureParams struct {
  	Snapshot  SnapshotID  `json:"snapshot"`
-@@ -1051,10 +1811,13 @@ type TypePredicateResponse struct {
+@@ -1051,10 +1813,13 @@ type TypePredicateResponse struct {
  
  // IndexInfoResponse represents a single index signature.
  type IndexInfoResponse struct {
@@ -4864,7 +4905,7 @@ index 952b572a6..56d2493d4 100644
  }
  
  // SourceFileResponse contains the binary-encoded AST data for a source file.
-@@ -1070,6 +1833,68 @@ type GetDiagnosticsParams struct {
+@@ -1070,6 +1835,68 @@ type GetDiagnosticsParams struct {
  	File     *DocumentIdentifier `json:"file,omitempty"`
  }
  
@@ -4934,7 +4975,7 @@ index 952b572a6..56d2493d4 100644
  type GetProjectDiagnosticsParams struct {
  	Snapshot SnapshotID `json:"snapshot"`
 diff --git a/internal/api/session.go b/internal/api/session.go
-index b350c6334..5b242d83e 100644
+index b350c6334..98464f361 100644
 --- a/internal/api/session.go
 +++ b/internal/api/session.go
 @@ -4,6 +4,7 @@ import (
@@ -5251,12 +5292,14 @@ index b350c6334..5b242d83e 100644
  func (setup checkerSetup) resolveSymbolHandle(id SymbolID) (*ast.Symbol, error) {
  	return setup.sd.resolveSymbolHandle(id)
  }
-@@ -527,6 +774,26 @@ func (s *Session) HandleRequest(ctx context.Context, method string, params json.
+@@ -527,6 +774,28 @@ func (s *Session) HandleRequest(ctx context.Context, method string, params json.
  		return s.handleGetSourceFile(ctx, parsed.(*GetSourceFileParams))
  	case string(MethodGetSourceFileNames):
  		return s.handleGetSourceFileNames(ctx, parsed.(*GetSourceFileNamesParams))
 +	case string(MethodGetBuilderFileGraph):
 +		return s.handleGetBuilderFileGraph(ctx, parsed.(*GetBuilderFileGraphParams))
++	case string(MethodGetAmbientModules):
++		return s.handleGetAmbientModules(ctx, parsed.(*GetAmbientModulesParams))
 +	case string(MethodGetModuleExportMap):
 +		return s.handleGetModuleExportMap(ctx, parsed.(*GetModuleExportMapParams))
 +	case string(MethodGetModuleSpecifiersBatch):
@@ -5278,7 +5321,7 @@ index b350c6334..5b242d83e 100644
  	case string(MethodGetSymbolAtPosition):
  		return s.handleGetSymbolAtPosition(ctx, parsed.(*GetSymbolAtPositionParams))
  	case string(MethodGetSymbolsAtPositions):
-@@ -535,6 +802,8 @@ func (s *Session) HandleRequest(ctx context.Context, method string, params json.
+@@ -535,6 +804,8 @@ func (s *Session) HandleRequest(ctx context.Context, method string, params json.
  		return s.handleGetSymbolAtLocation(ctx, parsed.(*GetSymbolAtLocationParams))
  	case string(MethodGetSymbolsAtLocations):
  		return s.handleGetSymbolsAtLocations(ctx, parsed.(*GetSymbolsAtLocationsParams))
@@ -5287,7 +5330,7 @@ index b350c6334..5b242d83e 100644
  	case string(MethodGetTypeOfSymbol):
  		return s.handleGetTypeOfSymbol(ctx, parsed.(*GetTypeOfSymbolParams))
  	case string(MethodGetTypesOfSymbols):
-@@ -543,10 +812,26 @@ func (s *Session) HandleRequest(ctx context.Context, method string, params json.
+@@ -543,10 +814,26 @@ func (s *Session) HandleRequest(ctx context.Context, method string, params json.
  		return s.handleGetDeclaredTypeOfSymbol(ctx, parsed.(*GetTypeOfSymbolParams))
  	case string(MethodResolveName):
  		return s.handleResolveName(ctx, parsed.(*ResolveNameParams))
@@ -5314,7 +5357,7 @@ index b350c6334..5b242d83e 100644
  	case string(MethodGetTypeAtLocation):
  		return s.handleGetTypeAtLocation(ctx, parsed.(*GetTypeAtLocationParams))
  	case string(MethodGetTypeAtLocations):
-@@ -563,6 +848,10 @@ func (s *Session) HandleRequest(ctx context.Context, method string, params json.
+@@ -563,6 +850,10 @@ func (s *Session) HandleRequest(ctx context.Context, method string, params json.
  		return s.handleGetExportsOfSymbol(ctx, parsed.(*GetSymbolPropertyParams))
  	case string(MethodGetExportSymbolOfSymbol):
  		return s.handleGetExportSymbolOfSymbol(ctx, parsed.(*GetSymbolPropertyParams))
@@ -5325,7 +5368,7 @@ index b350c6334..5b242d83e 100644
  	case string(MethodGetSymbolOfType):
  		return s.handleGetSymbolOfType(ctx, parsed.(*GetTypePropertyParams))
  	case string(MethodGetTargetOfType):
-@@ -613,6 +902,8 @@ func (s *Session) HandleRequest(ctx context.Context, method string, params json.
+@@ -613,6 +904,8 @@ func (s *Session) HandleRequest(ctx context.Context, method string, params json.
  		return s.handleGetBaseTypeOfLiteralType(ctx, parsed.(*GetBaseTypeOfLiteralTypeParams))
  	case string(MethodGetNonNullableType):
  		return s.handleGetNonNullableType(ctx, parsed.(*GetNonNullableTypeParams))
@@ -5334,7 +5377,7 @@ index b350c6334..5b242d83e 100644
  	case string(MethodGetTypeFromTypeNode):
  		return s.handleGetTypeFromTypeNode(ctx, parsed.(*GetTypeFromTypeNodeParams))
  	case string(MethodGetWidenedType):
-@@ -623,14 +914,34 @@ func (s *Session) HandleRequest(ctx context.Context, method string, params json.
+@@ -623,14 +916,34 @@ func (s *Session) HandleRequest(ctx context.Context, method string, params json.
  		return s.handleIsArrayLikeType(ctx, parsed.(*IsArrayLikeTypeParams))
  	case string(MethodIsTypeAssignableTo):
  		return s.handleIsTypeAssignableTo(ctx, parsed.(*IsTypeAssignableToParams))
@@ -5369,7 +5412,7 @@ index b350c6334..5b242d83e 100644
  	case string(MethodTypeToString):
  		return s.handleTypeToString(ctx, parsed.(*TypeToTypeNodeParams))
  	case string(MethodPrintNode):
-@@ -653,6 +964,8 @@ func (s *Session) HandleRequest(ctx context.Context, method string, params json.
+@@ -653,6 +966,8 @@ func (s *Session) HandleRequest(ctx context.Context, method string, params json.
  		return s.handleGetPropertyOfType(ctx, parsed.(*GetPropertyOfTypeParams))
  	case string(MethodGetIndexInfosOfType):
  		return s.handleGetIndexInfosOfType(ctx, parsed.(*CheckerTypeParams))
@@ -5378,7 +5421,7 @@ index b350c6334..5b242d83e 100644
  	case string(MethodGetConstraintOfTypeParameter):
  		return s.handleGetConstraintOfTypeParameter(ctx, parsed.(*CheckerTypeParams))
  	case string(MethodGetBaseConstraintOfType):
-@@ -671,8 +984,14 @@ func (s *Session) HandleRequest(ctx context.Context, method string, params json.
+@@ -671,8 +986,14 @@ func (s *Session) HandleRequest(ctx context.Context, method string, params json.
  		return s.handleGetImmediateAliasedSymbol(ctx, parsed.(*CheckerSymbolParams))
  	case string(MethodGetExportsOfModule):
  		return s.handleGetExportsOfModule(ctx, parsed.(*CheckerSymbolParams))
@@ -5393,7 +5436,7 @@ index b350c6334..5b242d83e 100644
  	case string(MethodGetJSDocTags):
  		return s.handleGetJSDocTags(ctx, parsed.(*CheckerSymbolParams))
  	case string(MethodGetDocumentationComment):
-@@ -681,8 +1000,132 @@ func (s *Session) HandleRequest(ctx context.Context, method string, params json.
+@@ -681,8 +1002,132 @@ func (s *Session) HandleRequest(ctx context.Context, method string, params json.
  		return s.handleIsArrayType(ctx, parsed.(*CheckerTypeParams))
  	case string(MethodIsTupleType):
  		return s.handleIsTupleType(ctx, parsed.(*CheckerTypeParams))
@@ -5526,7 +5569,7 @@ index b350c6334..5b242d83e 100644
  	case string(MethodGetStringType):
  		return s.handleGetIntrinsicType(ctx, parsed.(*GetIntrinsicTypeParams), (*checker.Checker).GetStringType)
  	case string(MethodGetNumberType):
-@@ -709,6 +1152,10 @@ func (s *Session) HandleRequest(ctx context.Context, method string, params json.
+@@ -709,6 +1154,10 @@ func (s *Session) HandleRequest(ctx context.Context, method string, params json.
  		return s.handleGetBindDiagnostics(ctx, parsed.(*GetDiagnosticsParams))
  	case string(MethodGetSemanticDiagnostics):
  		return s.handleGetSemanticDiagnostics(ctx, parsed.(*GetDiagnosticsParams))
@@ -5537,7 +5580,7 @@ index b350c6334..5b242d83e 100644
  	case string(MethodGetSuggestionDiagnostics):
  		return s.handleGetSuggestionDiagnostics(ctx, parsed.(*GetDiagnosticsParams))
  	case string(MethodGetDeclarationDiagnostics):
-@@ -777,6 +1224,7 @@ func (s *Session) handleInitialize(ctx context.Context) (*InitializeResponse, er
+@@ -777,6 +1226,7 @@ func (s *Session) handleInitialize(ctx context.Context) (*InitializeResponse, er
  	return &InitializeResponse{
  		UseCaseSensitiveFileNames: s.projectSession.FS().UseCaseSensitiveFileNames(),
  		CurrentDirectory:          s.projectSession.GetCurrentDirectory(),
@@ -5545,7 +5588,7 @@ index b350c6334..5b242d83e 100644
  	}, nil
  }
  
-@@ -793,6 +1241,17 @@ func (s *Session) handleUpdateSnapshot(ctx context.Context, params *UpdateSnapsh
+@@ -793,6 +1243,17 @@ func (s *Session) handleUpdateSnapshot(ctx context.Context, params *UpdateSnapsh
  	s.updateMu.Lock()
  	defer s.updateMu.Unlock()
  
@@ -5563,7 +5606,7 @@ index b350c6334..5b242d83e 100644
  	fileChanges := s.toFileChangeSummary(params.FileChanges)
  
  	apiRequest := &project.APISnapshotRequest{}
-@@ -844,6 +1303,7 @@ func (s *Session) handleUpdateSnapshot(ctx context.Context, params *UpdateSnapsh
+@@ -844,6 +1305,7 @@ func (s *Session) handleUpdateSnapshot(ctx context.Context, params *UpdateSnapsh
  
  	// Close files: only release a ref we currently hold.
  	var closedFiles []tspath.Path
@@ -5571,7 +5614,7 @@ index b350c6334..5b242d83e 100644
  	for _, f := range params.CloseFiles {
  		path := s.toPath(f.ToURI(s.projectSession.GetCurrentDirectory()).FileName())
  		if !s.openFiles.Has(path) {
-@@ -854,6 +1314,68 @@ func (s *Session) handleUpdateSnapshot(ctx context.Context, params *UpdateSnapsh
+@@ -854,6 +1316,68 @@ func (s *Session) handleUpdateSnapshot(ctx context.Context, params *UpdateSnapsh
  		}
  		apiRequest.CloseFiles.Add(path)
  		closedFiles = append(closedFiles, path)
@@ -5640,7 +5683,7 @@ index b350c6334..5b242d83e 100644
  	}
  
  	// Even when nothing is opened or closed, APIUpdate ensures all projects and
-@@ -898,6 +1420,7 @@ func (s *Session) handleUpdateSnapshot(ctx context.Context, params *UpdateSnapsh
+@@ -898,6 +1422,7 @@ func (s *Session) handleUpdateSnapshot(ctx context.Context, params *UpdateSnapsh
  			snapshot:          snapshot,
  			refCount:          1,
  			symbolRegistry:    make(map[SymbolID]*ast.Symbol),
@@ -5648,7 +5691,7 @@ index b350c6334..5b242d83e 100644
  			projectRegistries: make(map[ProjectID]*projectRegistryData),
  		}
  		s.snapshots[handle] = sd
-@@ -919,6 +1442,29 @@ func (s *Session) handleUpdateSnapshot(ctx context.Context, params *UpdateSnapsh
+@@ -919,6 +1444,29 @@ func (s *Session) handleUpdateSnapshot(ctx context.Context, params *UpdateSnapsh
  		changes = computeSnapshotChanges(prevSD.snapshot, snapshot)
  	}
  
@@ -5678,7 +5721,7 @@ index b350c6334..5b242d83e 100644
  	return &UpdateSnapshotResponse{
  		Snapshot: handle,
  		Projects: projectResponses,
-@@ -1018,8 +1564,8 @@ func (s *Session) handleGetSourceFile(ctx context.Context, params *GetSourceFile
+@@ -1018,8 +1566,8 @@ func (s *Session) handleGetSourceFile(ctx context.Context, params *GetSourceFile
  		return nil, nil
  	}
  
@@ -5689,7 +5732,7 @@ index b350c6334..5b242d83e 100644
  	if err != nil {
  		return nil, fmt.Errorf("failed to encode source file: %w", err)
  	}
-@@ -1033,6 +1579,27 @@ func (s *Session) handleGetSourceFile(ctx context.Context, params *GetSourceFile
+@@ -1033,6 +1581,27 @@ func (s *Session) handleGetSourceFile(ctx context.Context, params *GetSourceFile
  	}, nil
  }
  
@@ -5717,7 +5760,7 @@ index b350c6334..5b242d83e 100644
  // handleGetSourceFileNames returns file names of all source files in a project.
  func (s *Session) handleGetSourceFileNames(ctx context.Context, params *GetSourceFileNamesParams) ([]string, error) {
  	sd, err := s.getSnapshotData(params.Snapshot)
-@@ -1053,210 +1620,258 @@ func (s *Session) handleGetSourceFileNames(ctx context.Context, params *GetSourc
+@@ -1053,210 +1622,275 @@ func (s *Session) handleGetSourceFileNames(ctx context.Context, params *GetSourc
  	return result, nil
  }
  
@@ -5737,23 +5780,18 @@ index b350c6334..5b242d83e 100644
  		return nil, err
  	}
 -	defer setup.done()
--
+ 
 -	sourceFile := setup.program.GetSourceFile(params.File.ToFileName())
 -	if sourceFile == nil {
 -		return nil, fmt.Errorf("%w: source file not found: %v", ErrClientError, params.File)
--	}
- 
--	positionMap := sourceFile.GetPositionMap()
--	node := astnav.GetTouchingPropertyName(sourceFile, positionMap.UTF16ToUTF8(int(params.Position)))
--	if node == nil {
--		return nil, nil
 +	program, err := sd.getProgram(params.Project)
 +	if err != nil {
 +		return nil, err
  	}
  
--	symbol := setup.checker.GetSymbolAtLocation(node)
--	if symbol == nil {
+-	positionMap := sourceFile.GetPositionMap()
+-	node := astnav.GetTouchingPropertyName(sourceFile, positionMap.UTF16ToUTF8(int(params.Position)))
+-	if node == nil {
 -		return nil, nil
 +	entries := sd.builderFileGraph(program)
 +	result := make([]*BuilderFileGraphEntry, len(entries))
@@ -5767,9 +5805,28 @@ index b350c6334..5b242d83e 100644
 +			Refs:               e.ReferencedFiles,
 +		}
  	}
--
--	return setup.newSymbolResponse(symbol), nil
 +	return result, nil
++}
+ 
+-	symbol := setup.checker.GetSymbolAtLocation(node)
+-	if symbol == nil {
+-		return nil, nil
++// handleGetAmbientModules returns only ambient module names and light symbols.
++// It intentionally avoids the named/default export and importability work done
++// by handleGetModuleExportMap.
++func (s *Session) handleGetAmbientModules(ctx context.Context, params *GetAmbientModulesParams) (*AmbientModulesResponse, error) {
++	sd, err := s.getSnapshotData(params.Snapshot)
++	if err != nil {
++		return nil, err
+ 	}
+ 
+-	return setup.newSymbolResponse(symbol), nil
++	program, err := sd.getProgram(params.Project)
++	if err != nil {
++		return nil, err
++	}
++
++	return computeAmbientModules(ctx, program, sd)
  }
  
 -// handleGetSymbolsAtPositions returns symbols at multiple positions in a file.
@@ -5980,38 +6037,24 @@ index b350c6334..5b242d83e 100644
  	}
 -	if symbol == nil {
 -		return nil, nil
-+	sourceFile, err := s.resolveOptionalSourceFile(program, params.File)
-+	if err != nil || sourceFile == nil {
-+		return nil, err
- 	}
-+	return resolutionModeResponse(program.GetDefaultResolutionModeForFile(sourceFile)), nil
-+}
- 
+-	}
+-
 -	t := setup.checker.GetDeclaredTypeOfSymbol(symbol)
 -	if t == nil {
 -		return nil, nil
-+func (s *Session) handleGetEmitModuleFormatOfFile(ctx context.Context, params *GetDiagnosticsParams) (*ModuleKindResponse, error) {
-+	sd, err := s.getSnapshotData(params.Snapshot)
-+	if err != nil {
++	sourceFile, err := s.resolveOptionalSourceFile(program, params.File)
++	if err != nil || sourceFile == nil {
 +		return nil, err
  	}
 -
 -	return setup.newTypeResponse(t), nil
-+	program, err := sd.getProgram(params.Project)
-+	if err != nil {
-+		return nil, err
-+	}
-+	sourceFile, err := s.resolveOptionalSourceFile(program, params.File)
-+	if err != nil || sourceFile == nil {
-+		return nil, err
-+	}
-+	return &ModuleKindResponse{Kind: int32(program.GetEmitModuleFormatOfFile(sourceFile))}, nil
++	return resolutionModeResponse(program.GetDefaultResolutionModeForFile(sourceFile)), nil
  }
  
 -// handleResolveName resolves a name to a symbol at a given location.
 -func (s *Session) handleResolveName(ctx context.Context, params *ResolveNameParams) (*SymbolResponse, error) {
 -	setup, err := s.setupChecker(ctx, params.Snapshot, params.Project)
-+func (s *Session) handleGetModeForUsageLocation(ctx context.Context, params *GetModeForUsageLocationParams) (*ResolutionModeResponse, error) {
++func (s *Session) handleGetEmitModuleFormatOfFile(ctx context.Context, params *GetDiagnosticsParams) (*ModuleKindResponse, error) {
 +	sd, err := s.getSnapshotData(params.Snapshot)
  	if err != nil {
  		return nil, err
@@ -6035,18 +6078,34 @@ index b350c6334..5b242d83e 100644
 +	if err != nil {
 +		return nil, err
 +	}
++	sourceFile, err := s.resolveOptionalSourceFile(program, params.File)
++	if err != nil || sourceFile == nil {
++		return nil, err
+ 	}
++	return &ModuleKindResponse{Kind: int32(program.GetEmitModuleFormatOfFile(sourceFile))}, nil
++}
+ 
+-	symbol := setup.checker.ResolveName(params.Name, location, ast.SymbolFlags(params.Meaning), params.ExcludeGlobals)
++func (s *Session) handleGetModeForUsageLocation(ctx context.Context, params *GetModeForUsageLocationParams) (*ResolutionModeResponse, error) {
++	sd, err := s.getSnapshotData(params.Snapshot)
++	if err != nil {
++		return nil, err
++	}
++	program, err := sd.getProgram(params.Project)
++	if err != nil {
++		return nil, err
++	}
 +	sourceFile := program.GetSourceFile(params.File.ToFileName())
 +	if sourceFile == nil {
 +		return nil, fmt.Errorf("%w: source file not found: %v", ErrClientError, params.File)
- 	}
++	}
 +	usage := stringLiteralLikeAtPosition(sourceFile, int(params.Position))
 +	if usage == nil {
 +		return resolutionModeResponse(core.ModuleKindNone), nil
 +	}
 +	return resolutionModeResponse(program.GetModeForUsageLocation(sourceFile, usage)), nil
 +}
- 
--	symbol := setup.checker.ResolveName(params.Name, location, ast.SymbolFlags(params.Meaning), params.ExcludeGlobals)
++
 +func (s *Session) handleGetEmitSyntaxForUsageLocation(ctx context.Context, params *GetModeForUsageLocationParams) (*ResolutionModeResponse, error) {
 +	sd, err := s.getSnapshotData(params.Snapshot)
 +	if err != nil {
@@ -6111,7 +6170,7 @@ index b350c6334..5b242d83e 100644
  	if symbol == nil {
  		return nil, nil
  	}
-@@ -1264,50 +1879,114 @@ func (s *Session) handleResolveName(ctx context.Context, params *ResolveNamePara
+@@ -1264,50 +1898,114 @@ func (s *Session) handleResolveName(ctx context.Context, params *ResolveNamePara
  	return setup.newSymbolResponse(symbol), nil
  }
  
@@ -6246,7 +6305,7 @@ index b350c6334..5b242d83e 100644
  	setup, err := s.setupChecker(ctx, params.Snapshot, params.Project)
  	if err != nil {
  		return nil, err
-@@ -1322,23 +2001,23 @@ func (s *Session) handleGetTypeAtLocation(ctx context.Context, params *GetTypeAt
+@@ -1322,23 +2020,23 @@ func (s *Session) handleGetTypeAtLocation(ctx context.Context, params *GetTypeAt
  		return nil, nil
  	}
  
@@ -6276,7 +6335,7 @@ index b350c6334..5b242d83e 100644
  	for i, loc := range params.Locations {
  		node, err := setup.sd.resolveNodeHandle(setup.program, loc)
  		if err != nil {
-@@ -1347,35 +2026,32 @@ func (s *Session) handleGetTypeAtLocations(ctx context.Context, params *GetTypeA
+@@ -1347,35 +2045,32 @@ func (s *Session) handleGetTypeAtLocations(ctx context.Context, params *GetTypeA
  		if node == nil {
  			continue
  		}
@@ -6322,7 +6381,7 @@ index b350c6334..5b242d83e 100644
  	if t == nil {
  		return nil, nil
  	}
-@@ -1383,27 +2059,24 @@ func (s *Session) handleGetTypeAtPosition(ctx context.Context, params *GetTypeAt
+@@ -1383,27 +2078,24 @@ func (s *Session) handleGetTypeAtPosition(ctx context.Context, params *GetTypeAt
  	return setup.newTypeResponse(t), nil
  }
  
@@ -6360,7 +6419,7 @@ index b350c6334..5b242d83e 100644
  		if t != nil {
  			results[i] = setup.newTypeResponse(t)
  		}
-@@ -1412,308 +2085,2369 @@ func (s *Session) handleGetTypesAtPositions(ctx context.Context, params *GetType
+@@ -1412,308 +2104,2369 @@ func (s *Session) handleGetTypesAtPositions(ctx context.Context, params *GetType
  	return results, nil
  }
  
@@ -6433,20 +6492,14 @@ index b350c6334..5b242d83e 100644
 +	}
  
 -func (s *Session) handleGetFreshTypeOfType(_ context.Context, params *GetTypePropertyParams) (*TypeResponse, error) {
--	return s.resolveTypePropertyOfType(params, func(t *checker.Type) *checker.Type { return t.AsLiteralType().FreshType() })
--}
 +	symbol := setup.checker.ResolveName(params.Name, location, ast.SymbolFlags(params.Meaning), params.ExcludeGlobals)
 +	if symbol == nil {
 +		return nil, nil
 +	}
- 
--func (s *Session) handleGetRegularTypeOfType(_ context.Context, params *GetTypePropertyParams) (*TypeResponse, error) {
--	return s.resolveTypePropertyOfType(params, func(t *checker.Type) *checker.Type { return t.AsLiteralType().RegularType() })
++
 +	return setup.newSymbolResponse(symbol), nil
- }
- 
--func (s *Session) handleGetTypesOfType(_ context.Context, params *GetTypePropertyParams) ([]*TypeResponse, error) {
--	return s.resolveTypeArrayPropertyOfType(params, (*checker.Type).Types)
++}
++
 +// handleGetSymbolsInScope returns all symbols visible in scope at a node
 +// location, filtered by the given SymbolFlags meaning. With params.Dedup it
 +// returns the GetSymbolsInScopeResponse split shape: full payloads only for
@@ -6895,9 +6948,11 @@ index b350c6334..5b242d83e 100644
 +}
 +
 +func (s *Session) handleGetFreshTypeOfType(_ context.Context, params *GetTypePropertyParams) (*TypeResponse, error) {
-+	return s.resolveTypePropertyOfType(params, func(t *checker.Type) *checker.Type { return t.AsLiteralType().FreshType() })
-+}
-+
+ 	return s.resolveTypePropertyOfType(params, func(t *checker.Type) *checker.Type { return t.AsLiteralType().FreshType() })
+ }
+ 
+-func (s *Session) handleGetRegularTypeOfType(_ context.Context, params *GetTypePropertyParams) (*TypeResponse, error) {
+-	return s.resolveTypePropertyOfType(params, func(t *checker.Type) *checker.Type { return t.AsLiteralType().RegularType() })
 +func (s *Session) handleGetRegularTypeOfType(_ context.Context, params *GetTypePropertyParams) (*TypeResponse, error) {
 +	return s.resolveTypePropertyOfType(params, func(t *checker.Type) *checker.Type { return t.AsLiteralType().RegularType() })
 +}
@@ -8201,11 +8256,8 @@ index b350c6334..5b242d83e 100644
 +		results[i] = setup.newSymbolResponse(exp)
 +	}
 +	return results, nil
- }
- 
--func (s *Session) handleGetTypeParametersOfType(_ context.Context, params *GetTypePropertyParams) ([]*TypeResponse, error) {
--	return s.resolveTypeArrayPropertyOfType(params, func(t *checker.Type) []*checker.Type { return t.AsInterfaceType().TypeParameters() })
--}
++}
++
 +// handleGetJsxIntrinsicTagNamesAt returns JSX.IntrinsicElements properties at a location.
 +func (s *Session) handleGetJsxIntrinsicTagNamesAt(ctx context.Context, params *CheckerNodeParams) ([]*SymbolResponse, error) {
 +	setup, err := s.setupChecker(ctx, params.Snapshot, params.Project)
@@ -8221,9 +8273,7 @@ index b350c6334..5b242d83e 100644
 +	if node == nil {
 +		return nil, nil
 +	}
- 
--func (s *Session) handleGetOuterTypeParametersOfType(_ context.Context, params *GetTypePropertyParams) ([]*TypeResponse, error) {
--	return s.resolveTypeArrayPropertyOfType(params, func(t *checker.Type) []*checker.Type { return t.AsInterfaceType().OuterTypeParameters() })
++
 +	syms := setup.checker.GetJsxIntrinsicTagNamesAt(node)
 +	results := make([]*SymbolResponse, len(syms))
 +	for i, sym := range syms {
@@ -8232,8 +8282,9 @@ index b350c6334..5b242d83e 100644
 +	return results, nil
  }
  
--func (s *Session) handleGetLocalTypeParametersOfType(_ context.Context, params *GetTypePropertyParams) ([]*TypeResponse, error) {
--	return s.resolveTypeArrayPropertyOfType(params, func(t *checker.Type) []*checker.Type { return t.AsInterfaceType().LocalTypeParameters() })
+-func (s *Session) handleGetTypesOfType(_ context.Context, params *GetTypePropertyParams) ([]*TypeResponse, error) {
+-	return s.resolveTypeArrayPropertyOfType(params, (*checker.Type).Types)
+-}
 +// handleIsPropertyAccessible reports whether a property is accessible from a node.
 +func (s *Session) handleIsPropertyAccessible(ctx context.Context, params *IsPropertyAccessibleParams) (bool, error) {
 +	setup, err := s.setupChecker(ctx, params.Snapshot, params.Project)
@@ -8241,7 +8292,10 @@ index b350c6334..5b242d83e 100644
 +		return false, err
 +	}
 +	defer setup.done()
-+
+ 
+-func (s *Session) handleGetTypeParametersOfType(_ context.Context, params *GetTypePropertyParams) ([]*TypeResponse, error) {
+-	return s.resolveTypeArrayPropertyOfType(params, func(t *checker.Type) []*checker.Type { return t.AsInterfaceType().TypeParameters() })
+-}
 +	node, err := setup.sd.resolveNodeHandle(setup.program, params.Location)
 +	if err != nil {
 +		return false, err
@@ -8249,12 +8303,17 @@ index b350c6334..5b242d83e 100644
 +	if node == nil {
 +		return false, nil
 +	}
-+
+ 
+-func (s *Session) handleGetOuterTypeParametersOfType(_ context.Context, params *GetTypePropertyParams) ([]*TypeResponse, error) {
+-	return s.resolveTypeArrayPropertyOfType(params, func(t *checker.Type) []*checker.Type { return t.AsInterfaceType().OuterTypeParameters() })
+-}
 +	t, err := setup.resolveTypeHandle(params.Type)
 +	if err != nil {
 +		return false, err
 +	}
-+
+ 
+-func (s *Session) handleGetLocalTypeParametersOfType(_ context.Context, params *GetTypePropertyParams) ([]*TypeResponse, error) {
+-	return s.resolveTypeArrayPropertyOfType(params, func(t *checker.Type) []*checker.Type { return t.AsInterfaceType().LocalTypeParameters() })
 +	symbol, err := setup.resolveSymbolHandle(params.Symbol)
 +	if err != nil {
 +		return false, err
@@ -8884,7 +8943,7 @@ index b350c6334..5b242d83e 100644
  	setup, err := s.setupChecker(ctx, params.Snapshot, params.Project)
  	if err != nil {
  		return nil, err
-@@ -1728,82 +4462,124 @@ func (s *Session) handleGetContextualType(ctx context.Context, params *GetContex
+@@ -1728,82 +4481,124 @@ func (s *Session) handleGetContextualType(ctx context.Context, params *GetContex
  		return nil, nil
  	}
  
@@ -9037,7 +9096,7 @@ index b350c6334..5b242d83e 100644
  	setup, err := s.setupChecker(ctx, params.Snapshot, params.Project)
  	if err != nil {
  		return nil, err
-@@ -1815,77 +4591,104 @@ func (s *Session) handleGetWidenedType(ctx context.Context, params *GetWidenedTy
+@@ -1815,77 +4610,104 @@ func (s *Session) handleGetWidenedType(ctx context.Context, params *GetWidenedTy
  		return nil, err
  	}
  
@@ -9175,7 +9234,7 @@ index b350c6334..5b242d83e 100644
  	setup, err := s.setupChecker(ctx, params.Snapshot, params.Project)
  	if err != nil {
  		return nil, err
-@@ -1899,17 +4702,30 @@ func (s *Session) handleGetShorthandAssignmentValueSymbol(ctx context.Context, p
+@@ -1899,17 +4721,30 @@ func (s *Session) handleGetShorthandAssignmentValueSymbol(ctx context.Context, p
  	if node == nil {
  		return nil, nil
  	}
@@ -9211,7 +9270,7 @@ index b350c6334..5b242d83e 100644
  	setup, err := s.setupChecker(ctx, params.Snapshot, params.Project)
  	if err != nil {
  		return nil, err
-@@ -1920,105 +4736,145 @@ func (s *Session) handleGetTypeOfSymbolAtLocation(ctx context.Context, params *G
+@@ -1920,105 +4755,145 @@ func (s *Session) handleGetTypeOfSymbolAtLocation(ctx context.Context, params *G
  	if err != nil {
  		return nil, err
  	}
@@ -9405,7 +9464,7 @@ index b350c6334..5b242d83e 100644
  	setup, err := s.setupChecker(ctx, params.Snapshot, params.Project)
  	if err != nil {
  		return nil, err
-@@ -2030,177 +4886,322 @@ func (s *Session) handleTypeToString(ctx context.Context, params *TypeToTypeNode
+@@ -2030,177 +4905,322 @@ func (s *Session) handleTypeToString(ctx context.Context, params *TypeToTypeNode
  		return nil, err
  	}
  
@@ -9811,7 +9870,7 @@ index b350c6334..5b242d83e 100644
  }
  
  // handleGetBaseTypes returns the base types of an interface/class type.
-@@ -2303,6 +5304,51 @@ func (s *Session) handleGetIndexInfosOfType(ctx context.Context, params *Checker
+@@ -2303,6 +5323,51 @@ func (s *Session) handleGetIndexInfosOfType(ctx context.Context, params *Checker
  		}
  		if info.Declaration() != nil {
  			results[i].Declaration = setup.sd.nodeHandleFrom(info.Declaration())
@@ -9863,7 +9922,7 @@ index b350c6334..5b242d83e 100644
  		}
  	}
  
-@@ -2517,6 +5563,73 @@ func (s *Session) handleGetExportsOfModule(ctx context.Context, params *CheckerS
+@@ -2517,6 +5582,73 @@ func (s *Session) handleGetExportsOfModule(ctx context.Context, params *CheckerS
  	return results, nil
  }
  
@@ -9937,7 +9996,7 @@ index b350c6334..5b242d83e 100644
  // handleGetMemberInModuleExports returns an export by name from a module symbol.
  func (s *Session) handleGetMemberInModuleExports(ctx context.Context, params *GetMemberInModuleExportsParams) (*SymbolResponse, error) {
  	setup, err := s.setupChecker(ctx, params.Snapshot, params.Project)
-@@ -2868,7 +5981,6 @@ func (s *Session) handleGetBindDiagnostics(ctx context.Context, params *GetDiagn
+@@ -2868,7 +6000,6 @@ func (s *Session) handleGetBindDiagnostics(ctx context.Context, params *GetDiagn
  
  // handleGetSemanticDiagnostics returns semantic diagnostics for a file or all files.
  func (s *Session) handleGetSemanticDiagnostics(ctx context.Context, params *GetDiagnosticsParams) ([]*DiagnosticResponse, error) {
@@ -9945,7 +10004,7 @@ index b350c6334..5b242d83e 100644
  	sd, err := s.getSnapshotData(params.Snapshot)
  	if err != nil {
  		return nil, err
-@@ -2884,10 +5996,150 @@ func (s *Session) handleGetSemanticDiagnostics(ctx context.Context, params *GetD
+@@ -2884,10 +6015,150 @@ func (s *Session) handleGetSemanticDiagnostics(ctx context.Context, params *GetD
  		return nil, err
  	}
  
@@ -10096,7 +10155,7 @@ index b350c6334..5b242d83e 100644
  // handleGetSuggestionDiagnostics returns suggestion diagnostics for a file or all files.
  func (s *Session) handleGetSuggestionDiagnostics(ctx context.Context, params *GetDiagnosticsParams) ([]*DiagnosticResponse, error) {
  	ctx = core.WithCheckerLifetime(ctx, core.CheckerLifetimeDiagnostics)
-@@ -2966,7 +6218,6 @@ func (s *Session) handleGetProgramDiagnostics(ctx context.Context, params *GetPr
+@@ -2966,7 +6237,6 @@ func (s *Session) handleGetProgramDiagnostics(ctx context.Context, params *GetPr
  
  // handleGetGlobalDiagnostics returns global (non-file-specific) semantic diagnostics.
  func (s *Session) handleGetGlobalDiagnostics(ctx context.Context, params *GetProjectDiagnosticsParams) ([]*DiagnosticResponse, error) {
@@ -10104,7 +10163,7 @@ index b350c6334..5b242d83e 100644
  	sd, err := s.getSnapshotData(params.Snapshot)
  	if err != nil {
  		return nil, err
-@@ -2983,11 +6234,27 @@ func (s *Session) handleGetGlobalDiagnostics(ctx context.Context, params *GetPro
+@@ -2983,11 +6253,27 @@ func (s *Session) handleGetGlobalDiagnostics(ctx context.Context, params *GetPro
  	}
  
  	// Global diagnostics are accumulated lazily by the project's checker pool as
@@ -10137,7 +10196,7 @@ index b350c6334..5b242d83e 100644
  
  	diags := core.Filter(proj.GetProjectDiagnostics(ctx), func(d *ast.Diagnostic) bool {
  		return d.File() == nil
-@@ -3184,3 +6451,24 @@ func (s *Session) handleGetReferencedSymbolsForNode(ctx context.Context, params
+@@ -3184,3 +6470,24 @@ func (s *Session) handleGetReferencedSymbolsForNode(ctx context.Context, params
  	}
  	return result, nil
  }
