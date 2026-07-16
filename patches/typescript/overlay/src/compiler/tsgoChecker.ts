@@ -6108,6 +6108,21 @@ export function createTsgoChecker(program: any): any {
                 return undefined;
             }
         }
+        // ExportAssignment declarations (host binder symbol for `export default …`
+        // / `export = …`, re-anchored by resolveHostExportDefaultSymbol): the
+        // checker returns no symbol for the statement node itself — recover the
+        // tsgo member through the module symbol's exports table instead.
+        if (decl.kind === SyntaxKind.ExportAssignment) {
+            const tsgoSf = getTsgoSourceFile(sf.fileName);
+            if (!tsgoSf || tsgoSf.kind !== SyntaxKind.SourceFile) return undefined;
+            try {
+                const moduleSym = project.checker.getSymbolAtLocation(tsgoSf);
+                const memberName = decl.isExportEquals ? "export=" : "default";
+                return moduleSym?.exports?.get?.(memberName) ?? undefined;
+            } catch {
+                return undefined;
+            }
+        }
         // Anchor on the declaration's name node when present — identifiers sit
         // at identical offsets in the tsgo AST (host text is the overlay
         // source of truth for tsgo).
@@ -7601,11 +7616,16 @@ export function createTsgoChecker(program: any): any {
                 if (typeof start === "number") {
                     try {
                         const tsgoNode = findTsgoNodeAtPosition(sf.fileName, start, location.kind, end);
+                        if (_traceSymEnabled) traceSym(`getTypeOfSymbolAtLocation sym=${traceSymSymbol(symbol)} locKind=${location.kind} start=${start} hit=${!!tsgoNode} hitKind=${tsgoNode?.kind}`);
                         if (tsgoNode) {
                             const t = rpc().getTypeOfSymbolAtLocation(symbol, tsgoNode);
+                            if (_traceSymEnabled) traceSym(`getTypeOfSymbolAtLocation rpc-result flags=${t?.flags} id=${t?.id}`);
                             if (t) { fixupType(t); return t; }
                         }
-                    } catch { /* fall through to errorType */ }
+                    } catch (e) {
+                        if (_traceSymEnabled) traceSym(`getTypeOfSymbolAtLocation rpc-throw ${String((e as any)?.message ?? e).split("\n")[0]}`);
+                        /* fall through to errorType */
+                    }
                 }
             }
             // Auto-import completion entries may query export symbols at virtual-doc
