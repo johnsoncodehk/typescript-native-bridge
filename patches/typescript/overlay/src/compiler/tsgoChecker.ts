@@ -2061,9 +2061,7 @@ function symbolDisplayNameWithComputedDecl(symbol: any, getHostSf?: (fileName: s
     const fallback = symbolDisplayNameOf(symbol);
     if (!fallback || !getHostSf) return fallback;
     const rawName = String(symbol?.escapedName ?? symbol?.name ?? "");
-    if (!((symbol?.checkFlags ?? 0) & CHECKFLAGS_LATE_BIT) && rawName !== "__computed") {
-        return fallback;
-    }
+    const lateLike = ((symbol?.checkFlags ?? 0) & CHECKFLAGS_LATE_BIT) !== 0 || rawName === "__computed";
     let decls: readonly any[];
     try {
         decls = symbol?.declarations;
@@ -2076,9 +2074,18 @@ function symbolDisplayNameWithComputedDecl(symbol: any, getHostSf?: (fileName: s
         const hostDecl = remapDeclarationToHost(decl, getHostSf);
         const name = hostDecl ? (ts as any).getNameOfDeclaration?.(hostDecl) : undefined;
         if (!name) continue;
-        return (ts as any).isComputedPropertyName?.(name)
-            ? ((ts as any).declarationNameToString?.(name) ?? fallback)
-            : fallback;
+        if (lateLike) {
+            return (ts as any).isComputedPropertyName?.(name)
+                ? ((ts as any).declarationNameToString?.(name) ?? fallback)
+                : fallback;
+        }
+        // Stock getNameOfSymbolAsWritten: a name written as a string/template
+        // literal prints as-written (quotes included) — 'data-test-id', 'foo',
+        // "onUpdate:modelValue". Bridge printed the bare unescaped name.
+        if ((ts as any).isStringLiteral?.(name) || (ts as any).isNoSubstitutionTemplateLiteral?.(name)) {
+            return (ts as any).declarationNameToString?.(name) ?? fallback;
+        }
+        return fallback;
     }
     return fallback;
 }
