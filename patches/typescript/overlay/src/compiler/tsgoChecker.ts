@@ -1928,19 +1928,47 @@ function hydrateScopeSymbolParents(symbols: readonly any[]): void {
         try { registry.materializeSymbols(missingParentIds); }
         catch { /* parent getter falls back to RPC */ }
     }
+    const unfilled: any[] = [];
     for (const sym of symbols) {
         if (!isBridgeWireSymbol(sym)) continue;
         const own = Object.getOwnPropertyDescriptor(sym, "parent");
         if (own && !own.get && !own.set) continue;
         const ph = sym.parentHandle;
-        // omitzero / missing handle: not "no parent" — leave lazy getter + memo.
-        if (typeof ph !== "number" || ph === 0) continue;
+        // omitzero / missing handle: not "no parent" — batch-resolve below.
+        if (typeof ph !== "number" || ph === 0) {
+            if (
+                !Object.prototype.hasOwnProperty.call(sym, "__tnbParentMemo")
+                || sym.__tnbParentMemoPh !== ph
+                || sym.__tnbParentMemoEpoch !== _tnbParentMemoEpoch
+            ) {
+                unfilled.push(sym);
+            }
+            continue;
+        }
         const parent = registry?.getSymbol?.(ph);
         if (!parent) continue; // leave lazy getter
         try {
             Object.defineProperty(sym, "parent", { value: parent, configurable: true });
         }
         catch { /* read-only */ }
+    }
+    // Batch the "unfilled" remainder: each would otherwise pay one lazy
+    // getParentOfSymbol RPC on first .parent read (completion's getSymbolKind
+    // reads it for every entry — ~1k FFI round-trips per keystroke). The batch
+    // reads the same sd.symbol.Parent the lazy path reads, so writing the
+    // result (including confirmed "no parent") into the memo fields is
+    // observationally identical, just one RPC.
+    if (registry && unfilled.length && typeof registry.fetchParentsOfSymbols === "function") {
+        try {
+            const parents = registry.fetchParentsOfSymbols(unfilled.map(s => s.id));
+            for (let i = 0; i < unfilled.length; i++) {
+                const sym = unfilled[i];
+                sym.__tnbParentMemo = parents[i];
+                sym.__tnbParentMemoPh = sym.parentHandle;
+                sym.__tnbParentMemoEpoch = _tnbParentMemoEpoch;
+            }
+        }
+        catch { /* lazy getter fallback */ }
     }
 }
 /**
@@ -5498,6 +5526,15 @@ export function createTsgoChecker(program: any): any {
                     // Stock returns the input module symbol when there is no export=;
                     // preserve moduleSymbol identity for downstream === checks.
                     if (resolved && resolved !== bridge) return resolved;
+                    if (resolved) {
+                        // Authoritative "no export=" from the checker — the
+                        // host exports fallback below cannot find one either
+                        // (the mirror parsed the same content). Materializing
+                        // .exports here cost a getExportsOfSymbol RPC + sorted
+                        // Map per module per generation in the auto-import
+                        // codefix scan.
+                        return moduleSymbol;
+                    }
                 } catch (err) {
                     // No host fallback — surface RPC/bridge failures instead of
                     // silently skipping export= property enumeration.
@@ -5936,6 +5973,21 @@ export function createTsgoChecker(program: any): any {
     function tsgoSymbolForHostDeclaration(decl: any): any {
         const sf = decl?.getSourceFile?.();
         if (!sf?.fileName) return undefined;
+        // SourceFile declarations (module symbols): the tsgo counterpart is the
+        // mirror SourceFile itself — resolve it directly instead of walking the
+        // whole file to index every node position (auto-import codefix resolves
+        // the module symbol of every external module per keystroke; the index
+        // build was the dominant cost for project files, whose RemoteSourceFile
+        // objects are not retained across generations).
+        if (decl.kind === SyntaxKind.SourceFile) {
+            const tsgoSf = getTsgoSourceFile(sf.fileName);
+            if (!tsgoSf || tsgoSf.kind !== SyntaxKind.SourceFile) return undefined;
+            try {
+                return project.checker.getSymbolAtLocation(tsgoSf) ?? undefined;
+            } catch {
+                return undefined;
+            }
+        }
         // Anchor on the declaration's name node when present — identifiers sit
         // at identical offsets in the tsgo AST (host text is the overlay
         // source of truth for tsgo).
@@ -6329,10 +6381,25 @@ export function createTsgoChecker(program: any): any {
                         // Match stock SymbolTable insertion (= declaration) order so
                         // firstOrUndefinedIterator(exports.values()) picks the same
                         // enum member as stock (e.g. Color.Red not Color.Green).
+                        // Sort key: bare NodeHandle (path, index) when available —
+                        // node indexes are assigned in document order, so this
+                        // reproduces position order without resolving the remote
+                        // node (NodeHandle.pos → resolveSelf → getSourceFile RPC
+                        // per declaration; codefix export scans hit this for
+                        // every export of every module).
+                        const declKey = (s: any): [string, number] => {
+                            const d = s?.valueDeclaration ?? s?.declarations?.[0];
+                            if (d == null) return ["", 0];
+                            if (typeof d.index === "number" && typeof d.path === "string") {
+                                return [d.path, d.index];
+                            }
+                            const pos = typeof d.pos === "number" ? d.pos : 0;
+                            return [String(d.getSourceFile?.()?.fileName ?? ""), pos];
+                        };
                         const sorted = list.slice().sort((a: any, b: any) => {
-                            const pa = a?.valueDeclaration?.pos ?? a?.declarations?.[0]?.pos ?? 0;
-                            const pb = b?.valueDeclaration?.pos ?? b?.declarations?.[0]?.pos ?? 0;
-                            return pa - pb;
+                            const [fa, ka] = declKey(a);
+                            const [fb, kb] = declKey(b);
+                            return fa < fb ? -1 : fa > fb ? 1 : ka - kb;
                         });
                         const map = new Map<string, any>();
                         for (const s of sorted) {
