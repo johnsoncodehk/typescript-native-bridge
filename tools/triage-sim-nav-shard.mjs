@@ -171,6 +171,26 @@ function sortLocSet(locs) {
 		.sort((a, b) => a.localeCompare(b));
 }
 
+// Compare-only deduped set: sortLocSet keeps multiplicities, but VS Code/Volar
+// consume location SETS — one side returning the same loc twice is not a
+// product divergence. Archived snippets keep summary.locs (sorted multiset).
+function dedupeLocSet(locs) {
+	return [...new Set(locs.map((l) => locKey(l.file, l.line, l.offset)))].sort((a, b) =>
+		a.localeCompare(b),
+	);
+}
+
+function classifyLocSets(aSetArr, bSetArr) {
+	const a = new Set(aSetArr);
+	const b = new Set(bSetArr);
+	const aSubB = [...a].every((v) => b.has(v));
+	const bSubA = [...b].every((v) => a.has(v));
+	if (aSubB && bSubA) return 'set-equal';
+	if (aSubB) return 'missing';
+	if (bSubA) return 'extra';
+	return 'mixed';
+}
+
 function badTnbFile(filePath) {
 	if (!filePath) return 'empty-file';
 	if (filePath.startsWith('bundled://')) return 'bundled';
@@ -271,6 +291,7 @@ function normalizeNavResult(cmd, resp, side) {
 	}
 
 	summary.locs = sortLocSet(locs);
+	summary.locCmp = dedupeLocSet(locs);
 	const tnbBad = side === 'TNB' ? checkTnbLocs(locs) : { bad: false };
 	return {
 		summary,
@@ -303,12 +324,19 @@ function compareNav(cmd, tnbN, stockN) {
 		}
 		return { kind: 'MATCH', tnb: tnbN, stock: stockN };
 	}
-	const a = tnbN.summary.locs.join('\n');
-	const b = stockN.summary.locs.join('\n');
-	if (a !== b) {
-		return { kind: 'DIFF', detail: 'loc-set-mismatch', tnb: tnbN, stock: stockN };
+	const a = tnbN.summary.locCmp.join('\n');
+	const b = stockN.summary.locCmp.join('\n');
+	if (a === b) {
+		const multEq = tnbN.summary.locs.join('\n') === stockN.summary.locs.join('\n');
+		return { kind: 'MATCH', dedupeOnly: multEq ? undefined : true, tnb: tnbN, stock: stockN };
 	}
-	return { kind: 'MATCH', tnb: tnbN, stock: stockN };
+	return {
+		kind: 'DIFF',
+		detail: 'loc-set-mismatch',
+		locClass: classifyLocSets(tnbN.summary.locCmp, stockN.summary.locCmp),
+		tnb: tnbN,
+		stock: stockN,
+	};
 }
 
 function compareDiag(tnbD, stockD) {
@@ -709,6 +737,7 @@ const skipReasons = {};
 const diffs = [];
 const docdiffs = [];
 const diagmsgs = [];
+const dedupeRescued = [];
 
 function bumpSkip(reason) {
 	skip++;
@@ -726,7 +755,10 @@ for (const key of compareKeys) {
 	const isDiag = key.startsWith('diag:');
 	const cmp = isDiag ? compareDiag(t, s) : compareNav(t.cmd, t, s);
 
-	if (cmp.kind === 'MATCH') match++;
+	if (cmp.kind === 'MATCH') {
+		match++;
+		if (cmp.dedupeOnly) dedupeRescued.push(key);
+	}
 	else if (cmp.kind === 'DOC-DIFF') {
 		docdiff++;
 		docdiffs.push({ key, ...cmp });
@@ -801,6 +833,7 @@ const payload = {
 	skip,
 	skipReasons,
 	compareKeys: compareKeys.length,
+	dedupeRescued,
 	files: fileTable,
 	positionsSum: fileTable.reduce((s, r) => s + r.positions, 0),
 	navCmdCount: fileTable.reduce((s, r) => s + r.positions, 0) * 4,
@@ -813,6 +846,7 @@ const payload = {
 		offset: d.op?.offset,
 		cmd: d.key.startsWith('diag:') ? 'geterr' : d.op?.cmd,
 		detail: d.detail,
+		locClass: d.locClass,
 		seqClass: d.seqClass,
 		tnb: d.tnb?.rawSnippet ?? truncate(d.tnb),
 		stock: d.stock?.rawSnippet ?? truncate(d.stock),
