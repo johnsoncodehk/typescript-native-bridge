@@ -56,10 +56,28 @@ export function toTsgoFileName(fileName: string): string {
     return fileName;
 }
 
+// Hot path: called per declaration during scope-symbol refinement. The libDir
+// prefix is constant per process; compare case-insensitively because tsgo
+// canonicalizes paths to lower case on case-insensitive file systems, and a
+// case-sensitive prefix test silently disabled lib-file detection (and with it
+// cross-snapshot retention of lib RemoteSourceFiles) for such paths.
+let _libDirPrefixLower: string | undefined;
+function getLibDirPrefixLower(): string {
+    if (_libDirPrefixLower === undefined) {
+        const path = require("path") as typeof import("path");
+        _libDirPrefixLower = (path.join(getTnbPackageRoot(), "lib") + path.sep).toLowerCase();
+    }
+    return _libDirPrefixLower;
+}
+
 export function isHostLibFile(fileName: string): boolean {
     if (isBundledLibPath(fileName)) return true;
-    const path = require("path") as typeof import("path");
-    const libDir = path.join(getTnbPackageRoot(), "lib");
-    const normalized = path.normalize(fileName);
-    return normalized.startsWith(libDir + path.sep) && /lib\.[^/]+\.d\.ts$/i.test(normalized);
+    if (!/lib\.[^/\\]+\.d\.ts$/i.test(fileName)) return false;
+    let candidate = fileName;
+    if (candidate.includes("\\") || candidate.includes("./")) {
+        const path = require("path") as typeof import("path");
+        candidate = path.normalize(candidate);
+    }
+    const prefix = getLibDirPrefixLower();
+    return candidate.length > prefix.length && candidate.slice(0, prefix.length).toLowerCase() === prefix;
 }

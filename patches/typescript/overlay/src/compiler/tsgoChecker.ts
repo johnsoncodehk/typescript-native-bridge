@@ -413,6 +413,17 @@ function getHostSfStableCache(lsHost: any): Map<string, { version: string; sf: a
     return _hostSfStableNoHost;
 }
 
+// Cross-generation node index reuse, keyed by the tsgo RemoteSourceFile
+// object. The checker adapter (and its per-generation nodeIndexCache) is
+// recreated per program, but MiniSourceFileCache hands back the same decoded
+// RemoteSourceFile object for disk-stable declaration files across snapshots,
+// so a full-file position index keyed by that object stays valid until the
+// file's content changes (which yields a new object). Auto-import codefix
+// resolves module symbols through findTsgoNodeAtPosition on dozens of
+// node_modules .d.ts per keystroke; rebuilding those indexes per generation
+// dominated the getCodeFixes wall.
+const _nodeIndexBySf = new WeakMap<object, Map<number, any[]>>();
+
 function toCStr(s: string): Buffer {
     return Buffer.from(s + "\0", "utf8");
 }
@@ -502,6 +513,7 @@ class MiniSourceFileCache {
         // noembed: lib paths are real packageRoot/lib/*.d.ts (no bundled://).
         return p.endsWith(".d.ts") && (p.includes("/node_modules/") || p.includes("bundled://") || isBundledLibPath(p) || isHostLibFile(p));
     }
+
 
     getRetained(p: string, snapshotId: any, projectId: any): any {
         let byProj = this.bySnap.get(snapshotId);
@@ -2572,6 +2584,23 @@ function sameExternalModuleIdentity(a: any, b: any): boolean {
     return an.length > 0 && an === bn;
 }
 
+/** Top-level `declare module "X"` scan; statements decode without a parent climb. */
+function sourceFileStatementsHaveStringAmbientModule(sf: any): boolean {
+    try {
+        for (const s of sf?.statements ?? []) {
+            if (s?.kind === SyntaxKind.ModuleDeclaration && s.name?.kind === SyntaxKind.StringLiteral) return true;
+        }
+        return false;
+    }
+    catch { return true; } // fail open — keep the climb
+}
+// "File contains a string ambient module" memo. node_modules declarations are
+// path-keyed (content-stable in a session; MiniSourceFileCache reuses their
+// decoded objects on the same assumption). Everything else keys on the
+// SourceFile object so edited project files can never serve a stale flag.
+const _stringAmbientByPath = new Map<string, boolean>();
+const _stringAmbientBySf = new WeakMap<object, boolean>();
+
 /**
  * Resolve the exporting module's host symbol from a symbol's declarations.
  * Prefer enclosing string ambient modules over the containing SourceFile
@@ -2587,6 +2616,47 @@ function resolveHostExternalModuleSymbol(
         const decls: readonly any[] | undefined = symbol.declarations;
         if (decls?.length) {
             for (const d of decls) {
+                // Bridge NodeHandles carry their file path on the wire. Use it
+                // to gate the remote work: resolving a remote node's SourceFile
+                // or climbing .parent decodes ancestor nodes one by one, and
+                // refineNavSymbol funnels ~2k scope symbols through here per
+                // completion keystroke.
+                const wireRaw = d?.kind !== SyntaxKind.SourceFile ? (d?.path ?? d?.fileName) : undefined;
+                if (typeof wireRaw === "string" && wireRaw.length) {
+                    const wirePath = toHostFileName(wireRaw);
+                    if (isHostLibFile(wirePath) || isBundledLibPath(wirePath) || wireRaw.includes("bundled://")) {
+                        // Default-lib declaration: default libs contain no
+                        // string ambient modules and are never host-parsed.
+                        continue;
+                    }
+                    const isNm = wirePath.includes("/node_modules/");
+                    let sfLazy: any;
+                    let hasAmbient = isNm ? _stringAmbientByPath.get(wirePath) : undefined;
+                    if (hasAmbient === undefined) {
+                        sfLazy = d?.getSourceFile?.();
+                        if (!isNm && sfLazy) hasAmbient = _stringAmbientBySf.get(sfLazy);
+                        if (hasAmbient === undefined) {
+                            hasAmbient = sfLazy ? sourceFileStatementsHaveStringAmbientModule(sfLazy) : true;
+                            if (sfLazy) {
+                                if (isNm) _stringAmbientByPath.set(wirePath, hasAmbient);
+                                else _stringAmbientBySf.set(sfLazy, hasAmbient);
+                            }
+                        }
+                    }
+                    if (hasAmbient) {
+                        const ambient = enclosingStringAmbientModuleSymbol(d);
+                        if (ambient && isExternalModuleLikeSymbol(ambient)) return ambient;
+                    }
+                    // Host lookup must use the SourceFile's own fileName: the
+                    // wire path is a canonical (lowercased on case-insensitive
+                    // hosts) tsgo path, which misses the host's script table
+                    // and re-parses the file under a duplicate identity.
+                    sfLazy ??= d?.getSourceFile?.();
+                    const hostMod = hostModuleSymbolFromSourceFileName(sfLazy?.fileName, getHostSf);
+                    if (hostMod) return hostMod;
+                    if (sfLazy?.symbol && isExternalModuleLikeSymbol(sfLazy.symbol)) return sfLazy.symbol;
+                    continue;
+                }
                 const ambient = enclosingStringAmbientModuleSymbol(d);
                 if (ambient && isExternalModuleLikeSymbol(ambient)) return ambient;
                 const sf = d?.kind === SyntaxKind.SourceFile ? d : d?.getSourceFile?.();
@@ -5566,6 +5636,7 @@ export function createTsgoChecker(program: any): any {
             + ` properties=${propertiesCache.size}`,
         );
         symByPos.clear();
+        hostBoundSfMemo.clear();
         symPrefetched.clear();
         symPrefetchPopulated.clear();
         moduleSpecPrefetched.clear();
@@ -5636,6 +5707,19 @@ export function createTsgoChecker(program: any): any {
     function buildNodeIndex(fileName: string, sf: any): Map<number, any[]> | undefined {
         const cached = nodeIndexCache.get(fileName);
         if (cached) return cached;
+        // Cross-generation reuse: same RemoteSourceFile object ⇒ same index.
+        if (sf && typeof sf === "object") {
+            const stable = _nodeIndexBySf.get(sf);
+            if (stable) {
+                nodeIndexCache.set(fileName, stable);
+                return stable;
+            }
+        }
+        if (process.env.TNB_TRACE_NODEINDEX === "1") {
+            try {
+                require("fs").appendFileSync("/tmp/tnb-nodeindex.log", `build file=${fileName} sfType=${sf?.constructor?.name}\n`);
+            } catch { /* trace only */ }
+        }
         const t0 = process.env.TSGO_PROFILE === "1" ? Date.now() : 0;
         const idx = new Map<number, any[]>();
         nodeIndexCache.set(fileName, idx);
@@ -5651,6 +5735,7 @@ export function createTsgoChecker(program: any): any {
             }
         };
         if (sf) visit(sf);
+        if (sf && typeof sf === "object") _nodeIndexBySf.set(sf, idx);
         if (process.env.TSGO_PROFILE === "1") { _stats.indexBuildMs += Date.now() - t0; _stats.indexBuildCount++; }
         return idx;
     }
@@ -6731,12 +6816,33 @@ export function createTsgoChecker(program: any): any {
     }
 
     // ── Build adapter object ─────────────────────────────────────────
+    // Memoized per checker generation: refineNavSymbol resolves the module
+    // parent of ~2k scope symbols per completion, each walking declarations
+    // and calling getHostBoundSf per declaration file. Repeating the
+    // resolveHostFileName + getScriptVersion + sfCache probe per call burned
+    // most of the completion wall. null = confirmed not host-parsed.
+    const hostBoundSfMemo = new Map<string, any>();
     const getHostBoundSf = (fileName: string): any | undefined => {
+        const memo = hostBoundSfMemo.get(fileName);
+        if (memo !== undefined) return memo === null ? undefined : memo;
+        // Lib files never take the host-parse path (getOrCreateSourceFile
+        // gates preferHostSourceFiles on !isHostLibFile), so probing them
+        // here only materializes a tsgo-backed skeleton (readFile +
+        // computeLineStarts on lib.dom.d.ts, per generation) to then reject
+        // it. Skip the program lookup entirely.
+        if (isBundledLibPath(fileName) || isHostLibFile(toHostFileName(fileName))) {
+            hostBoundSfMemo.set(fileName, null);
+            return undefined;
+        }
         const getSourceFile = _hostProgramRef?.getSourceFile ?? program.getSourceFile;
         const sf = getSourceFile?.(fileName);
         // Soft-P′ soft-bound disk/node_modules files carry binder fields
         // (ExportSpecifier.symbol) without the overlay identity brand.
-        if (!isHostParsedSourceFile(sf)) return undefined;
+        if (!isHostParsedSourceFile(sf)) {
+            hostBoundSfMemo.set(fileName, null);
+            return undefined;
+        }
+        hostBoundSfMemo.set(fileName, sf);
         return sf;
     };
     const refineNavSymbol = (sym: any) => {
