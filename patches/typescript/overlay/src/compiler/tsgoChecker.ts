@@ -4795,7 +4795,26 @@ export function createTsgoProgram(
         getAutomaticTypeDirectiveNames: () => [],
         getFileProcessingDiagnostics: () => undefined,
         getResolvedModule: () => undefined,
-        getResolvedModuleFromModuleSpecifier: () => undefined,
+        // No resolution cache on the thin program; resolve through the checker
+        // (tsgo RPC) so services' getReferenceAtPosition can produce stock's
+        // file-start definition for module specifiers.
+        getResolvedModuleFromModuleSpecifier: (moduleSpecifier: any, _sourceFile?: any) => {
+            try {
+                const sym = checker.resolveExternalModuleName?.(moduleSpecifier);
+                const decl = sym?.declarations?.[0];
+                const sf = decl && (decl.kind === ts.SyntaxKind.SourceFile ? decl : decl.getSourceFile?.());
+                const fileName = sf?.fileName;
+                if (typeof fileName !== "string" || !fileName) return undefined;
+                return {
+                    resolvedModule: {
+                        resolvedFileName: fileName,
+                        extension: ts.extensionFromPath(fileName),
+                        isExternalLibraryImport: fileName.includes("/node_modules/"),
+                    },
+                    failedLookupLocations: [],
+                };
+            } catch { return undefined; }
+        },
         getResolvedTypeReferenceDirective: () => undefined,
         getResolvedTypeReferenceDirectiveFromTypeReferenceDirective: () => undefined,
         getLibFileFromReference: () => undefined,
@@ -5537,7 +5556,12 @@ export function createTsgoChecker(program: any): any {
     // Symbol cache keyed by (fileName, end-offset) — the fast path for
     // getSymbolAtLocation, which resolves the vast majority of the ~30k
     // scope-manager identifier queries without touching the node index.
-    const symByPos = new Map<string, Map<number, any>>();
+    const symByPos = new Map<string, Map<string, any>>();
+    // Start-keyed symbols from the allIdentifiers prefetch RPC (returns only
+    // start positions, never undefined, always real symbol sites). Kept
+    // separate from the exact-span symByPos so start-keyed entries can never
+    // collide with a different token's span keys.
+    const symPrefetchByPos = new Map<string, Map<number, any>>();
     const symPrefetched = new Set<string>();
     /** Per-file cache misses before batch prefetch — sparse files stay on direct RPC. */
     const symMissCountByFile = new Map<string, number>();
@@ -5561,7 +5585,7 @@ export function createTsgoChecker(program: any): any {
         const h = hostForOverlaySyncLocal();
         return resolveHostFileName(fileName, h);
     };
-    const getSymFileCache = (fileName: string, create = false): Map<number, any> | undefined => {
+    const getSymFileCache = (fileName: string, create = false): Map<string, any> | undefined => {
         const key = symCacheFileName(fileName);
         let fc = symByPos.get(key);
         if (!fc && create) {
@@ -5570,12 +5594,18 @@ export function createTsgoChecker(program: any): any {
         }
         return fc;
     };
+    // Exact-span keys only. The old start/end/end-1 triple-key scheme let a
+    // token's END key collide with the next token's START key, so a cached
+    // `undefined` (no-symbol token, e.g. `(`) poisoned the adjacent
+    // identifier's lookup and getSymbolAtLocation returned undefined without
+    // ever querying (def for `useCssModule` went empty).
     const probeSymCache = (fileName: string, start: number, end: number): { found: boolean; sym: any } => {
         const fc = getSymFileCache(fileName);
         if (!fc) return { found: false, sym: undefined };
-        if (fc.has(start)) return { found: true, sym: fc.get(start) };
-        if (fc.has(end)) return { found: true, sym: fc.get(end) };
-        if (end > start && fc.has(end - 1)) return { found: true, sym: fc.get(end - 1) };
+        const key = `${start}:${end}`;
+        if (fc.has(key)) return { found: true, sym: fc.get(key) };
+        const pf = symPrefetchByPos.get(symCacheFileName(fileName));
+        if (pf?.has(start)) return { found: true, sym: pf.get(start) };
         return { found: false, sym: undefined };
     };
     const isIdentifierLikeNode = (node: any): boolean => {
@@ -5610,9 +5640,7 @@ export function createTsgoChecker(program: any): any {
         isIdentifierLikeNode(node) || isModuleSpecifierStringLiteral(node);
     const storeSymCache = (fileName: string, start: number, end: number, sym: any): void => {
         const fc = getSymFileCache(fileName, true)!;
-        fc.set(start, sym);
-        if (end !== start) fc.set(end, sym);
-        if (end > start) fc.set(end - 1, sym);
+        fc.set(`${start}:${end}`, sym);
     };
     // refineNavSymbol memo: the same symbol is refined once even when queried
     // from many reference sites (e.g. 100 refs to `foo`). Keyed by symbol
@@ -5906,6 +5934,7 @@ export function createTsgoChecker(program: any): any {
             + ` properties=${propertiesCache.size}`,
         );
         symByPos.clear();
+        symPrefetchByPos.clear();
         hostBoundSfMemo.clear();
         symPrefetched.clear();
         symPrefetchPopulated.clear();
@@ -6023,9 +6052,10 @@ export function createTsgoChecker(program: any): any {
             return;
         }
         symPrefetched.add(cacheName);
-        const fileCache = getSymFileCache(cacheName, true)!;
+        let pf = symPrefetchByPos.get(cacheName);
+        if (!pf) { pf = new Map(); symPrefetchByPos.set(cacheName, pf); }
         for (const [pos, sym] of byPos) {
-            fileCache.set(pos, sym);
+            pf.set(pos, sym);
         }
         symPrefetchPopulated.add(cacheName);
         if (process.env.TSGO_PROFILE === "1") {
@@ -7346,6 +7376,13 @@ export function createTsgoChecker(program: any): any {
             case SyntaxKind.TemplateHead:
             case SyntaxKind.TemplateMiddle:
             case SyntaxKind.TemplateTail:
+                return { action: "undefined" };
+            // `{` (object literal braces): stock's switch has no OpenBraceToken
+            // case → default undefined. Positional RPC resolves the brace of an
+            // export-assigned object literal to the `default` symbol, which made
+            // go-to-def on `defineComponent({...})` include the local
+            // export-assignment statement as an extra definition.
+            case SyntaxKind.OpenBraceToken:
                 return { action: "undefined" };
             // JSDocComment only (not the whole FirstJSDocNode..LastJSDocNode
             // range): stock returns undefined for the comment container, and
@@ -10180,7 +10217,7 @@ const _tnbProgramCoverage = {
     resolvedModules: "stub",
     resolvedTypeReferenceDirectiveNames: "stub",
     getResolvedModule: "stub",
-    getResolvedModuleFromModuleSpecifier: "stub",
+    getResolvedModuleFromModuleSpecifier: "adapter",
     getResolvedTypeReferenceDirective: "stub",
     getResolvedTypeReferenceDirectiveFromTypeReferenceDirective: "stub",
     forEachResolvedModule: "stub",
