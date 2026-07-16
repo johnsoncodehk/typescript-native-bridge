@@ -490,6 +490,19 @@ class BridgeClient {
         return _koffi.decode(res.data, _koffi.array("uint8_t", len, "Typed")) as Uint8Array;
     }
 
+    // v7.0.2+ Client surface: the API layer probes the timing collector on
+    // every RemoteSourceFile decode. TNB never enables timing collection, so
+    // report it as disabled.
+    getTimingCollector(): undefined {
+        return undefined;
+    }
+
+    getTimingInfo(): any {
+        return { enabled: false };
+    }
+
+    resetTimingInfo(): void { /* timing collection disabled */ }
+
     close(): void {
         try { _bridgeFns.BridgeDisposeSession(BigInt(this.handle)); } catch { /* best-effort */ }
     }
@@ -4700,7 +4713,9 @@ function collectContainerMemberSymbols(parentSym: any): any[] {
     try {
         if (typeof parentSym.getMembers === "function") {
             const list = parentSym.getMembers();
-            if (list?.length) for (const m of list) push(m);
+            // v7.0.2+ returns a ReadonlyMap; earlier bridge returned an array.
+            if (list && typeof list.values === "function" && typeof list.get === "function") for (const m of list.values()) push(m);
+            else if (list?.length) for (const m of list) push(m);
         }
     } catch { /* best-effort */ }
     // Host SymbolObject (post refineNavSymbol) exposes `.members` as a Map /
@@ -4719,7 +4734,8 @@ function collectContainerMemberSymbols(parentSym: any): any[] {
     try {
         if (typeof parentSym.getExports === "function") {
             const list = parentSym.getExports();
-            if (list?.length) for (const m of list) push(m);
+            if (list && typeof list.values === "function" && typeof list.get === "function") for (const m of list.values()) push(m);
+            else if (list?.length) for (const m of list) push(m);
         }
     } catch { /* best-effort */ }
     try {
@@ -6374,6 +6390,12 @@ export function createTsgoChecker(program: any): any {
                     if (Object.prototype.hasOwnProperty.call(this, "__tnbExports")) return this.__tnbExports;
                     try {
                         const list = typeof this.getExports === "function" ? this.getExports() : undefined;
+                        // v7.0.2+ getExports() returns a ReadonlyMap already in the
+                        // checker's canonical (declaration) order — use it directly.
+                        if (list && typeof list.get === "function" && typeof list.values === "function") {
+                            this.__tnbExports = list.size ? list : undefined;
+                            return this.__tnbExports;
+                        }
                         if (!list?.length) {
                             this.__tnbExports = undefined;
                             return undefined;

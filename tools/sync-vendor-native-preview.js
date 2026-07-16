@@ -1,6 +1,8 @@
 "use strict";
-// Copy @typescript/native-preview package skeleton (not src/dist) into
-// vendor/native-preview/ so the built dist/ lands next to package.json, lib/, vendor/.
+// Copy @typescript/native-preview package skeleton plus built dist/ into
+// vendor/native-preview/. dist must be built in place (outDir=dist) because
+// the package's `#enums/*` imports self-resolve through dist/enums/*.enum.d.ts
+// during its own tsc build; run this AFTER `tsc -b`.
 //   node tools/sync-vendor-native-preview.js
 
 const fs = require("fs");
@@ -10,7 +12,7 @@ const repoRoot = path.resolve(__dirname, "..");
 const srcRoot = path.join(repoRoot, "typescript-go", "_packages", "native-preview");
 const destRoot = path.join(repoRoot, "vendor", "native-preview");
 
-const COPY_DIRS = ["lib", "vendor", "bin"];
+const COPY_DIRS = ["lib", "vendor", "bin", "dist"];
 const COPY_FILES = ["package.json"];
 
 function copyDir(src, dest) {

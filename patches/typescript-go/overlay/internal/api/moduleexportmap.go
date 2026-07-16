@@ -80,7 +80,7 @@ func getDefaultLikeExportInfo(c *checker.Checker, moduleSymbol *ast.Symbol) (*as
 	return nil, 0, ""
 }
 
-func computeModuleExportMap(ctx context.Context, program *compiler.Program, sd *snapshotData, importingSourceFile *ast.SourceFile) (*ModuleExportMapResponse, error) {
+func computeModuleExportMap(ctx context.Context, program *compiler.Program, sd *snapshotData, project ProjectID, importingSourceFile *ast.SourceFile) (*ModuleExportMapResponse, error) {
 	chk, done := program.GetTypeChecker(ctx)
 	defer done()
 
@@ -100,7 +100,7 @@ func computeModuleExportMap(ctx context.Context, program *compiler.Program, sd *
 
 		mod := &ModuleExportMapModule{
 			ModuleName:   moduleSymbol.Name,
-			ModuleSymbol: sd.newLightSymbolResponse(moduleSymbol),
+			ModuleSymbol: sd.newLightSymbolResponse(moduleSymbol, project),
 		}
 		if moduleFile != nil {
 			mod.ModuleFileName = moduleFile.FileName()
@@ -119,7 +119,7 @@ func computeModuleExportMap(ctx context.Context, program *compiler.Program, sd *
 				flags = uint32(target.Flags)
 			}
 			mod.DefaultExport = &ModuleExportMapDefaultExport{
-				Symbol:      sd.newLightSymbolResponse(sym),
+				Symbol:      sd.newLightSymbolResponse(sym, project),
 				TableKey:    tableKey,
 				ExportKind:  kind,
 				TargetFlags: flags,
@@ -141,7 +141,7 @@ func computeModuleExportMap(ctx context.Context, program *compiler.Program, sd *
 				flags = uint32(target.Flags)
 			}
 			mod.NamedExports = append(mod.NamedExports, &ModuleExportMapNamedExport{
-				Symbol:      sd.newLightSymbolResponse(exported),
+				Symbol:      sd.newLightSymbolResponse(exported, project),
 				Key:         key,
 				TargetFlags: flags,
 			})
@@ -212,7 +212,7 @@ type moduleExportMapImportabilityCacheKey struct {
 	importingPath string
 }
 
-func (sd *snapshotData) moduleExportMap(ctx context.Context, program *compiler.Program, importingSourceFile *ast.SourceFile) (*ModuleExportMapResponse, error) {
+func (sd *snapshotData) moduleExportMap(ctx context.Context, program *compiler.Program, project ProjectID, importingSourceFile *ast.SourceFile) (*ModuleExportMapResponse, error) {
 	if importingSourceFile == nil {
 		sd.moduleExportMapMemoMu.Lock()
 		if resp, ok := sd.moduleExportMapMemo[program]; ok {
@@ -221,7 +221,7 @@ func (sd *snapshotData) moduleExportMap(ctx context.Context, program *compiler.P
 		}
 		sd.moduleExportMapMemoMu.Unlock()
 
-		resp, err := computeModuleExportMap(ctx, program, sd, nil)
+		resp, err := computeModuleExportMap(ctx, program, sd, project, nil)
 		if err != nil {
 			return nil, err
 		}
@@ -248,7 +248,7 @@ func (sd *snapshotData) moduleExportMap(ctx context.Context, program *compiler.P
 	}
 	sd.moduleExportMapImportabilityMemoMu.Unlock()
 
-	resp, err := computeModuleExportMap(ctx, program, sd, importingSourceFile)
+	resp, err := computeModuleExportMap(ctx, program, sd, project, importingSourceFile)
 	if err != nil {
 		return nil, err
 	}

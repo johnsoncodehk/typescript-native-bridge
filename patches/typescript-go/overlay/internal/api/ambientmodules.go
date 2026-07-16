@@ -30,7 +30,7 @@ type AmbientModuleResponse struct {
 // type checker. Builder/referenced-files callers only need merged declaration
 // sets (to detect cross-file ambient edges); paying NewChecker here dominated
 // Elk cold builds (~700ms) even after stripping export-map work.
-func computeAmbientModules(ctx context.Context, program *compiler.Program, sd *snapshotData) (*AmbientModulesResponse, error) {
+func computeAmbientModules(ctx context.Context, program *compiler.Program, sd *snapshotData, project ProjectID) (*AmbientModulesResponse, error) {
 	_ = ctx
 	program.BindSourceFiles()
 
@@ -59,7 +59,7 @@ func computeAmbientModules(ctx context.Context, program *compiler.Program, sd *s
 		seen[moduleSymbol] = true
 		resp.Modules = append(resp.Modules, &AmbientModuleResponse{
 			ModuleName:   moduleSymbol.Name,
-			ModuleSymbol: sd.newLightSymbolResponse(moduleSymbol),
+			ModuleSymbol: sd.newLightSymbolResponse(moduleSymbol, project),
 		})
 	}
 

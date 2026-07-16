@@ -16,6 +16,7 @@ const tnbPath = path.join(volarRoot, 'node_modules/typescript/lib/tsserver.js');
 
 /** @type {Record<string, Record<string, number>>} */
 const stats = Object.create(null);
+const failures = [];
 /** @type {Array<{method:string,kind:string,command:string,file:string,offset:number,line:number,col:number,raw:object}>} */
 const correlatedHits = [];
 
@@ -280,11 +281,15 @@ async function safeSend(send, command, args, meta) {
 	let res;
 	try {
 		res = await send(command, args, 30_000);
-		if (res && res.success === false) meta.fail++;
+		if (res && res.success === false) {
+			meta.fail++;
+			failures.push({ command, file: meta.fileBase, line: meta.line, col: meta.col, message: String(res.message ?? '').slice(0, 200) });
+		}
 		else meta.ok++;
 	} catch (e) {
 		meta.fail++;
 		res = { success: false, message: String(e?.message ?? e) };
+		failures.push({ command, file: meta.fileBase, line: meta.line, col: meta.col, message: String(res.message).slice(0, 200), threw: true });
 	}
 	const after = readNewThrowLines(meta.throwLen);
 	meta.throwLen = after.len;
@@ -456,6 +461,16 @@ async function main() {
 
 	printStats();
 	console.error(`[sweep] ok≈${meta.ok} fail≈${meta.fail}`);
+	fs.writeFileSync('/tmp/tnb-sweep-failures.json', JSON.stringify(failures, null, 1));
+	const byCmdMsg = Object.create(null);
+	for (const f of failures) {
+		const key = `${f.command} :: ${f.message.split('\n')[0]}`;
+		byCmdMsg[key] = (byCmdMsg[key] ?? 0) + 1;
+	}
+	console.error('[sweep] failure breakdown:');
+	for (const [k, n] of Object.entries(byCmdMsg).sort((a, b) => b[1] - a[1])) {
+		console.error(`  ${n}\t${k}`);
+	}
 }
 
 main().catch(err => {
