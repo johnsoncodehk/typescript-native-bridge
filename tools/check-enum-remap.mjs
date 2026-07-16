@@ -209,11 +209,11 @@ const REGISTRY = [
         field: "symbol.checkFlags", enum: "CheckFlags", status: "exempt", identical: false,
         reason: "tsgo exposes raw checkFlags but generates no CheckFlags enum to diff; consumer-read bits audited identical (645a122). LIMITATION: not auto-verifiable.",
     },
-    // Flags exposed on Signature.
-    {
-        field: "signature.flags", enum: "SignatureFlags", status: "exempt", identical: false,
-        reason: "Signature.flags is private in native-preview and never reaches consumers (no estree/rule reads it)",
-    },
+    // Flags exposed on Signature. The old exemption ("never reaches consumers")
+    // was wrong: services/symbolDisplay.ts reads `signature.flags &
+    // SignatureFlags.Abstract` — the raw tsgo Construct bit (1<<2, tsgo-only)
+    // landed on fork Abstract and printed spurious `abstract new` (4ff2c52).
+    { field: "signature.flags", enum: "SignatureFlags", status: "remapped", wire: "remapSignatureFlags(" },
 ];
 
 // A wire token counts as present only on a live (non-comment) line, so a
