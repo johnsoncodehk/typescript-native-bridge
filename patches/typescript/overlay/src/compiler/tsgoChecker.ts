@@ -71,6 +71,9 @@ interface TnbProgramContext {
     pendingOverlays?: any[];
     pendingExtraFileExtensions?: any[];
     pendingReferencedProjects?: string[];
+    /** This project's thin program — checker-side host-SF lookups must use it
+     * (not the global _hostProgramRef, which tracks the LAST created project). */
+    thinProgram?: any;
 }
 const _programContextByProgram = new WeakMap<object, TnbProgramContext>();
 
@@ -993,9 +996,34 @@ function collectTsgoOpenFileNames(syncHost: any, extra?: Iterable<string>): stri
         ps.openFiles.forEach((_root: string, path: string) => {
             const info = ps.getScriptInfoForPath(path);
             if (!info?.isScriptOpen()) return;
-            const inProject = info.containingProjects?.includes?.(syncHost);
-            const hasSnapshot = !!syncHost.getScriptSnapshot?.(info.fileName);
-            if (!inProject && !hasSnapshot) return;
+            const containing = info.containingProjects;
+            const inProject = containing?.includes?.(syncHost);
+            if (!inProject) {
+                // Foreign tabs must not be adopted into this project's tsgo
+                // roots. Never probe via project.getScriptSnapshot here — on a
+                // tsserver Project it ATTACHES the info to the project
+                // (getOrCreateScriptInfoAndAttachToProject), so multi-project
+                // reference search then routes the file into sibling projects
+                // whose program lacks it ("Could not find source file" throws).
+                if (containing && containing.length > 0) return;
+                // Unassigned tab (assignment may still be in flight during
+                // first project load). A configured project only adopts tabs
+                // living under its own config directory — a tab outside it
+                // belongs to a sibling config that hasn't loaded yet, and
+                // adopting it would route multi-project reference search into
+                // a program that lacks the file ("Could not find source
+                // file"). In-memory-only tabs (no disk file) under the config
+                // dir are legitimate members (include:**/* would match them).
+                if (syncHost.projectKind === 1 /* ProjectKind.Configured */) {
+                    const cfg: string | undefined = syncHost.canonicalConfigFilePath
+                        ?? syncHost.getProjectName?.();
+                    const cfgDir = typeof cfg === "string" ? cfg.slice(0, cfg.lastIndexOf("/") + 1) : "";
+                    if (!cfgDir) return;
+                    const tabPath = String(path);
+                    if (!tabPath.startsWith(cfgDir.toLowerCase()) && !info.fileName?.startsWith(cfgDir)) return;
+                }
+                if (!info.getSnapshot?.()) return;
+            }
             add(info.fileName);
         });
     }
@@ -4023,11 +4051,20 @@ export function createTsgoProgram(
         if (!programFileNamesCache || programFileNamesCache.proj !== proj) {
             const names = new Set<string>();
             for (const n of proj.program.getSourceFileNames?.() ?? []) {
+                // Callers query with host-cased fileNames OR canonical
+                // lowercase Paths (NodeHandle.path, builder byPath walks) —
+                // index both forms so member files never false-negative.
                 names.add(toHostFileName(n));
+                names.add(canonicalSourceFilePath(n));
             }
             programFileNamesCache = { proj, names };
         }
-        return programFileNamesCache.names.has(toHostFileName(fileName));
+        const hit = programFileNamesCache.names.has(toHostFileName(fileName))
+            || programFileNamesCache.names.has(canonicalSourceFilePath(fileName));
+        if (!hit) {
+            _navTrace(() => `programContainsFile miss: file=${fileName} cfg=${configFilePath} names=${programFileNamesCache!.names.size}`);
+        }
+        return hit;
     };
 
     // Whole-program diagnostics memo, keyed on the tsgo project object (same
@@ -4671,6 +4708,7 @@ export function createTsgoProgram(
     };
 
     registerProgramContext(thinProgram, programCtx);
+    programCtx.thinProgram = thinProgram;
     _hostProgramRef = thinProgram;
 
     return new Proxy(thinProgram, {
@@ -4915,6 +4953,17 @@ function peelExpressionWrappersForBindingParent(node: any): any {
     return cur;
 }
 
+// ── nav-path debug trace (default OFF; TNB_TRACE_NAV=1 → TNB_TRACE_NAV_FILE) ──
+const _navTraceFile = process.env.TNB_TRACE_NAV === "1"
+    ? (process.env.TNB_TRACE_NAV_FILE || "/tmp/tnb-nav-trace.log")
+    : "";
+function _navTrace(msg: () => string): void {
+    if (!_navTraceFile) return;
+    try {
+        (require("fs") as typeof import("fs")).appendFileSync(_navTraceFile, `${Date.now()} ${msg()}\n`);
+    } catch { /* best-effort */ }
+}
+
 function resolveNamelessDeclarationSymbol(n: any, project: any): any {
     if (!n || !project?.checker) return undefined;
     const parent = peelExpressionWrappersForBindingParent(n) ?? n.parent;
@@ -4923,10 +4972,18 @@ function resolveNamelessDeclarationSymbol(n: any, project: any): any {
     if (!parentSym && parent.name) {
         try { parentSym = project.checker.getSymbolAtLocation(parent.name); } catch { /* best-effort */ }
     }
-    if (!parentSym) return undefined;
-    // Keep class-name definitions when symbolMatchesSignature takes the
-    // constructor branch (strict isClassDeclaration filter).
-    ensureContainerDeclarationOnSymbol(parentSym, parent);
+    if (!parentSym && !parent.name) {
+        // Anonymous container (TypeLiteral in a .d.ts — e.g. Vue component
+        // construct signatures inside `defineComponent`'s return type). Stock
+        // binder gives decl.symbol.parent = the type-literal symbol ("__type");
+        // recover it through the container's type.
+        try { parentSym = project.checker.getTypeAtLocation(parent)?.symbol; } catch { /* best-effort */ }
+    }
+    if (parentSym) {
+        // Keep class-name definitions when symbolMatchesSignature takes the
+        // constructor branch (strict isClassDeclaration filter).
+        ensureContainerDeclarationOnSymbol(parentSym, parent);
+    }
 
     const isAnonFunction =
         n.kind === SyntaxKind.ArrowFunction || n.kind === SyntaxKind.FunctionExpression;
@@ -4986,9 +5043,29 @@ function installNodeHandleHooks(s: any): void {
     // Resolve the handle to its full tsgo RemoteNode once, caching on the
     // instance so repeat reads skip the resolve() walk.
     const resolveSelf = (self: any): any => {
-        if (self._resolvedNode === undefined) {
-            const project = _currentProjectRef.project;
-            self._resolvedNode = project ? (self.resolve(project) ?? null) : null;
+        if (self._resolvedNode === undefined || self._resolvedNode === null) {
+            // Prefer the handle's own producing project (NodeHandle.canonicalProject,
+            // v7.0.2+): with multiple configured projects open, the global
+            // _currentProjectRef may point at a sibling project that doesn't
+            // contain this handle's file — resolve() would miss and services
+            // then crash on undefined structural fields (e.g.
+            // ExportAssignment.expression → isIdentifier(undefined)).
+            let resolved: any = null;
+            try { resolved = self.resolve() ?? null; } catch { /* handle without canonicalProject */ }
+            if (resolved === null) {
+                const project = _currentProjectRef.project;
+                if (project) {
+                    try { resolved = self.resolve(project) ?? null; } catch { /* best-effort */ }
+                }
+            }
+            // Do not memoize failure: a transient miss (project unset during an
+            // early call, or a snapshot rotation) must not poison the handle for
+            // the rest of the session.
+            if (resolved === null) {
+                _navTrace(() => `resolveSelf miss: path=${self?.path} kind=${self?.kind} index=${self?.index}`);
+                return self._resolvedNode = null;
+            }
+            self._resolvedNode = resolved;
         }
         return self._resolvedNode;
     };
@@ -4997,6 +5074,13 @@ function installNodeHandleHooks(s: any): void {
     // project.program.getSourceFile(path) without full Node materialisation.
     if (typeof proto.getSourceFile !== "function") {
         proto.getSourceFile = function () {
+            // Prefer the handle's producing project (v7.0.2 canonicalProject):
+            // the global _currentProjectRef may point at a sibling project that
+            // doesn't contain this handle's file.
+            try {
+                const own = (this as any).canonicalProject?.program?.getSourceFile(this.path);
+                if (own) return own;
+            } catch { /* best-effort */ }
             const project = _currentProjectRef.project;
             if (!project) return undefined;
             return project.program.getSourceFile(this.path);
@@ -5116,7 +5200,10 @@ function installNodeHandleHooks(s: any): void {
                     if (own) return own;
                     const n = resolveSelf(this);
                     const project = _currentProjectRef.project;
-                    if (!n || !project?.checker) return undefined;
+                    if (!n || !project?.checker) {
+                        _navTrace(() => `symbol-getter bail: n=${!!n} checker=${!!project?.checker} path=${(this as any)?.path} kind=${(this as any)?.kind}`);
+                        return undefined;
+                    }
                     try {
                         const nameNode = n.name;
                         if (nameNode) {
@@ -5128,11 +5215,16 @@ function installNodeHandleHooks(s: any): void {
                                 ensureContainerDeclarationOnSymbol(sym, n);
                                 return sym;
                             }
+                            _navTrace(() => `symbol-getter named-miss: kind=${n.kind} name=${String(nameNode.text ?? "").slice(0, 40)} sf=${n.getSourceFile?.()?.fileName}`);
                             // Named binding miss (e.g. generated __VLS_export behind
                             // wrappers): still recover nameless function shims.
                         }
-                        return resolveNamelessDeclarationSymbol(n, project);
-                    } catch { /* best-effort */ }
+                        const shim = resolveNamelessDeclarationSymbol(n, project);
+                        if (!shim) _navTrace(() => `symbol-getter nameless-miss: kind=${n.kind} sf=${n.getSourceFile?.()?.fileName}`);
+                        return shim;
+                    } catch (e) {
+                        _navTrace(() => `symbol-getter throw: kind=${n?.kind} err=${String((e as any)?.message ?? e).slice(0, 120)}`);
+                    }
                     return undefined;
                 },
             });
@@ -5180,7 +5272,19 @@ export function createTsgoChecker(program: any): any {
     let project: any;
 
     function ensureProject(): any {
-        if (project) return project;
+        if (project) {
+            // Re-point the module-global active-project ref at THIS checker's
+            // project. With several configured projects in one tsserver
+            // session, the sibling project's creation leaves the ref pointing
+            // at itself; non-adapter consumers (NodeHandle/Type proto hooks,
+            // thin-program helpers) then resolve against the wrong project and
+            // silently miss (e.g. references returning [] for a file whose
+            // sibling project is merely open).
+            if (_currentProjectRef.project !== project) {
+                _currentProjectRef.project = project;
+            }
+            return project;
+        }
 
         // Return cached project for this tsconfig if already created. The cache
         // is process-global, so the project may have been created by the other
@@ -6218,7 +6322,7 @@ export function createTsgoChecker(program: any): any {
         // Type objects (e.g. no-unnecessary-type-assertion's hasSameProperties).
         if (!proto.getProperties) {
             proto.getProperties = function () {
-                const proj = _currentProjectRef.project;
+                const proj = projectForBridgeObject(this) ?? _currentProjectRef.project;
                 if (!proj) return [];
                 return memoGet(propertiesCache, this, () => proj.checker.getPropertiesOfType(this) ?? []);
             };
@@ -6230,7 +6334,7 @@ export function createTsgoChecker(program: any): any {
         }
         if (!proto.getApparentProperties) {
             proto.getApparentProperties = function () {
-                const proj = _currentProjectRef.project;
+                const proj = projectForBridgeObject(this) ?? _currentProjectRef.project;
                 if (!proj) return [];
                 return proj.checker.getAugmentedPropertiesOfType(this) ?? [];
             };
@@ -6242,7 +6346,7 @@ export function createTsgoChecker(program: any): any {
         }
         if (!proto.getNonNullableType) {
             proto.getNonNullableType = function () {
-                const proj = _currentProjectRef.project;
+                const proj = projectForBridgeObject(this) ?? _currentProjectRef.project;
                 if (!proj) return this;
                 const t = proj.checker.getNonNullableType(this);
                 if (t) fixupType(t);
@@ -6251,7 +6355,7 @@ export function createTsgoChecker(program: any): any {
         }
         if (!proto.getNonOptionalType) {
             proto.getNonOptionalType = function () {
-                const proj = _currentProjectRef.project;
+                const proj = projectForBridgeObject(this) ?? _currentProjectRef.project;
                 if (!proj) return this;
                 const t = proj.checker.getNonOptionalType(this);
                 if (t) fixupType(t);
@@ -6262,7 +6366,7 @@ export function createTsgoChecker(program: any): any {
         // type parameters; returns undefined for non-type-parameter types.
         if (!proto.getConstraint) {
             proto.getConstraint = function () {
-                const proj = _currentProjectRef.project;
+                const proj = projectForBridgeObject(this) ?? _currentProjectRef.project;
                 if (!proj) return undefined;
                 if (typeof this.flags === "number" && (this.flags & TF.TypeParameter) !== 0) {
                     const t = proj.checker.getConstraintOfTypeParameter(this);
@@ -6276,7 +6380,7 @@ export function createTsgoChecker(program: any): any {
         // checker.getIndexTypeOfType(this, IndexKind.String|Number).
         if (!proto.getNumberIndexType) {
             proto.getNumberIndexType = function () {
-                const proj = _currentProjectRef.project;
+                const proj = projectForBridgeObject(this) ?? _currentProjectRef.project;
                 if (!proj) return undefined;
                 const t = proj.checker.getIndexTypeOfType(this, 1 /* IndexKind.Number */);
                 if (t) fixupType(t);
@@ -6285,7 +6389,7 @@ export function createTsgoChecker(program: any): any {
         }
         if (!proto.getStringIndexType) {
             proto.getStringIndexType = function () {
-                const proj = _currentProjectRef.project;
+                const proj = projectForBridgeObject(this) ?? _currentProjectRef.project;
                 if (!proj) return undefined;
                 const t = proj.checker.getIndexTypeOfType(this, 0 /* IndexKind.String */);
                 if (t) fixupType(t);
@@ -6295,7 +6399,7 @@ export function createTsgoChecker(program: any): any {
         // isNullableType — stock Type path: checker.isNullableType(this).
         if (!proto.isNullableType) {
             proto.isNullableType = function () {
-                const proj = _currentProjectRef.project;
+                const proj = projectForBridgeObject(this) ?? _currentProjectRef.project;
                 if (!proj) return false;
                 return !!proj.checker.isNullableType(this);
             };
@@ -6313,7 +6417,7 @@ export function createTsgoChecker(program: any): any {
         // getReturnType — delegate to checker.getReturnTypeOfSignature + fixup.
         if (!proto.getReturnType) {
             proto.getReturnType = function () {
-                const proj = _currentProjectRef.project;
+                const proj = projectForBridgeObject(this) ?? _currentProjectRef.project;
                 if (!proj) return undefined;
                 const t = proj.checker.getReturnTypeOfSignature(this);
                 if (t) fixupType(t);
@@ -6733,6 +6837,16 @@ export function createTsgoChecker(program: any): any {
         return v;
     };
 
+    // Cross-project routing: a bridge TypeObject/Signature knows its producing
+    // project via its (private) objectRegistry. With several configured
+    // projects in one tsserver session, _currentProjectRef may point at a
+    // sibling project whose Go-side registry doesn't own this handle — the RPC
+    // then dies with "type handle N not found in project registry". Prefer the
+    // object's own project when it exposes one.
+    function projectForBridgeObject(obj: any): any {
+        return obj?.objectRegistry?.project;
+    }
+
     // ── Object-literal completion batch ──────────────────────────────
     // Stock Completions.getPropertiesForObjectExpression makes O(3N) checker
     // calls for a union contextual type: getPromisedTypeOfPromise per member,
@@ -6853,7 +6967,7 @@ export function createTsgoChecker(program: any): any {
     };
 
     const resolvePropertyOfType = (type: any, name: string): any => {
-        const proj = _currentProjectRef.project;
+        const proj = projectForBridgeObject(type) ?? _currentProjectRef.project;
         if (!proj || !type) return undefined;
         let byName = propertyByNameCache.get(type);
         if (!byName) {
@@ -6876,7 +6990,7 @@ export function createTsgoChecker(program: any): any {
     };
 
     const getSignaturesCached = (type: any, kind: number): readonly any[] => {
-        const proj = _currentProjectRef.project;
+        const proj = projectForBridgeObject(type) ?? _currentProjectRef.project;
         if (!proj) return [];
         let byKind = signaturesByKindCache.get(type);
         if (!byKind) { byKind = new Map(); signaturesByKindCache.set(type, byKind); }
@@ -6888,7 +7002,7 @@ export function createTsgoChecker(program: any): any {
     };
 
     const getBaseTypesCached = (type: any): readonly any[] => {
-        const proj = _currentProjectRef.project;
+        const proj = projectForBridgeObject(type) ?? _currentProjectRef.project;
         if (!proj) return [];
         return memoGet(baseTypesCache, type, () => proj.checker.getBaseTypes(type) ?? []);
     };
@@ -6923,7 +7037,15 @@ export function createTsgoChecker(program: any): any {
             hostBoundSfMemo.set(fileName, null);
             return undefined;
         }
-        const getSourceFile = _hostProgramRef?.getSourceFile ?? program.getSourceFile;
+        // Prefer THIS project's thin program: _hostProgramRef is module-global
+        // and tracks the most recently created project. With two configured
+        // projects open, routing through the sibling's program misses this
+        // project's host-bound .vue files, memoizes null, and refineNavSymbol
+        // then returns symbols whose declarations stay remote — FAR identity
+        // matching silently finds nothing (refs [] on a self-import).
+        const getSourceFile = programCtx?.thinProgram?.getSourceFile
+            ?? _hostProgramRef?.getSourceFile
+            ?? program.getSourceFile;
         const sf = getSourceFile?.(fileName);
         // Soft-P′ soft-bound disk/node_modules files carry binder fields
         // (ExportSpecifier.symbol) without the overlay identity brand.
