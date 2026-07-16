@@ -6108,16 +6108,22 @@ export function createTsgoChecker(program: any): any {
                 return undefined;
             }
         }
-        // ExportAssignment declarations (host binder symbol for `export default …`
-        // / `export = …`, re-anchored by resolveHostExportDefaultSymbol): the
-        // checker returns no symbol for the statement node itself — recover the
-        // tsgo member through the module symbol's exports table instead.
-        if (decl.kind === SyntaxKind.ExportAssignment) {
+        // Nameless module default-export declarations — `export default …`
+        // ExportAssignment (host binder symbol re-anchored by
+        // resolveHostExportDefaultSymbol) and anonymous `export default
+        // class/function` declarations. There is no name node to anchor on and
+        // the checker returns no symbol for the statement/declaration node
+        // itself — recover the tsgo member through the module symbol's exports
+        // table instead (the host binder names these symbols "default" /
+        // "export=", matching the exports-table key).
+        const isNamelessDefaultExport = decl.kind === SyntaxKind.ExportAssignment
+            || (!decl.name && !!(decl.modifiers?.some?.((m: any) => m.kind === SyntaxKind.DefaultKeyword)));
+        if (isNamelessDefaultExport) {
             const tsgoSf = getTsgoSourceFile(sf.fileName);
             if (!tsgoSf || tsgoSf.kind !== SyntaxKind.SourceFile) return undefined;
             try {
                 const moduleSym = project.checker.getSymbolAtLocation(tsgoSf);
-                const memberName = decl.isExportEquals ? "export=" : "default";
+                const memberName = decl.kind === SyntaxKind.ExportAssignment && decl.isExportEquals ? "export=" : "default";
                 return moduleSym?.exports?.get?.(memberName) ?? undefined;
             } catch {
                 return undefined;
