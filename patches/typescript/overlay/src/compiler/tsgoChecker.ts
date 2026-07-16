@@ -408,7 +408,7 @@ const _hostSfStableByHost = new WeakMap<object, Map<string, { version: string; s
 const _hostSfStableNoHost = new Map<string, { version: string; sf: any }>();
 function isStableHostSfPath(p: string): boolean {
     if (process.env.TNB_DISABLE_STABLE_HOST_SF === "1") return false;
-    return p.endsWith(".d.ts") && p.includes("/node_modules/");
+    return p.endsWith(".d.ts") && (p.includes("/node_modules/") || isHostLibFile(p));
 }
 function getHostSfStableCache(lsHost: any): Map<string, { version: string; sf: any }> {
     if (typeof lsHost === "object" && lsHost !== null) {
@@ -1112,34 +1112,49 @@ function ensureHostSourceFileModuleRefs(sf: any): void {
     // earlier attachHostSourceFileMetadata; rebuild from statements.
     if (sf.imports && sf.imports.length > 0) return;
     const imports: any[] = [];
-    for (const statement of sf.statements ?? []) {
-        const kind = statement?.kind;
+    const pushSpec = (spec: any): void => {
+        if (
+            spec
+            && typeof spec.text === "string"
+            && spec.text.length
+            && (spec.kind === SyntaxKind.StringLiteral || spec.kind === SyntaxKind.NoSubstitutionTemplateLiteral)
+        ) {
+            imports.push(spec);
+        }
+    };
+    // Mirror stock Program.collectExternalModuleReferences (program.ts:3362-3371):
+    // statement-level import/re-export/import-equals specifiers PLUS type-space
+    // import("mod").T arguments and dynamic import()/require() call arguments —
+    // findModuleReferences (importTracker.forEachImport) matches module symbols
+    // only through file.imports, so omitting type-space literals drops FAR refs
+    // at `import('vue').X` sites (sim-nav refs-missing cross-vue cluster).
+    const walk = (node: any): void => {
+        if (!node) return;
+        const kind = node.kind;
         if (kind === SyntaxKind.ImportDeclaration || kind === SyntaxKind.ExportDeclaration) {
-            const spec = statement.moduleSpecifier;
-            if (
-                spec
-                && typeof spec.text === "string"
-                && spec.text.length
-                && (spec.kind === SyntaxKind.StringLiteral || spec.kind === SyntaxKind.NoSubstitutionTemplateLiteral)
-            ) {
-                imports.push(spec);
-            }
+            pushSpec(node.moduleSpecifier);
         }
         else if (kind === SyntaxKind.ImportEqualsDeclaration) {
-            const ref = statement.moduleReference;
+            const ref = node.moduleReference;
             if (ref?.kind === SyntaxKind.ExternalModuleReference) {
-                const expr = ref.expression;
-                if (
-                    expr
-                    && typeof expr.text === "string"
-                    && expr.text.length
-                    && (expr.kind === SyntaxKind.StringLiteral || expr.kind === SyntaxKind.NoSubstitutionTemplateLiteral)
-                ) {
-                    imports.push(expr);
-                }
+                pushSpec(ref.expression);
             }
         }
-    }
+        else if (kind === SyntaxKind.ImportType) {
+            const arg = node.argument;
+            if (arg?.kind === SyntaxKind.LiteralType) {
+                pushSpec(arg.literal);
+            }
+        }
+        else if (kind === SyntaxKind.CallExpression) {
+            const expr = node.expression;
+            if (expr?.kind === SyntaxKind.ImportKeyword || (expr?.kind === SyntaxKind.Identifier && expr.text === "require")) {
+                pushSpec(node.arguments?.[0]);
+            }
+        }
+        (ts as any).forEachChild?.(node, walk);
+    };
+    for (const statement of sf.statements ?? []) walk(statement);
     sf.imports = imports;
 }
 
@@ -3951,6 +3966,24 @@ export function createTsgoProgram(
             }
         }
 
+        // Default libs (lib.*.d.ts): stock LS token walks (FAR/highlights/rename)
+        // traverse program.getSourceFiles() and surface declaration entries in
+        // lib files; the bridge's never-host-parse rule dropped them from the
+        // walk (sim-nav refs-missing cluster). Under tsserver (projectService)
+        // host-parse once per content version and reuse via the stable cache —
+        // lib content is fixed per install, same rule as node_modules .d.ts.
+        // createBoundHostSourceFile returns undefined on empty text → fall
+        // through to the tsgo-backed skeleton below (checker RPC unaffected).
+        if (softPMaterializeAllForImportTracker && isHostLibFile(hostFileName)) {
+            const libText = host?.readFile?.(hostFileName) ?? "";
+            const hostSf = createBoundHostSourceFile(hostFileName, fileName, libText);
+            if (hostSf) {
+                ensureTnbVersion(hostSf, hostFileName);
+                sfCache.set(cacheKey, hostSf);
+                return rememberStable(hostSf);
+            }
+        }
+
         const hostContent = hostContentByFile.get(hostFileName);
         const text = hostContent?.text ?? host?.readFile?.(hostFileName) ?? "";
         const scriptKind = hostContent?.scriptKind ?? inferScriptKind(hostFileName);
@@ -4427,7 +4460,11 @@ export function createTsgoProgram(
             // (preferHost via overlays, no projectService) keeps content-gated
             // materialization to avoid --build OOM.
             for (const name of names) {
-                if (isHostLibFile(name)) continue;
+                // Default libs join the LS walk view only under tsserver
+                // (projectService), where FAR/highlights/rename need their
+                // declaration entries (stock parity); other modes keep the
+                // exclusion — no token walks there, just wasted AST cost.
+                if (isHostLibFile(name) && !softPMaterializeAllForImportTracker) continue;
                 const hostFileName = toHostFileName(name);
                 let sf: any;
                 if (preferLightProgramFiles) {
