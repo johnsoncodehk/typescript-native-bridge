@@ -111,6 +111,9 @@ type TnbBridgeProcessState = {
     /** RemoteNode prototype kind getters are wrapped exactly once per process —
      * a second wrap would remap SyntaxKind values twice. */
     kindRemapApplied?: boolean;
+    /** ProjectObjectRegistry.getOrCreateSignature is wrapped exactly once per
+     * process — a second wrap would remap SignatureFlags values twice. */
+    sigFlagsRemapApplied?: boolean;
     /** NodeHandle.prototype hooks are installed exactly once per process —
      * the prototype is shared across lib/typescript.js and lib/_tsc.js bundles. */
     nodeHandlePatched?: boolean;
@@ -2025,7 +2028,47 @@ function hydrateScopeSymbolParents(symbols: readonly any[]): void {
  * `createPropertyAccessExpression(enumExpr, symbolToString(member))` in
  * fixAddMissingMember does not become an illegal Identifier.
  */
-function symbolToStringWithChain(symbol: any, enclosing?: any, flags?: number): string {
+// CheckFlags.Late — late-bound symbol for a computed property with a dynamic
+// name. Identical bit (1<<12) in the fork and tsgo enums (ast/checkflags.go),
+// so the raw bridge `symbol.checkFlags` can be tested directly.
+const CHECKFLAGS_LATE_BIT = 1 << 12;
+
+// Stock getNameOfSymbolAsWritten (checker.ts:11293-11310): for a symbol whose
+// first named declaration has a ComputedPropertyName, the display name is the
+// declaration's name TEXT (`[key]`) when the symbol is late-bound
+// (CheckFlags.Late) or never received a usable literal name (escapedName
+// `__computed`); binder-literal names (`["kk"]` → symbol "kk") keep the symbol
+// name. The bridge otherwise reduces every name to the unescaped escapedName
+// (`kk`), diverging from stock quickinfo `(property) [key]: T`. The gate
+// (Late | __computed) keeps the host-declaration lookup off the hot path for
+// ordinary symbols.
+function symbolDisplayNameWithComputedDecl(symbol: any, getHostSf?: (fileName: string) => any | undefined): string {
+    const fallback = symbolDisplayNameOf(symbol);
+    if (!fallback || !getHostSf) return fallback;
+    const rawName = String(symbol?.escapedName ?? symbol?.name ?? "");
+    if (!((symbol?.checkFlags ?? 0) & CHECKFLAGS_LATE_BIT) && rawName !== "__computed") {
+        return fallback;
+    }
+    let decls: readonly any[];
+    try {
+        decls = symbol?.declarations;
+    }
+    catch {
+        return fallback;
+    }
+    if (!decls?.length) return fallback;
+    for (const decl of decls) {
+        const hostDecl = remapDeclarationToHost(decl, getHostSf);
+        const name = hostDecl ? (ts as any).getNameOfDeclaration?.(hostDecl) : undefined;
+        if (!name) continue;
+        return (ts as any).isComputedPropertyName?.(name)
+            ? ((ts as any).declarationNameToString?.(name) ?? fallback)
+            : fallback;
+    }
+    return fallback;
+}
+
+function symbolToStringWithChain(symbol: any, enclosing?: any, flags?: number, getHostSf?: (fileName: string) => any | undefined): string {
     // With enclosingDeclaration, stock's node builder remaps file-path module
     // symbols to package/relative specifiers (QI: module "vue"); without it
     // (and FQN) the absolute binder name is preserved.
@@ -2033,7 +2076,7 @@ function symbolToStringWithChain(symbol: any, enclosing?: any, flags?: number): 
         const moduleDisplay = moduleSymbolDisplaySpecifier(symbol, enclosing);
         if (moduleDisplay) return moduleDisplay;
     }
-    const name = symbolDisplayNameOf(symbol);
+    const name = symbolDisplayNameWithComputedDecl(symbol, getHostSf);
     if (!name) return "";
     if (!enclosing) {
         return name;
@@ -3246,8 +3289,8 @@ if (process.env.TNB_GUARD_STATS_FILE) {
 
 // Lazily-required tsgo enum objects (native-preview dist). Resolved from the
 // vendored copy under vendor/native-preview/.
-let _tsgoEnums: { SyntaxKind: any; NodeFlags: any; ObjectFlags: any } | undefined;
-function loadTsgoEnums(): { SyntaxKind: any; NodeFlags: any; ObjectFlags: any } {
+let _tsgoEnums: { SyntaxKind: any; NodeFlags: any; ObjectFlags: any; SignatureFlags: any } | undefined;
+function loadTsgoEnums(): { SyntaxKind: any; NodeFlags: any; ObjectFlags: any; SignatureFlags: any } {
     if (_tsgoEnums) return _tsgoEnums;
     const path = require("path") as typeof import("path");
     const enumsDir = path.join(getNativePreviewDir(), "dist", "enums");
@@ -3256,6 +3299,7 @@ function loadTsgoEnums(): { SyntaxKind: any; NodeFlags: any; ObjectFlags: any } 
         SyntaxKind: load("syntaxKind.js", "SyntaxKind"),
         NodeFlags: load("nodeFlags.js", "NodeFlags"),
         ObjectFlags: load("objectFlags.js", "ObjectFlags"),
+        SignatureFlags: load("signatureFlags.js", "SignatureFlags"),
     };
     return _tsgoEnums;
 }
@@ -3387,6 +3431,36 @@ function remapObjectFlags(tsgoFlags: number): number {
     if (cached !== undefined) return cached;
     const out = remapFlagsByPairs(tsgoFlags, objectFlagsPairs());
     _objectFlagsRemapCache.set(tsgoFlags, out);
+    return out;
+}
+
+// ── SignatureFlags remap (tsgo bit layout → fork bit layout), by member name ──
+// tsgo inserts a Construct bit (1<<2) the fork does not have (construct-ness
+// lives in SignatureKind there), shifting Abstract (tsgo 1<<3 vs fork 1<<2)
+// and every bit above it. vendor Signature.flags carries the RAW tsgo layout
+// (constructor: `this.flags = data.flags`), but fork services read it against
+// the FORK enum — symbolDisplay.ts prints `abstract` for alias construct
+// signatures when `signature.flags & SignatureFlags.Abstract` (fork 1<<2) is
+// set, which the tsgo Construct bit lights up on every construct signature.
+// buildFlagPairsByName drops the tsgo-only Construct bit and lands each named
+// bit on its fork home.
+let _signatureFlagsPairs: ReadonlyArray<readonly [number, number]> | undefined;
+const _signatureFlagsRemapCache = new Map<number, number>();
+
+function signatureFlagsPairs(): ReadonlyArray<readonly [number, number]> {
+    if (!_signatureFlagsPairs) {
+        const tsgo = loadTsgoEnums();
+        _signatureFlagsPairs = buildFlagPairsByName(tsgo.SignatureFlags, (ts as any).SignatureFlags);
+    }
+    return _signatureFlagsPairs;
+}
+
+function remapSignatureFlags(tsgoFlags: number): number {
+    if (!tsgoFlags) return 0;
+    const cached = _signatureFlagsRemapCache.get(tsgoFlags);
+    if (cached !== undefined) return cached;
+    const out = remapFlagsByPairs(tsgoFlags, signatureFlagsPairs());
+    _signatureFlagsRemapCache.set(tsgoFlags, out);
     return out;
 }
 
@@ -5297,6 +5371,7 @@ export function createTsgoChecker(program: any): any {
             _currentProjectRef.project = project;
             patchSymbolProto(sync);
             patchSignatureProto(sync);
+            patchSignatureFlagsRemap(sync, project);
             installNodeHandleHooks(sync);
             installTsgoBackedSourceFileLoader(() => project);
             return project;
@@ -5397,6 +5472,7 @@ export function createTsgoChecker(program: any): any {
         _currentProjectRef.project = project;
         patchSymbolProto(sync);
         patchSignatureProto(sync);
+        patchSignatureFlagsRemap(sync, project);
         installNodeHandleHooks(sync);
         // Patch kind remapping using a sample source file from the tsgo project.
         // One-time per process (kindRemapApplied) — skip the sample-file RPC on
@@ -6490,6 +6566,53 @@ export function createTsgoChecker(program: any): any {
             if (tags.length) this.__tnbJsDocTags = tags;
             return tags;
         };
+    }
+
+    // ── SignatureFlags boundary remap ─────────────────────────────────
+    // Raw tsgo flags per remapped Signature, kept so the native-preview
+    // getters (hasRestParameter/isConstruct/isAbstract) can keep reading TSGO
+    // semantics after `flags` is rewritten to the fork layout. The WeakMap
+    // doubles as the already-remapped marker (registry memoizes instances, so
+    // a cache hit must not remap a second time).
+    const _sigRawFlags = new WeakMap<object, number>();
+
+    // All Signature instances funnel through
+    // ProjectObjectRegistry.getOrCreateSignature (single `new Signature` site
+    // in the native-preview bundle, memoized per registry). Wrapping that one
+    // method remaps every signature exactly once at creation. The registry
+    // class is not exported, so reach its prototype through a live instance.
+    function patchSignatureFlagsRemap(s: any, project: any): void {
+        const proc = tnbBridgeProcessState();
+        if (proc.sigFlagsRemapApplied) return;
+        const registry = project?.checker?.objectRegistry;
+        const registryProto = registry ? Object.getPrototypeOf(registry) : undefined;
+        const sigProto = s?.Signature?.prototype;
+        if (!registryProto?.getOrCreateSignature || !sigProto) return;
+        proc.sigFlagsRemapApplied = true;
+        const origGetOrCreateSignature = registryProto.getOrCreateSignature;
+        registryProto.getOrCreateSignature = function (this: any, data: any) {
+            const sig = origGetOrCreateSignature.call(this, data);
+            if (sig && typeof sig.flags === "number" && !_sigRawFlags.has(sig)) {
+                const raw = sig.flags as number;
+                _sigRawFlags.set(sig, raw);
+                sig.flags = remapSignatureFlags(raw);
+            }
+            return sig;
+        };
+        // The native-preview Signature getters read `this.flags` against the
+        // TSGO enum; keep them correct off the raw stored value.
+        const tsgoSF = loadTsgoEnums().SignatureFlags;
+        const rawFlagsOf = (self: any): number => _sigRawFlags.get(self) ?? self?.flags ?? 0;
+        for (const [getterName, bit] of [
+            ["hasRestParameter", tsgoSF.HasRestParameter],
+            ["isConstruct", tsgoSF.Construct],
+            ["isAbstract", tsgoSF.Abstract],
+        ] as const) {
+            Object.defineProperty(sigProto, getterName, {
+                configurable: true,
+                get(this: any) { return (rawFlagsOf(this) & (bit as number)) !== 0; },
+            });
+        }
     }
 
     function patchSymbolProto(s: any): void {
@@ -7989,7 +8112,7 @@ export function createTsgoChecker(program: any): any {
         },
         writeSymbol(symbol: any, enclosing?: any, _meaning?: number, flags?: number, writer?: any): void {
             if (!symbol || !writer) return;
-            const text = symbolToStringWithChain(symbol, enclosing, flags);
+            const text = symbolToStringWithChain(symbol, enclosing, flags, getHostBoundSf);
             if (text) writer.writeSymbol?.(text, symbol);
         },
         // Stock writeSignature → signatureToString(enclosing, flags, kind, writer,
@@ -8019,7 +8142,7 @@ export function createTsgoChecker(program: any): any {
         // the parent chain — both symbol kinds (host SymbolObject and bridge
         // Symbol) carry name/parent, so this is served uniformly in JS.
         symbolToString(symbol: any, enclosing?: any, _meaning?: number, flags?: number): string {
-            return symbolToStringWithChain(symbol, enclosing, flags);
+            return symbolToStringWithChain(symbol, enclosing, flags, getHostBoundSf);
         },
         getFullyQualifiedName(symbol: any): string {
             let name = symbolDisplayNameOf(symbol);
