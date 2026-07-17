@@ -1,14 +1,16 @@
 #!/usr/bin/env node
-// getSourceFile RPC regression guard.
+// RPC regression guard (vue-tsc workload).
 //
 // TNB serves BuilderProgram's getSourceFiles()/getSourceFileByPath() from a
 // metadata-only light stub so it does NOT pay a tsgo getSourceFile RPC for every
-// program file; only files that are actually type-checked materialize a
-// tsgo-backed SourceFile (one RPC each). If that split regresses — e.g. the
-// light stub is dropped or merged into the full path — every program file starts
-// paying an RPC and the count spikes. This guard runs the vue-tsc full build
-// (packages/tsc, the workload that exercises the split) and asserts the RPC
-// count stays under baseline.
+// program file. If that split regresses — e.g. the light stub is dropped or
+// merged into the full path — every program file starts paying an RPC and the
+// count spikes. This guard runs the vue-tsc full build (packages/tsc, the
+// workload that exercises the split) and asserts:
+//   1. total RPC count > 0        — liveness: the tsgo-backed path actually ran
+//      (build mode batches diagnostics and may legitimately pay ZERO
+//      getSourceFile RPCs, so the total is the only reliable signal);
+//   2. getSourceFile RPC <= baseline — the spike check described above.
 //
 // component-meta is NOT usable here: it drives the Language Service host path and
 // only ever produces `host` SourceFiles, so it never exercises the light /
@@ -75,23 +77,41 @@ if (!vitestFinished) {
 	fail(`vue-tsc did not finish (no vitest run summary; likely native crash, exit ${vitest.status ?? "signal"})`);
 }
 
-let stats;
-try {
-	stats = JSON.parse(fs.readFileSync(statsPath, "utf8"));
+// The overlay writes one `${statsPath}.<pid>` file per overlaid process (the
+// vitest runner and the spawned vue-tsc CLI are different processes sharing the
+// same env var); sum them all.
+const dir = path.dirname(statsPath);
+const base = path.basename(statsPath);
+const statFiles = fs.readdirSync(dir).filter(f => f.startsWith(`${base}.`));
+let stats = null;
+if (statFiles.length) {
+	stats = { totalRpcCount: 0, getSourceFileRpcCount: 0 };
+	for (const f of statFiles) {
+		try {
+			const s = JSON.parse(fs.readFileSync(path.join(dir, f), "utf8"));
+			stats.totalRpcCount += s.totalRpcCount ?? 0;
+			stats.getSourceFileRpcCount += s.getSourceFileRpcCount ?? 0;
+		}
+		catch { /* partial write — ignore */ }
+	}
 }
-catch {
+else {
 	console.error(vitest.stdout);
 	console.error(vitest.stderr);
-	fail(`guard stats file missing at ${statsPath} — overlay did not write TNB_GUARD_STATS_FILE`);
+	fail(`guard stats files missing at ${statsPath}.* — overlay did not write TNB_GUARD_STATS_FILE`);
 }
 
 if (stats) {
+	const total = stats.totalRpcCount ?? 0;
 	const rpc = stats.getSourceFileRpcCount ?? 0;
 
-	// rpc === 0 means the tsgo-backed getSourceFile path never ran — the workload
-	// didn't exercise the split, so a "low" count would be a false pass.
-	if (rpc <= 0) {
-		fail(`getSourceFile RPC count is ${rpc} — the tsgo-backed path did not run (wrong workload or regression)`);
+	// total === 0 means no tsgo RPC ran at all — the workload never reached the
+	// bridge (wrong workload, or the overlay failed to load), so a "low"
+	// getSourceFile count would be a false pass. getSourceFileRpc itself may
+	// legitimately be 0: build mode batches diagnostics (getDiagnosticsBatch)
+	// and the light-stub split no longer materializes per-file tsgo SFs.
+	if (total <= 0) {
+		fail(`total RPC count is ${total} — the tsgo-backed path did not run (wrong workload or regression)`);
 	}
 
 	let baseline = { maxGetSourceFileRpc: rpc };
@@ -107,12 +127,14 @@ if (stats) {
 
 	if (!errors.length) {
 		console.log(
-			`check:sourcefile-guard ok (getSourceFileRpc=${rpc}, baseline<=${baseline.maxGetSourceFileRpc})`,
+			`check:sourcefile-guard ok (totalRpc=${total}, getSourceFileRpc=${rpc}, baseline<=${baseline.maxGetSourceFileRpc})`,
 		);
 	}
 }
 
-try { fs.unlinkSync(statsPath); } catch { /* ignore */ }
+for (const f of statFiles) {
+	try { fs.unlinkSync(path.join(dir, f)); } catch { /* ignore */ }
+}
 
 if (errors.length) {
 	console.error("\ncheck:sourcefile-guard failed:\n");

@@ -1,4 +1,4 @@
 {
 	"maxGetSourceFileRpc": 240,
-	"note": "vue-tsc full build (packages/tsc). Observed getSourceFile RPC ≈220. A skeleton/light-stub regression that eagerly materializes tsgo-backed SourceFiles for every program file shows up as an RPC spike here. Increase only if the light-stub path is intentionally changed. component-meta is NOT usable — it only produces `host` SourceFiles and never exercises the split."
+	"note": "vue-tsc full build (packages/tsc). getSourceFileRpc is the SPIKE guard (light-stub regression shows up as a spike); it may legitimately read 0 in build mode since diagnostics are batched (getDiagnosticsBatch) and no per-file tsgo SFs materialize. The LIVENESS signal is totalRpcCount > 0 (asserted by the guard, not baselined here). Increase maxGetSourceFileRpc only if the light-stub path is intentionally changed. component-meta is NOT usable — it only produces `host` SourceFiles and never exercises the split."
 }

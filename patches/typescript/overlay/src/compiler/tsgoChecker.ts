@@ -100,6 +100,11 @@ type TnbBridgeProcessState = {
     useCaseSensitive?: boolean;
     version?: string;
     debugAnnounced?: boolean;
+    /** Process-global RPC counters for the sourcefile guard. Both bundle
+     * copies register an exit hook that writes `${out}.<pid>`, and the last
+     * writer wins — a per-copy counter would let the non-counting copy
+     * clobber the totals with its own zeros. */
+    guardStats?: { totalRpcCount: number; getSourceFileRpcCount: number };
     /** tsgo Project per resolved tsconfig path. Projects are snapshots of the
      * process-wide bridge session, so a per-bundle cache would let the two
      * bundles hold diverging Project snapshots for the same tsconfig. */
@@ -301,17 +306,38 @@ function loadBridgeDeps(): void {
     // sync API is CJS-compatible even though the package is "type": "module".
     _sync = require(path.join(nativePreviewDir, "dist", "api", "sync", "api.js"));
 
-    // Bridge lives at <tnb>/native/bridge.<ext> next to lib/ and vendor/.
+    // Bridge resolution order:
+    // 1. Published platform package @typescript-native-bridge/<platform>-<arch>
+    //    (optionalDependency of the main package; npm installs only the matching one).
+    // 2. <tnb>/native/bridge.<ext> next to lib/ and vendor/ — dev clone or link: install.
+    // 3. <tnb>/typescript-go/bridge/ — in-repo `go build` output during development.
     const ext = process.platform === "darwin" ? "dylib" : process.platform === "win32" ? "dll" : "so";
     const libName = `bridge.${ext}`;
     const packageRoot = getTnbPackageRoot();
+    let resolvedBridge: string | undefined;
+    try {
+        const platformPkgJson = require.resolve(
+            `@typescript-native-bridge/${process.platform}-${process.arch}/package.json`,
+        );
+        const fromPlatformPkg = path.join(path.dirname(platformPkgJson), "native", libName);
+        if (fs.existsSync(fromPlatformPkg)) {
+            resolvedBridge = fromPlatformPkg;
+        }
+    } catch {
+        // Platform package not installed (dev clone, or npm skipped a non-matching
+        // optional dependency) — fall through to the local paths.
+    }
     const libPath = path.join(packageRoot, "native", libName);
     const devBridge = path.join(packageRoot, "typescript-go", "bridge", libName);
-    const resolvedBridge = fs.existsSync(libPath) ? libPath : devBridge;
+    if (!resolvedBridge) {
+        resolvedBridge = fs.existsSync(libPath) ? libPath : devBridge;
+    }
     if (!fs.existsSync(resolvedBridge)) {
         throw new Error(
-            `tsgoChecker: bridge shared library not found (tried ${libPath}, ${devBridge})\n` +
-            `  Build it: npm run build:bridge`,
+            `tsgoChecker: bridge shared library not found (tried platform package ` +
+            `@typescript-native-bridge/${process.platform}-${process.arch}, ${libPath}, ${devBridge})\n` +
+            `  Unsupported platform, or the optional dependency was not installed. ` +
+            `From a source checkout, build it: npm run build:bridge`,
         );
     }
     // The cgo bridge embeds the Go runtime into this Node process. Go's
@@ -464,6 +490,7 @@ class BridgeClient {
 
     apiRequest(method: string, params: any): any {
         const t0 = process.env.TSGO_PROFILE === "1" ? Date.now() : 0;
+        noteRpc(method);
         const paramsJson = params == null ? null : JSON.stringify(params);
         let mc = this.methodCStr.get(method);
         if (!mc) { mc = toCStr(method); this.methodCStr.set(method, mc); }
@@ -480,7 +507,7 @@ class BridgeClient {
 
     apiRequestBinary(method: string, params: any): Uint8Array | undefined {
         const t0 = process.env.TSGO_PROFILE === "1" ? Date.now() : 0;
-        if (method === "getSourceFile") noteGetSourceFileRpc();
+        noteRpc(method);
         const paramsJson = params == null ? null : JSON.stringify(params);
         let mc = this.methodCStr.get(method);
         if (!mc) { mc = toCStr(method); this.methodCStr.set(method, mc); }
@@ -3336,12 +3363,16 @@ export function getTsgoProfileStats(): Readonly<typeof _stats> {
 // through canonicalSourceFilePath (which mirrors tsgo's toPath EXACTLY). See the
 // _tsgoUseCaseSensitive comment above for why the key rule must match tsgo.
 //
-// The one thing worth guarding at runtime is the getSourceFile RPC count: the
+// The things worth guarding at runtime: (a) the getSourceFile RPC count — the
 // light-stub path exists to avoid eagerly materializing tsgo-backed SFs for
-// every program file, so a regression there shows up as an RPC spike. CI checks
-// it against a baseline (tools/check-sourcefile-guard.mjs).
+// every program file, so a regression there shows up as an RPC spike; and
+// (b) the total RPC count as a liveness signal — build mode (batched
+// diagnostics) legitimately pays ZERO getSourceFile RPCs, so only the total
+// proves the tsgo-backed path actually ran. CI checks both against a baseline
+// (tools/check-sourcefile-guard.mjs).
 
-const _guardStats = {
+const _guardStats = tnbBridgeProcessState().guardStats ??= {
+    totalRpcCount: 0,
     getSourceFileRpcCount: 0,
 };
 
@@ -3357,17 +3388,25 @@ function canonicalSourceFilePath(filePath: string): string {
     return _tsgoUseCaseSensitive ? filePath : filePath.toLowerCase();
 }
 
-function noteGetSourceFileRpc(): void {
-    _guardStats.getSourceFileRpcCount++;
+function noteRpc(method: string): void {
+    _guardStats.totalRpcCount++;
+    if (method === "getSourceFile") {
+        _guardStats.getSourceFileRpcCount++;
+    }
     scheduleGuardStatsFlush();
 }
 
 function maybeWriteGuardStatsFile(): void {
     const out = process.env.TNB_GUARD_STATS_FILE;
     if (!out) return;
+    // Per-pid output: the workload process (e.g. a spawned vue-tsc CLI) and the
+    // test runner are different processes that share this env var; the guard
+    // tool sums every `${out}.<pid>` file. Last-writer-wins on a single file
+    // would zero out the counts (runner outlives the workload and has none).
     try {
         const fs = require("fs") as typeof import("fs");
-        fs.writeFileSync(out, JSON.stringify({
+        fs.writeFileSync(`${out}.${process.pid}`, JSON.stringify({
+            totalRpcCount: _guardStats.totalRpcCount,
             getSourceFileRpcCount: _guardStats.getSourceFileRpcCount,
         }));
     }
