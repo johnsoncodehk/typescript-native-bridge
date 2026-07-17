@@ -4401,6 +4401,64 @@ export function createTsgoProgram(
         return rootPathSetCache.has(String(path));
     };
 
+    // Stock Program learns realpath→symlinked-dir mappings as a byproduct of
+    // JS module resolution, and Project.getSymlinkCache seeds itself from
+    // program.forEachResolvedModule (setSymlinksFromResolutions →
+    // guessDirectorySymlink). That cache is how module-specifier computation
+    // maps a pnpm realpath (…/node_modules/.pnpm/<key>/node_modules/vue/…)
+    // back to the importable specifier "vue". Our resolutions live on the Go
+    // side, leaving the cache empty — and with no symlinked candidate,
+    // tryGetModuleNameAsNodeModule mis-parses the realpath into a garbage
+    // ".pnpm/<key>/node_modules/vue" specifier, tripping
+    // Debug.assert(moduleSpecifier === data.moduleSpecifier) in
+    // getCompletionEntryCodeActionsAndSourceDisplay (auto-import completion
+    // details, volar #4577). Synthesize the same (resolvedFileName,
+    // originalPath) pairs from the pnpm layout instead: a package in the
+    // store <root>/node_modules/.pnpm/… may be linked from <root>/node_modules
+    // (single-package layout) or from any workspace package's node_modules
+    // (e.g. <root>/test-workspace/node_modules), so probe every ancestor
+    // directory of the program's non-store files and keep candidates that
+    // host.realpath proves are symlinks to the store package dir.
+    const pnpmOriginalPkgDirByRealDir = new Map<string, string>(); // "" = probed, no symlink
+    let symlinkProbeDirs: string[] | undefined;
+    const getSymlinkProbeDirs = (): string[] => {
+        if (symlinkProbeDirs) return symlinkProbeDirs;
+        const dirs = new Set<string>();
+        for (const fileName of getSourceFileNames()) {
+            if (fileName.includes("/node_modules/.pnpm/")) continue;
+            for (let d = fileName.slice(0, fileName.lastIndexOf("/")); d.length > 1; d = d.slice(0, d.lastIndexOf("/"))) {
+                if (dirs.has(d)) break; // already walked from a sibling file
+                dirs.add(d);
+            }
+        }
+        return symlinkProbeDirs = [...dirs];
+    };
+    const pnpmOriginalPathFor = (fileName: string): string | undefined => {
+        const m = /^(.*)\/node_modules\/\.pnpm\/[^/]+\/node_modules\/((?:@[^/]+\/)?[^/]+)(\/.*)$/.exec(fileName);
+        if (!m) return undefined;
+        const realPkgDir = fileName.slice(0, fileName.length - m[3].length);
+        let originalPkgDir = pnpmOriginalPkgDirByRealDir.get(realPkgDir);
+        if (originalPkgDir === undefined) {
+            originalPkgDir = "";
+            const storeRoot = m[1];
+            const candidates = getSymlinkProbeDirs()
+                .filter((d) => d === storeRoot || d.startsWith(storeRoot + "/"))
+                .sort((a, b) => a.length - b.length); // prefer shallow (stock's module-path sort does the same)
+            for (const d of candidates) {
+                const candidate = `${d}/node_modules/${m[2]}`;
+                try {
+                    const real = host?.realpath?.(candidate);
+                    if (real ? canonicalSourceFilePath(real) === canonicalSourceFilePath(realPkgDir) : !!host?.directoryExists?.(candidate)) {
+                        originalPkgDir = candidate;
+                        break;
+                    }
+                } catch { /* best-effort: try the next candidate */ }
+            }
+            pnpmOriginalPkgDirByRealDir.set(realPkgDir, originalPkgDir);
+        }
+        return originalPkgDir === "" ? undefined : originalPkgDir + m[3];
+    };
+
     const thinProgram: any = {
         // Marks this as a tsgo-backed program: its SourceFiles come straight from
         // tsgo and are never acquired via the LanguageService document registry.
@@ -4839,7 +4897,23 @@ export function createTsgoProgram(
         // BuilderProgram support
         structureIsChanged: () => false,
         getFilesWithInvalidatedResolutions: () => new Set(),
-        forEachResolvedModule: (_callback: any) => { /* tsgo program owns module resolutions */ },
+        forEachResolvedModule: (callback: any) => {
+            // Feed Project.getSymlinkCache the pnpm symlink pairs stock
+            // resolution would have produced (see pnpmOriginalPathFor above).
+            // The seeding path only reads resolution.resolvedModule; the
+            // module-name argument is unused there.
+            for (const fileName of getSourceFileNames()) {
+                const originalPath = pnpmOriginalPathFor(fileName);
+                if (originalPath === undefined) continue;
+                callback({
+                    resolvedModule: {
+                        resolvedFileName: fileName,
+                        originalPath,
+                        extension: ts.extensionFromPath(fileName),
+                    },
+                }, /*moduleName*/ "");
+            }
+        },
         forEachResolvedTypeReferenceDirective: (_callback: any) => {},
         getAutomaticTypeDirectiveResolutions: () => new Map(),
     };
@@ -5235,6 +5309,20 @@ function installNodeHandleHooks(s: any): void {
             get() {
                 if (this.kind !== SyntaxKind.SourceFile) return undefined;
                 return this.getSourceFile()?.fileName ?? this.path;
+            },
+        });
+    }
+    // NodeHandle.originalFileName — stock moduleSpecifiers
+    // (getAllModulePathsWorker) reads SourceFile.originalFileName; a SourceFile
+    // handle without it silently computes garbage relative specifiers (".."),
+    // tripping the completionEntryDetails auto-import assert
+    // (moduleSpecifier === data.moduleSpecifier). Mirror the fileName getter.
+    if (!Object.getOwnPropertyDescriptor(proto, "originalFileName")) {
+        Object.defineProperty(proto, "originalFileName", {
+            configurable: true,
+            get() {
+                if (this.kind !== SyntaxKind.SourceFile) return undefined;
+                return this.getSourceFile()?.originalFileName ?? this.getSourceFile()?.fileName ?? this.path;
             },
         });
     }
@@ -7431,7 +7519,14 @@ export function createTsgoChecker(program: any): any {
     function tryGetMemberInModuleExportsImpl(memberName: any, moduleSymbol: any): any {
         if (moduleSymbol?.exports) {
             const sym = moduleSymbol.exports.get(memberName);
-            return sym ? refineNavSymbol(sym) : undefined;
+            if (sym) return refineNavSymbol(sym);
+            // Fall through on miss: the raw host table holds direct members only,
+            // while stock's getExportsOfModule (checker.ts:5155) also resolves
+            // `export *` chains — let the Go side answer those. Returning
+            // undefined here broke completionEntryDetails fast-path resolution
+            // for star-exported members (e.g. `ref` from 'vue' via runtime-dom),
+            // dropping into the slow path and tripping stock's collectAutoImports
+            // assert ("faster path is available via `data`").
         }
         ensureProject();
         try {
@@ -10227,7 +10322,7 @@ const _tnbProgramCoverage = {
     getResolvedModuleFromModuleSpecifier: "adapter",
     getResolvedTypeReferenceDirective: "stub",
     getResolvedTypeReferenceDirectiveFromTypeReferenceDirective: "stub",
-    forEachResolvedModule: "stub",
+    forEachResolvedModule: "adapter",
     forEachResolvedTypeReferenceDirective: "stub",
     emit: "adapter",
     getOptionsDiagnostics: "adapter",

@@ -4,6 +4,10 @@
  * when faster path is available via `data`" — completions.ts:4233).
  * Repro chain: completionInfo (external module exports) → for entries with `data`,
  * completionEntryDetails → success=false / server error = repro.
+ * Requests use the ARRAY form (`entryNames`) — the shape VS Code actually sends.
+ * The legacy singular `entryName` form is rejected by the tsserver handler, so
+ * it can never reach the auto-import slow path (that blind spot hid the #4577
+ * pnpm-specifier crash; see triage-completion-details-array.mjs).
  * Buckets entries by data.fileName extension (.vue vs .ts) and details-queries a
  * sample of each bucket (fast path fails per-source-module, so bucket coverage
  * matters more than raw count). Runs TNB vs STOCK.
@@ -72,7 +76,7 @@ async function run(label, tsserverPath, env, file, line, offset) {
 			for (const e of list.slice(0, 50)) {
 				out.queried++;
 				try {
-					const det = await send('completionEntryDetails', { file, line, offset, entryName: e.name, source: e.source, data: e.data });
+					const det = await send('completionEntryDetails', { file, line, offset, entryNames: [{ name: e.name, source: e.source, data: e.data }] });
 					if (!det?.success) out.fails.push({ bucket: b, name: e.name, msg: String(det?.message ?? '').split('\n')[0] });
 					else out.okCount++;
 				} catch (err) {
