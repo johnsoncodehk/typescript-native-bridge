@@ -65,6 +65,9 @@ jobs:
         run: |
           git clone --depth 50 --branch "$VOLAR_BRANCH" https://github.com/vuejs/language-tools.git "$RUNNER_TEMP/volar"
           git -C "$RUNNER_TEMP/volar" checkout "$VOLAR_SHA"
+          # pnpm's `typescript: link:./typescript-native-bridge` override must
+          # resolve at install time — create the symlink BEFORE pnpm install.
+          ln -sfn "$GITHUB_WORKSPACE" "$RUNNER_TEMP/volar/typescript-native-bridge"
 
       - name: Install + build volar
         if: steps.volar-cache.outputs.cache-hit != 'true'
