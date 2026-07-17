@@ -443,6 +443,14 @@ const _programShapeNoHost = new Map<string, TnbProgramShape>();
 // share across generations. Keyed per LS host so closed projects drop entries.
 const _hostSfStableByHost = new WeakMap<object, Map<string, { version: string; sf: any }>>();
 const _hostSfStableNoHost = new Map<string, { version: string; sf: any }>();
+// Process-global stable SF cache: stable .d.ts (bundled lib + node_modules)
+// binds identically for a given content version, and ensureHostSourceFileBound
+// brands after one bind (no re-bind), so ONE entry serves every project in the
+// process. The per-lsHost cache above duplicated the entire lib closure per
+// project — the dominant tsserver memory cost in multi-tsconfig workspaces
+// (issue #6, ~54MB/.vue per open). Entries are replaced on scriptVersion
+// change; the set is bounded by the on-disk declaration set.
+const _hostSfStableGlobal = new Map<string, { version: string; sf: any }>();
 function isStableHostSfPath(p: string): boolean {
     if (process.env.TNB_DISABLE_STABLE_HOST_SF === "1") return false;
     return p.endsWith(".d.ts") && (p.includes("/node_modules/") || isHostLibFile(p));
@@ -4144,7 +4152,7 @@ export function createTsgoProgram(
         if (sfCache.has(cacheKey)) return sfCache.get(cacheKey);
         // Disk-stable library declarations: reuse the bound host AST from the
         // previous program generation when the script version is unchanged.
-        const stableSfCache = isStableHostSfPath(hostFileName) ? getHostSfStableCache(hostForLs()) : undefined;
+        const stableSfCache = isStableHostSfPath(hostFileName) ? _hostSfStableGlobal : undefined;
         if (stableSfCache) {
             const hit = stableSfCache.get(hostFileName);
             if (hit && hit.version === String(scriptVersion)) {
