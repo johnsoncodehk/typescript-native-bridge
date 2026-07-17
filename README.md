@@ -280,12 +280,44 @@ pnpm exec vue-tsc -b --noEmit 2>&1 | tee /tmp/tsc.log
 grep -F 'TNB ACTIVE' /tmp/tsc.log || { echo 'TNB not active'; exit 1; }
 ```
 
-**Linux CI:** The loader supports `bridge.so` / `bridge.dll`, but this repo may
-only ship `bridge.dylib` until you build or publish per-platform binaries. Run
-`npm run build:bridge` on the target OS, or ensure your package artifact includes
-`native/bridge.*` for the runner (see [Platform support](#platform-support)).
+**Linux CI:** the published npm artifact ships `bridge.dylib` (macOS arm64) only, and
+`os`/`cpu` gating makes `npm install` refuse other platforms outright. For Linux CI,
+use a source checkout of this repo (`npm run setup`) until per-platform prebuilds ship
+(see [Platform support](#platform-support)).
 
 Debug slow runs: `TSGO_PROFILE=1` prints a `[tsgo-profile]` timing summary to stderr on process exit (not a `.cpuprofile` file).
+
+---
+
+## Known differences from stock TypeScript
+
+The checker is tsgo, so behavior is not yet bit-for-bit identical to the JS checker.
+Current state, measured by replaying **37,409 language-service probe units** (quickinfo,
+go-to-definition, references, highlights, diagnostics) against the pinned stock build
+(`typescript@6.0.3`): **1,231 known differences (3.3%)**, all triaged and attributed.
+What remains, by class:
+
+- **QuickInfo display formatting** — the rendered *text* of a hover can differ: quote
+  style (tsgo preserves the source's `'…'`; stock resynthesizes `"…"`) and minor
+  whitespace / truncation-density differences on very long types. Display-only — the
+  underlying types and error behavior are identical. Closing the truncation class needs
+  upstream tsgo plumbing and is tracked but not scheduled.
+- **Result ordering** — references / definition results can arrive in a different order
+  with an identical location set.
+- **Cross-`.vue` reference residuals** — a small number of reference locations can be
+  missing in multi-`.vue`-project setups (root cause under investigation).
+- **Intentional (won't fix)** — two inputs that crash *stock* (semantic-classifications
+  stack overflow) are survived by TNB, and tsgo deliberately omits TS1003 on malformed
+  JSDoc.
+
+Diagnostics parity (emitted errors) on a large real-world Vue monorepo is exact except
+2 lines. If you hit a difference not listed here, please file an issue with a minimal
+repro.
+
+Performance expectations, from our benchmarks (your repo will differ): cold `vue-tsc -b`
+on a large Vue monorepo runs ~3.0s vs ~4.4–4.7s stock (median); editor steady-state
+completion is ~30–40ms per keystroke vs stock ~10–30ms in the same probe — close to
+stock, still being worked down.
 
 ---
 
@@ -313,8 +345,9 @@ Debug slow runs: `TSGO_PROFILE=1` prints a `[tsgo-profile]` timing summary to st
 
 ### Type errors differ from stock TypeScript
 
-TNB is experimental; tsgo parity with JS TypeScript is not 100%. Pin a version, diff
-results, and report gaps. This is expected during early adoption.
+TNB is experimental; tsgo parity with JS TypeScript is not 100%. Check
+[Known differences](#known-differences-from-stock-typescript) first — if yours is not
+listed, pin a version, diff results, and report the gap.
 
 ### Missing native bridge
 
@@ -325,14 +358,16 @@ this repo or ensure published artifacts include your platform.
 
 ## Platform support
 
-| OS | Native library | Notes |
+| OS / arch | Native library | npm artifact |
 |---|---|---|
-| macOS | `native/bridge.dylib` | Primary dev target; may be the only prebuilt binary in a dev clone |
-| Linux | `native/bridge.so` | Build with `npm run build:bridge` on Linux for CI |
-| Windows | `native/bridge.dll` | Supported by loader; build on Windows |
+| macOS arm64 | `native/bridge.dylib` | ✅ shipped — the only prebuilt platform for now |
+| Linux / Windows / macOS x64 | `bridge.so` / `bridge.dll` / `bridge.dylib` | Not shipped; install is refused by `os`/`cpu` gating |
 
-End users of a **published** package need prebuilt binaries per platform. Contributors
-build locally with Go + a C toolchain (`npm run build:bridge`).
+The loader supports all three library formats, but the **published npm package currently
+contains the macOS arm64 bridge only** — `npm install` on any other platform fails with
+`EBADPLATFORM`. To run elsewhere, build from source (clone with submodules, then
+`npm run setup`; requires Go + a C toolchain). The gating lifts once per-platform
+prebuilds are wired into the release workflow.
 
 ---
 
