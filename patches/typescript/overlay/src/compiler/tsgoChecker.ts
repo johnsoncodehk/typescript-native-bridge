@@ -344,8 +344,17 @@ function loadBridgeDeps(): void {
     // signal-based async preemption (SIGURG) collides with Node's fatal-signal
     // handler: SIGURG gets routed into node::SignalExit -> ResetStdio, which
     // storms tcsetattr/ioctl on a TTY until the CPU is pinned and the process
-    // won't even die on SIGTERM. GODEBUG is read by the Go runtime at dlopen,
-    // so disable async preemption before _koffi.load arms its signal handler.
+    // won't even die on SIGTERM.
+    //
+    // This process.env write does NOT reach the Go runtime in THIS process:
+    // GODEBUG is parsed from the original process-spawn environment — proven
+    // by a GODEBUG=inittrace A/B (JS setenv immediately before koffi.load
+    // yields zero init trace; spawn-env yields a full one). That is why
+    // bin/tsc, bin/tsserver, and lib/tsserver.js re-exec through
+    // tools/tnb-godebug.js instead. The write is still useful: child processes
+    // spawned later inherit it. Entrypoints that load the bridge WITHOUT the
+    // re-exec (programmatic require of typescript) run unprotected — non-TTY
+    // hosts have not shown the SIGURG storm.
     // TNB_SKIP_ASYNC_PREEMPT_OFF=1 disables this guard for hang repro only.
     if (process.env.TNB_SKIP_ASYNC_PREEMPT_OFF !== "1"
         && !/(?:^|,)asyncpreemptoff=1(?:,|$)/.test(process.env.GODEBUG ?? "")) {
