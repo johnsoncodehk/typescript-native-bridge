@@ -22,6 +22,7 @@
 		"patch:ts": "node tools/patch-typescript.js",
 		"save-patches": "node tools/save-tsgo-patches.js",
 		"save-ts-patches": "node tools/save-typescript-patches.js",
+		"bump:version": "node tools/bump-version.mjs",
 		"check:enums": "node tools/check-enum-remap.mjs",
 		"check:lib-sync": "node tools/check-lib-sync.mjs",
 		"check:bundle-shape": "node tools/check-bundle-shape.mjs",

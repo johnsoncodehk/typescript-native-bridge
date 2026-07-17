@@ -397,6 +397,7 @@ npm run setup    # submodules + vendor JS + native bridge + lib/
 | `refresh` | Re-apply both patch trees and run `check:lib` |
 | `save-ts-patches` | Save typescript submodule changes → `patches/typescript/` |
 | `save-patches` | Save typescript-go submodule changes → `patches/typescript-go/` |
+| `bump:version` | Bump `<stock>-bridge.N.tsgo.<tsgo>` — base change resets to `bridge.0`, else `bridge.N+1` (`--dry-run` to preview) |
 | `check:lib-sync` | Verify overlay / submodule / `lib/` are aligned |
 | `check:enums` | Validate TS↔Go enum remapping tables |
 
