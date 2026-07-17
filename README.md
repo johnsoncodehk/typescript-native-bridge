@@ -291,33 +291,15 @@ Debug slow runs: `TSGO_PROFILE=1` prints a `[tsgo-profile]` timing summary to st
 
 ## Known differences from stock TypeScript
 
-The checker is tsgo, so behavior is not yet bit-for-bit identical to the JS checker.
-Current state, measured by replaying **37,409 language-service probe units** (quickinfo,
-go-to-definition, references, highlights, diagnostics) against the pinned stock build
-(`typescript@6.0.3`): **1,231 known differences (3.3%)**, all triaged and attributed.
-What remains, by class:
-
-- **QuickInfo display formatting** — the rendered *text* of a hover can differ: quote
-  style (tsgo preserves the source's `'…'`; stock resynthesizes `"…"`) and minor
-  whitespace / truncation-density differences on very long types. Display-only — the
-  underlying types and error behavior are identical. Closing the truncation class needs
-  upstream tsgo plumbing and is tracked but not scheduled.
-- **Result ordering** — references / definition results can arrive in a different order
-  with an identical location set.
-- **Cross-`.vue` reference residuals** — a small number of reference locations can be
-  missing in multi-`.vue`-project setups (root cause under investigation).
-- **Intentional (won't fix)** — two inputs that crash *stock* (semantic-classifications
-  stack overflow) are survived by TNB, and tsgo deliberately omits TS1003 on malformed
-  JSDoc.
-
+The checker is tsgo, so behavior is not yet bit-for-bit identical to the JS checker:
+across **37,409 replayed language-service probe units**, **1,231 (3.3%)** differ from
+the pinned stock build — all triaged and attributed. The full breakdown (display
+formatting, result ordering, cross-`.vue` reference residuals, intentional deviations)
+is tracked in
+[#2 — known differences](https://github.com/johnsoncodehk/typescript-native-bridge/issues/2).
 Diagnostics parity (emitted errors) on a large real-world Vue monorepo is exact except
-2 lines. If you hit a difference not listed here, please file an issue with a minimal
-repro.
-
-Performance expectations, from our benchmarks (your repo will differ): cold `vue-tsc -b`
-on a large Vue monorepo runs ~3.0s vs ~4.4–4.7s stock (median); editor steady-state
-completion is ~30–40ms per keystroke vs stock ~10–30ms in the same probe — close to
-stock, still being worked down.
+2 lines. If you hit a difference not listed in the tracker, please file an issue with a
+minimal repro.
 
 ---
 
