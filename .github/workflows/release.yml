@@ -1,0 +1,74 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write # GitHub Release
+  id-token: write # npm provenance / trusted publishing
+
+jobs:
+  publish:
+    runs-on: macos-latest # bridge.dylib is darwin-arm64; build and publish from the same target
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 1
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26" # typescript-go/go.mod
+
+      - name: Verify tag matches package.json version
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          PKG="$(node -p "require('./package.json').version")"
+          if [ "$TAG" != "$PKG" ]; then
+            echo "tag $TAG != package.json version $PKG"
+            exit 1
+          fi
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install typescript submodule dependencies
+        run: npm ci
+        working-directory: typescript
+
+      - name: Install typescript-go submodule dependencies
+        run: npm ci
+        working-directory: typescript-go
+
+      - name: Build js (tsgo native-preview -> vendor)
+        run: npm run build:js
+
+      - name: Build lib (patched TypeScript fork)
+        run: npm run build:lib
+
+      - name: Build bridge (cgo dylib)
+        run: npm run build:bridge
+
+      - name: Gates
+        run: |
+          npm run check:lib
+          npm run check:enums
+          npm run check:sourcefile-guard
+
+      - name: Publish to npm
+        run: npm publish --provenance
+        env:
+          # Empty when the secret is unset: npm then falls back to OIDC trusted publishing.
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Create GitHub Release
+        run: gh release create "${GITHUB_REF_NAME}" --generate-notes --verify-tag
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
