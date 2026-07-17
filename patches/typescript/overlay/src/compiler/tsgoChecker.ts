@@ -415,6 +415,8 @@ function isTsgoBridgeSymbol(symbol: any): boolean {
 let _client: any;
 let _api: any;
 let _sourceFileCache: any;
+/** Previous LS snapshot per opened project — disposed on the next generation flip. */
+const _lastSnapshotByProject = new Map<string, any>();
 // Process-global (see TnbBridgeProcessState.projectCache) — both bundles must
 // see the same Project snapshot per tsconfig.
 const _projectCache: Map<string, any> = tnbBridgeProcessState().projectCache ??= new Map();
@@ -634,7 +636,28 @@ class MiniSourceFileCache {
         return byPath.get(p);
     }
     retainForSnapshot() {}
-    releaseSnapshot() {}
+    /**
+     * Drop every file decoded for a disposed snapshot. Called by the vendored
+     * client (Snapshot.dispose) and by the overlay's generation tracking —
+     * LS generations flip per program rebuild, and without this the cache
+     * holds every generation's decoded RemoteSourceFiles forever (issue #6).
+     * Evicted paths simply re-fetch on demand via the getSourceFile RPC.
+     */
+    releaseSnapshot(snapshotId: any) {
+        const byProj = this.bySnap.get(snapshotId);
+        if (!byProj) return;
+        this.bySnap.delete(snapshotId);
+        // Purge paths no longer present in any live snapshot so has() only
+        // reports live entries; stable .d.ts re-enters via getRetained.
+        if (this.bySnap.size === 0) { this.paths.clear(); return; }
+        const live = new Set<string>();
+        for (const proj of this.bySnap.values()) {
+            for (const byPath of proj.values()) {
+                for (const p of byPath.keys()) live.add(p);
+            }
+        }
+        this.paths = live;
+    }
     clear() { this.bySnap.clear(); this.paths.clear(); this.stableByPath.clear(); }
     has(p: string) { return this.paths.has(p); }
 }
@@ -684,8 +707,25 @@ function ensureBridgeSession(): void {
             // Changed/deleted files invalidate the cross-snapshot stable
             // declaration cache (see MiniSourceFileCache.getRetained).
             if (data?.changes) _sourceFileCache.invalidateChangedPaths(data.changes);
-            const onDispose = () => {};
-            return new _sync.Snapshot(data, _client, _sourceFileCache, toPath, onDispose);
+            const snapshot = new _sync.Snapshot(data, _client, _sourceFileCache, toPath, () => {
+                _sourceFileCache.releaseSnapshot(snapshot.id);
+            });
+            // LS generations flip per program rebuild: dispose the previous
+            // generation of the same project so its decoded RemoteSourceFiles
+            // and Go-side snapshot state are released instead of accumulating
+            // forever (issue #6). Only single-openProject calls are tracked —
+            // build mode (closeParams) keeps its own lifecycle via
+            // releaseStaleBuildSnapshots. structureIsReused compares shape data
+            // (not the old snapshot), so disposing here is safe.
+            const key = merged?.length === 1 ? merged[0] : undefined;
+            if (key) {
+                const prev = _lastSnapshotByProject.get(key);
+                if (prev && prev !== snapshot) {
+                    try { prev.dispose(); } catch { /* already released */ }
+                }
+                _lastSnapshotByProject.set(key, snapshot);
+            }
+            return snapshot;
         },
         close() {
             try { _client.close(); } catch {}
