@@ -69,8 +69,10 @@ const vitest = spawnSync(
 // stats file continuously, so file existence alone only proves startup was
 // reached — a mid/late native crash (NAPI segfault, OOM SIGKILL) leaves a full
 // stats file behind. Vitest always prints a run summary when it finishes; its
-// absence means the process died mid-run.
-const vitestOut = `${vitest.stdout ?? ""}\n${vitest.stderr ?? ""}`;
+// absence means the process died mid-run. Strip ANSI colors first: vitest
+// colorizes its summary in CI (FORCE_COLOR-style environments), which would
+// otherwise break the plain-text match.
+const vitestOut = `${vitest.stdout ?? ""}\n${vitest.stderr ?? ""}`.replace(/\[[0-9;]*m/g, "");
 const vitestFinished = /Test Files\s+\d+\s+(failed|passed)/.test(vitestOut)
 	|| /Tests\s+\d+\s+(failed|passed)/.test(vitestOut);
 if (!vitestFinished) {
