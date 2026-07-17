@@ -1,0 +1,134 @@
+name: nightly
+
+on:
+  schedule:
+    - cron: "23 3 * * *" # UTC, off-peak
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  VOLAR_BRANCH: feat/tnb-migration
+  VOLAR_SHA: 398ac0a71 # vuejs/language-tools@feat/tnb-migration, pinned for reproducibility
+  BASELINE: test/baselines/nav-results-191a373-t5.json
+
+jobs:
+  sim-nav:
+    runs-on: macos-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 1
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26" # typescript-go/go.mod
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install typescript submodule dependencies
+        run: npm ci
+        working-directory: typescript
+
+      - name: Install typescript-go submodule dependencies
+        run: npm ci
+        working-directory: typescript-go
+
+      - name: Build js (tsgo native-preview -> vendor)
+        run: npm run build:js
+
+      - name: Build lib (patched TypeScript fork)
+        run: npm run build:lib
+
+      - name: Build bridge (cgo dylib)
+        run: npm run build:bridge
+
+      - name: Clone volar (cache)
+        id: volar-cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ runner.temp }}/volar
+            ${{ runner.temp }}/volar-stock
+          key: volar-${{ env.VOLAR_SHA }}-v1
+
+      - name: Clone volar
+        if: steps.volar-cache.outputs.cache-hit != 'true'
+        run: |
+          git clone --depth 50 --branch "$VOLAR_BRANCH" https://github.com/vuejs/language-tools.git "$RUNNER_TEMP/volar"
+          git -C "$RUNNER_TEMP/volar" checkout "$VOLAR_SHA"
+
+      - name: Install + build volar
+        if: steps.volar-cache.outputs.cache-hit != 'true'
+        run: |
+          cd "$RUNNER_TEMP/volar"
+          corepack enable
+          pnpm install --frozen-lockfile
+          pnpm run build
+
+      - name: Pack stock typescript
+        if: steps.volar-cache.outputs.cache-hit != 'true'
+        run: |
+          mkdir "$RUNNER_TEMP/volar-stock"
+          cd "$RUNNER_TEMP/volar-stock"
+          npm pack typescript@6.0.3 --silent
+          tar -xzf typescript-6.0.3.tgz
+
+      - name: Link TNB into volar
+        run: ln -sfn "$GITHUB_WORKSPACE" "$RUNNER_TEMP/volar/typescript-native-bridge"
+
+      - name: Run sim-nav (4 shards in parallel)
+        env:
+          VOLAR_ROOT: ${{ runner.temp }}/volar
+          STOCK_TSSERVER_PATH: ${{ runner.temp }}/volar-stock/package/lib/tsserver.js
+        run: |
+          set -u
+          for i in 0 1 2 3; do
+            rm -rf "/tmp/tnb-tools-shard$i"
+            cp -R tools "/tmp/tnb-tools-shard$i"
+          done
+          pids=()
+          for i in 0 1 2 3; do
+            (
+              cd "/tmp/tnb-tools-shard$i"
+              SIM_NAV_SHARD_INDEX=$i SIM_NAV_SHARD_COUNT=4 \
+              SIM_NAV_SKIP_CLASSIFY=1 \
+              SIM_NAV_OUT_JSON="/tmp/tnb-sim-nav-shard$i.json" \
+              SIM_NAV_THROW_FILE="/tmp/tnb-sim-nav-shard$i.throws.jsonl" \
+                node triage-sim-nav-shard.mjs > "/tmp/tnb-sim-nav-shard$i.log" 2>&1
+            ) &
+            pids+=($!)
+          done
+          rc=0
+          for p in "${pids[@]}"; do wait "$p" || rc=1; done
+          for i in 0 1 2 3; do
+            echo "=== shard $i (tail) ==="
+            tail -5 "/tmp/tnb-sim-nav-shard$i.log" || true
+          done
+          exit $rc
+
+      - name: Merge shard results
+        run: node tools/sim-nav-merge.mjs --out /tmp/tnb-sim-nav-merged.json /tmp/tnb-sim-nav-shard0.json /tmp/tnb-sim-nav-shard1.json /tmp/tnb-sim-nav-shard2.json /tmp/tnb-sim-nav-shard3.json
+
+      - name: Check against baseline
+        run: node tools/sim-nav-merge.mjs --baseline "$BASELINE" /tmp/tnb-sim-nav-merged.json
+
+      - name: Upload sim-nav results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sim-nav-results
+          path: /tmp/tnb-sim-nav-merged.json
+          retention-days: 30
+
+      - name: Cleanup harness processes
+        if: always()
+        run: node tools/kill-leaked-harness.mjs || true

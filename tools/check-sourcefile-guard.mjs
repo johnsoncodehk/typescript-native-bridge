@@ -24,6 +24,8 @@ import { fileURLToPath } from "node:url";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const volarCandidates = [
+	// CI / explicit override wins.
+	...(process.env.VOLAR_ROOT ? [path.resolve(process.env.VOLAR_ROOT)] : []),
 	path.resolve(root, "..", "volar", "vue"),
 	path.resolve(root, "..", "..", "volar", "vue"),
 ];

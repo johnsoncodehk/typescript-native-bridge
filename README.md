@@ -280,10 +280,9 @@ pnpm exec vue-tsc -b --noEmit 2>&1 | tee /tmp/tsc.log
 grep -F 'TNB ACTIVE' /tmp/tsc.log || { echo 'TNB not active'; exit 1; }
 ```
 
-**Linux CI:** the published npm artifact ships `bridge.dylib` (macOS arm64) only, and
-`os`/`cpu` gating makes `npm install` refuse other platforms outright. For Linux CI,
-use a source checkout of this repo (`npm run setup`) until per-platform prebuilds ship
-(see [Platform support](#platform-support)).
+**Linux CI:** nothing special — `npm install` automatically pulls the matching bridge
+binary (`@typescript-native-bridge/linux-x64`) as an optional dependency (see
+[Platform support](#platform-support)).
 
 Debug slow runs: `TSGO_PROFILE=1` prints a `[tsgo-profile]` timing summary to stderr on process exit (not a `.cpuprofile` file).
 
@@ -340,16 +339,27 @@ this repo or ensure published artifacts include your platform.
 
 ## Platform support
 
-| OS / arch | Native library | npm artifact |
-|---|---|---|
-| macOS arm64 | `native/bridge.dylib` | ✅ shipped — the only prebuilt platform for now |
-| Linux / Windows / macOS x64 | `bridge.so` / `bridge.dll` / `bridge.dylib` | Not shipped; install is refused by `os`/`cpu` gating |
+The bridge binary ships as per-platform optional dependencies
+(`@typescript-native-bridge/<os>-<arch>`, the esbuild / `@typescript/native-preview`
+model). `npm install typescript-native-bridge` automatically installs only the
+sub-package matching your machine — the main package itself is pure JS:
 
-The loader supports all three library formats, but the **published npm package currently
-contains the macOS arm64 bridge only** — `npm install` on any other platform fails with
-`EBADPLATFORM`. To run elsewhere, build from source (clone with submodules, then
-`npm run setup`; requires Go + a C toolchain). The gating lifts once per-platform
-prebuilds are wired into the release workflow.
+| Platform | Sub-package |
+|---|---|
+| macOS Apple Silicon | `@typescript-native-bridge/darwin-arm64` |
+| macOS Intel | `@typescript-native-bridge/darwin-x64` |
+| Linux x64 | `@typescript-native-bridge/linux-x64` |
+| Linux arm64 | `@typescript-native-bridge/linux-arm64` |
+| Linux arm (32-bit) | `@typescript-native-bridge/linux-arm` |
+| Windows x64 | `@typescript-native-bridge/win32-x64` |
+| Windows arm64 | `@typescript-native-bridge/win32-arm64` |
+
+At runtime the loader resolves the bridge in order: the platform sub-package →
+`<pkg>/native/bridge.*` (dev clone / `link:` install) → in-repo `go build` output.
+On an unsupported platform the sub-package is silently skipped by npm and the loader
+fails with a clear "unsupported platform or missing optional dependency" error —
+build from source there (clone with submodules, then `npm run setup`; requires Go +
+a C toolchain).
 
 ---
 
@@ -475,14 +485,27 @@ git push --follow-tags
 ```
 
 The tag name must be `v` + the exact `package.json` version — CI refuses to publish on
-mismatch. Published artifacts are **macOS arm64 only** (the cgo bridge is built on a
-`macos-latest` runner; `os`/`cpu` in `package.json` blocks installs elsewhere).
+mismatch. The workflow has three jobs: `build-lib` (the platform-independent JS payload,
+on `macos-latest`), `build-bridge` (a 7-leg matrix — native builds for darwin-arm64 /
+darwin-x64 / linux-x64 / linux-arm64, cross-compiles from `ubuntu-latest` for linux-arm /
+win32-x64 / win32-arm64), and `publish`, which assembles the seven
+`@typescript-native-bridge/<os>-<arch>` sub-packages, publishes them, then publishes the
+main package (all with provenance).
 
-One-time npm setup: on npmjs.com → package settings → Trusted Publisher →
-GitHub Actions — org/user `johnsoncodehk`, repository `typescript-native-bridge`,
-workflow `release.yml`, environment empty, allowed action `publish` only. The workflow
-authenticates via OIDC; no token or secret is needed. (Fallback: an `NPM_TOKEN` Actions
-secret with publish rights is used instead when present.)
+One-time npm setup:
+
+1. Create the free npm org **`typescript-native-bridge`** (npmjs.com → Add Organization)
+   — the seven platform sub-packages live under it.
+2. Authentication, pick one:
+   - **Trusted publishing (no token):** package settings → Trusted Publisher → GitHub
+     Actions — org/user `johnsoncodehk`, repository `typescript-native-bridge`, workflow
+     `release.yml`, environment empty, allowed action `publish` only. **Per package:**
+     all 8 packages need this, and a package must exist on npm before its settings page
+     does — squat the seven sub-packages with a `0.0.0` placeholder first (publish a
+     one-file stub from each name).
+   - **Token:** one granular access token covering all 8 packages, stored as the
+     `NPM_TOKEN` Actions secret — simpler with 8 packages; the workflow uses it when
+     present and falls back to OIDC otherwise.
 
 Every version is semver-prerelease-shaped (`-bridge.N.tsgo.x.y.z`), so range installs
 like `^6` never match; consumers install via the `latest` dist-tag (default) or an exact
