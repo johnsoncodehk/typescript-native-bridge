@@ -3777,6 +3777,43 @@ function installRemoteNodeTraversalHooks(): void {
                 get(this: any) { return this.defaultType; },
             });
         }
+        // tsgo's AST stores the question-mark token as `postfixToken` on some
+        // node kinds (PropertySignature/Declaration, Parameter, Method*,
+        // MappedTypeNode, NamedTupleMember) while stock's display machinery
+        // (emitter, symbolDisplay, textChanges) reads `questionToken` — which
+        // the vendored getter resolves only for Go fields literally named
+        // "questionToken" (e.g. ConditionalExpression). Fall back to
+        // `postfixToken` when the native lookup misses, so reused declaration
+        // nodes print `?` — quickinfo reusing a tsgo-materialized declaration
+        // dropped optionality without it (issue #4).
+        const questionTokenDesc = Object.getOwnPropertyDescriptor(RemoteNode.prototype, "questionToken");
+        const origQuestionTokenGet = questionTokenDesc?.get;
+        if (origQuestionTokenGet) {
+            Object.defineProperty(RemoteNode.prototype, "questionToken", {
+                configurable: true,
+                get(this: any) {
+                    return origQuestionTokenGet.call(this) ?? this.postfixToken;
+                },
+            });
+        }
+        // tsgo's nodebuilder leaves RawText empty on synthesized TemplateHead/
+        // Middle/Tail; the decoder surfaces that as rawText="" (present, not
+        // undefined). Stock getLiteralText prefers rawText over text with `??`,
+        // so "" shadows the cooked text and template literal prefixes vanish
+        // (`on${Capitalize<...>}` printed as `${Capitalize<...>}` — issue #4).
+        // Empty raw text means "no raw form": surface it as undefined so stock
+        // printing falls back to the cooked text.
+        const rawTextDesc = Object.getOwnPropertyDescriptor(RemoteNode.prototype, "rawText");
+        const origRawTextGet = rawTextDesc?.get;
+        if (origRawTextGet) {
+            Object.defineProperty(RemoteNode.prototype, "rawText", {
+                configurable: true,
+                get(this: any) {
+                    const v = origRawTextGet.call(this);
+                    return v === "" ? undefined : v;
+                },
+            });
+        }
         // Boundary invariant: file names visible to JS consumers are host
         // paths. RemoteSourceFile.fileName reads the wire string, which is
         // bundled:///libs/lib.*.d.ts for tsgo's embedded libs — leaking that
