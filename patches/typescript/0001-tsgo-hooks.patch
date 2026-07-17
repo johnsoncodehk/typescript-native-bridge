@@ -1,5 +1,5 @@
 diff --git a/src/compiler/_namespaces/ts.ts b/src/compiler/_namespaces/ts.ts
-index bd9684e48..74b178d66 100644
+index bd9684e481..74b178d66f 100644
 --- a/src/compiler/_namespaces/ts.ts
 +++ b/src/compiler/_namespaces/ts.ts
 @@ -29,6 +29,8 @@ export * from "../moduleNameResolver.js";
@@ -12,7 +12,7 @@ index bd9684e48..74b178d66 100644
  export * from "../sourcemap.js";
  export * from "../transformers/utilities.js";
 diff --git a/src/compiler/builder.ts b/src/compiler/builder.ts
-index 34adf6e49..4048af803 100644
+index 34adf6e49b..4048af803d 100644
 --- a/src/compiler/builder.ts
 +++ b/src/compiler/builder.ts
 @@ -260,6 +260,17 @@ export interface BuilderProgramState extends BuilderState, ReusableBuilderProgra
@@ -73,7 +73,7 @@ index 34adf6e49..4048af803 100644
          if (!root.length) return root.push(fileId);
          const last = root[root.length - 1];
 diff --git a/src/compiler/builderState.ts b/src/compiler/builderState.ts
-index 625a64e26..998ae64a3 100644
+index 625a64e266..998ae64a39 100644
 --- a/src/compiler/builderState.ts
 +++ b/src/compiler/builderState.ts
 @@ -302,6 +302,14 @@ export namespace BuilderState {
@@ -143,7 +143,7 @@ index 625a64e26..998ae64a3 100644
          }
  
 diff --git a/src/compiler/checker.ts b/src/compiler/checker.ts
-index 0567712f1..f5ed206ac 100644
+index 0567712f11..f5ed206acf 100644
 --- a/src/compiler/checker.ts
 +++ b/src/compiler/checker.ts
 @@ -1166,8 +1166,16 @@ const enum ReferenceHint {
@@ -166,7 +166,7 @@ index 0567712f1..f5ed206ac 100644
  let nextFlowId = 1;
  
 diff --git a/src/compiler/moduleSpecifiers.ts b/src/compiler/moduleSpecifiers.ts
-index 8860677e6..f5ced72f3 100644
+index 8860677e6c..f5ced72f3d 100644
 --- a/src/compiler/moduleSpecifiers.ts
 +++ b/src/compiler/moduleSpecifiers.ts
 @@ -57,6 +57,7 @@ import {
@@ -241,7 +241,7 @@ index 8860677e6..f5ced72f3 100644
  
  function tryGetModuleNameFromPaths(relativeToBaseUrl: string, paths: MapLike<readonly string[]>, allowedEndings: ModuleSpecifierEnding[], baseDirectory: string, getCanonicalFileName: GetCanonicalFileName, host: ModuleSpecifierResolutionHost, compilerOptions: CompilerOptions): string | undefined {
 diff --git a/src/compiler/parser.ts b/src/compiler/parser.ts
-index 68133ac5f..3effa07d2 100644
+index 68133ac5f1..3effa07d2c 100644
 --- a/src/compiler/parser.ts
 +++ b/src/compiler/parser.ts
 @@ -1250,6 +1250,12 @@ export function forEachChild<T>(node: Node, cbNode: (node: Node) => T | undefine
@@ -258,7 +258,7 @@ index 68133ac5f..3effa07d2 100644
      return fn === undefined ? undefined : fn(node, cbNode, cbNodes);
  }
 diff --git a/src/compiler/program.ts b/src/compiler/program.ts
-index b44a155f0..c631f17df 100644
+index b44a155f01..c631f17df1 100644
 --- a/src/compiler/program.ts
 +++ b/src/compiler/program.ts
 @@ -48,6 +48,7 @@ import {
@@ -308,7 +308,7 @@ index b44a155f0..c631f17df 100644
  
      function emit(
 diff --git a/src/compiler/resolutionCache.ts b/src/compiler/resolutionCache.ts
-index da7c2f288..82243fb29 100644
+index da7c2f2889..82243fb299 100644
 --- a/src/compiler/resolutionCache.ts
 +++ b/src/compiler/resolutionCache.ts
 @@ -72,6 +72,7 @@ import {
@@ -335,7 +335,7 @@ index da7c2f288..82243fb29 100644
              newProgram?.getSourceFiles().forEach(newFile => {
                  const expected = newFile.packageJsonLocations?.length ?? 0;
 diff --git a/src/compiler/tsbuildPublic.ts b/src/compiler/tsbuildPublic.ts
-index 04ca4db0f..e1ed32c9e 100644
+index 04ca4db0fd..e1ed32c9eb 100644
 --- a/src/compiler/tsbuildPublic.ts
 +++ b/src/compiler/tsbuildPublic.ts
 @@ -112,6 +112,7 @@ import {
@@ -379,7 +379,7 @@ index 04ca4db0f..e1ed32c9e 100644
          return {
              type: UpToDateStatusType.OutOfDateBuildInfoWithErrors,
 diff --git a/src/server/editorServices.ts b/src/server/editorServices.ts
-index aa578c7ed..b8fda3805 100644
+index aa578c7ed0..b8fda38051 100644
 --- a/src/server/editorServices.ts
 +++ b/src/server/editorServices.ts
 @@ -2191,7 +2191,47 @@ export class ProjectService {
@@ -455,7 +455,7 @@ index aa578c7ed..b8fda3805 100644
  
      /** @internal */
 diff --git a/src/services/codefixes/importFixes.ts b/src/services/codefixes/importFixes.ts
-index 6034c9dfc..0c9a6178d 100644
+index 6034c9dfc3..0c9a6178db 100644
 --- a/src/services/codefixes/importFixes.ts
 +++ b/src/services/codefixes/importFixes.ts
 @@ -1257,13 +1257,14 @@ function getNewImportFixes(
@@ -477,7 +477,7 @@ index 6034c9dfc..0c9a6178d 100644
      let computedWithoutCacheCount = 0;
      const fixes = flatMap(exportInfo, (exportInfo, i) => {
 diff --git a/src/services/completions.ts b/src/services/completions.ts
-index 28d29136d..c111e369a 100644
+index 28d29136da..c111e369a9 100644
 --- a/src/services/completions.ts
 +++ b/src/services/completions.ts
 @@ -175,6 +175,7 @@ import {
@@ -874,7 +874,7 @@ index 28d29136d..c111e369a 100644
   * True if the first character of `lowercaseCharacters` is the first character
   * of some "word" in `identiferString` (where the string is split into "words"
 diff --git a/src/services/exportInfoMap.ts b/src/services/exportInfoMap.ts
-index dfd00ce2e..a6b14ba3d 100644
+index dfd00ce2e9..a6b14ba3d9 100644
 --- a/src/services/exportInfoMap.ts
 +++ b/src/services/exportInfoMap.ts
 @@ -4,7 +4,10 @@ import {
@@ -2026,7 +2026,7 @@ index dfd00ce2e..a6b14ba3d 100644
      catch (err) {
          // Ensure cache is reset if operation is cancelled
 diff --git a/src/services/services.ts b/src/services/services.ts
-index 9885093ed..0cbb4021a 100644
+index 9885093ed6..0cbb4021a3 100644
 --- a/src/services/services.ts
 +++ b/src/services/services.ts
 @@ -330,6 +330,9 @@ import {
@@ -2087,7 +2087,7 @@ index 9885093ed..0cbb4021a 100644
          }
      }
 diff --git a/src/services/utilities.ts b/src/services/utilities.ts
-index bec7d4b26..927d0cff0 100644
+index bec7d4b266..927d0cff0e 100644
 --- a/src/services/utilities.ts
 +++ b/src/services/utilities.ts
 @@ -107,6 +107,7 @@ import {

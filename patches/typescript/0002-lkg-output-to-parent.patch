@@ -1,5 +1,5 @@
 diff --git a/scripts/produceLKG.mjs b/scripts/produceLKG.mjs
-index 4209a2b9b..1573bb044 100644
+index 4209a2b9b5..1573bb0445 100644
 --- a/scripts/produceLKG.mjs
 +++ b/scripts/produceLKG.mjs
 @@ -10,7 +10,7 @@ const __dirname = path.dirname(__filename);

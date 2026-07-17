@@ -2,8 +2,7 @@
 /**
  * Witness: completionEntryDetails ARRAY form (`entryNames`) — VS Code's actual
  * request shape — must not crash the auto-import slow path for pnpm-store
- * modules (volar test-workspace component-meta/#4577, `ref` from 'vue', whose
- * realpath lives under node_modules/.pnpm/...).
+ * modules (`ref` from 'vue', whose realpath lives under node_modules/.pnpm/...).
  *
  * Why the legacy probes missed it: the singular `entryName` form is rejected
  * by the tsserver handler (returns an empty array), so tools using it (e.g.
@@ -16,7 +15,15 @@
  * ("Debug Failure. False expression." — surfaced via collectAutoImports /
  * getCompletionData in the IDE stack).
  *
- * Checks on component-meta/#4577/main.vue line 12 (`ref|`), TNB vs STOCK:
+ * Fixture history: originally component-meta/#4577/main.vue line 12 (`ref|`).
+ * After the TS 6.0.3 pin upgrade, upstream completions no longer offer
+ * data-bearing auto-import entries at that (.vue type) position — verified
+ * upstream-faithful by swapping volar's inner typescript to pure stock 6.0.3
+ * (same 1045/0-data result), i.e. NOT a bridge regression. Rebased to
+ * component-meta/ts-component/component.ts + appended `const x = ref` line,
+ * where both sides still offer `ref` from "vue" with data.
+ *
+ * Checks (TNB vs STOCK):
  *   1. legacy singular form succeeds (parity baseline)
  *   2. array form with data succeeds (the crash case)
  *   3. array form without data succeeds
@@ -33,10 +40,12 @@ const stockPath = process.env.STOCK_TSSERVER_PATH ?? '/tmp/stock-ts-p3/package/l
 const tnbPath = path.join(volarRoot, 'node_modules/typescript/lib/tsserver.js');
 const pluginProbe = path.join(volarRoot, 'packages/language-server');
 const tw = path.join(volarRoot, 'test-workspace');
-const file = path.join(tw, 'component-meta/#4577/main.vue');
-// main.vue line 12: `ref|` — offset 4 sits right after "ref".
-const line = 12;
-const offset = 4;
+const file = path.join(tw, 'component-meta/ts-component/component.ts');
+// Append an expression-position `ref` usage; completions there offer the
+// auto-import `ref` from 'vue' with data on both TNB and STOCK.
+const fileContent = fs.readFileSync(file, 'utf8') + '\nconst x = ref\n';
+const line = fileContent.split('\n').length - 1;
+const offset = 14;
 
 const harnessArgs = [
 	'--disableAutomaticTypingAcquisition',
@@ -56,7 +65,7 @@ function displayText(parts) {
 async function run(label, tsserverPath, env) {
 	return withTsserver({ tsserverPath, args: harnessArgs, env, deadlineMs: 180_000 }, async ({ send }) => {
 		await send('configure', { preferences: prefs });
-		await send('updateOpen', { changedFiles: [], closedFiles: [], openFiles: [{ file, fileContent: fs.readFileSync(file, 'utf8'), projectRootPath: tw }] });
+		await send('updateOpen', { changedFiles: [], closedFiles: [], openFiles: [{ file, fileContent, projectRootPath: tw }] });
 		const info = await send('completionInfo', { file, line, offset, includeExternalModuleExports: true, includeInsertTextCompletions: true });
 		const e = (info?.body?.entries ?? []).find((x) => x.name === 'ref');
 		if (!e?.data) return { label, fatal: `no data-bearing 'ref' entry (entries=${info?.body?.entries?.length ?? 0})` };

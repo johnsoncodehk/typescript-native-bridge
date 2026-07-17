@@ -1,6 +1,6 @@
 {
 	"name": "typescript-native-bridge",
-	"version": "6.0.0-bridge.1.tsgo.7.0.2",
+	"version": "6.0.3-bridge.0.tsgo.7.0.2",
 	"license": "Apache-2.0",
 	"description": "Build host for a tsgo-backed TypeScript fork: pins upstream `microsoft/TypeScript` and `microsoft/typescript-go` as submodules and materializes a small patch set on top — a tsgoChecker overlay on TypeScript plus a cgo bridge (bridge.dylib) on typescript-go. The built fork (`lib/typescript.js`) is a drop-in `typescript` whose type checker runs in-process on tsgo via the NAPI bridge.",
 	"main": "./lib/typescript.js",
