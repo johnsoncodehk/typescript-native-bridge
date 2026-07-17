@@ -461,13 +461,11 @@ The tag name must be `v` + the exact `package.json` version — CI refuses to pu
 mismatch. Published artifacts are **macOS arm64 only** (the cgo bridge is built on a
 `macos-latest` runner; `os`/`cpu` in `package.json` blocks installs elsewhere).
 
-One-time npm setup — pick one:
-
-- **Trusted publishing (recommended, no token):** on npmjs.com → package settings →
-  Trusted Publisher → GitHub Actions, repo `johnsoncodehk/typescript-native-bridge`,
-  workflow `release.yml`. The workflow authenticates via OIDC.
-- **Token:** create a granular access token with publish rights for the package and add
-  it as the `NPM_TOKEN` Actions secret.
+One-time npm setup: on npmjs.com → package settings → Trusted Publisher →
+GitHub Actions — org/user `johnsoncodehk`, repository `typescript-native-bridge`,
+workflow `release.yml`, environment empty, allowed action `publish` only. The workflow
+authenticates via OIDC; no token or secret is needed. (Fallback: an `NPM_TOKEN` Actions
+secret with publish rights is used instead when present.)
 
 Every version is semver-prerelease-shaped (`-bridge.N.tsgo.x.y.z`), so range installs
 like `^6` never match; consumers install via the `latest` dist-tag (default) or an exact

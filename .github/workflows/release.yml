@@ -27,6 +27,9 @@ jobs:
         with:
           go-version: "1.26" # typescript-go/go.mod
 
+      - name: Ensure npm >= 11.5.1 (trusted publishing)
+        run: npm install -g npm@latest
+
       - name: Verify tag matches package.json version
         run: |
           TAG="${GITHUB_REF_NAME#v}"
