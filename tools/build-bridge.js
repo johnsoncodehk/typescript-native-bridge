@@ -9,15 +9,18 @@ const path = require("path");
 const repoRoot = path.resolve(__dirname, "..");
 const bridgeDir = path.join(repoRoot, "typescript-go", "bridge");
 const nativeDir = path.join(repoRoot, "native");
-const ext = process.platform === "darwin" ? "dylib" : process.platform === "win32" ? "dll" : "so";
+// GOOS (when set, cross-compile) decides the artifact extension; otherwise the host.
+const goos = process.env.GOOS || (process.platform === "win32" ? "windows" : process.platform);
+const ext = goos === "darwin" ? "dylib" : goos === "windows" ? "dll" : "so";
 const outPath = path.join(nativeDir, `bridge.${ext}`);
 
 fs.mkdirSync(nativeDir, { recursive: true });
 
-const r = spawnSync(
-	"go",
-	["build", "-tags=noembed", "-buildmode=c-shared", "-o", outPath, "bridge.go"],
-	{ cwd: bridgeDir, stdio: "inherit" },
-);
+const args = ["build", "-tags=noembed", "-buildmode=c-shared"];
+// TNB_STRIP=1: drop debug symbols for shipped binaries (release matrix).
+if (process.env.TNB_STRIP === "1") args.push("-ldflags=-s -w");
+args.push("-o", outPath, "bridge.go");
+
+const r = spawnSync("go", args, { cwd: bridgeDir, stdio: "inherit" });
 if (r.status !== 0) process.exit(r.status ?? 1);
 console.log(`build-bridge: ${outPath}`);

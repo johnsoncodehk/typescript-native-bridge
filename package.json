@@ -9,12 +9,6 @@
 	"engines": {
 		"node": ">=20.19"
 	},
-	"os": [
-		"darwin"
-	],
-	"cpu": [
-		"arm64"
-	],
 	"publishConfig": {
 		"access": "public"
 	},
@@ -28,7 +22,6 @@
 	"files": [
 		"bin",
 		"lib",
-		"native",
 		"vendor",
 		"NOTICE"
 	],
