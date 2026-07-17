@@ -1152,6 +1152,15 @@ function ensureHostSourceFileModuleRefs(sf: any): void {
                 pushSpec(node.arguments?.[0]);
             }
         }
+        else if (kind === SyntaxKind.JSDocImportTag) {
+            // Stock reaches JSDoc import tags via forEachDynamicImportOrRequireCall
+            // (includeTypeSpaceImports) — the @import module specifier belongs in
+            // file.imports so findModuleReferences matches module-specifier FAR.
+            pushSpec(node.moduleSpecifier);
+        }
+        // forEachChild has no jsDoc slot on statements (stock forEachChildVisitor),
+        // so JSDoc tags are invisible to the plain child walk — descend explicitly.
+        if (Array.isArray(node.jsDoc)) for (const doc of node.jsDoc) walk(doc);
         (ts as any).forEachChild?.(node, walk);
     };
     for (const statement of sf.statements ?? []) walk(statement);
@@ -2248,9 +2257,16 @@ function findHostNodeAtPosition(sf: any, pos: number): any | undefined {
     if (!isHostParsedSourceFile(sf) || typeof pos !== "number") return undefined;
     let best: any;
     function visit(node: any): void {
-        if (pos < node.getStart(sf) || pos >= node.getEnd(sf)) return;
+        // Full-span containment (pos..end), NOT getStart: declarations inside a
+        // JSDoc comment (e.g. @import's ImportSpecifier) sit in leading trivia and
+        // a trivia-skipping lower bound prunes them. jsDoc arrays are not visited
+        // by forEachChild — walk them explicitly (mirrors getNodeAtPosition), and
+        // walk them AFTER forEachChild so a deeper JSDoc hit wins over a shallow
+        // trivia-spanning code child.
+        if (pos < node.pos || pos >= node.end) return;
         best = node;
         ts.forEachChild(node, visit);
+        if (Array.isArray(node.jsDoc)) for (const doc of node.jsDoc) visit(doc);
     }
     visit(sf);
     return best;
@@ -2603,6 +2619,12 @@ function remapDeclarationToHost(decl: any, getHostSf: (fileName: string) => any 
         if (parent.name === hostNode || parent.propertyName === hostNode) {
             return parent;
         }
+    }
+    if (hostNode.kind !== wantKind && hostNode.kind !== wantKindAlt) {
+        // Full-span matching (trivia-aware) can surface a wrong-kind node when the
+        // declaration position lies in a comment/string with no real AST child. A
+        // mismatched "declaration" corrupts scope walks — prefer no remap.
+        return decl;
     }
     return hostNode;
 }
@@ -3022,11 +3044,39 @@ function ensureExportedSymbolModuleParent(
     if (isExternalModuleLikeSymbol(symbol)) {
         const hostMod = resolveHostExternalModuleSymbol(symbol, getHostSf);
         if (hostMod && hostMod !== symbol && sameExternalModuleIdentity(symbol, hostMod)) {
+            mergeAmbientModuleDeclarationsIntoHostModule(symbol, hostMod);
             return hostMod;
         }
     }
 
     return symbol;
+}
+
+/**
+ * Stock's checker merges `declare module "X"` augmentations into the module
+ * symbol's declarations; FAR's getReferencedSymbolsForModule then highlights
+ * each augmentation name literal (references/documentHighlights on any 'vue'
+ * module string) and definition lists the augmentation beside the module
+ * file. The tsgo module symbol carries the augmentation ModuleDeclaration,
+ * but canonicalizing to the host sf.symbol drops it (the host binder bound
+ * the module file alone). Re-attach the host-mapped augmentation declarations
+ * so FAR/definition see them — declarations arrive here already remapped by
+ * remapSymbolDeclarationsToHost; skip any that stayed remote.
+ */
+function mergeAmbientModuleDeclarationsIntoHostModule(fromSymbol: any, hostMod: any): void {
+    let decls: readonly any[] | undefined;
+    try { decls = fromSymbol?.declarations; } catch { return; }
+    if (!decls?.length) return;
+    let hostDecls: any[] | undefined;
+    try { hostDecls = hostMod?.declarations; } catch { return; }
+    if (!Array.isArray(hostDecls)) return;
+    for (const decl of decls) {
+        if (decl?.kind !== SyntaxKind.ModuleDeclaration) continue;
+        if (declarationNeedsHostRemap(decl)) continue; // still remote — not host-navigable
+        if (!decl.name) continue;
+        if (hostDecls.includes(decl)) continue;
+        try { hostDecls.push(decl); } catch { return; }
+    }
 }
 
 function refineHostNavigationSymbol(symbol: any, getHostSf: (fileName: string) => any | undefined): any {
@@ -3081,6 +3131,18 @@ function getHostBoundSymbolAtLocation(node: any): any | undefined {
                             + `nodeText=${JSON.stringify(traceSymNodeText(node, sf))}`,
                         );
                     }
+                    return undefined;
+                }
+                // Import/ExportSpecifier propertyName (`{ default as X }` /
+                // `{ x as y }`): stock resolves the *immediate aliased* export
+                // symbol in the source module (checker.getSymbolAtLocation →
+                // getImmediateAliasedSymbol), not the local alias — refs stay
+                // empty in-file (sim-nav #5067 highlights-extra). Defer to the
+                // tsgo RPC path, which mirrors that resolution.
+                if (
+                    (parent.kind === SyntaxKind.ImportSpecifier || parent.kind === SyntaxKind.ExportSpecifier)
+                    && parent.propertyName === node
+                ) {
                     return undefined;
                 }
                 if (parent.name === node || parent.propertyName === node) {
@@ -3159,9 +3221,46 @@ function convertTsgoDiagnostic(d: any, getSourceFile: (fileName: string) => any)
         relatedInformation: d.relatedInformation?.map((r: any) => convertTsgoDiagnostic(r, getSourceFile)),
     };
 }
+/**
+ * Stock `checkUnusedLocalsAndParameters` rolls a fully-unused single-element
+ * OBJECT binding pattern in a lone variable declaration up to the pattern span
+ * (`const { info } = x` → 6133 on `{ info }`; array elements and multi-element
+ * patterns keep the per-element span). tsgo always reports the element name
+ * span. Widen only the exact stock case: one-element object pattern, single
+ * declaration in the list, and the tsgo span covers exactly the element name.
+ */
+function rollUpUnusedBindingPatternDiagnostic(d: any): void {
+    if (d.code !== 6133 || !d.file || typeof d.start !== "number" || typeof d.length !== "number") return;
+    let sf = d.file;
+    if (!isHostParsedSourceFile(sf)) {
+        // Diagnostic file stubs are lightweight skeletons (no AST). The span
+        // check needs the host-parsed AST — resolve it from the live program
+        // (same lookup refineNavSymbol's getHostBoundSf falls back to).
+        sf = (_hostProgramRef as any)?.getSourceFile?.(d.file.fileName);
+        if (!isHostParsedSourceFile(sf)) return;
+    }
+    let el: any = findHostNodeAtPosition(sf, d.start);
+    while (el && el.kind !== SyntaxKind.BindingElement) el = el.parent;
+    if (!el) return;
+    const name = el.name;
+    if (!name || name.getStart(sf) !== d.start || name.getEnd() !== d.start + d.length) return;
+    const pattern = el.parent;
+    if (!pattern || pattern.kind !== SyntaxKind.ObjectBindingPattern) return;
+    if ((pattern.elements?.length ?? 0) !== 1 || pattern.elements[0] !== el) return;
+    const varDecl = pattern.parent;
+    const list = varDecl?.parent;
+    if (varDecl?.kind !== SyntaxKind.VariableDeclaration || list?.kind !== SyntaxKind.VariableDeclarationList) return;
+    if (list.declarations?.length !== 1) return;
+    d.start = pattern.getStart(sf);
+    d.length = pattern.getEnd() - d.start;
+}
 function mapTsgoDiagnostics(raw: readonly any[] | undefined, getSourceFile: (fileName: string) => any): readonly any[] {
     if (!raw?.length) return [];
-    return raw.map(d => convertTsgoDiagnostic(d, getSourceFile));
+    return raw.map(d => {
+        const converted = convertTsgoDiagnostic(d, getSourceFile);
+        try { rollUpUnusedBindingPatternDiagnostic(converted); } catch { /* best-effort span parity */ }
+        return converted;
+    });
 }
 const BUILTIN_SCRIPT_EXTENSIONS = new Set([".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs", ".json"]);
 /** True for files whose extension needs host (Volar) virtual content (.vue, .mdx, …). */
@@ -4459,6 +4558,56 @@ export function createTsgoProgram(
         return originalPkgDir === "" ? undefined : originalPkgDir + m[3];
     };
 
+    // Stock Program records type-reference-directive resolutions at build time
+    // and findModuleReferences replays them (FAR on a module symbol highlights
+    // each `/// <reference types="…" />` site whose resolution matches). Our
+    // resolutions live on the Go side with no per-directive RPC, so re-derive
+    // the answer from program membership: whatever tsgo resolved is in the
+    // file list, and the file list contains exactly one match for the standard
+    // shapes (`node_modules/<name>.d.ts`, `…/<name>/index.d.ts`, @types, or a
+    // relative directive resolved against the referencing file). Ambiguous or
+    // nonstandard layouts (typesVersions/exports-only packages) fall back to
+    // undefined — the pre-fix behavior — never a wrong answer.
+    const typeRefDirectiveResolutionCache = new Map<string, any>();
+    const resolveTypeReferenceDirectiveInProgram = (name: string, referencingFileName: string): string | undefined => {
+        const matches = new Map<string, string>(); // canonical → host file name
+        const add = (hostFileName: string) => {
+            const canon = canonicalSourceFilePath(hostFileName);
+            if (!matches.has(canon)) matches.set(canon, hostFileName);
+        };
+        if (name.startsWith("./") || name.startsWith("../")) {
+            const dir = referencingFileName.slice(0, referencingFileName.lastIndexOf("/"));
+            const base = `${dir}/${name}`;
+            for (const candidate of [base, `${base}.d.ts`]) {
+                const parts = candidate.split("/");
+                const out: string[] = [];
+                for (const p of parts) {
+                    if (p === ".") continue;
+                    if (p === "..") out.pop();
+                    else out.push(p);
+                }
+                const normalized = out.join("/");
+                for (const fileName of getSourceFileNames()) {
+                    if (canonicalSourceFilePath(fileName) === canonicalSourceFilePath(normalized)) add(fileName);
+                }
+                if (matches.size) break;
+            }
+        }
+        else {
+            const suffixes = [`/node_modules/${name}.d.ts`, `/node_modules/${name}/index.d.ts`, `/node_modules/@types/${name}/index.d.ts`];
+            for (const fileName of getSourceFileNames()) {
+                const canon = canonicalSourceFilePath(fileName);
+                for (const suffix of suffixes) {
+                    if (canon.endsWith(suffix)) {
+                        add(fileName);
+                        break;
+                    }
+                }
+            }
+        }
+        return matches.size === 1 ? [...matches.values()][0] : undefined;
+    };
+
     const thinProgram: any = {
         // Marks this as a tsgo-backed program: its SourceFiles come straight from
         // tsgo and are never acquired via the LanguageService document registry.
@@ -4881,7 +5030,19 @@ export function createTsgoProgram(
             } catch { return undefined; }
         },
         getResolvedTypeReferenceDirective: () => undefined,
-        getResolvedTypeReferenceDirectiveFromTypeReferenceDirective: () => undefined,
+        getResolvedTypeReferenceDirectiveFromTypeReferenceDirective: (ref: any, sourceFile: any) => {
+            const name = ref?.fileName;
+            if (typeof name !== "string" || !name) return undefined;
+            const referencingFileName = String(sourceFile?.fileName ?? "");
+            const key = referencingFileName + "\n" + name;
+            if (typeRefDirectiveResolutionCache.has(key)) return typeRefDirectiveResolutionCache.get(key);
+            const resolvedFileName = resolveTypeReferenceDirectiveInProgram(name, referencingFileName);
+            const result = resolvedFileName
+                ? { resolvedTypeReferenceDirective: { resolvedFileName, primary: true }, failedLookupLocations: [] }
+                : undefined;
+            typeRefDirectiveResolutionCache.set(key, result);
+            return result;
+        },
         getLibFileFromReference: () => undefined,
         forEachResolvedProjectReference: () => undefined,
         getResolvedProjectReferenceByPath: () => undefined,
@@ -10321,7 +10482,7 @@ const _tnbProgramCoverage = {
     getResolvedModule: "stub",
     getResolvedModuleFromModuleSpecifier: "adapter",
     getResolvedTypeReferenceDirective: "stub",
-    getResolvedTypeReferenceDirectiveFromTypeReferenceDirective: "stub",
+    getResolvedTypeReferenceDirectiveFromTypeReferenceDirective: "adapter",
     forEachResolvedModule: "adapter",
     forEachResolvedTypeReferenceDirective: "stub",
     emit: "adapter",
