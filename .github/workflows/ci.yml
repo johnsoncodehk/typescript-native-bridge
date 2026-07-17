@@ -91,6 +91,17 @@ jobs:
       - name: Link TNB into volar
         run: ln -sfn "$GITHUB_WORKSPACE" "$RUNNER_TEMP/volar/typescript-native-bridge"
 
+      - name: sweep-ls-throws
+        env:
+          VOLAR_ROOT: ${{ runner.temp }}/volar
+        run: |
+          # Runs before the witness batch: it regenerates /tmp/tnb-sweep-fixtures
+          # that triage-quickinfo-emptyparity and triage-refs-exportspec read.
+          TNB_TRACE_THROW=1 TNB_TRACE_THROW_FILE=/tmp/tnb-throw-ci.jsonl \
+            node tools/sweep-ls-throws.mjs 2>&1 | tee /tmp/tnb-sweep-ci.log
+          grep -q "correlated throw hits: 0" /tmp/tnb-sweep-ci.log \
+            || { echo "sweep correlated hits != 0"; exit 1; }
+
       - name: Regression witnesses
         env:
           VOLAR_ROOT: ${{ runner.temp }}/volar
@@ -134,15 +145,6 @@ jobs:
             echo "WITNESS FAILURES (${#failed[@]}): ${failed[*]}"
             exit 1
           fi
-
-      - name: sweep-ls-throws
-        env:
-          VOLAR_ROOT: ${{ runner.temp }}/volar
-        run: |
-          TNB_TRACE_THROW=1 TNB_TRACE_THROW_FILE=/tmp/tnb-throw-ci.jsonl \
-            node tools/sweep-ls-throws.mjs 2>&1 | tee /tmp/tnb-sweep-ci.log
-          grep -q "correlated throw hits: 0" /tmp/tnb-sweep-ci.log \
-            || { echo "sweep correlated hits != 0"; exit 1; }
 
       - name: sourcefile-guard
         env:

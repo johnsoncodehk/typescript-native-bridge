@@ -26,7 +26,8 @@ const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..'
 const volarRoot = resolveVolarRoot();
 const tnbPath = process.env.TNB_ORPHAN_TSSERVER
 	?? path.join(volarRoot, 'node_modules/typescript/lib/tsserver.js');
-const stockPath = process.env.STOCK_TSSERVER
+const stockPath = process.env.STOCK_TSSERVER_PATH
+	?? process.env.STOCK_TSSERVER
 	?? '/tmp/stock-ts-p3/package/lib/tsserver.js';
 
 const EXIT_MS = 2000;
