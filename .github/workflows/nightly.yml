@@ -91,14 +91,17 @@ jobs:
           STOCK_TSSERVER_PATH: ${{ runner.temp }}/volar-stock/package/lib/tsserver.js
         run: |
           set -u
+          # Shards need ISOLATED PARENT DIRS: the harness lock file lives at
+          # <toolsDir>/../.tnb-harness.lock, so copies must not share /tmp.
           for i in 0 1 2 3; do
-            rm -rf "/tmp/tnb-tools-shard$i"
-            cp -R tools "/tmp/tnb-tools-shard$i"
+            rm -rf "/tmp/tnb-shard$i"
+            mkdir -p "/tmp/tnb-shard$i"
+            cp -R tools "/tmp/tnb-shard$i/tools"
           done
           pids=()
           for i in 0 1 2 3; do
             (
-              cd "/tmp/tnb-tools-shard$i"
+              cd "/tmp/tnb-shard$i/tools"
               SIM_NAV_SHARD_INDEX=$i SIM_NAV_SHARD_COUNT=4 \
               SIM_NAV_SKIP_CLASSIFY=1 \
               SIM_NAV_OUT_JSON="/tmp/tnb-sim-nav-shard$i.json" \
