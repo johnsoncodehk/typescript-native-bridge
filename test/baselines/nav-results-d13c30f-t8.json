@@ -1,7 +1,7 @@
 {
   "total": 37409,
-  "match": 36196,
-  "diff": 1175,
+  "match": 36215,
+  "diff": 1156,
   "docdiff": 37,
   "diagmsg": 1,
   "skip": 0,
@@ -79,28 +79,6 @@
       "detail": "quickinfo-display/kind",
       "tnb": "{\"success\":true,\"displayString\":\"(property) ComponentOptionsBase.name?: string | undefined\",\"kind\":\"property\",\"documentation\":\"\"}",
       "stock": "{\"success\":true,\"displayString\":\"(property) ComponentOptionsBase<Props, RawBindings, D, C extends ComputedOptions, M extends MethodOptions, Mixin extends ComponentOptionsMixin, Extends extends ComponentOptionsMixin, E extends EmitsOptions, EE extends string = string, Defaults = {}, I extends ComponentInjectOptions = {}, II extends string = string, S extends SlotsType = {}, LC extends Record<string, Component> = {}, Directives extends Record<string, Directive> = {}, Exposed extends string = string, Provide extends ComponentProvideOptions = ComponentProvideOptions, DataVM = any>.name?: string | undefined\",\"kind\":\"property\",\"documentation\":\"\"}"
-    },
-    {
-      "key": "nav:/Users/johnsonchu/Desktop/volar/vue/test-workspace/component-meta/component-name-description/component.vue:12:4:definitionAndBoundSpan",
-      "file": "/Users/johnsonchu/Desktop/volar/vue/test-workspace/component-meta/component-name-description/component.vue",
-      "line": 12,
-      "offset": 4,
-      "cmd": "definitionAndBoundSpan",
-      "detail": "loc-set-mismatch",
-      "locClass": "extra",
-      "tnb": "{\"success\":true,\"locs\":[\"/Users/johnsonchu/Desktop/volar/vue/node_modules/.pnpm/@vue+runtime-core@https+++pkg.pr.new+vuejs+core+@vue+runtime-core@e1bc0eb02e22bc0c236e1471c11d96a368764b72/node_modules/@vue/runtime-core/dist/runtime-core.d.ts|71|5\",\"/Users/johnsonchu/Desktop/volar/vue/test-workspace/component-meta/component-name-description/component.vue|12|4\"]}",
-      "stock": "{\"success\":true,\"locs\":[\"/Users/johnsonchu/Desktop/volar/vue/node_modules/.pnpm/@vue+runtime-core@https+++pkg.pr.new+vuejs+core+@vue+runtime-core@e1bc0eb02e22bc0c236e1471c11d96a368764b72/node_modules/@vue/runtime-core/dist/runtime-core.d.ts|71|5\"]}"
-    },
-    {
-      "key": "nav:/Users/johnsonchu/Desktop/volar/vue/test-workspace/component-meta/component-name-description/component.vue:13:4:definitionAndBoundSpan",
-      "file": "/Users/johnsonchu/Desktop/volar/vue/test-workspace/component-meta/component-name-description/component.vue",
-      "line": 13,
-      "offset": 4,
-      "cmd": "definitionAndBoundSpan",
-      "detail": "loc-set-mismatch",
-      "locClass": "extra",
-      "tnb": "{\"success\":true,\"locs\":[\"/Users/johnsonchu/Desktop/volar/vue/node_modules/.pnpm/@vue+runtime-core@https+++pkg.pr.new+vuejs+core+@vue+runtime-core@e1bc0eb02e22bc0c236e1471c11d96a368764b72/node_modules/@vue/runtime-core/dist/runtime-core.d.ts|72|5\",\"/Users/johnsonchu/Desktop/volar/vue/test-workspace/component-meta/component-name-description/component.vue|13|4\"]}",
-      "stock": "{\"success\":true,\"locs\":[\"/Users/johnsonchu/Desktop/volar/vue/node_modules/.pnpm/@vue+runtime-core@https+++pkg.pr.new+vuejs+core+@vue+runtime-core@e1bc0eb02e22bc0c236e1471c11d96a368764b72/node_modules/@vue/runtime-core/dist/runtime-core.d.ts|72|5\"]}"
     },
     {
       "key": "nav:/Users/johnsonchu/Desktop/volar/vue/test-workspace/component-meta/reference-type-exposed/component-options-api.vue:2:10:quickinfo",
@@ -3335,72 +3313,6 @@
       "detail": "quickinfo-display/kind",
       "tnb": "{\"success\":true,\"displayString\":\"(property) props?: string[] | ComponentObjectPropsOptions<Data> | {\\n    numberDefault: {\\n        type: NumberConstructor;\\n        default: number;\\n    };\\n    objectDefault: {\\n        type: ObjectConstructor;\\n        default: () => {\\n            ...;\\n        };\\n    };\\n    arrayDefault: {\\n        type: ArrayConstructor;\\n        default: () => number[];\\n    };\\n    complexDefault: {\\n        type: ArrayConstructor;\\n        default: (props: any) => never[] | undefined;\\n    };\\n} | undefined\",\"kind\":\"property\",\"documentation\":\"\"}",
       "stock": "{\"success\":true,\"displayString\":\"(property) props?: string[] | ComponentObjectPropsOptions<Data> | {\\n    numberDefault: {\\n        type: NumberConstructor;\\n        default: number;\\n    };\\n    objectDefault: {\\n        type: ObjectConstructor;\\n        default: () => {\\n            foo: string;\\n        };\\n    };\\n    arrayDefault: {\\n        type: ArrayConstructor;\\n        default: () => number[];\\n    };\\n    complexDefault: {\\n        type: ArrayConstructor;\\n        default: (props: any) => never[] | undefined;\\n    };\\n} | undefined\",\"kind\":\"property\",\"documentation\":\"\"}"
-    },
-    {
-      "key": "nav:/Users/johnsonchu/Desktop/volar/vue/test-workspace/component-meta/options-api/component.ts:32:4:definitionAndBoundSpan",
-      "file": "/Users/johnsonchu/Desktop/volar/vue/test-workspace/component-meta/options-api/component.ts",
-      "line": 32,
-      "offset": 4,
-      "cmd": "definitionAndBoundSpan",
-      "detail": "loc-set-mismatch",
-      "locClass": "extra",
-      "tnb": "{\"success\":true,\"locs\":[\"/Users/johnsonchu/Desktop/volar/vue/node_modules/.pnpm/@vue+runtime-core@https+++pkg.pr.new+vuejs+core+@vue+runtime-core@e1bc0eb02e22bc0c236e1471c11d96a368764b72/node_modules/@vue/runtime-core/dist/runtime-core.d.ts|71|5\",\"/Users/johnsonchu/Desktop/volar/vue/test-workspace/component-meta/options-api/component.ts|32|4\"]}",
-      "stock": "{\"success\":true,\"locs\":[\"/Users/johnsonchu/Desktop/volar/vue/node_modules/.pnpm/@vue+runtime-core@https+++pkg.pr.new+vuejs+core+@vue+runtime-core@e1bc0eb02e22bc0c236e1471c11d96a368764b72/node_modules/@vue/runtime-core/dist/runtime-core.d.ts|71|5\"]}"
-    },
-    {
-      "key": "nav:/Users/johnsonchu/Desktop/volar/vue/test-workspace/component-meta/options-api/component.ts:33:4:definitionAndBoundSpan",
-      "file": "/Users/johnsonchu/Desktop/volar/vue/test-workspace/component-meta/options-api/component.ts",
-      "line": 33,
-      "offset": 4,
-      "cmd": "definitionAndBoundSpan",
-      "detail": "loc-set-mismatch",
-      "locClass": "extra",
-      "tnb": "{\"success\":true,\"locs\":[\"/Users/johnsonchu/Desktop/volar/vue/node_modules/.pnpm/@vue+runtime-core@https+++pkg.pr.new+vuejs+core+@vue+runtime-core@e1bc0eb02e22bc0c236e1471c11d96a368764b72/node_modules/@vue/runtime-core/dist/runtime-core.d.ts|73|5\",\"/Users/johnsonchu/Desktop/volar/vue/test-workspace/component-meta/options-api/component.ts|33|4\"]}",
-      "stock": "{\"success\":true,\"locs\":[\"/Users/johnsonchu/Desktop/volar/vue/node_modules/.pnpm/@vue+runtime-core@https+++pkg.pr.new+vuejs+core+@vue+runtime-core@e1bc0eb02e22bc0c236e1471c11d96a368764b72/node_modules/@vue/runtime-core/dist/runtime-core.d.ts|73|5\"]}"
-    },
-    {
-      "key": "nav:/Users/johnsonchu/Desktop/volar/vue/test-workspace/component-meta/options-api/component.ts:48:4:definitionAndBoundSpan",
-      "file": "/Users/johnsonchu/Desktop/volar/vue/test-workspace/component-meta/options-api/component.ts",
-      "line": 48,
-      "offset": 4,
-      "cmd": "definitionAndBoundSpan",
-      "detail": "loc-set-mismatch",
-      "locClass": "extra",
-      "tnb": "{\"success\":true,\"locs\":[\"/Users/johnsonchu/Desktop/volar/vue/node_modules/.pnpm/@vue+runtime-core@https+++pkg.pr.new+vuejs+core+@vue+runtime-core@e1bc0eb02e22bc0c236e1471c11d96a368764b72/node_modules/@vue/runtime-core/dist/runtime-core.d.ts|71|5\",\"/Users/johnsonchu/Desktop/volar/vue/test-workspace/component-meta/options-api/component.ts|48|4\"]}",
-      "stock": "{\"success\":true,\"locs\":[\"/Users/johnsonchu/Desktop/volar/vue/node_modules/.pnpm/@vue+runtime-core@https+++pkg.pr.new+vuejs+core+@vue+runtime-core@e1bc0eb02e22bc0c236e1471c11d96a368764b72/node_modules/@vue/runtime-core/dist/runtime-core.d.ts|71|5\"]}"
-    },
-    {
-      "key": "nav:/Users/johnsonchu/Desktop/volar/vue/test-workspace/component-meta/options-api/component.ts:49:4:definitionAndBoundSpan",
-      "file": "/Users/johnsonchu/Desktop/volar/vue/test-workspace/component-meta/options-api/component.ts",
-      "line": 49,
-      "offset": 4,
-      "cmd": "definitionAndBoundSpan",
-      "detail": "loc-set-mismatch",
-      "locClass": "extra",
-      "tnb": "{\"success\":true,\"locs\":[\"/Users/johnsonchu/Desktop/volar/vue/node_modules/.pnpm/@vue+runtime-core@https+++pkg.pr.new+vuejs+core+@vue+runtime-core@e1bc0eb02e22bc0c236e1471c11d96a368764b72/node_modules/@vue/runtime-core/dist/runtime-core.d.ts|73|5\",\"/Users/johnsonchu/Desktop/volar/vue/test-workspace/component-meta/options-api/component.ts|49|4\"]}",
-      "stock": "{\"success\":true,\"locs\":[\"/Users/johnsonchu/Desktop/volar/vue/node_modules/.pnpm/@vue+runtime-core@https+++pkg.pr.new+vuejs+core+@vue+runtime-core@e1bc0eb02e22bc0c236e1471c11d96a368764b72/node_modules/@vue/runtime-core/dist/runtime-core.d.ts|73|5\"]}"
-    },
-    {
-      "key": "nav:/Users/johnsonchu/Desktop/volar/vue/test-workspace/component-meta/options-api/component.ts:55:4:definitionAndBoundSpan",
-      "file": "/Users/johnsonchu/Desktop/volar/vue/test-workspace/component-meta/options-api/component.ts",
-      "line": 55,
-      "offset": 4,
-      "cmd": "definitionAndBoundSpan",
-      "detail": "loc-set-mismatch",
-      "locClass": "extra",
-      "tnb": "{\"success\":true,\"locs\":[\"/Users/johnsonchu/Desktop/volar/vue/node_modules/.pnpm/@vue+runtime-core@https+++pkg.pr.new+vuejs+core+@vue+runtime-core@e1bc0eb02e22bc0c236e1471c11d96a368764b72/node_modules/@vue/runtime-core/dist/runtime-core.d.ts|71|5\",\"/Users/johnsonchu/Desktop/volar/vue/test-workspace/component-meta/options-api/component.ts|55|4\"]}",
-      "stock": "{\"success\":true,\"locs\":[\"/Users/johnsonchu/Desktop/volar/vue/node_modules/.pnpm/@vue+runtime-core@https+++pkg.pr.new+vuejs+core+@vue+runtime-core@e1bc0eb02e22bc0c236e1471c11d96a368764b72/node_modules/@vue/runtime-core/dist/runtime-core.d.ts|71|5\"]}"
-    },
-    {
-      "key": "nav:/Users/johnsonchu/Desktop/volar/vue/test-workspace/component-meta/options-api/component.ts:56:4:definitionAndBoundSpan",
-      "file": "/Users/johnsonchu/Desktop/volar/vue/test-workspace/component-meta/options-api/component.ts",
-      "line": 56,
-      "offset": 4,
-      "cmd": "definitionAndBoundSpan",
-      "detail": "loc-set-mismatch",
-      "locClass": "extra",
-      "tnb": "{\"success\":true,\"locs\":[\"/Users/johnsonchu/Desktop/volar/vue/node_modules/.pnpm/@vue+runtime-core@https+++pkg.pr.new+vuejs+core+@vue+runtime-core@e1bc0eb02e22bc0c236e1471c11d96a368764b72/node_modules/@vue/runtime-core/dist/runtime-core.d.ts|73|5\",\"/Users/johnsonchu/Desktop/volar/vue/test-workspace/component-meta/options-api/component.ts|56|4\"]}",
-      "stock": "{\"success\":true,\"locs\":[\"/Users/johnsonchu/Desktop/volar/vue/node_modules/.pnpm/@vue+runtime-core@https+++pkg.pr.new+vuejs+core+@vue+runtime-core@e1bc0eb02e22bc0c236e1471c11d96a368764b72/node_modules/@vue/runtime-core/dist/runtime-core.d.ts|73|5\"]}"
     },
     {
       "key": "nav:/Users/johnsonchu/Desktop/volar/vue/test-workspace/component-meta/options-api/component.ts:56:21:references",
@@ -6896,61 +6808,6 @@
       "stock": "{\"success\":true,\"displayString\":\"(property) props?: string[] | ComponentObjectPropsOptions<Data> | {\\n    foo: {\\n        type: StringConstructor;\\n        required: true;\\n    };\\n    bar: {\\n        type: StringConstructor;\\n        default: string;\\n    };\\n    baz: {\\n        type: StringConstructor;\\n    };\\n    xfoo: {\\n        readonly type: StringConstructor;\\n        readonly required: true;\\n    };\\n    xbar: {\\n        readonly type: StringConstructor;\\n        readonly default: \\\"\\\";\\n    };\\n    xbaz: {\\n        readonly type: StringConstructor;\\n    };\\n} | undefined\",\"kind\":\"property\",\"documentation\":\"\"}"
     },
     {
-      "key": "nav:/Users/johnsonchu/Desktop/volar/vue/test-workspace/component-meta/reference-type-props/component-js.vue:8:3:definitionAndBoundSpan",
-      "file": "/Users/johnsonchu/Desktop/volar/vue/test-workspace/component-meta/reference-type-props/component-js.vue",
-      "line": 8,
-      "offset": 3,
-      "cmd": "definitionAndBoundSpan",
-      "detail": "loc-set-mismatch",
-      "locClass": "extra",
-      "tnb": "{\"success\":true,\"locs\":[\"/Users/johnsonchu/Desktop/volar/vue/node_modules/.pnpm/@vue+runtime-core@https+++pkg.pr.new+vuejs+core+@vue+runtime-core@e1bc0eb02e22bc0c236e1471c11d96a368764b72/node_modules/@vue/runtime-core/dist/runtime-core.d.ts|71|5\",\"/Users/johnsonchu/Desktop/volar/vue/test-workspace/component-meta/reference-type-props/component-js.vue|8|3\"]}",
-      "stock": "{\"success\":true,\"locs\":[\"/Users/johnsonchu/Desktop/volar/vue/node_modules/.pnpm/@vue+runtime-core@https+++pkg.pr.new+vuejs+core+@vue+runtime-core@e1bc0eb02e22bc0c236e1471c11d96a368764b72/node_modules/@vue/runtime-core/dist/runtime-core.d.ts|71|5\"]}"
-    },
-    {
-      "key": "nav:/Users/johnsonchu/Desktop/volar/vue/test-workspace/component-meta/reference-type-props/component-js.vue:9:3:definitionAndBoundSpan",
-      "file": "/Users/johnsonchu/Desktop/volar/vue/test-workspace/component-meta/reference-type-props/component-js.vue",
-      "line": 9,
-      "offset": 3,
-      "cmd": "definitionAndBoundSpan",
-      "detail": "loc-set-mismatch",
-      "locClass": "extra",
-      "tnb": "{\"success\":true,\"locs\":[\"/Users/johnsonchu/Desktop/volar/vue/node_modules/.pnpm/@vue+runtime-core@https+++pkg.pr.new+vuejs+core+@vue+runtime-core@e1bc0eb02e22bc0c236e1471c11d96a368764b72/node_modules/@vue/runtime-core/dist/runtime-core.d.ts|72|5\",\"/Users/johnsonchu/Desktop/volar/vue/test-workspace/component-meta/reference-type-props/component-js.vue|9|3\"]}",
-      "stock": "{\"success\":true,\"locs\":[\"/Users/johnsonchu/Desktop/volar/vue/node_modules/.pnpm/@vue+runtime-core@https+++pkg.pr.new+vuejs+core+@vue+runtime-core@e1bc0eb02e22bc0c236e1471c11d96a368764b72/node_modules/@vue/runtime-core/dist/runtime-core.d.ts|72|5\"]}"
-    },
-    {
-      "key": "nav:/Users/johnsonchu/Desktop/volar/vue/test-workspace/component-meta/reference-type-props/component-js.vue:12:3:definitionAndBoundSpan",
-      "file": "/Users/johnsonchu/Desktop/volar/vue/test-workspace/component-meta/reference-type-props/component-js.vue",
-      "line": 12,
-      "offset": 3,
-      "cmd": "definitionAndBoundSpan",
-      "detail": "loc-set-mismatch",
-      "locClass": "extra",
-      "tnb": "{\"success\":true,\"locs\":[\"/Users/johnsonchu/Desktop/volar/vue/node_modules/.pnpm/@vue+runtime-core@https+++pkg.pr.new+vuejs+core+@vue+runtime-core@e1bc0eb02e22bc0c236e1471c11d96a368764b72/node_modules/@vue/runtime-core/dist/runtime-core.d.ts|71|5\",\"/Users/johnsonchu/Desktop/volar/vue/test-workspace/component-meta/reference-type-props/component-js.vue|12|3\"]}",
-      "stock": "{\"success\":true,\"locs\":[\"/Users/johnsonchu/Desktop/volar/vue/node_modules/.pnpm/@vue+runtime-core@https+++pkg.pr.new+vuejs+core+@vue+runtime-core@e1bc0eb02e22bc0c236e1471c11d96a368764b72/node_modules/@vue/runtime-core/dist/runtime-core.d.ts|71|5\"]}"
-    },
-    {
-      "key": "nav:/Users/johnsonchu/Desktop/volar/vue/test-workspace/component-meta/reference-type-props/component-js.vue:13:3:definitionAndBoundSpan",
-      "file": "/Users/johnsonchu/Desktop/volar/vue/test-workspace/component-meta/reference-type-props/component-js.vue",
-      "line": 13,
-      "offset": 3,
-      "cmd": "definitionAndBoundSpan",
-      "detail": "loc-set-mismatch",
-      "locClass": "extra",
-      "tnb": "{\"success\":true,\"locs\":[\"/Users/johnsonchu/Desktop/volar/vue/node_modules/.pnpm/@vue+runtime-core@https+++pkg.pr.new+vuejs+core+@vue+runtime-core@e1bc0eb02e22bc0c236e1471c11d96a368764b72/node_modules/@vue/runtime-core/dist/runtime-core.d.ts|73|5\",\"/Users/johnsonchu/Desktop/volar/vue/test-workspace/component-meta/reference-type-props/component-js.vue|13|3\"]}",
-      "stock": "{\"success\":true,\"locs\":[\"/Users/johnsonchu/Desktop/volar/vue/node_modules/.pnpm/@vue+runtime-core@https+++pkg.pr.new+vuejs+core+@vue+runtime-core@e1bc0eb02e22bc0c236e1471c11d96a368764b72/node_modules/@vue/runtime-core/dist/runtime-core.d.ts|73|5\"]}"
-    },
-    {
-      "key": "nav:/Users/johnsonchu/Desktop/volar/vue/test-workspace/component-meta/reference-type-props/component-js.vue:16:3:definitionAndBoundSpan",
-      "file": "/Users/johnsonchu/Desktop/volar/vue/test-workspace/component-meta/reference-type-props/component-js.vue",
-      "line": 16,
-      "offset": 3,
-      "cmd": "definitionAndBoundSpan",
-      "detail": "loc-set-mismatch",
-      "locClass": "extra",
-      "tnb": "{\"success\":true,\"locs\":[\"/Users/johnsonchu/Desktop/volar/vue/node_modules/.pnpm/@vue+runtime-core@https+++pkg.pr.new+vuejs+core+@vue+runtime-core@e1bc0eb02e22bc0c236e1471c11d96a368764b72/node_modules/@vue/runtime-core/dist/runtime-core.d.ts|71|5\",\"/Users/johnsonchu/Desktop/volar/vue/test-workspace/component-meta/reference-type-props/component-js.vue|16|3\"]}",
-      "stock": "{\"success\":true,\"locs\":[\"/Users/johnsonchu/Desktop/volar/vue/node_modules/.pnpm/@vue+runtime-core@https+++pkg.pr.new+vuejs+core+@vue+runtime-core@e1bc0eb02e22bc0c236e1471c11d96a368764b72/node_modules/@vue/runtime-core/dist/runtime-core.d.ts|71|5\"]}"
-    },
-    {
       "key": "nav:/Users/johnsonchu/Desktop/volar/vue/test-workspace/component-meta/ts-component/component.ts:1:10:quickinfo",
       "file": "/Users/johnsonchu/Desktop/volar/vue/test-workspace/component-meta/ts-component/component.ts",
       "line": 1,
@@ -7962,28 +7819,6 @@
       "detail": "quickinfo-display/kind",
       "tnb": "{\"success\":true,\"displayString\":\"(property) ComponentOptionsBase.components?: Record<string, Component<any, any, any, ComputedOptions, MethodOptions, string[], any>> | {\\n    FooBar: DefineComponent2<{\\n        setup(): {};\\n        data(): {};\\n        ... 16 more ...;\\n        __defaults: unknown;\\n    }>;\\n} | undefined\",\"kind\":\"property\",\"documentation\":\"\"}",
       "stock": "{\"success\":true,\"displayString\":\"(property) ComponentOptionsBase<Readonly<{ fooBar: boolean; } & {} & {}>, {}, {}, {}, {}, {}, {}, string[] | ObjectEmitsOptions | (string[] & ThisType<void>), ... 9 more ..., CreateComponentPublicInstanceWithMixins<...>>.components?: Record<string, Component<any, any, any, ComputedOptions, MethodOptions, string[], any>> | {\\n    FooBar: DefineComponent2<{\\n        setup(): {};\\n        data(): {};\\n        props: {};\\n        computed: {};\\n        methods: {};\\n        mixins: {}[];\\n        extends: {};\\n        emits: string[];\\n        slots: {};\\n        inject: {};\\n        components: {};\\n        directives: {};\\n        provide: {};\\n        expose: string;\\n        __typeProps: unknown;\\n        __typeEmits: unknown;\\n        __typeRefs: {};\\n        __typeEl: any;\\n        __defaults: unknown;\\n    }>;\\n} | undefined\",\"kind\":\"property\",\"documentation\":\"\"}"
-    },
-    {
-      "key": "nav:/Users/johnsonchu/Desktop/volar/vue/test-workspace/tsc/#3374/main.vue:20:4:definitionAndBoundSpan",
-      "file": "/Users/johnsonchu/Desktop/volar/vue/test-workspace/tsc/#3374/main.vue",
-      "line": 20,
-      "offset": 4,
-      "cmd": "definitionAndBoundSpan",
-      "detail": "loc-set-mismatch",
-      "locClass": "extra",
-      "tnb": "{\"success\":true,\"locs\":[\"/Users/johnsonchu/Desktop/volar/vue/node_modules/.pnpm/@vue+runtime-core@https+++pkg.pr.new+vuejs+core+@vue+runtime-core@e1bc0eb02e22bc0c236e1471c11d96a368764b72/node_modules/@vue/runtime-core/dist/runtime-core.d.ts|71|5\",\"/Users/johnsonchu/Desktop/volar/vue/test-workspace/tsc/#3374/main.vue|20|4\"]}",
-      "stock": "{\"success\":true,\"locs\":[\"/Users/johnsonchu/Desktop/volar/vue/node_modules/.pnpm/@vue+runtime-core@https+++pkg.pr.new+vuejs+core+@vue+runtime-core@e1bc0eb02e22bc0c236e1471c11d96a368764b72/node_modules/@vue/runtime-core/dist/runtime-core.d.ts|71|5\"]}"
-    },
-    {
-      "key": "nav:/Users/johnsonchu/Desktop/volar/vue/test-workspace/tsc/#3374/main.vue:21:4:definitionAndBoundSpan",
-      "file": "/Users/johnsonchu/Desktop/volar/vue/test-workspace/tsc/#3374/main.vue",
-      "line": 21,
-      "offset": 4,
-      "cmd": "definitionAndBoundSpan",
-      "detail": "loc-set-mismatch",
-      "locClass": "extra",
-      "tnb": "{\"success\":true,\"locs\":[\"/Users/johnsonchu/Desktop/volar/vue/node_modules/.pnpm/@vue+runtime-core@https+++pkg.pr.new+vuejs+core+@vue+runtime-core@e1bc0eb02e22bc0c236e1471c11d96a368764b72/node_modules/@vue/runtime-core/dist/runtime-core.d.ts|73|5\",\"/Users/johnsonchu/Desktop/volar/vue/test-workspace/tsc/#3374/main.vue|21|4\"]}",
-      "stock": "{\"success\":true,\"locs\":[\"/Users/johnsonchu/Desktop/volar/vue/node_modules/.pnpm/@vue+runtime-core@https+++pkg.pr.new+vuejs+core+@vue+runtime-core@e1bc0eb02e22bc0c236e1471c11d96a368764b72/node_modules/@vue/runtime-core/dist/runtime-core.d.ts|73|5\"]}"
     },
     {
       "key": "nav:/Users/johnsonchu/Desktop/volar/vue/test-workspace/tsc/#3476/main.vue:7:10:quickinfo",
@@ -9695,28 +9530,6 @@
       "detail": "quickinfo-display/kind",
       "tnb": "{\"success\":true,\"displayString\":\"(property) ComponentOptionsBase.name?: string | undefined\",\"kind\":\"property\",\"documentation\":\"\"}",
       "stock": "{\"success\":true,\"displayString\":\"(property) ComponentOptionsBase<Props, RawBindings, D, C extends ComputedOptions, M extends MethodOptions, Mixin extends ComponentOptionsMixin, Extends extends ComponentOptionsMixin, E extends EmitsOptions, EE extends string = string, Defaults = {}, I extends ComponentInjectOptions = {}, II extends string = string, S extends SlotsType = {}, LC extends Record<string, Component> = {}, Directives extends Record<string, Directive> = {}, Exposed extends string = string, Provide extends ComponentProvideOptions = ComponentProvideOptions, DataVM = any>.name?: string | undefined\",\"kind\":\"property\",\"documentation\":\"\"}"
-    },
-    {
-      "key": "nav:/Users/johnsonchu/Desktop/volar/vue/test-workspace/component-meta/component-name-description/component-ts.ts:13:4:definitionAndBoundSpan",
-      "file": "/Users/johnsonchu/Desktop/volar/vue/test-workspace/component-meta/component-name-description/component-ts.ts",
-      "line": 13,
-      "offset": 4,
-      "cmd": "definitionAndBoundSpan",
-      "detail": "loc-set-mismatch",
-      "locClass": "extra",
-      "tnb": "{\"success\":true,\"locs\":[\"/Users/johnsonchu/Desktop/volar/vue/node_modules/.pnpm/@vue+runtime-core@https+++pkg.pr.new+vuejs+core+@vue+runtime-core@e1bc0eb02e22bc0c236e1471c11d96a368764b72/node_modules/@vue/runtime-core/dist/runtime-core.d.ts|71|5\",\"/Users/johnsonchu/Desktop/volar/vue/test-workspace/component-meta/component-name-description/component-ts.ts|13|4\"]}",
-      "stock": "{\"success\":true,\"locs\":[\"/Users/johnsonchu/Desktop/volar/vue/node_modules/.pnpm/@vue+runtime-core@https+++pkg.pr.new+vuejs+core+@vue+runtime-core@e1bc0eb02e22bc0c236e1471c11d96a368764b72/node_modules/@vue/runtime-core/dist/runtime-core.d.ts|71|5\"]}"
-    },
-    {
-      "key": "nav:/Users/johnsonchu/Desktop/volar/vue/test-workspace/component-meta/component-name-description/component-ts.ts:14:4:definitionAndBoundSpan",
-      "file": "/Users/johnsonchu/Desktop/volar/vue/test-workspace/component-meta/component-name-description/component-ts.ts",
-      "line": 14,
-      "offset": 4,
-      "cmd": "definitionAndBoundSpan",
-      "detail": "loc-set-mismatch",
-      "locClass": "extra",
-      "tnb": "{\"success\":true,\"locs\":[\"/Users/johnsonchu/Desktop/volar/vue/node_modules/.pnpm/@vue+runtime-core@https+++pkg.pr.new+vuejs+core+@vue+runtime-core@e1bc0eb02e22bc0c236e1471c11d96a368764b72/node_modules/@vue/runtime-core/dist/runtime-core.d.ts|72|5\",\"/Users/johnsonchu/Desktop/volar/vue/test-workspace/component-meta/component-name-description/component-ts.ts|14|4\"]}",
-      "stock": "{\"success\":true,\"locs\":[\"/Users/johnsonchu/Desktop/volar/vue/node_modules/.pnpm/@vue+runtime-core@https+++pkg.pr.new+vuejs+core+@vue+runtime-core@e1bc0eb02e22bc0c236e1471c11d96a368764b72/node_modules/@vue/runtime-core/dist/runtime-core.d.ts|72|5\"]}"
     },
     {
       "key": "nav:/Users/johnsonchu/Desktop/volar/vue/test-workspace/component-meta/reference-type-events/my-events.ts:6:37:references",
@@ -11761,28 +11574,6 @@
       "stock": "{\"success\":true,\"displayString\":\"(alias) defineComponent<unknown, unknown, {}, any, unknown, {\\n    strokeWidth: {\\n        type: StringConstructor;\\n        required: true;\\n    };\\n}, string[], {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, string, string, string, string, {\\n    strokeWidth: {\\n        type: StringConstructor;\\n        required: true;\\n    };\\n}, string[], {}, (event: string, ...args: any[]) => void, Readonly<{\\n    strokeWidth: string;\\n} & {} & {}>>(options: {\\n    props?: string[] | ComponentObjectPropsOptions<Data> | {\\n        strokeWidth: {\\n            type: StringConstructor;\\n            required: true;\\n        };\\n    } | undefined;\\n    __typeProps?: unknown;\\n    __typeEmits?: unknown;\\n    __typeRefs?: {} | undefined;\\n    __typeEl?: any;\\n    __defaults?: unknown;\\n} & ComponentOptionsBase<...> & ThisType<...>): DefineComponent2<...> (+2 overloads)\\nimport defineComponent\",\"kind\":\"alias\",\"documentation\":\"\"}"
     },
     {
-      "key": "nav:/Users/johnsonchu/Desktop/volar/vue/test-workspace/tsc/dataAttributes/main.vue:17:18:definitionAndBoundSpan",
-      "file": "/Users/johnsonchu/Desktop/volar/vue/test-workspace/tsc/dataAttributes/main.vue",
-      "line": 17,
-      "offset": 18,
-      "cmd": "definitionAndBoundSpan",
-      "detail": "loc-set-mismatch",
-      "locClass": "extra",
-      "tnb": "{\"success\":true,\"locs\":[\"/Users/johnsonchu/Desktop/volar/vue/node_modules/.pnpm/@vue+runtime-core@https+++pkg.pr.new+vuejs+core+@vue+runtime-core@e1bc0eb02e22bc0c236e1471c11d96a368764b72/node_modules/@vue/runtime-core/dist/runtime-core.d.ts|71|5\",\"/Users/johnsonchu/Desktop/volar/vue/test-workspace/tsc/dataAttributes/main.vue|17|18\"]}",
-      "stock": "{\"success\":true,\"locs\":[\"/Users/johnsonchu/Desktop/volar/vue/node_modules/.pnpm/@vue+runtime-core@https+++pkg.pr.new+vuejs+core+@vue+runtime-core@e1bc0eb02e22bc0c236e1471c11d96a368764b72/node_modules/@vue/runtime-core/dist/runtime-core.d.ts|71|5\"]}"
-    },
-    {
-      "key": "nav:/Users/johnsonchu/Desktop/volar/vue/test-workspace/tsc/dataAttributes/main.vue:17:32:definitionAndBoundSpan",
-      "file": "/Users/johnsonchu/Desktop/volar/vue/test-workspace/tsc/dataAttributes/main.vue",
-      "line": 17,
-      "offset": 32,
-      "cmd": "definitionAndBoundSpan",
-      "detail": "loc-set-mismatch",
-      "locClass": "extra",
-      "tnb": "{\"success\":true,\"locs\":[\"/Users/johnsonchu/Desktop/volar/vue/node_modules/.pnpm/@vue+runtime-core@https+++pkg.pr.new+vuejs+core+@vue+runtime-core@e1bc0eb02e22bc0c236e1471c11d96a368764b72/node_modules/@vue/runtime-core/dist/runtime-core.d.ts|72|5\",\"/Users/johnsonchu/Desktop/volar/vue/test-workspace/tsc/dataAttributes/main.vue|17|32\"]}",
-      "stock": "{\"success\":true,\"locs\":[\"/Users/johnsonchu/Desktop/volar/vue/node_modules/.pnpm/@vue+runtime-core@https+++pkg.pr.new+vuejs+core+@vue+runtime-core@e1bc0eb02e22bc0c236e1471c11d96a368764b72/node_modules/@vue/runtime-core/dist/runtime-core.d.ts|72|5\"]}"
-    },
-    {
       "key": "nav:/Users/johnsonchu/Desktop/volar/vue/test-workspace/tsc/defineExpose/main.vue:5:11:quickinfo",
       "file": "/Users/johnsonchu/Desktop/volar/vue/test-workspace/tsc/defineExpose/main.vue",
       "line": 5,
@@ -12528,5 +12319,5 @@
     "/tmp/tnb-sim-nav-shard2.json",
     "/tmp/tnb-sim-nav-shard3.json"
   ],
-  "summaryLine": "SUMMARY total=37409 match=36196 diff=1175 docdiff=37 diagmsg=1 skip=0"
+  "summaryLine": "SUMMARY total=37409 match=36215 diff=1156 docdiff=37 diagmsg=1 skip=0"
 }
