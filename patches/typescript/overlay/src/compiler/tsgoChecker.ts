@@ -4477,16 +4477,17 @@ export function createTsgoProgram(
         // Default libs (lib.*.d.ts): stock LS token walks (FAR/highlights/rename)
         // traverse program.getSourceFiles() and surface declaration entries in
         // lib files; the bridge's never-host-parse rule dropped them from the
-        // walk (sim-nav refs-missing cluster). Under tsserver (projectService)
-        // host-parse once per content version and reuse via the stable cache —
-        // lib content is fixed per install, same rule as node_modules .d.ts.
-        // createBoundHostSourceFile returns undefined on empty text → fall
-        // through to the tsgo-backed skeleton below (checker RPC unaffected).
-        // TNB_LIB_SKELETON=1 (memory experiment): skip the host parse and use
-        // the tsgo-backed skeleton for declaration files — the RemoteNode view
-        // already carries statements/positions for LS token walks, at a small
-        // fraction of the host-AST memory (issue #6).
-        if (softPMaterializeAllForImportTracker && isHostLibFile(hostFileName) && process.env.TNB_LIB_SKELETON !== "1") {
+        // walk (sim-nav refs-missing cluster). Bundled libs are served via the
+        // tsgo-backed skeleton below by default (issue #6): the RemoteNode view
+        // carries statements/positions for LS token walks at a small fraction
+        // of the host-AST memory, with getNamedDeclarations / getStart /
+        // operator-keyword / jsDoc children patched to stock shape in
+        // installRemoteNodeTraversalHooks. TNB_LIB_SKELETON=0 restores the
+        // previous behavior (host-parse once per content version, reuse via
+        // the stable cache — lib content is fixed per install, same rule as
+        // node_modules .d.ts). createBoundHostSourceFile returns undefined on
+        // empty text → fall through to the tsgo-backed skeleton below.
+        if (softPMaterializeAllForImportTracker && isHostLibFile(hostFileName) && process.env.TNB_LIB_SKELETON === "0") {
             const libText = host?.readFile?.(hostFileName) ?? "";
             const hostSf = createBoundHostSourceFile(hostFileName, fileName, libText);
             if (hostSf) {
