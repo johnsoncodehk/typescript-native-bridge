@@ -68,9 +68,12 @@ jobs:
       matrix:
         include:
           - { target: darwin-arm64, runner: macos-latest }
-          # macos-13 (Intel) was retired by GitHub in 2025 — jobs on it queue
-          # forever. macos-15-intel is the current Intel runner label.
-          - { target: darwin-x64, runner: macos-15-intel }
+          # darwin-x64 cross-compiles on the arm64 runner (clang -arch x86_64):
+          # GitHub's Intel pool (macos-13 retired 2025; macos-15-intel) is tiny
+          # and routinely congested — depending on it makes releases hang on
+          # queue capacity. Verified locally: Mach-O x86_64 dylib out of an
+          # arm64 Mac with CGO_ENABLED=1 GOOS=darwin GOARCH=amd64.
+          - { target: darwin-x64, runner: macos-latest, goos: darwin, goarch: amd64, cc: clang, cgo_cflags: "-arch x86_64", cgo_ldflags: "-arch x86_64" }
           - { target: linux-x64, runner: ubuntu-latest }
           - { target: linux-arm64, runner: ubuntu-24.04-arm }
           - { target: linux-arm, runner: ubuntu-latest, goos: linux, goarch: arm, goarm: "7", cc: arm-linux-gnueabihf-gcc, apt: gcc-arm-linux-gnueabihf }
@@ -113,6 +116,8 @@ jobs:
           GOARCH: ${{ matrix.goarch }}
           GOARM: ${{ matrix.goarm }}
           CC: ${{ matrix.cc }}
+          CGO_CFLAGS: ${{ matrix.cgo_cflags }}
+          CGO_LDFLAGS: ${{ matrix.cgo_ldflags }}
           CGO_ENABLED: 1
           TNB_STRIP: 1
 
