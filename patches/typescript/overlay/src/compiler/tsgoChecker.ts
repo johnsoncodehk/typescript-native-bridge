@@ -3779,10 +3779,30 @@ function installRemoteNodeTraversalHooks(): void {
         if (!RemoteNode?.prototype || typeof RemoteNode.prototype.forEachChild !== "function") return;
         if (typeof RemoteNode.prototype.getChildren !== "function") {
             RemoteNode.prototype.getChildren = function (this: any, _sourceFile?: any) {
-                const children: any[] = [];
+                // Stock getChildren includes jsDoc children (forEachChild does
+                // not) — FAR follows {@link} references inside JSDoc comments
+                // (sim-nav lib.es2015.iterable {@link Iterator} cluster, #6).
+                const children: any[] = this.jsDoc ? [...this.jsDoc] : [];
+                const jsDocCount = children.length;
                 // RemoteNode.forEachChild stops when the visitor returns truthy;
                 // Array.push does, so token walks must not return push's length.
                 this.forEachChild((child: any) => { children.push(child); });
+                // Stock children include the leading operator keyword token of
+                // TypeQuery (`typeof x`)/TypeOperator (`keyof T`)/InferType
+                // (`infer U`); tsgo encodes the operator as a scalar (or implies
+                // it from the node kind) and emits no child token, so token
+                // walks (getTokenAtPosition ← FAR keyword references) can never
+                // land on the keyword and typeof refs vanish from lib files
+                // (sim-nav typeof-keyword cluster, issue #6). Synthesize it.
+                // Position order is jsDoc < keyword < real children; the
+                // token's pos is the parent's (first-child convention), so it
+                // must sit after jsDoc to keep child ends ascending for
+                // getTokenAtPosition's binary search.
+                const kwKind = tnbLeadingOperatorKeywordKind(this);
+                if (kwKind !== undefined) {
+                    const token = tnbSynthesizeKeywordToken(this, kwKind);
+                    if (token) children.splice(jsDocCount, 0, token);
+                }
                 return children;
             };
         }
@@ -3815,6 +3835,36 @@ function installRemoteNodeTraversalHooks(): void {
                 return this.getChildren(sourceFile).length;
             };
         }
+        // RemoteNode.getStart delegates to the vendored getTokenPosOfNode,
+        // which classifies `node.kind` against TSGO SyntaxKind — but `kind`
+        // is the fork-remapped getter (patchRemoteNodeKinds), and fork
+        // StringLiteral(11) collides with tsgo JsxText(11). String literals
+        // then take the JsxText branch (stopAtComments=true), so a literal
+        // whose leading trivia contains a comment (e.g. a string-literal
+        // property name preceded by JSDoc) gets a getStart INSIDE the comment
+        // — references on such lib declarations report the comment line
+        // (sim-nav loc-set-mismatch cluster). Re-implement getStart with
+        // _rawKind/rawFlags checks (issue #6).
+        try {
+            const astMod = require(pathMod.join(getNativePreviewDir(), "dist", "ast", "index.js"));
+            const { skipTrivia, isJSDocNodeKind, SyntaxKind: TsgoSyntaxKind, NodeFlags: TsgoNodeFlags } = astMod;
+            const getTokenPosRaw = (node: any, sourceFile: any, includeJSDoc: boolean | undefined): number => {
+                // nodeIsMissing
+                if (node.pos === node.end && node.pos >= 0 && node._rawKind !== TsgoSyntaxKind.EndOfFile) {
+                    return node.pos;
+                }
+                if (isJSDocNodeKind(node._rawKind) || node._rawKind === TsgoSyntaxKind.JsxText) {
+                    return skipTrivia(sourceFile.text, node.pos, /*stopAfterLineBreak*/ false, /*stopAtComments*/ true);
+                }
+                if (includeJSDoc && node.jsDoc && node.jsDoc.length > 0) {
+                    return getTokenPosRaw(node.jsDoc[0], sourceFile, /*includeJSDoc*/ false);
+                }
+                return skipTrivia(sourceFile.text, node.pos, /*stopAfterLineBreak*/ false, /*stopAtComments*/ false, /*inJSDoc*/ !!(node._rawFlags & TsgoNodeFlags.JSDoc));
+            };
+            RemoteNode.prototype.getStart = function (this: any, sourceFile?: any, includeJsDocComment?: boolean): number {
+                return getTokenPosRaw(this, sourceFile ?? this.getSourceFile(), includeJsDocComment);
+            };
+        } catch { /* ast module layout changed — keep vendored getStart */ }
         // tsgo names TypeParameterDeclaration's default `defaultType` (`default`
         // is a Go keyword); stock consumers read `.default` (emitter's
         // emitTypeParameter prints `= D`, services read it for defaults).
@@ -3880,8 +3930,227 @@ function installRemoteNodeTraversalHooks(): void {
                 get(this: any) { return toHostFileName(rawGet.call(this)); },
             });
         }
+        // services SourceFileObject.getNamedDeclarations — navto (and FAR's
+        // getDeclarationOfName) call it on EVERY program source file. Under
+        // TNB_LIB_SKELETON bundled libs are RemoteSourceFiles, so the method
+        // must exist here; the result holds RemoteNode handles (cheap) instead
+        // of a host AST. Mirror of services.ts computeNamedDeclarations, but
+        // traversal uses the RemoteNode-native forEachChild (the stock
+        // ts.forEachChild per-kind property reader works too, native is one
+        // hop). `.symbol` is undefined on RemoteNodes — the overload-group
+        // merge then treats same-parent same-name functions as one group,
+        // which declaration merging in .d.ts guarantees anyway.
+        if (RemoteSourceFile?.prototype && typeof RemoteSourceFile.prototype.getNamedDeclarations !== "function") {
+            RemoteSourceFile.prototype.getNamedDeclarations = function (this: any) {
+                if (!this.namedDeclarations) {
+                    this.namedDeclarations = tnbComputeNamedDeclarations(this);
+                }
+                return this.namedDeclarations;
+            };
+        }
         proc.remoteNodeTraversalPatched = true;
     } catch { /* native-preview not built yet */ }
+}
+
+/** Keyword kind of the leading operator token that stock exposes as a child but tsgo does not. */
+function tnbLeadingOperatorKeywordKind(node: any): number | undefined {
+    switch (node.kind) {
+        case SyntaxKind.TypeQuery:
+            return SyntaxKind.TypeOfKeyword;
+        case SyntaxKind.InferType:
+            return SyntaxKind.InferKeyword;
+        case SyntaxKind.TypeOperator: {
+            // `operator` is remapped to fork kinds by patchRemoteNodeKinds.
+            const op = node.operator;
+            return typeof op === "number" ? op : undefined;
+        }
+    }
+    return undefined;
+}
+
+/** Minimal token-node for a leading operator keyword — mirrors stock's first-child token shape. */
+function tnbSynthesizeKeywordToken(parent: any, kind: number): any | undefined {
+    const text = ts.tokenToString(kind);
+    if (!text) return undefined;
+    const start = parent.getStart();
+    const end = start + text.length;
+    return {
+        kind,
+        pos: parent.pos,
+        end,
+        parent,
+        flags: 0,
+        getStart: () => start,
+        getEnd: () => end,
+        getWidth: () => text.length,
+        getFullStart: () => parent.pos,
+        getFullWidth: () => end - parent.pos,
+        getChildren: () => [],
+        forEachChild: () => undefined,
+        getChildCount: () => 0,
+        getSourceFile: () => parent.getSourceFile?.(),
+        getText: () => text,
+        getFullText: () => text,
+    };
+}
+
+/** services.ts computeNamedDeclarations over a RemoteNode tree (compiler-layer helpers only). */
+function tnbComputeNamedDeclarations(sourceFile: any): Map<string, any[]> {
+    const result = new Map<string, any[]>();
+    sourceFile.forEachChild(visit);
+    return result;
+
+    function addDeclaration(declaration: any): void {
+        const name = getDeclarationName(declaration);
+        if (name) {
+            const declarations = result.get(name);
+            if (declarations) declarations.push(declaration);
+            else result.set(name, [declaration]);
+        }
+    }
+
+    function getDeclarations(name: string): any[] {
+        let declarations = result.get(name);
+        if (!declarations) {
+            result.set(name, declarations = []);
+        }
+        return declarations;
+    }
+
+    function getNameFromPropertyName(name: any): string | undefined {
+        return name.kind === SyntaxKind.ComputedPropertyName
+            ? (ts.isStringOrNumericLiteralLike(name.expression) ? name.expression.text : undefined)
+            : ts.isPrivateIdentifier(name) ? ts.idText(name) : ts.getTextOfIdentifierOrLiteral(name);
+    }
+
+    function getDeclarationName(declaration: any): string | undefined {
+        const name = ts.getNonAssignedNameOfDeclaration(declaration);
+        return name && (ts.isComputedPropertyName(name) && ts.isPropertyAccessExpression(name.expression) ? (name.expression.name as any).text
+            : ts.isPropertyName(name) ? getNameFromPropertyName(name) : undefined);
+    }
+
+    function forEachChildOf(node: any): void {
+        // RemoteNode.forEachChild short-circuits on a truthy visitor return;
+        // visit returns void, so a bare pass-through is safe.
+        node.forEachChild(visit);
+    }
+
+    function visit(node: any): void {
+        switch (node.kind) {
+            case SyntaxKind.FunctionDeclaration:
+            case SyntaxKind.FunctionExpression:
+            case SyntaxKind.MethodDeclaration:
+            case SyntaxKind.MethodSignature: {
+                const declarationName = getDeclarationName(node);
+                if (declarationName) {
+                    const declarations = getDeclarations(declarationName);
+                    const lastDeclaration = declarations[declarations.length - 1];
+                    // Check whether this declaration belongs to an "overload group".
+                    if (lastDeclaration && node.parent === lastDeclaration.parent && node.symbol === lastDeclaration.symbol) {
+                        // Overwrite the last declaration if it was an overload
+                        // and this one is an implementation.
+                        if (node.body && !lastDeclaration.body) {
+                            declarations[declarations.length - 1] = node;
+                        }
+                    }
+                    else {
+                        declarations.push(node);
+                    }
+                }
+                forEachChildOf(node);
+                break;
+            }
+
+            case SyntaxKind.ClassDeclaration:
+            case SyntaxKind.ClassExpression:
+            case SyntaxKind.InterfaceDeclaration:
+            case SyntaxKind.TypeAliasDeclaration:
+            case SyntaxKind.EnumDeclaration:
+            case SyntaxKind.ModuleDeclaration:
+            case SyntaxKind.ImportEqualsDeclaration:
+            case SyntaxKind.ExportSpecifier:
+            case SyntaxKind.ImportSpecifier:
+            case SyntaxKind.ImportClause:
+            case SyntaxKind.NamespaceImport:
+            case SyntaxKind.GetAccessor:
+            case SyntaxKind.SetAccessor:
+            case SyntaxKind.TypeLiteral:
+                addDeclaration(node);
+                forEachChildOf(node);
+                break;
+
+            case SyntaxKind.Parameter:
+                // Only consider parameter properties
+                if (!ts.hasSyntacticModifier(node, ModifierFlags.ParameterPropertyModifier)) {
+                    break;
+                }
+            // falls through
+
+            case SyntaxKind.VariableDeclaration:
+            case SyntaxKind.BindingElement: {
+                if (ts.isBindingPattern(node.name)) {
+                    forEachChildOf(node.name);
+                    break;
+                }
+                if (node.initializer) {
+                    visit(node.initializer);
+                }
+            }
+            // falls through
+
+            case SyntaxKind.EnumMember:
+            case SyntaxKind.PropertyDeclaration:
+            case SyntaxKind.PropertySignature:
+                addDeclaration(node);
+                break;
+
+            case SyntaxKind.ExportDeclaration:
+                // Handle named exports case e.g.:
+                //    export {a, b as B} from "mod";
+                if (node.exportClause) {
+                    if (ts.isNamedExports(node.exportClause)) {
+                        for (const element of node.exportClause.elements ?? []) visit(element);
+                    }
+                    else {
+                        visit(node.exportClause.name);
+                    }
+                }
+                break;
+
+            case SyntaxKind.ImportDeclaration: {
+                const importClause = node.importClause;
+                if (importClause) {
+                    // Handle default import case e.g.:
+                    //    import d from "mod";
+                    if (importClause.name) {
+                        addDeclaration(importClause.name);
+                    }
+                    if (importClause.namedBindings) {
+                        if (importClause.namedBindings.kind === SyntaxKind.NamespaceImport) {
+                            // Handle namespace import case e.g.:
+                            //    import * as ns from "mod";
+                            addDeclaration(importClause.namedBindings);
+                        }
+                        else {
+                            // Handle named imports case e.g.:
+                            //    import {a, b as B} from "mod";
+                            for (const element of importClause.namedBindings.elements ?? []) visit(element);
+                        }
+                    }
+                }
+                break;
+            }
+
+            case SyntaxKind.BinaryExpression:
+                if (ts.getAssignmentDeclarationKind(node) !== 0 /* AssignmentDeclarationKind.None */) {
+                    addDeclaration(node);
+                }
+            // falls through
+
+            default:
+                forEachChildOf(node);
+        }
+    }
 }
 
 // ── Thin tsgo-backed Program ──
@@ -4213,7 +4482,11 @@ export function createTsgoProgram(
         // lib content is fixed per install, same rule as node_modules .d.ts.
         // createBoundHostSourceFile returns undefined on empty text → fall
         // through to the tsgo-backed skeleton below (checker RPC unaffected).
-        if (softPMaterializeAllForImportTracker && isHostLibFile(hostFileName)) {
+        // TNB_LIB_SKELETON=1 (memory experiment): skip the host parse and use
+        // the tsgo-backed skeleton for declaration files — the RemoteNode view
+        // already carries statements/positions for LS token walks, at a small
+        // fraction of the host-AST memory (issue #6).
+        if (softPMaterializeAllForImportTracker && isHostLibFile(hostFileName) && process.env.TNB_LIB_SKELETON !== "1") {
             const libText = host?.readFile?.(hostFileName) ?? "";
             const hostSf = createBoundHostSourceFile(hostFileName, fileName, libText);
             if (hostSf) {

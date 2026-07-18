@@ -115,6 +115,10 @@ export function createSkeletonSourceFile(
     anySf.moduleAugmentations = [];
     anySf.imports = [];
     anySf.ambientModuleNames = [];
+    // navto/FAR call getNamedDeclarations on every program SourceFile; the
+    // skeleton has no statements, so the empty map is its honest answer (the
+    // tsgo-backed shell gets the real RemoteNode walk in tsgoChecker).
+    anySf.getNamedDeclarations = () => new Map<string, any[]>();
     return sf;
 }
 
