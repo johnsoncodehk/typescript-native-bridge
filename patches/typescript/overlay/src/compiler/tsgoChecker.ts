@@ -17,7 +17,7 @@
 import * as ts from "./_namespaces/ts.js";
 import { bindSourceFile } from "./binder.js";
 import { createSourceFile } from "./parser.js";
-import { SyntaxKind, SymbolFlags, SymbolFormatFlags, NodeFlags, ModifierFlags, JSDocParsingMode, ModuleKind, StructureIsReused, EmitHint, EmitFlags, type Path, type Program, type TypeChecker } from "./types.js";
+import { SyntaxKind, SymbolFlags, SymbolFormatFlags, NodeFlags, ModifierFlags, JSDocParsingMode, ModuleKind, StructureIsReused, EmitHint, EmitFlags, ContextFlags, type Path, type Program, type TypeChecker } from "./types.js";
 import { getBuildInfoText, getTsBuildInfoEmitOutputFilePath, createPrinterWithRemoveComments } from "./emitter.js";
 import { usingSingleLineStringWriter } from "./utilities.js";
 import { getParseTreeNode, isFunctionLike } from "./utilitiesPublic.js";
@@ -7649,6 +7649,94 @@ export function createTsgoChecker(program: any): any {
         }
     }
 
+    /**
+     * ContextFlags.IgnoreNodeInferences emulation: drop union constituents that
+     * are the queried node's own inferred type (their declarations all live
+     * inside the node's span). See getContextualType in the checker shim.
+     */
+    function filterNodeInferredConstituents(t: any, node: any): any {
+        if (!t?.isUnion?.()) return t;
+        const members: any[] = t.types ?? [];
+        const kept = members.filter(m => !typeDeclaredWithin(m, node));
+        if (_traceSymEnabled) {
+            traceSym(`filterNodeInferred file=${node.getSourceFile?.()?.fileName} nodePos=${node.pos} members=${members.length} kept=${kept.length} within=[${members.map(m => typeDeclaredWithin(m, node) ? 1 : 0).join("")}]`);
+        }
+        if (kept.length === members.length) return t;
+        if (kept.length === 0) return undefined;
+        return unionDelegate(t, kept);
+    }
+
+    /** Union view over a filtered member list; delegates everything else to the original. */
+    function unionDelegate(original: any, members: any[]): any {
+        if (members.length === 1) return members[0];
+        const nonNullable = members.filter(m => !isNullableTypeShim(m));
+        // getNonNullableType must be overridden too: stock consumers
+        // (getPropertySymbolsFromContextualType) call it first, and plain
+        // delegation would hand back the UNfiltered original union.
+        const delegate = Object.create(original, {
+            isUnion: { value: () => true },
+            types: { value: members },
+            getNonNullableType: {
+                value: () => nonNullable.length === members.length ? delegate
+                    : nonNullable.length === 0 ? undefined
+                    : unionDelegate(original, nonNullable),
+            },
+        });
+        return delegate;
+    }
+
+    function isNullableTypeShim(m: any): boolean {
+        if (typeof m?.isNullableType === "function") {
+            try { if (m.isNullableType()) return true; } catch { /* fall through */ }
+        }
+        return m?.intrinsicName === "null" || m?.intrinsicName === "undefined";
+    }
+
+    function typeDeclaredWithin(t: any, node: any): boolean {
+        const sym = t.symbol ?? (typeof t.getSymbol === "function" ? (() => { try { return t.getSymbol(); } catch { return undefined; } })() : undefined);
+        const decls = sym?.declarations ?? [];
+        if (!decls.length) return false;
+        return decls.every((d: any) => nodeContainsPosition(node, d));
+    }
+
+    function declFileName(d: any): string | undefined {
+        // Host nodes expose getSourceFile(); tsgo checker symbol declarations
+        // arrive as NodeHandles with a `sourceFile` getter instead.
+        if (typeof d.getSourceFile === "function") {
+            try { return d.getSourceFile()?.fileName; } catch { /* fall through */ }
+        }
+        return d.sourceFile?.fileName;
+    }
+
+    function declSpan(d: any): { start: number; end: number; } | undefined {
+        if (typeof d.getStart === "function" && typeof d.getEnd === "function") {
+            return { start: d.getStart(), end: d.getEnd() };
+        }
+        // NodeHandle: resolve to the RemoteNode for positions.
+        if (typeof d.resolve === "function") {
+            let rn: any;
+            try { rn = d.resolve(); } catch { rn = undefined; }
+            if (rn) {
+                if (typeof rn.getStart === "function" && typeof rn.getEnd === "function") {
+                    return { start: rn.getStart(), end: rn.getEnd() };
+                }
+                if (typeof rn.pos === "number" && typeof rn.end === "number") {
+                    return { start: rn.pos, end: rn.end };
+                }
+            }
+        }
+        return undefined;
+    }
+
+    function nodeContainsPosition(node: any, d: any): boolean {
+        const sf = node.getSourceFile?.();
+        const dFile = declFileName(d);
+        if (!sf || !dFile || sf.fileName !== dFile) return false;
+        const span = declSpan(d);
+        if (!span || span.start < 0) return false;
+        return span.start >= node.pos && span.end <= node.end;
+    }
+
     function fixupType(t: any): any {
         if (Array.isArray(t)) { for (const i of t) fixupType(i); return t; }
         if (t && typeof t === "object") {
@@ -7669,6 +7757,7 @@ export function createTsgoChecker(program: any): any {
                 }
                 resolveRawTypeProps(obj);
                 // tsgo may expose `aliasTypeArguments: []` on reference/array
+
                 // types. Rule helpers (no-unnecessary-type-assertion's
                 // containsAny) use `type.aliasTypeArguments ??
                 // checker.getTypeArguments(type)` — an empty array is
@@ -8524,7 +8613,7 @@ export function createTsgoChecker(program: any): any {
             }
             return errorOrAny();
         },
-        getContextualType(node: any): any {
+        getContextualType(node: any, contextFlags?: number): any {
             ensureProject();
             const sf = node.getSourceFile?.();
             if (!sf) return undefined;
@@ -8552,6 +8641,16 @@ export function createTsgoChecker(program: any): any {
                 else {
                     _objCompletionPending = { hostNode: node, tsgoNode, results: [t] };
                 }
+            }
+            // ContextFlags.IgnoreNodeInferences: stock re-queries the contextual
+            // type excluding inference derived from the queried node itself
+            // (goToDefinition's object-literal path relies on this to drop the
+            // literal's own properties from the result). tsgo's RPC takes no
+            // flags and its union can include the node's own inferred type —
+            // emulate by dropping union constituents whose declarations all
+            // live inside the queried node (issue #5).
+            if (t && contextFlags !== undefined && (contextFlags & ContextFlags.IgnoreNodeInferences)) {
+                return filterNodeInferredConstituents(t, node);
             }
             return t;
         },

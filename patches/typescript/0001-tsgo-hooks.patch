@@ -2043,6 +2043,65 @@ index dfd00ce2e9..a6b14ba3d9 100644
      }
      catch (err) {
          // Ensure cache is reset if operation is cancelled
+diff --git a/src/services/goToDefinition.ts b/src/services/goToDefinition.ts
+index 0a45cc3e3e..d296a01666 100644
+--- a/src/services/goToDefinition.ts
++++ b/src/services/goToDefinition.ts
+@@ -316,7 +316,7 @@ function getDefinitionFromObjectLiteralElement(typeChecker: TypeChecker, node: N
+         const contextualType = element && typeChecker.getContextualType(element.parent);
+         if (contextualType) {
+             let properties = getPropertySymbolsFromContextualType(element, typeChecker, contextualType, /*unionSymbolOk*/ false);
+-            if (some(properties, p => !!(p.valueDeclaration && isObjectLiteralExpression(p.valueDeclaration.parent) && isObjectLiteralElementLike(p.valueDeclaration) && p.valueDeclaration.name === node))) {
++            if (some(properties, p => isSelfReferentialContextualProperty(p, node))) {
+                 const withoutNodeInferencesType = typeChecker.getContextualType(element.parent, ContextFlags.IgnoreNodeInferences);
+                 if (withoutNodeInferencesType) {
+                     const withoutNodeInferencesProperties = getPropertySymbolsFromContextualType(element, typeChecker, withoutNodeInferencesType, /*unionSymbolOk*/ false);
+@@ -331,6 +331,45 @@ function getDefinitionFromObjectLiteralElement(typeChecker: TypeChecker, node: N
+     return emptyArray;
+ }
+ 
++/**
++ * TNB (issue #5): the stock form of this test is
++ * `p.valueDeclaration && isObjectLiteralExpression(p.valueDeclaration.parent)
++ * && isObjectLiteralElementLike(p.valueDeclaration) && p.valueDeclaration.name === node`.
++ * tsgo-side property symbols carry declarations as NodeHandles — no `.parent`
++ * or `.name` links — so the identity test never detects the object literal's
++ * own properties as self-referential and the IgnoreNodeInferences re-query
++ * never runs (the self declaration then leaks into the definition list).
++ * Keep the stock test as the fast path; for handle-shaped declarations,
++ * resolve and compare name positions across ASTs.
++ */
++function isSelfReferentialContextualProperty(p: Symbol, node: Node): boolean {
++    const valueDeclaration = (p.valueDeclaration ?? p.declarations?.[0]) as Declaration | undefined;
++    if (!valueDeclaration) return false;
++    if (
++        isObjectLiteralExpression(valueDeclaration.parent)
++        && isObjectLiteralElementLike(valueDeclaration)
++        && (valueDeclaration as any).name === node
++    ) {
++        return true;
++    }
++    const anyDecl = valueDeclaration as any;
++    // Cross-AST path: tsgo-side declarations (NodeHandles) can never be === the
++    // host node, so the identity test above failed even though the declaration
++    // IS the element's own name. Resolve the handle and compare name positions.
++    if (typeof anyDecl.resolve !== "function") return false;
++    let rn: any;
++    try { rn = anyDecl._resolvedNode ?? anyDecl.resolve(); } catch { rn = undefined; }
++    if (!rn || !isObjectLiteralExpression(rn.parent) || !isObjectLiteralElementLike(rn)) return false;
++    const rnName = rn.name;
++    if (!rnName) return false;
++    const rnSf = typeof rn.getSourceFile === "function" ? rn.getSourceFile() : (rn as any).sourceFile;
++    const nodeSf = node.getSourceFile();
++    if (!rnSf || rnSf.fileName !== nodeSf.fileName) return false;
++    const rnStart = typeof rnName.getStart === "function" ? rnName.getStart() : rnName.pos;
++    const rnEnd = typeof rnName.getEnd === "function" ? rnName.getEnd() : rnName.end;
++    return rnStart === node.getStart() && rnEnd === node.getEnd();
++}
++
+ function getDefinitionFromOverriddenMember(typeChecker: TypeChecker, node: Node) {
+     const classElement = findAncestor(node, isClassElement);
+     if (!(classElement && classElement.name)) return;
 diff --git a/src/services/services.ts b/src/services/services.ts
 index 9885093ed6..0cbb4021a3 100644
 --- a/src/services/services.ts
