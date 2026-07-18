@@ -24,10 +24,16 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 24
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            typescript/package-lock.json
+            typescript-go/package-lock.json
 
       - uses: actions/setup-go@v5
         with:
           go-version: "1.26" # typescript-go/go.mod
+          cache-dependency-path: typescript-go/go.sum
 
       - name: Install dependencies
         run: npm ci
@@ -107,44 +113,47 @@ jobs:
           VOLAR_ROOT: ${{ runner.temp }}/volar
           STOCK_TSSERVER_PATH: ${{ runner.temp }}/volar-stock/package/lib/tsserver.js
         run: |
-          failed=()
-          for w in \
-            triage-sim-xfile \
-            triage-xrefs-diag-variants \
-            triage-qi-delete-min \
-            triage-sim-edit \
-            triage-quickinfo-emptyparity \
-            triage-refs-exportspec \
-            triage-tostring-gtd-vue \
-            triage-defineprops-refs \
-            triage-completion-parity \
-            triage-f2hl-augment \
-            triage-f2hl-typesref \
-            triage-f2hl-jsdoc \
-            triage-f2hl-defaultkw \
-            triage-f2qi-names \
-            triage-geterr-5823 \
-            triage-f2r5-defcases \
-            triage-f2r6-libref \
-            triage-f2r6-samevue \
-            triage-f2r6-xvue \
-            triage-completion-details-array \
-            triage-adv6a-jsx-spelling \
-            triage-adv6b-generic-sig \
-            triage-ambient-rpc-fallback \
-            triage-impl-kind \
-            triage-rpcsym-nameless \
-            triage-rpcsym-adversarial \
-            triage-orphan-leak \
-            triage-parent-watch-acceptance \
-          ; do
-            echo "=== $w ==="
-            node "tools/$w.mjs" || failed+=("$w")
+          # Parallel groups on isolated tools copies: the harness lock lives at
+          # <toolsDir>/../.tnb-harness.lock, so concurrent tools from one
+          # tools/ dir would serialize. Groups are LPT-balanced from measured
+          # per-tool durations (~985s sequential -> ~330s per group). vendor/
+          # lib/ native/ are symlinked into each copy for tools that boot the
+          # bridge in-process (they resolve the repo from import.meta.dirname/..).
+          # Starts are staggered to spread the tsserver boot spike.
+          group1="triage-f2qi-names triage-xrefs-diag-variants triage-tostring-gtd-vue triage-adv6b-generic-sig triage-sim-edit triage-f2hl-jsdoc triage-completion-details-array triage-refs-exportspec"
+          group2="triage-f2r5-defcases triage-f2r6-samevue triage-f2r6-libref triage-f2r6-xvue triage-sim-xfile triage-f2hl-typesref triage-geterr-5823 triage-quickinfo-emptyparity triage-ambient-rpc-fallback triage-completion-parity"
+          group3="triage-qi-delete-min triage-defineprops-refs triage-impl-kind triage-rpcsym-nameless triage-rpcsym-adversarial triage-f2hl-augment triage-orphan-leak triage-parent-watch-acceptance triage-f2hl-defaultkw triage-adv6a-jsx-spelling"
+          pids=()
+          i=0
+          for group in "$group1" "$group2" "$group3"; do
+            i=$((i + 1))
+            rm -rf "/tmp/tnb-wg$i"
+            mkdir -p "/tmp/tnb-wg$i"
+            cp -R tools "/tmp/tnb-wg$i/tools"
+            ln -sfn "$GITHUB_WORKSPACE/vendor" "/tmp/tnb-wg$i/vendor"
+            ln -sfn "$GITHUB_WORKSPACE/lib" "/tmp/tnb-wg$i/lib"
+            ln -sfn "$GITHUB_WORKSPACE/native" "/tmp/tnb-wg$i/native"
+            (
+              failed=()
+              for w in $group; do
+                echo "=== [wg$i] $w ==="
+                (cd "/tmp/tnb-wg$i/tools" && node "$w.mjs") || failed+=("$w")
+              done
+              if ((${#failed[@]})); then
+                echo "WG$i FAILURES (${#failed[@]}): ${failed[*]}"
+                exit 1
+              fi
+            ) > "/tmp/tnb-wg$i.log" 2>&1 &
+            pids+=($!)
+            sleep 15
           done
-          if ((${#failed[@]})); then
-            echo "WITNESS FAILURES (${#failed[@]}): ${failed[*]}"
-            exit 1
-          fi
+          rc=0
+          for p in "${pids[@]}"; do wait "$p" || rc=1; done
+          for j in 1 2 3; do
+            echo "=== witness group $j (tail) ==="
+            tail -5 "/tmp/tnb-wg$j.log" || true
+          done
+          exit $rc
 
       - name: sourcefile-guard
         env:
