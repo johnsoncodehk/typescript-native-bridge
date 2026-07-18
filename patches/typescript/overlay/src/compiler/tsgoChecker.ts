@@ -5043,6 +5043,18 @@ export function createTsgoProgram(
         // toLineColumnOffset (go-to-definition span conversion) sees real line maps.
         getSourceFileByPath: (path: any) => {
             const pathStr = String(path);
+            // Membership gate (issue #7): stock Program.getSourceFileByPath
+            // returns undefined for non-members — Project.containsScriptInfo
+            // relies on that to answer "does this project contain the file".
+            // Ungated, tsserver materialized an SF for ANY path here, so
+            // containsFile over-reported and the session's per-project
+            // references worker routed findReferences into non-member
+            // projects whose (gated) getSourceFile then threw "Could not find
+            // source file". Lib files keep the permissive path, mirroring
+            // getSourceFile above.
+            if (!isHostLibFile(toHostFileName(pathStr)) && !programContainsFile(pathStr)) {
+                return undefined;
+            }
             // Pure-disk lint: the builder's affected-file drain calls this once
             // per changed file (and per graph node on incremental runs). The
             // fileHasHostSourceContent probe below would CREATE a host snapshot
