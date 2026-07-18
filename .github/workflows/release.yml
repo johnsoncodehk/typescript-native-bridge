@@ -101,8 +101,8 @@ jobs:
       - name: Install llvm-mingw
         if: matrix.llvm_mingw
         run: |
-          curl -sSL https://github.com/mstorsjo/llvm-mingw/releases/download/20250417/llvm-mingw-20250417-ucrt-ubuntu-20.04-x86_64.tar.xz | sudo tar -xJ -C /opt
-          echo "/opt/llvm-mingw-20250417-ucrt-ubuntu-20.04-x86_64/bin" >> "$GITHUB_PATH"
+          curl -sSL https://github.com/mstorsjo/llvm-mingw/releases/download/20250417/llvm-mingw-20250417-ucrt-ubuntu-22.04-x86_64.tar.xz | sudo tar -xJ -C /opt
+          echo "/opt/llvm-mingw-20250417-ucrt-ubuntu-22.04-x86_64/bin" >> "$GITHUB_PATH"
 
       - name: Build bridge (stripped)
         run: node tools/build-bridge.js
@@ -163,6 +163,7 @@ jobs:
 
       - name: Publish platform sub-packages
         run: |
+          set -euo pipefail
           for d in subpkgs/*; do
             echo "== publishing $(basename "$d") =="
             (cd "$d" && npm publish --provenance)
