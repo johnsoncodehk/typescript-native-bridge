@@ -173,14 +173,16 @@ jobs:
           set -euo pipefail
           for d in subpkgs/*; do
             echo "== publishing $(basename "$d") =="
-            (cd "$d" && npm publish --provenance)
+            (cd "$d" && npm publish --provenance --tag bridge)
           done
         env:
           # Empty when the secret is unset: npm then falls back to OIDC trusted publishing.
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       - name: Publish main package
-        run: npm publish --provenance
+        # --tag bridge: the version is a semver prerelease (x.y.z-bridge.N…);
+        # npm refuses to publish prereleases to the implicit `latest` tag.
+        run: npm publish --provenance --tag bridge
         working-directory: staging
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
