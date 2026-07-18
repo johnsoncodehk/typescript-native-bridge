@@ -34,7 +34,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 	"unsafe"
 
@@ -165,10 +164,11 @@ func startOrphanWatchdog() {
 			for {
 				time.Sleep(2 * time.Second)
 				if os.Getppid() == 1 {
-					// Parent died. SIGKILL ourselves: skips Node's atexit
+					// Parent died. Hard-kill ourselves: skips Node's atexit
 					// (ResetStdio) entirely, so the storm can never re-arm,
-					// and the OS reclaims all session memory.
-					_ = syscall.Kill(os.Getpid(), syscall.SIGKILL)
+					// and the OS reclaims all session memory. killSelf is
+					// platform-split (syscall.Kill is Unix-only).
+					killSelf()
 				}
 			}
 		}()

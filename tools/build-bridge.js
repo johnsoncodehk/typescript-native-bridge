@@ -19,7 +19,9 @@ fs.mkdirSync(nativeDir, { recursive: true });
 const args = ["build", "-tags=noembed", "-buildmode=c-shared"];
 // TNB_STRIP=1: drop debug symbols for shipped binaries (release matrix).
 if (process.env.TNB_STRIP === "1") args.push("-ldflags=-s -w");
-args.push("-o", outPath, "bridge.go");
+// Build the package (not just bridge.go) so platform-split files
+// (killself_unix.go / killself_windows.go) are included.
+args.push("-o", outPath, ".");
 
 const r = spawnSync("go", args, { cwd: bridgeDir, stdio: "inherit" });
 if (r.status !== 0) process.exit(r.status ?? 1);
