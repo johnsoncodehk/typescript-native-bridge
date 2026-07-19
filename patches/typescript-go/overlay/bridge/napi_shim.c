@@ -12,8 +12,8 @@
 //     ownership and recycles it on the next call.
 //   - Binary results: Go pins the slice via runtime.Pinner and hands V8 a
 //     view — zero copies. The pin releases from the external buffer's
-//     finalizer on GC (or immediately after a copy if the runtime lacks
-//     external buffers — degradation inside one path, not a mode switch).
+//     finalizer on GC. External buffers exist since Node 8 (our engine floor
+//     is Node 20), so no copy fallback exists: a create failure is a bug.
 //     Go's GC is non-moving, so the view stays valid until release.
 //   - Everything synchronous on the JS thread. No async NAPI, no callbacks,
 //     no thread-safe functions.
@@ -127,8 +127,8 @@ static napi_value fn_call(napi_env env, napi_callback_info info) {
 // Zero-copy release: the external buffer's finalizer runs on the env thread
 // (cgo callbacks are thread-safe) and unpins via BridgeReleaseBinary. The
 // registry in bridge.go is LoadAndDelete-idempotent, so release is exactly
-// once by construction. If a runtime lacks external-buffer support, degrade
-// to copy+immediate-release inside the same path (not a mode switch).
+// once by construction. External buffers exist since Node 8 — every supported
+// runtime has them, so a create failure is a bug, not a case to degrade.
 static void finalize_release(napi_env env, void* data, void* hint) {
 	(void)env;
 	(void)data;
@@ -150,11 +150,11 @@ static napi_value fn_call_binary(napi_env env, napi_callback_info info) {
 		return nul;
 	}
 	napi_value buf = NULL;
+	// External buffers exist since Node 8/NAPIv1 — every supported runtime
+	// (engines floor is Node 20) has them. A failure here is a real bug:
+	// surface it via the pending napi exception instead of degrading.
 	if (napi_create_external_buffer(env, (size_t)res.len, res.data, finalize_release, (void*)(uintptr_t)res.handle, &buf) != napi_ok) {
-		// No external-buffer support: copy out and release the pin now.
-		void* dst = NULL;
-		napi_create_buffer_copy(env, (size_t)res.len, res.data, &dst, &buf);
-		BridgeReleaseBinary(res.handle);
+		return NULL;
 	}
 	return buf;
 }
