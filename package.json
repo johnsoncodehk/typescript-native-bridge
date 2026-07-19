@@ -43,7 +43,5 @@
 		"build:ts": "node tools/patch-typescript.js && cd typescript && npm install && npm run build:compiler && npx hereby lkg",
 		"build:bridge": "node tools/patch-tsgo.js && node tools/build-bridge.js"
 	},
-	"dependencies": {
-		"koffi": "^2.16.0"
-	}
+	"dependencies": {}
 }

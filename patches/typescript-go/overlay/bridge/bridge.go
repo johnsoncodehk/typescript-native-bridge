@@ -1,7 +1,7 @@
 // Package main is a Proof-of-Concept NAPI/FFI bridge for typescript-go.
 //
-// It builds as a C-shared library (`go build -buildmode=c-shared`) and exposes
-// a tiny C ABI that Node.js can load via an FFI library (koffi). The bridge
+// It builds as a NAPI addon (`go build -buildmode=c-shared` → bridge.node,
+// see napi_shim.c) that Node.js loads directly via require(). The bridge
 // reuses the exact same api.Session / project.Session machinery that the IPC
 // stdio server uses — every type/symbol/source-file query goes through
 // Session.HandleRequest, so there is zero handler duplication. The only thing
@@ -12,8 +12,8 @@
 //   - BridgeCallBinary  -> raw bytes (for getSourceFile etc.), single-copy into a Node Buffer
 //
 // Memory model: both paths write into reusable C buffers. Calls are fully
-// synchronous, so koffi copies the data out at the FFI boundary before the
-// next call reuses the buffer. Zero per-call malloc, zero leaks.
+// synchronous, so the NAPI shim copies the data out to V8 before the next call
+// reuses the buffer. Zero per-call malloc, zero leaks.
 package main
 
 /*
@@ -21,8 +21,8 @@ package main
 #include <stdlib.h>
 #include <string.h>
 
-// BridgeBinary is returned by value from BridgeCallBinary. Layout must match
-// the koffi struct declared on the JS side: { void* data; int64_t len; }.
+// BridgeBinary is returned by value from BridgeCallBinary. Layout matches
+// napi_shim.c's declaration: { void* data; int64_t len; }.
 struct BridgeBinary { void* data; long long len; };
 */
 import "C"

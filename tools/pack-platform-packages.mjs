@@ -18,13 +18,13 @@ import path from "node:path";
 
 const SCOPE = "@typescript-native-bridge";
 const PLATFORMS = [
-	{ os: "darwin", arch: "arm64", ext: "dylib" },
-	{ os: "darwin", arch: "x64", ext: "dylib" },
-	{ os: "linux", arch: "x64", ext: "so" },
-	{ os: "linux", arch: "arm64", ext: "so" },
-	{ os: "linux", arch: "arm", ext: "so" },
-	{ os: "win32", arch: "x64", ext: "dll" },
-	{ os: "win32", arch: "arm64", ext: "dll" },
+	{ os: "darwin", arch: "arm64", ext: "node" },
+	{ os: "darwin", arch: "x64", ext: "node" },
+	{ os: "linux", arch: "x64", ext: "node" },
+	{ os: "linux", arch: "arm64", ext: "node" },
+	{ os: "linux", arch: "arm", ext: "node" },
+	{ os: "win32", arch: "x64", ext: "node" },
+	{ os: "win32", arch: "arm64", ext: "node" },
 ];
 
 const [stagingDir, bridgesDir, outDir] = process.argv.slice(2);

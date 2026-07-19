@@ -77,8 +77,8 @@ jobs:
           - { target: linux-x64, runner: ubuntu-latest }
           - { target: linux-arm64, runner: ubuntu-24.04-arm }
           - { target: linux-arm, runner: ubuntu-latest, goos: linux, goarch: arm, goarm: "7", cc: arm-linux-gnueabihf-gcc, apt: gcc-arm-linux-gnueabihf }
-          - { target: win32-x64, runner: ubuntu-latest, goos: windows, goarch: amd64, cc: x86_64-w64-mingw32-gcc, apt: gcc-mingw-w64-x86-64 }
-          - { target: win32-arm64, runner: ubuntu-latest, goos: windows, goarch: arm64, cc: aarch64-w64-mingw32-gcc, llvm_mingw: "1" }
+          - { target: win32-x64, runner: ubuntu-latest, goos: windows, goarch: amd64, cc: x86_64-w64-mingw32-gcc, apt: gcc-mingw-w64-x86-64, node_lib: "https://nodejs.org/dist/v24.15.0/win-x64/node.lib" }
+          - { target: win32-arm64, runner: ubuntu-latest, goos: windows, goarch: arm64, cc: aarch64-w64-mingw32-gcc, llvm_mingw: "1", node_lib: "https://nodejs.org/dist/v24.15.0/win-arm64/node.lib" }
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
@@ -109,6 +109,10 @@ jobs:
           curl -sSL https://github.com/mstorsjo/llvm-mingw/releases/download/20250417/llvm-mingw-20250417-ucrt-ubuntu-22.04-x86_64.tar.xz | sudo tar -xJ -C /opt
           echo "/opt/llvm-mingw-20250417-ucrt-ubuntu-22.04-x86_64/bin" >> "$GITHUB_PATH"
 
+      - name: Download node.lib (windows targets)
+        if: matrix.node_lib
+        run: curl -sSL "${{ matrix.node_lib }}" -o /tmp/node.lib
+
       - name: Build bridge (stripped)
         run: node tools/build-bridge.js
         env:
@@ -118,6 +122,7 @@ jobs:
           CC: ${{ matrix.cc }}
           CGO_CFLAGS: ${{ matrix.cgo_cflags }}
           CGO_LDFLAGS: ${{ matrix.cgo_ldflags }}
+          TNB_NODE_LIB: ${{ matrix.node_lib != null && '/tmp/node.lib' || '' }}
           CGO_ENABLED: 1
           TNB_STRIP: 1
 

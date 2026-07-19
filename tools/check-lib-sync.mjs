@@ -64,11 +64,11 @@ for (const lib of [libTs, libTsc]) {
 
 // 2.5 SIGURG signal-storm guard must be compiled into BOTH bundles.
 // A bundle that carries the bridge loader but not the GODEBUG guard can
-// dlopen bridge.dylib with async preemption enabled — the 23h orphan bug.
+// dlopen bridge.node with async preemption enabled — the 23h orphan bug.
 for (const lib of [libTs, libTsc]) {
 	if (!fs.existsSync(lib)) continue;
 	const text = fs.readFileSync(lib, "utf8");
-	if (text.includes("koffi") && !text.includes("asyncpreemptoff=1")) {
+	if (text.includes("bridge.node") && !text.includes("asyncpreemptoff=1")) {
 		fail(`${path.relative(root, lib)}: has bridge loader but no GODEBUG asyncpreemptoff guard — stale build, run npm run build:lib`);
 	}
 }

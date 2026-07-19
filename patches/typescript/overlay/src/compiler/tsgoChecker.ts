@@ -87,11 +87,11 @@ function getProgramContext(program: object): TnbProgramContext | undefined {
 }
 
 // ── Bridge deps (process-global — lib/typescript.js and lib/_tsc.js each bundle
-// their own copy of this module, but koffi.struct() names are process-global) ──
+// their own copy of this module; the NAPI addon must be shared across copies) ──
 const TNB_BRIDGE_STATE_KEY = Symbol.for("typescript-native-bridge.bridgeState");
 
 type TnbBridgeProcessState = {
-    koffi?: any;
+    bridgeAddon?: any;
     sync?: any;
     bridgeFns?: any;
     client?: any;
@@ -159,7 +159,7 @@ function tnbBridgeProcessState(): TnbBridgeProcessState {
     return g[TNB_BRIDGE_STATE_KEY];
 }
 
-let _koffi: any;
+let _bridgeAddon: any;
 let _sync: any;
 let _bridgeFns: any;
 /** Thin program from createTsgoProgram — wired after getOrCreateSourceFile exists. */
@@ -183,13 +183,13 @@ function getNativePreviewDir(): string {
 /**
  * Adopt the process-global bridge instances into this bundle's module locals.
  * lib/typescript.js and lib/_tsc.js each carry a copy of this module; whichever
- * copy initializes the bridge first owns the canonical koffi/sync/client, and
- * every other copy must adopt ALL of them — a partial copy leaves _koffi/_sync/
- * _bridgeFns undefined in the second bundle, breaking patchSymbolProto,
- * instanceof checks, and koffi.decode.
+ * copy initializes the bridge first owns the canonical addon/sync/client, and
+ * every other copy must adopt ALL of them — a partial copy leaves _bridgeAddon/
+ * _sync/_bridgeFns undefined in the second bundle, breaking patchSymbolProto
+ * and instanceof checks.
  */
 function hydrateBridgeModuleLocals(proc: TnbBridgeProcessState): void {
-    _koffi = proc.koffi;
+    _bridgeAddon = proc.bridgeAddon;
     _sync = proc.sync;
     _bridgeFns = proc.bridgeFns;
     if (!proc.client) return;
@@ -293,26 +293,24 @@ function installSignalExitBypass(proc: TnbBridgeProcessState): void {
 
 function loadBridgeDeps(): void {
     const proc = tnbBridgeProcessState();
-    if (proc.koffi) {
+    if (proc.bridgeAddon) {
         hydrateBridgeModuleLocals(proc);
         installSignalExitBypass(proc);
         return;
     }
     const path = require("path") as typeof import("path");
     const fs = require("fs") as typeof import("fs");
-    _koffi = require("koffi");
 
     const nativePreviewDir = getNativePreviewDir();
     // sync API is CJS-compatible even though the package is "type": "module".
     _sync = require(path.join(nativePreviewDir, "dist", "api", "sync", "api.js"));
 
-    // Bridge resolution order:
+    // Bridge resolution order (NAPI addon, bridge.node on every platform):
     // 1. Published platform package @typescript-native-bridge/<platform>-<arch>
     //    (optionalDependency of the main package; npm installs only the matching one).
-    // 2. <tnb>/native/bridge.<ext> next to lib/ and vendor/ — dev clone or link: install.
+    // 2. <tnb>/native/bridge.node next to lib/ and vendor/ — dev clone or link: install.
     // 3. <tnb>/typescript-go/bridge/ — in-repo `go build` output during development.
-    const ext = process.platform === "darwin" ? "dylib" : process.platform === "win32" ? "dll" : "so";
-    const libName = `bridge.${ext}`;
+    const libName = "bridge.node";
     const packageRoot = getTnbPackageRoot();
     let resolvedBridge: string | undefined;
     try {
@@ -366,20 +364,22 @@ function loadBridgeDeps(): void {
     // runtime init; noembed.go's getenvLive therefore checks os.Getenv (Win32
     // block — the only channel that sees SetEnvironmentVariableW on Windows)
     // and libc getenv (live CRT environ for POSIX setenv) — both see this write
-    // as long as it happens before koffi.load below.
+    // as long as it happens before require() of the addon below.
     // External non-empty override wins — do not clobber a pre-set path.
     if (!process.env.TNB_LIB_PATH) {
         process.env.TNB_LIB_PATH = path.join(packageRoot, "lib");
     }
-    const lib = _koffi.load(resolvedBridge);
+    // The bridge is a NAPI addon (bridge.node) — Node dlopens it directly via
+    // require(); no FFI library. napi_shim.c exposes plain JS functions with
+    // the same contract the koffi declarations had (strings/Buffer/int64).
+    _bridgeAddon = require(resolvedBridge);
     _bridgeFns = {
-        BridgeNewSession: lib.func("char *BridgeNewSession(char *cwd)"),
-        BridgeCall: lib.func("char *BridgeCall(int64_t session, char *method, char *paramsJson)"),
-        BridgeDisposeSession: lib.func("void BridgeDisposeSession(int64_t session)"),
-        BridgeBinary: _koffi.struct("BridgeBinary", { data: "void *", len: "int64_t" }),
-        BridgeCallBinary: lib.func("BridgeBinary BridgeCallBinary(int64_t session, char *method, char *paramsJson)"),
+        BridgeNewSession: _bridgeAddon.newSession,
+        BridgeCall: _bridgeAddon.call,
+        BridgeCallBinary: _bridgeAddon.callBinary,
+        BridgeDisposeSession: _bridgeAddon.disposeSession,
     };
-    proc.koffi = _koffi;
+    proc.bridgeAddon = _bridgeAddon;
     proc.sync = _sync;
     proc.bridgeFns = _bridgeFns;
     // ── SignalExit bypass (tsserver + test runners) ──
@@ -477,10 +477,6 @@ function getHostSfStableCache(lsHost: any): Map<string, { version: string; sf: a
 // dominated the getCodeFixes wall.
 const _nodeIndexBySf = new WeakMap<object, Map<number, any[]>>();
 
-function toCStr(s: string): Buffer {
-    return Buffer.from(s + "\0", "utf8");
-}
-
 function parseBridgeEnvelope(str: string | null): any {
     if (str == null) throw new Error("tsgoChecker: bridge returned null");
     const env = JSON.parse(str);
@@ -491,35 +487,18 @@ function parseBridgeEnvelope(str: string | null): any {
 class BridgeClient {
     private handle: number;
     private handleBigInt: bigint;
-    private methodCStr = new Map<string, Buffer>();
-    private scratch = Buffer.alloc(256);
 
     constructor(cwd: string) {
-        this.handle = Number(parseBridgeEnvelope(_bridgeFns.BridgeNewSession(toCStr(cwd))));
+        this.handle = Number(parseBridgeEnvelope(_bridgeFns.BridgeNewSession(cwd)));
         this.handleBigInt = BigInt(this.handle);
-    }
-
-    private toCStrScratch(s: string): Buffer {
-        const need = Buffer.byteLength(s, "utf8") + 1;
-        if (need > this.scratch.length) {
-            this.scratch = Buffer.alloc(need * 2);
-        }
-        const written = this.scratch.write(s, 0, "utf8");
-        this.scratch[written] = 0;
-        return this.scratch.subarray(0, need);
     }
 
     apiRequest(method: string, params: any): any {
         const t0 = process.env.TSGO_PROFILE === "1" ? Date.now() : 0;
         noteRpc(method);
         const paramsJson = params == null ? null : JSON.stringify(params);
-        let mc = this.methodCStr.get(method);
-        if (!mc) { mc = toCStr(method); this.methodCStr.set(method, mc); }
         const traceId = _rpcTraceEnter(method, false, this.handle);
-        const str = _bridgeFns.BridgeCall(
-            this.handleBigInt, mc,
-            paramsJson == null ? null : this.toCStrScratch(paramsJson),
-        );
+        const str = _bridgeFns.BridgeCall(this.handleBigInt, method, paramsJson);
         _rpcTraceExit(traceId, method);
         const result = parseBridgeEnvelope(str);
         if (process.env.TSGO_PROFILE === "1") _profRpc(method, Date.now() - t0);
@@ -530,18 +509,13 @@ class BridgeClient {
         const t0 = process.env.TSGO_PROFILE === "1" ? Date.now() : 0;
         noteRpc(method);
         const paramsJson = params == null ? null : JSON.stringify(params);
-        let mc = this.methodCStr.get(method);
-        if (!mc) { mc = toCStr(method); this.methodCStr.set(method, mc); }
         const traceId = _rpcTraceEnter(method, true, this.handle);
-        const res = _bridgeFns.BridgeCallBinary(
-            this.handleBigInt, mc,
-            paramsJson == null ? null : this.toCStrScratch(paramsJson),
-        );
+        // NAPI addon returns a Buffer (V8 copy of the Go-owned binBuf), or null
+        // for empty results.
+        const buf = _bridgeFns.BridgeCallBinary(this.handleBigInt, method, paramsJson);
         _rpcTraceExit(traceId, method);
         if (process.env.TSGO_PROFILE === "1") _profRpc(method, Date.now() - t0);
-        const len = Number(res.len);
-        if (len <= 0 || res.data == null) return undefined;
-        return _koffi.decode(res.data, _koffi.array("uint8_t", len, "Typed")) as Uint8Array;
+        return buf ?? undefined;
     }
 
     // v7.0.2+ Client surface: the API layer probes the timing collector on
@@ -6073,7 +6047,7 @@ export function createTsgoChecker(program: any): any {
     configFilePath = resolveTsconfigPath(configFilePath);
     options.configFilePath = configFilePath;
 
-    let koffi = _koffi;
+    let bridgeAddon = _bridgeAddon;
     let sync = _sync;
     let bridgeFns = _bridgeFns;
     let project: any;
@@ -6100,7 +6074,7 @@ export function createTsgoChecker(program: any): any {
         if (cached) {
             ensureBridgeSession();
             project = cached;
-            koffi = _koffi; sync = _sync; bridgeFns = _bridgeFns;
+            bridgeAddon = _bridgeAddon; sync = _sync; bridgeFns = _bridgeFns;
             _currentProjectRef.project = project;
             patchSymbolProto(sync);
             patchSignatureProto(sync);
@@ -6112,7 +6086,7 @@ export function createTsgoChecker(program: any): any {
 
         if (process.env.TSGO_PROFILE === "1") _tsgoLoadStart = Date.now();
         ensureBridgeSession();
-        koffi = _koffi; sync = _sync; bridgeFns = _bridgeFns;
+        bridgeAddon = _bridgeAddon; sync = _sync; bridgeFns = _bridgeFns;
 
         // Collect host file content to feed as tsgo overlays — makes the fork
         // host the single source of truth (avoids tsgo double disk read, and
