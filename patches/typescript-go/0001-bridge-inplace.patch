@@ -1,18 +1,17 @@
 diff --git a/_packages/native-preview/src/api/async/client.ts b/_packages/native-preview/src/api/async/client.ts
-index b4a123d53..4c3add585 100644
+index b4a123d53..6d3b9b8f3 100644
 --- a/_packages/native-preview/src/api/async/client.ts
 +++ b/_packages/native-preview/src/api/async/client.ts
-@@ -90,7 +90,8 @@ export class Client {
+@@ -90,7 +90,7 @@ export class Client {
              }
  
              this.process = spawn(resolveExePath(options), args, {
 -                stdio: ["pipe", "pipe", "inherit"],
 +                stdio: ["pipe", "pipe", "pipe"],
-+                detached: false,
              });
  
              this.process.once("error", error => {
-@@ -98,6 +99,11 @@ export class Client {
+@@ -98,6 +98,11 @@ export class Client {
              });
  
              this.process.once("spawn", () => {
@@ -577,20 +576,19 @@ index 658d07806..e6a23df64 100644
   * A diagnostic message from the TypeScript compiler.
   */
 diff --git a/_packages/native-preview/src/api/syncChannel.ts b/_packages/native-preview/src/api/syncChannel.ts
-index 122203c85..b9b92dc61 100644
+index 122203c85..873d9000d 100644
 --- a/_packages/native-preview/src/api/syncChannel.ts
 +++ b/_packages/native-preview/src/api/syncChannel.ts
-@@ -149,7 +149,8 @@ export class SyncRpcChannel {
+@@ -149,7 +149,7 @@ export class SyncRpcChannel {
              // real C-runtime fd backed by a proper HANDLE.
              const pipePath = `\\\\.\\pipe\\tsgo-sync-${process.pid}-${Date.now()}`;
              this.child = spawn(exe, [...args, "--pipe", pipePath], {
 -                stdio: ["ignore", "ignore", "inherit"],
 +                stdio: ["ignore", "ignore", "ignore"],
-+                detached: false,
              });
  
              // Retry openSync until the child creates the named pipe.
-@@ -178,12 +179,17 @@ export class SyncRpcChannel {
+@@ -178,12 +178,16 @@ export class SyncRpcChannel {
          }
          else {
              // POSIX: use stdio pipe file descriptors directly.
@@ -600,7 +598,6 @@ index 122203c85..b9b92dc61 100644
              this.child = spawn(exe, args, {
 -                stdio: ["pipe", "pipe", "inherit"],
 +                stdio: ["pipe", "pipe", "pipe"],
-+                detached: false,
              });
  
              const stdout = this.child.stdout! as StdoutWithHandle;
@@ -609,7 +606,7 @@ index 122203c85..b9b92dc61 100644
  
              this.readFd = stdout._handle.fd;
              this.writeFd = stdin._handle.fd;
-@@ -191,6 +197,7 @@ export class SyncRpcChannel {
+@@ -191,6 +195,7 @@ export class SyncRpcChannel {
              if (typeof this.readFd !== "number" || this.readFd < 0 || typeof this.writeFd !== "number" || this.writeFd < 0) {
                  stdout.destroy();
                  stdin.destroy();
@@ -617,7 +614,7 @@ index 122203c85..b9b92dc61 100644
                  this.child.kill();
                  throw new Error(
                      "SyncRpcChannel: could not obtain pipe file descriptors.",
-@@ -206,11 +213,13 @@ export class SyncRpcChannel {
+@@ -206,11 +211,13 @@ export class SyncRpcChannel {
              stdout._handle.setBlocking?.(true);
              stdin._handle.setBlocking?.(true);
  
@@ -633,7 +630,7 @@ index 122203c85..b9b92dc61 100644
          }
  
          // Track for auto-cleanup on process exit.
-@@ -256,6 +265,7 @@ export class SyncRpcChannel {
+@@ -256,6 +263,7 @@ export class SyncRpcChannel {
              // and no longer prevent the event loop from draining.
              this.child.stdout?.destroy();
              this.child.stdin?.destroy();
@@ -1445,18 +1442,10 @@ index f8d006e92..8f90cd03b 100644
  		defer opts.Tracing.Push(tracing.PhaseProgram, "processRootFiles", map[string]any{"count": len(rootFiles)}, false)()
  	}
 diff --git a/internal/compiler/program.go b/internal/compiler/program.go
-index 74b2504d9..cf1654f64 100644
+index 74b2504d9..b3b598571 100644
 --- a/internal/compiler/program.go
 +++ b/internal/compiler/program.go
-@@ -5,6 +5,7 @@ import (
- 	"fmt"
- 	"io"
- 	"maps"
-+	"os"
- 	"slices"
- 	"strings"
- 	"sync"
-@@ -116,6 +117,30 @@ type Program struct {
+@@ -116,6 +116,30 @@ type Program struct {
  	// Cached map of package names to whether they bundle types
  	packagesMapOnce sync.Once
  	packagesMap     map[string]bool
@@ -1487,7 +1476,7 @@ index 74b2504d9..cf1654f64 100644
  }
  
  // FileExists implements checker.Program.
-@@ -197,6 +222,10 @@ func (p *Program) GetRedirectForResolution(file ast.HasFileName) *tsoptions.Pars
+@@ -197,6 +221,10 @@ func (p *Program) GetRedirectForResolution(file ast.HasFileName) *tsoptions.Pars
  	return redirect
  }
  
@@ -1498,7 +1487,7 @@ index 74b2504d9..cf1654f64 100644
  func (p *Program) GetParseFileRedirect(fileName string) string {
  	return p.projectReferenceFileMapper.getParseFileRedirect(ast.NewHasFileName(fileName, p.toPath(fileName)))
  }
-@@ -234,7 +263,7 @@ func (p *Program) GetSourceFileFromReference(origin *ast.SourceFile, ref *ast.Fi
+@@ -234,7 +262,7 @@ func (p *Program) GetSourceFileFromReference(origin *ast.SourceFile, ref *ast.Fi
  	// Still, without the failed lookup reporting that only the loader does, this isn't terribly complicated
  
  	fileName := tspath.ResolvePath(tspath.GetDirectoryPath(origin.FileName()), ref.FileName)
@@ -1507,7 +1496,7 @@ index 74b2504d9..cf1654f64 100644
  	supportedExtensions := tsoptions.GetSupportedExtensionsWithJsonIfResolveJsonModule(p.Options(), supportedExtensionsBase)
  	allowNonTsExtensions := p.Options().AllowNonTsExtensions.IsTrue()
  	if tspath.HasExtension(fileName) {
-@@ -569,6 +598,17 @@ func (p *Program) collectCheckerDiagnostics(ctx context.Context, sourceFile *ast
+@@ -569,6 +597,17 @@ func (p *Program) collectCheckerDiagnostics(ctx context.Context, sourceFile *ast
  		if p.SkipTypeChecking(sourceFile, false) {
  			return nil
  		}
@@ -1515,7 +1504,7 @@ index 74b2504d9..cf1654f64 100644
 +		// diagnostics checker (exclusive via its semaphore) that the
 +		// whole-program pass warmed, instead of constructing a query
 +		// checker per file. See collectCheckerDiagnosticsFromFiles.
-+		if p.compilerCheckerPool == nil && smallProgramSingleChecker() && p.isSmallCheckableProgram() {
++		if p.compilerCheckerPool == nil && p.isSmallCheckableProgram() {
 +			dctx := core.WithCheckerLifetime(ctx, core.CheckerLifetimeDiagnostics)
 +			c, done := p.checkerPool.GetChecker(dctx, sourceFile)
 +			result := collect(dctx, c, sourceFile)
@@ -1525,16 +1514,10 @@ index 74b2504d9..cf1654f64 100644
  		c, done := p.GetTypeCheckerForFileExclusive(ctx, sourceFile)
  		result := collect(ctx, c, sourceFile)
  		done()
-@@ -577,6 +617,17 @@ func (p *Program) collectCheckerDiagnostics(ctx context.Context, sourceFile *ast
+@@ -577,6 +616,11 @@ func (p *Program) collectCheckerDiagnostics(ctx context.Context, sourceFile *ast
  	return SortAndDeduplicateDiagnostics(slices.Concat(p.collectCheckerDiagnosticsFromFiles(ctx, p.files, collect)...))
  }
  
-+// smallProgramSingleChecker gates the micro-program fast path in
-+// collectCheckerDiagnosticsFromFiles (kill switch: TNB_SMALL_PROGRAM_CHECKER=0).
-+var smallProgramSingleChecker = sync.OnceValue(func() bool {
-+	return os.Getenv("TNB_SMALL_PROGRAM_CHECKER") != "0"
-+})
-+
 +// smallProgramCheckerThreshold mirrors the internal compiler pool's sizing
 +// (newCheckerPool allocates one checker per ~4 files): at or below this many
 +// checkable files a single checker is cheaper than constructing several.
@@ -1543,7 +1526,7 @@ index 74b2504d9..cf1654f64 100644
  // collectCheckerDiagnosticsFromFiles collects checker diagnostics for a list of files.
  func (p *Program) collectCheckerDiagnosticsFromFiles(ctx context.Context, sourceFiles []*ast.SourceFile, collect func(context.Context, *checker.Checker, *ast.SourceFile) []*ast.Diagnostic) [][]*ast.Diagnostic {
  	diagnostics := make([][]*ast.Diagnostic, len(sourceFiles))
-@@ -585,11 +636,33 @@ func (p *Program) collectCheckerDiagnosticsFromFiles(ctx context.Context, source
+@@ -585,11 +629,33 @@ func (p *Program) collectCheckerDiagnosticsFromFiles(ctx context.Context, source
  			diagnostics[fileIndex] = collect(ctx, c, file)
  		})
  	} else {
@@ -1565,7 +1548,7 @@ index 74b2504d9..cf1654f64 100644
 +		// follow-up per-file RPCs on the same program (declaration emit,
 +		// suggestion diagnostics) reuse the same warm checker rather than
 +		// constructing yet another one.
-+		if len(checkable) > 0 && len(checkable) <= smallProgramCheckerThreshold && smallProgramSingleChecker() {
++		if len(checkable) > 0 && len(checkable) <= smallProgramCheckerThreshold {
 +			dctx := core.WithCheckerLifetime(ctx, core.CheckerLifetimeDiagnostics)
 +			c, done := p.checkerPool.GetChecker(dctx, nil)
 +			for _, i := range checkable {
@@ -1973,51 +1956,6 @@ index 4659530ff..dfcd64020 100644
  		// Should also be marked as changed since it was closed and reopened
  		assert.Assert(t, result.Changed.Has(testURI1), "close then open should mark as changed")
  		// Should have the new content
-diff --git a/internal/project/parsecache.go b/internal/project/parsecache.go
-index 6ef1cdf62..7ee64ecd9 100644
---- a/internal/project/parsecache.go
-+++ b/internal/project/parsecache.go
-@@ -1,12 +1,23 @@
- package project
- 
- import (
-+	"fmt"
-+	"os"
-+	"sync"
-+	"time"
-+
- 	"github.com/microsoft/typescript-go/internal/ast"
- 	"github.com/microsoft/typescript-go/internal/core"
- 	"github.com/microsoft/typescript-go/internal/parser"
- 	"github.com/zeebo/xxh3"
- )
- 
-+// parseStatsEnabled logs every actual parse (cache miss) to stderr when
-+// TNB_PARSE_STATS=1 — diagnostic aid for measuring cross-project re-parse.
-+var parseStatsEnabled = sync.OnceValue(func() bool {
-+	return os.Getenv("TNB_PARSE_STATS") == "1"
-+})
-+
- type ParseCacheKey struct {
- 	ast.SourceFileParseOptions
- 	ScriptKind core.ScriptKind
-@@ -31,8 +42,16 @@ func NewParseCache(options RefCountCacheOptions) *ParseCache {
- 	return NewRefCountCache(
- 		options,
- 		func(key ParseCacheKey, fh FileHandle) *ast.SourceFile {
-+			var start time.Time
-+			if parseStatsEnabled() {
-+				start = time.Now()
-+			}
- 			file := parser.ParseSourceFile(key.SourceFileParseOptions, fh.Content(), key.ScriptKind)
- 			file.Hash = fh.Hash()
-+			if parseStatsEnabled() {
-+				fmt.Fprintf(os.Stderr, "[tnb-parse] %.3fms %s\n",
-+					float64(time.Since(start).Microseconds())/1000, key.FileName)
-+			}
- 			return file
- 		},
- 	)
 diff --git a/internal/project/project.go b/internal/project/project.go
 index 39c77aa78..16fb2c8af 100644
 --- a/internal/project/project.go
@@ -2349,17 +2287,15 @@ index 00f4056e5..bc42163ab 100644
  	s.cancelDiagnosticsRefresh()
  	s.cancelWarmAutoImportCache()
 diff --git a/internal/project/snapshot.go b/internal/project/snapshot.go
-index 61af433d3..04b4f3370 100644
+index 61af433d3..76e369d7a 100644
 --- a/internal/project/snapshot.go
 +++ b/internal/project/snapshot.go
-@@ -264,8 +264,8 @@ func (s *Snapshot) Clone(ctx context.Context, change SnapshotChange, overlays ma
- 			return details
+@@ -265,7 +265,7 @@ func (s *Snapshot) Clone(ctx context.Context, change SnapshotChange, overlays ma
  		}
  		switch change.reason {
--		case UpdateReasonDidOpenFile:
+ 		case UpdateReasonDidOpenFile:
 -			logger.Logf("Reason: DidOpenFile - %s", change.fileChanges.Opened)
-+	case UpdateReasonDidOpenFile:
-+		logger.Logf("Reason: DidOpenFile - %v", change.fileChanges.Opened)
++			logger.Logf("Reason: DidOpenFile - %v", change.fileChanges.Opened)
  		case UpdateReasonDidCloseFile:
  			logger.Logf("Reason: DidCloseFile - %v", change.fileChanges.Closed)
  		case UpdateReasonDidChangeCompilerOptionsForInferredProjects:

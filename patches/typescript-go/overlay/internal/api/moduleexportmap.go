@@ -176,18 +176,6 @@ func computeModuleExportMap(ctx context.Context, program *compiler.Program, sd *
 			continue
 		}
 		addModule(ambient, nil)
-		// Node16 parity: stock may expose both "process" and "node:process".
-		var altName string
-		if strings.HasPrefix(ambient.Name, "node:") {
-			altName = strings.TrimPrefix(ambient.Name, "node:")
-		} else {
-			altName = "node:" + ambient.Name
-		}
-		if altName != ambient.Name {
-			if alt := chk.TryFindAmbientModule(altName); alt != nil {
-				addModule(alt, nil)
-			}
-		}
 	}
 
 	for _, sf := range program.SourceFiles() {

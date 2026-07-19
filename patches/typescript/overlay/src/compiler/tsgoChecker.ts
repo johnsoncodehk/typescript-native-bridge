@@ -2,7 +2,7 @@
 // in-process NAPI bridge, while keeping the rest of the tsserver /
 // LanguageService / namespace surface intact.
 //
-// Heavy deps (koffi, vendored native-preview under vendor/) are require()'d on first use.
+// Heavy deps (the NAPI bridge addon, vendored native-preview under vendor/) are require()'d on first use.
 //
 // The adapter builds a tsgo project from the Program's configFilePath,
 // then routes checker queries by (fileName, position) — the same file
@@ -201,13 +201,13 @@ function hydrateBridgeModuleLocals(proc: TnbBridgeProcessState): void {
     if (proc.debugAnnounced) _tnbDebugAnnounced = true;
 }
 
-// ── RPC / invalidation trace (default OFF; TNB_RPC_TRACE=1 or TNB_TRACE_RPC=1) ──
-// Writes ENTER/EXIT + EVENT lines to TNB_RPC_TRACE_FILE (default /tmp/tnb-rpc.log).
+// ── RPC / invalidation trace (default OFF; TNB_TRACE_RPC=1) ──
+// Writes ENTER/EXIT + EVENT lines to TNB_TRACE_RPC_FILE (default /tmp/tnb-rpc.log).
 // Zero overhead when unset: the flag is snapshotted once at module load.
 let _rpcTraceSeq = 0;
-const _rpcTraceEnabled = process.env.TNB_RPC_TRACE === "1" || process.env.TNB_TRACE_RPC === "1";
+const _rpcTraceEnabled = process.env.TNB_TRACE_RPC === "1";
 const _rpcTraceLog: string = _rpcTraceEnabled
-    ? (process.env.TNB_RPC_TRACE_FILE || process.env.TNB_TRACE_RPC_FILE || "/tmp/tnb-rpc.log")
+    ? (process.env.TNB_TRACE_RPC_FILE || "/tmp/tnb-rpc.log")
     : "";
 const _rpcTraceEnterTs = new Map<number, number>();
 function _rpcTraceEnter(method: string, binary: boolean, session: number): number {
@@ -254,21 +254,14 @@ function isTsserverProcess(): boolean {
  */
 function installSignalExitBypass(proc: TnbBridgeProcessState): void {
     if (proc.signalExitBypassInstalled) return;
-    if (process.env.TNB_SIGNAL_EXIT_BYPASS === "0") return;
-    if (!(process.env.TNB_SIGNAL_EXIT_BYPASS === "1"
-        || process.env.VITEST
+    if (!(process.env.VITEST
         || process.env.JEST_WORKER_ID
         || isTsserverProcess())) {
         return;
     }
     proc.signalExitBypassInstalled = true;
     const disposeBridgeBestEffort = () => {
-        // Dispose the koffi BridgeClient session. SyncRpcChannel (if used)
-        // kills its children via the process `exit` hook fired by process.exit.
-        try {
-            tnbBridgeProcessState().api?.close?.();
-        }
-        catch { /* best-effort */ }
+        // Dispose the NAPI bridge session.
         try {
             _api?.close?.();
         }
@@ -412,7 +405,7 @@ function isTsgoBridgeSymbol(symbol: any): boolean {
     return symbol.objectRegistry != null;
 }
 
-// Module-level session pool — one koffi BridgeClient + tsgo API per process,
+// Module-level session pool — one NAPI bridge client + tsgo API per process,
 // shared across all Programs. Projects are cached per tsconfig path.
 let _client: any;
 let _api: any;
@@ -442,28 +435,17 @@ const _programShapeNoHost = new Map<string, TnbProgramShape>();
 // stability is keyed by host getScriptVersion; a changed file gets a new
 // version and misses. Same reuse rule stock applies via oldProgram
 // (structureIsReused) — bound host ASTs are content-addressed and safe to
-// share across generations. Keyed per LS host so closed projects drop entries.
-const _hostSfStableByHost = new WeakMap<object, Map<string, { version: string; sf: any }>>();
-const _hostSfStableNoHost = new Map<string, { version: string; sf: any }>();
+// share across generations.
 // Process-global stable SF cache: stable .d.ts (bundled lib + node_modules)
 // binds identically for a given content version, and ensureHostSourceFileBound
 // brands after one bind (no re-bind), so ONE entry serves every project in the
-// process. The per-lsHost cache above duplicated the entire lib closure per
-// project — the dominant tsserver memory cost in multi-tsconfig workspaces
-// (issue #6, ~54MB/.vue per open). Entries are replaced on scriptVersion
-// change; the set is bounded by the on-disk declaration set.
+// process — per-project copies of the lib closure were the dominant tsserver
+// memory cost in multi-tsconfig workspaces (issue #6, ~54MB/.vue per open).
+// Entries are replaced on scriptVersion change; the set is bounded by the
+// on-disk declaration set.
 const _hostSfStableGlobal = new Map<string, { version: string; sf: any }>();
 function isStableHostSfPath(p: string): boolean {
-    if (process.env.TNB_DISABLE_STABLE_HOST_SF === "1") return false;
     return p.endsWith(".d.ts") && (p.includes("/node_modules/") || isHostLibFile(p));
-}
-function getHostSfStableCache(lsHost: any): Map<string, { version: string; sf: any }> {
-    if (typeof lsHost === "object" && lsHost !== null) {
-        let m = _hostSfStableByHost.get(lsHost);
-        if (!m) { m = new Map(); _hostSfStableByHost.set(lsHost, m); }
-        return m;
-    }
-    return _hostSfStableNoHost;
 }
 
 // Cross-generation node index reuse, keyed by the tsgo RemoteSourceFile
@@ -510,8 +492,8 @@ class BridgeClient {
         noteRpc(method);
         const paramsJson = params == null ? null : JSON.stringify(params);
         const traceId = _rpcTraceEnter(method, true, this.handle);
-        // NAPI addon returns a Buffer (V8 copy of the Go-owned binBuf), or null
-        // for empty results.
+        // NAPI addon returns a zero-copy external Buffer wrapping the Go-owned
+        // binBuf (released back to Go on GC), or null for empty results.
         const buf = _bridgeFns.BridgeCallBinary(this.handleBigInt, method, paramsJson);
         _rpcTraceExit(traceId, method);
         if (process.env.TSGO_PROFILE === "1") _profRpc(method, Date.now() - t0);
@@ -1030,12 +1012,8 @@ function ensureSymbolContextualDocCompat(sym: any): any {
 function fileExistsOnDisk(fileName: string): boolean {
     let exists = _overlayDiskExistsCache.get(fileName);
     if (exists === undefined) {
-        try {
-            const fs = require("fs") as typeof import("fs");
-            exists = fs.existsSync(fileName);
-        } catch {
-            exists = false;
-        }
+        const fs = require("fs") as typeof import("fs");
+        exists = fs.existsSync(fileName);
         _overlayDiskExistsCache.set(fileName, exists);
     }
     return exists;
@@ -1054,7 +1032,7 @@ function collectTsgoOpenFileNames(syncHost: any, extra?: Iterable<string>): stri
         for (const fn of scriptNames) add(fn);
     }
     const ps = syncHost?.projectService;
-    if (ps?.openFiles?.forEach && syncHost.projectService === ps) {
+    if (ps?.openFiles?.forEach) {
         // tsserver Project — include open client tabs not listed in config roots.
         ps.openFiles.forEach((_root: string, path: string) => {
             const info = ps.getScriptInfoForPath(path);
@@ -1139,7 +1117,7 @@ function getHostScriptContent(host: any, fileName: string, options: any): { text
     return undefined;
 }
 
-function hostSourceFileOptions(languageVersion: number, _host: any) {
+function hostSourceFileOptions(languageVersion: number) {
     // Host-parsed AST is only built for Language Service paths (Volar virtual
     // files, component-meta docs, hover/quickinfo). ParseForTypeErrors strips
     // description JSDoc from .ts files (only keeps @see/@link), which makes
@@ -1154,7 +1132,7 @@ function sourceFileFromHostSnapshot(host: any, hostFileName: string, requestFile
     const text = snap.getText(0, snap.getLength());
     if (!text.length) return undefined;
     const scriptKind = resolveLanguageServiceScriptKind(host, requestFileName, hostFileName, /*fromHostSnapshot*/ true);
-    const sf = createSourceFile(hostFileName, text, hostSourceFileOptions(languageTarget, host), /*setParentNodes*/ true, scriptKind);
+    const sf = createSourceFile(hostFileName, text, hostSourceFileOptions(languageTarget), /*setParentNodes*/ true, scriptKind);
     return attachHostSourceFileMetadata(sf, hostFileName);
 }
 
@@ -1370,7 +1348,7 @@ function hostifyDecodedTypeNode(typeNode: any): any {
     const sf = createSourceFile(
         "__tnb_typeToTypeNode.ts",
         `type __T = ${text};`,
-        hostSourceFileOptions(/*languageVersion*/ 99, /*host*/ undefined),
+        hostSourceFileOptions(/*languageVersion*/ 99),
         /*setParentNodes*/ true,
         /*scriptKind*/ 3 /* ScriptKind.TS */,
     );
@@ -1390,7 +1368,7 @@ function hostifyDecodedDeclarationNode(node: any): any {
     const sf = createSourceFile(
         "__tnb_declNode.ts",
         `interface __D { ${text} }`,
-        hostSourceFileOptions(/*languageVersion*/ 99, /*host*/ undefined),
+        hostSourceFileOptions(/*languageVersion*/ 99),
         /*setParentNodes*/ true,
         /*scriptKind*/ 3 /* ScriptKind.TS */,
     );
@@ -1409,7 +1387,7 @@ function hostifyDecodedSignatureDeclaration(node: any, kind: number): any {
     if (!text) return undefined;
     // Nodebuilder often emits nameless methods (`(): T`); inject a placeholder so
     // the reparse is legal. Callers replace the name via factory.update*.
-    if (/^\s*[\(<]/.test(text) || /^\s*</.test(text)) {
+    if (/^\s*[\(<]/.test(text)) {
         text = `__m${text}`;
     }
     // MethodDeclaration must be reparsed as a class member (interface wrap yields MethodSignature).
@@ -1417,7 +1395,7 @@ function hostifyDecodedSignatureDeclaration(node: any, kind: number): any {
         const sf = createSourceFile(
             "__tnb_methodDecl.ts",
             `class __C { ${text} }`,
-            hostSourceFileOptions(/*languageVersion*/ 99, /*host*/ undefined),
+            hostSourceFileOptions(/*languageVersion*/ 99),
             /*setParentNodes*/ true,
             /*scriptKind*/ 3 /* ScriptKind.TS */,
         );
@@ -1431,7 +1409,7 @@ function hostifyDecodedSignatureDeclaration(node: any, kind: number): any {
         const sf = createSourceFile(
             "__tnb_fnDecl.ts",
             text,
-            hostSourceFileOptions(/*languageVersion*/ 99, /*host*/ undefined),
+            hostSourceFileOptions(/*languageVersion*/ 99),
             /*setParentNodes*/ true,
             /*scriptKind*/ 3 /* ScriptKind.TS */,
         );
@@ -1441,7 +1419,7 @@ function hostifyDecodedSignatureDeclaration(node: any, kind: number): any {
     const sf = createSourceFile(
         "__tnb_fnExpr.ts",
         `const __e = (${text});`,
-        hostSourceFileOptions(/*languageVersion*/ 99, /*host*/ undefined),
+        hostSourceFileOptions(/*languageVersion*/ 99),
         /*setParentNodes*/ true,
         /*scriptKind*/ 3 /* ScriptKind.TS */,
     );
@@ -1462,7 +1440,7 @@ function hostifyDecodedExpression(node: any): any {
     const sf = createSourceFile(
         "__tnb_exprNode.ts",
         `const __e = (${text});`,
-        hostSourceFileOptions(/*languageVersion*/ 99, /*host*/ undefined),
+        hostSourceFileOptions(/*languageVersion*/ 99),
         /*setParentNodes*/ true,
         /*scriptKind*/ 3 /* ScriptKind.TS */,
     );
@@ -1484,7 +1462,7 @@ function hostifyDecodedPropertyName(node: any): any {
     const sf = createSourceFile(
         "__tnb_propName.ts",
         `const __o = { ${text}: 0 };`,
-        hostSourceFileOptions(/*languageVersion*/ 99, /*host*/ undefined),
+        hostSourceFileOptions(/*languageVersion*/ 99),
         /*setParentNodes*/ true,
         /*scriptKind*/ 3 /* ScriptKind.TS */,
     );
@@ -1504,7 +1482,7 @@ function hostifyDecodedTypePredicateNode(node: any): any {
     const sf = createSourceFile(
         "__tnb_predNode.ts",
         `function __f(x: unknown): ${text} { return true as any; }`,
-        hostSourceFileOptions(/*languageVersion*/ 99, /*host*/ undefined),
+        hostSourceFileOptions(/*languageVersion*/ 99),
         /*setParentNodes*/ true,
         /*scriptKind*/ 3 /* ScriptKind.TS */,
     );
@@ -1625,7 +1603,7 @@ const TypeFormatFlagsNodeBuilderFlagsMask =
 /** NodeBuilderFlags.IgnoreErrors composite (Allow* recoverability bits). */
 const NodeBuilderFlagsIgnoreErrors =
     (1 << 15) | (1 << 16) | (1 << 17) | (1 << 18) | (1 << 19) | (1 << 21) | (1 << 26);
-function toWriteTypeNodeBuilderFlags(flags?: number, _maximumLength?: number): number {
+function toWriteTypeNodeBuilderFlags(flags?: number): number {
     // Stock typeToString: toNodeBuilderFlags(flags) | IgnoreErrors | (noTruncation ? NoTruncation : 0).
     // Preserve caller's NoTruncation bit via the mask; do NOT invent NoTruncation from
     // maximumLength — that overshoots stock hover MaxTruncationLength (500) to Go's
@@ -1676,7 +1654,7 @@ function stampIdentifierEscapedText(node: any, fallbackName?: string): void {
     const kind = node.kind;
     // Accept stock (80/81) and raw tsgo (79/80) Identifier kinds — remap may not
     // have run yet when NodeBuilder first returns a decoded node.
-    if (kind === SyntaxKind.Identifier || kind === SyntaxKind.PrivateIdentifier || kind === 79 || kind === 80 || kind === 81) {
+    if (kind === SyntaxKind.Identifier || kind === SyntaxKind.PrivateIdentifier || kind === 79) {
         const text = node.escapedText ?? node.text ?? fallbackName;
         if (text != null && text !== "") {
             const s = String(text);
@@ -2295,10 +2273,7 @@ function resolveNameOnHostBoundAst(name: string, location: any): any | undefined
     if (!location || typeof location.getStart !== "function") return undefined;
     const sf = location.getSourceFile?.();
     if (!sf?.__tnbHostBound) return undefined;
-    const unescaped = typeof name === "string" && name.charCodeAt(0) === 95 /* _ */
-        ? name
-        : name;
-    if (location.kind === SyntaxKind.Identifier && location.text === unescaped) {
+    if (location.kind === SyntaxKind.Identifier && location.text === name) {
         return getHostBoundSymbolAtLocation(location);
     }
     return undefined;
@@ -3748,184 +3723,180 @@ function patchRemoteNodeKinds(sampleNode: any): void {
 function installRemoteNodeTraversalHooks(): void {
     const proc = tnbBridgeProcessState();
     if (proc.remoteNodeTraversalPatched) return;
-    try {
-        const pathMod = require("path") as typeof import("path");
-        const nodeModule = require(pathMod.join(getNativePreviewDir(), "dist", "api", "node", "node.js"));
-        const RemoteNode = nodeModule.RemoteNode;
-        if (!RemoteNode?.prototype || typeof RemoteNode.prototype.forEachChild !== "function") return;
-        if (typeof RemoteNode.prototype.getChildren !== "function") {
-            RemoteNode.prototype.getChildren = function (this: any, _sourceFile?: any) {
-                // Stock getChildren includes jsDoc children (forEachChild does
-                // not) — FAR follows {@link} references inside JSDoc comments
-                // (sim-nav lib.es2015.iterable {@link Iterator} cluster, #6).
-                const children: any[] = this.jsDoc ? [...this.jsDoc] : [];
-                const jsDocCount = children.length;
-                // RemoteNode.forEachChild stops when the visitor returns truthy;
-                // Array.push does, so token walks must not return push's length.
-                this.forEachChild((child: any) => { children.push(child); });
-                // Stock children include the leading operator keyword token of
-                // TypeQuery (`typeof x`)/TypeOperator (`keyof T`)/InferType
-                // (`infer U`); tsgo encodes the operator as a scalar (or implies
-                // it from the node kind) and emits no child token, so token
-                // walks (getTokenAtPosition ← FAR keyword references) can never
-                // land on the keyword and typeof refs vanish from lib files
-                // (sim-nav typeof-keyword cluster, issue #6). Synthesize it.
-                // Position order is jsDoc < keyword < real children; the
-                // token's pos is the parent's (first-child convention), so it
-                // must sit after jsDoc to keep child ends ascending for
-                // getTokenAtPosition's binary search.
-                const kwKind = tnbLeadingOperatorKeywordKind(this);
-                if (kwKind !== undefined) {
-                    const token = tnbSynthesizeKeywordToken(this, kwKind);
-                    if (token) children.splice(jsDocCount, 0, token);
+    const pathMod = require("path") as typeof import("path");
+    const nodeModule = require(pathMod.join(getNativePreviewDir(), "dist", "api", "node", "node.js"));
+    const RemoteNode = nodeModule.RemoteNode;
+    if (!RemoteNode?.prototype || typeof RemoteNode.prototype.forEachChild !== "function") return;
+    if (typeof RemoteNode.prototype.getChildren !== "function") {
+        RemoteNode.prototype.getChildren = function (this: any, _sourceFile?: any) {
+            // Stock getChildren includes jsDoc children (forEachChild does
+            // not) — FAR follows {@link} references inside JSDoc comments
+            // (sim-nav lib.es2015.iterable {@link Iterator} cluster, #6).
+            const children: any[] = this.jsDoc ? [...this.jsDoc] : [];
+            const jsDocCount = children.length;
+            // RemoteNode.forEachChild stops when the visitor returns truthy;
+            // Array.push does, so token walks must not return push's length.
+            this.forEachChild((child: any) => { children.push(child); });
+            // Stock children include the leading operator keyword token of
+            // TypeQuery (`typeof x`)/TypeOperator (`keyof T`)/InferType
+            // (`infer U`); tsgo encodes the operator as a scalar (or implies
+            // it from the node kind) and emits no child token, so token
+            // walks (getTokenAtPosition ← FAR keyword references) can never
+            // land on the keyword and typeof refs vanish from lib files
+            // (sim-nav typeof-keyword cluster, issue #6). Synthesize it.
+            // Position order is jsDoc < keyword < real children; the
+            // token's pos is the parent's (first-child convention), so it
+            // must sit after jsDoc to keep child ends ascending for
+            // getTokenAtPosition's binary search.
+            const kwKind = tnbLeadingOperatorKeywordKind(this);
+            if (kwKind !== undefined) {
+                const token = tnbSynthesizeKeywordToken(this, kwKind);
+                if (token) children.splice(jsDocCount, 0, token);
+            }
+            return children;
+        };
+    }
+    if (typeof RemoteNode.prototype.getFirstToken !== "function") {
+        RemoteNode.prototype.getFirstToken = function (this: any, sourceFile?: any) {
+            const children = this.getChildren(sourceFile);
+            if (!children.length) return undefined;
+            for (const child of children) {
+                if (child.kind < SyntaxKind.FirstJSDocNode || child.kind > SyntaxKind.LastJSDocNode) {
+                    return child.kind < SyntaxKind.FirstNode
+                        ? child
+                        : child.getFirstToken?.(sourceFile);
                 }
-                return children;
-            };
+            }
+            return undefined;
+        };
+    }
+    if (typeof RemoteNode.prototype.getLastToken !== "function") {
+        RemoteNode.prototype.getLastToken = function (this: any, sourceFile?: any) {
+            const children = this.getChildren(sourceFile);
+            const child = children[children.length - 1];
+            if (!child) return undefined;
+            return child.kind < SyntaxKind.FirstNode
+                ? child
+                : child.getLastToken?.(sourceFile);
+        };
+    }
+    if (typeof RemoteNode.prototype.getChildCount !== "function") {
+        RemoteNode.prototype.getChildCount = function (this: any, sourceFile?: any) {
+            return this.getChildren(sourceFile).length;
+        };
+    }
+    // RemoteNode.getStart delegates to the vendored getTokenPosOfNode,
+    // which classifies `node.kind` against TSGO SyntaxKind — but `kind`
+    // is the fork-remapped getter (patchRemoteNodeKinds), and fork
+    // StringLiteral(11) collides with tsgo JsxText(11). String literals
+    // then take the JsxText branch (stopAtComments=true), so a literal
+    // whose leading trivia contains a comment (e.g. a string-literal
+    // property name preceded by JSDoc) gets a getStart INSIDE the comment
+    // — references on such lib declarations report the comment line
+    // (sim-nav loc-set-mismatch cluster). Re-implement getStart with
+    // _rawKind/rawFlags checks (issue #6).
+    const astMod = require(pathMod.join(getNativePreviewDir(), "dist", "ast", "index.js"));
+    const { skipTrivia, isJSDocNodeKind, SyntaxKind: TsgoSyntaxKind, NodeFlags: TsgoNodeFlags } = astMod;
+    const getTokenPosRaw = (node: any, sourceFile: any, includeJSDoc: boolean | undefined): number => {
+        // nodeIsMissing
+        if (node.pos === node.end && node.pos >= 0 && node._rawKind !== TsgoSyntaxKind.EndOfFile) {
+            return node.pos;
         }
-        if (typeof RemoteNode.prototype.getFirstToken !== "function") {
-            RemoteNode.prototype.getFirstToken = function (this: any, sourceFile?: any) {
-                const children = this.getChildren(sourceFile);
-                if (!children.length) return undefined;
-                for (const child of children) {
-                    if (child.kind < SyntaxKind.FirstJSDocNode || child.kind > SyntaxKind.LastJSDocNode) {
-                        return child.kind < SyntaxKind.FirstNode
-                            ? child
-                            : child.getFirstToken?.(sourceFile);
-                    }
-                }
-                return undefined;
-            };
+        if (isJSDocNodeKind(node._rawKind) || node._rawKind === TsgoSyntaxKind.JsxText) {
+            return skipTrivia(sourceFile.text, node.pos, /*stopAfterLineBreak*/ false, /*stopAtComments*/ true);
         }
-        if (typeof RemoteNode.prototype.getLastToken !== "function") {
-            RemoteNode.prototype.getLastToken = function (this: any, sourceFile?: any) {
-                const children = this.getChildren(sourceFile);
-                const child = children[children.length - 1];
-                if (!child) return undefined;
-                return child.kind < SyntaxKind.FirstNode
-                    ? child
-                    : child.getLastToken?.(sourceFile);
-            };
+        if (includeJSDoc && node.jsDoc && node.jsDoc.length > 0) {
+            return getTokenPosRaw(node.jsDoc[0], sourceFile, /*includeJSDoc*/ false);
         }
-        if (typeof RemoteNode.prototype.getChildCount !== "function") {
-            RemoteNode.prototype.getChildCount = function (this: any, sourceFile?: any) {
-                return this.getChildren(sourceFile).length;
-            };
-        }
-        // RemoteNode.getStart delegates to the vendored getTokenPosOfNode,
-        // which classifies `node.kind` against TSGO SyntaxKind — but `kind`
-        // is the fork-remapped getter (patchRemoteNodeKinds), and fork
-        // StringLiteral(11) collides with tsgo JsxText(11). String literals
-        // then take the JsxText branch (stopAtComments=true), so a literal
-        // whose leading trivia contains a comment (e.g. a string-literal
-        // property name preceded by JSDoc) gets a getStart INSIDE the comment
-        // — references on such lib declarations report the comment line
-        // (sim-nav loc-set-mismatch cluster). Re-implement getStart with
-        // _rawKind/rawFlags checks (issue #6).
-        try {
-            const astMod = require(pathMod.join(getNativePreviewDir(), "dist", "ast", "index.js"));
-            const { skipTrivia, isJSDocNodeKind, SyntaxKind: TsgoSyntaxKind, NodeFlags: TsgoNodeFlags } = astMod;
-            const getTokenPosRaw = (node: any, sourceFile: any, includeJSDoc: boolean | undefined): number => {
-                // nodeIsMissing
-                if (node.pos === node.end && node.pos >= 0 && node._rawKind !== TsgoSyntaxKind.EndOfFile) {
-                    return node.pos;
-                }
-                if (isJSDocNodeKind(node._rawKind) || node._rawKind === TsgoSyntaxKind.JsxText) {
-                    return skipTrivia(sourceFile.text, node.pos, /*stopAfterLineBreak*/ false, /*stopAtComments*/ true);
-                }
-                if (includeJSDoc && node.jsDoc && node.jsDoc.length > 0) {
-                    return getTokenPosRaw(node.jsDoc[0], sourceFile, /*includeJSDoc*/ false);
-                }
-                return skipTrivia(sourceFile.text, node.pos, /*stopAfterLineBreak*/ false, /*stopAtComments*/ false, /*inJSDoc*/ !!(node._rawFlags & TsgoNodeFlags.JSDoc));
-            };
-            RemoteNode.prototype.getStart = function (this: any, sourceFile?: any, includeJsDocComment?: boolean): number {
-                return getTokenPosRaw(this, sourceFile ?? this.getSourceFile(), includeJsDocComment);
-            };
-        } catch { /* ast module layout changed — keep vendored getStart */ }
-        // tsgo names TypeParameterDeclaration's default `defaultType` (`default`
-        // is a Go keyword); stock consumers read `.default` (emitter's
-        // emitTypeParameter prints `= D`, services read it for defaults).
-        // Alias it at the boundary so decoded nodes keep the stock shape.
-        if (!Object.getOwnPropertyDescriptor(RemoteNode.prototype, "default")) {
-            Object.defineProperty(RemoteNode.prototype, "default", {
-                configurable: true,
-                get(this: any) { return this.defaultType; },
-            });
-        }
-        // tsgo's AST stores the question-mark token as `postfixToken` on some
-        // node kinds (PropertySignature/Declaration, Parameter, Method*,
-        // MappedTypeNode, NamedTupleMember) while stock's display machinery
-        // (emitter, symbolDisplay, textChanges) reads `questionToken` — which
-        // the vendored getter resolves only for Go fields literally named
-        // "questionToken" (e.g. ConditionalExpression). Fall back to
-        // `postfixToken` when the native lookup misses, so reused declaration
-        // nodes print `?` — quickinfo reusing a tsgo-materialized declaration
-        // dropped optionality without it (issue #4).
-        const questionTokenDesc = Object.getOwnPropertyDescriptor(RemoteNode.prototype, "questionToken");
-        const origQuestionTokenGet = questionTokenDesc?.get;
-        if (origQuestionTokenGet) {
-            Object.defineProperty(RemoteNode.prototype, "questionToken", {
-                configurable: true,
-                get(this: any) {
-                    return origQuestionTokenGet.call(this) ?? this.postfixToken;
-                },
-            });
-        }
-        // tsgo's nodebuilder leaves RawText empty on synthesized TemplateHead/
-        // Middle/Tail; the decoder surfaces that as rawText="" (present, not
-        // undefined). Stock getLiteralText prefers rawText over text with `??`,
-        // so "" shadows the cooked text and template literal prefixes vanish
-        // (`on${Capitalize<...>}` printed as `${Capitalize<...>}` — issue #4).
-        // Empty raw text means "no raw form": surface it as undefined so stock
-        // printing falls back to the cooked text.
-        const rawTextDesc = Object.getOwnPropertyDescriptor(RemoteNode.prototype, "rawText");
-        const origRawTextGet = rawTextDesc?.get;
-        if (origRawTextGet) {
-            Object.defineProperty(RemoteNode.prototype, "rawText", {
-                configurable: true,
-                get(this: any) {
-                    const v = origRawTextGet.call(this);
-                    return v === "" ? undefined : v;
-                },
-            });
-        }
-        // Boundary invariant: file names visible to JS consumers are host
-        // paths. RemoteSourceFile.fileName reads the wire string, which is
-        // bundled:///libs/lib.*.d.ts for tsgo's embedded libs — leaking that
-        // into e.g. DefinitionInfo.fileName crashes tsserver span mapping
-        // (goto definition on lib members). NodeHandle.getSourceFile() already
-        // resolves to host names; align the decoded-node path. RPC identity is
-        // unaffected: node ids embed sourceFile.path (raw wire path), and
-        // tsgo-facing lookups renormalize via toTsgoFileName.
-        const RemoteSourceFile = nodeModule.RemoteSourceFile;
-        const fileNameDesc = RemoteSourceFile?.prototype
-            && Object.getOwnPropertyDescriptor(RemoteSourceFile.prototype, "fileName");
-        if (fileNameDesc?.get) {
-            const rawGet = fileNameDesc.get;
-            Object.defineProperty(RemoteSourceFile.prototype, "fileName", {
-                configurable: true,
-                get(this: any) { return toHostFileName(rawGet.call(this)); },
-            });
-        }
-        // services SourceFileObject.getNamedDeclarations — navto (and FAR's
-        // getDeclarationOfName) call it on EVERY program source file. Under
-        // TNB_LIB_SKELETON bundled libs are RemoteSourceFiles, so the method
-        // must exist here; the result holds RemoteNode handles (cheap) instead
-        // of a host AST. Mirror of services.ts computeNamedDeclarations, but
-        // traversal uses the RemoteNode-native forEachChild (the stock
-        // ts.forEachChild per-kind property reader works too, native is one
-        // hop). `.symbol` is undefined on RemoteNodes — the overload-group
-        // merge then treats same-parent same-name functions as one group,
-        // which declaration merging in .d.ts guarantees anyway.
-        if (RemoteSourceFile?.prototype && typeof RemoteSourceFile.prototype.getNamedDeclarations !== "function") {
-            RemoteSourceFile.prototype.getNamedDeclarations = function (this: any) {
-                if (!this.namedDeclarations) {
-                    this.namedDeclarations = tnbComputeNamedDeclarations(this);
-                }
-                return this.namedDeclarations;
-            };
-        }
-        proc.remoteNodeTraversalPatched = true;
-    } catch { /* native-preview not built yet */ }
+        return skipTrivia(sourceFile.text, node.pos, /*stopAfterLineBreak*/ false, /*stopAtComments*/ false, /*inJSDoc*/ !!(node._rawFlags & TsgoNodeFlags.JSDoc));
+    };
+    RemoteNode.prototype.getStart = function (this: any, sourceFile?: any, includeJsDocComment?: boolean): number {
+        return getTokenPosRaw(this, sourceFile ?? this.getSourceFile(), includeJsDocComment);
+    };
+    // tsgo names TypeParameterDeclaration's default `defaultType` (`default`
+    // is a Go keyword); stock consumers read `.default` (emitter's
+    // emitTypeParameter prints `= D`, services read it for defaults).
+    // Alias it at the boundary so decoded nodes keep the stock shape.
+    if (!Object.getOwnPropertyDescriptor(RemoteNode.prototype, "default")) {
+        Object.defineProperty(RemoteNode.prototype, "default", {
+            configurable: true,
+            get(this: any) { return this.defaultType; },
+        });
+    }
+    // tsgo's AST stores the question-mark token as `postfixToken` on some
+    // node kinds (PropertySignature/Declaration, Parameter, Method*,
+    // MappedTypeNode, NamedTupleMember) while stock's display machinery
+    // (emitter, symbolDisplay, textChanges) reads `questionToken` — which
+    // the vendored getter resolves only for Go fields literally named
+    // "questionToken" (e.g. ConditionalExpression). Fall back to
+    // `postfixToken` when the native lookup misses, so reused declaration
+    // nodes print `?` — quickinfo reusing a tsgo-materialized declaration
+    // dropped optionality without it (issue #4).
+    const questionTokenDesc = Object.getOwnPropertyDescriptor(RemoteNode.prototype, "questionToken");
+    const origQuestionTokenGet = questionTokenDesc?.get;
+    if (origQuestionTokenGet) {
+        Object.defineProperty(RemoteNode.prototype, "questionToken", {
+            configurable: true,
+            get(this: any) {
+                return origQuestionTokenGet.call(this) ?? this.postfixToken;
+            },
+        });
+    }
+    // tsgo's nodebuilder leaves RawText empty on synthesized TemplateHead/
+    // Middle/Tail; the decoder surfaces that as rawText="" (present, not
+    // undefined). Stock getLiteralText prefers rawText over text with `??`,
+    // so "" shadows the cooked text and template literal prefixes vanish
+    // (`on${Capitalize<...>}` printed as `${Capitalize<...>}` — issue #4).
+    // Empty raw text means "no raw form": surface it as undefined so stock
+    // printing falls back to the cooked text.
+    const rawTextDesc = Object.getOwnPropertyDescriptor(RemoteNode.prototype, "rawText");
+    const origRawTextGet = rawTextDesc?.get;
+    if (origRawTextGet) {
+        Object.defineProperty(RemoteNode.prototype, "rawText", {
+            configurable: true,
+            get(this: any) {
+                const v = origRawTextGet.call(this);
+                return v === "" ? undefined : v;
+            },
+        });
+    }
+    // Boundary invariant: file names visible to JS consumers are host
+    // paths. RemoteSourceFile.fileName reads the wire string, which is
+    // bundled:///libs/lib.*.d.ts for tsgo's embedded libs — leaking that
+    // into e.g. DefinitionInfo.fileName crashes tsserver span mapping
+    // (goto definition on lib members). NodeHandle.getSourceFile() already
+    // resolves to host names; align the decoded-node path. RPC identity is
+    // unaffected: node ids embed sourceFile.path (raw wire path), and
+    // tsgo-facing lookups renormalize via toTsgoFileName.
+    const RemoteSourceFile = nodeModule.RemoteSourceFile;
+    const fileNameDesc = RemoteSourceFile?.prototype
+        && Object.getOwnPropertyDescriptor(RemoteSourceFile.prototype, "fileName");
+    if (fileNameDesc?.get) {
+        const rawGet = fileNameDesc.get;
+        Object.defineProperty(RemoteSourceFile.prototype, "fileName", {
+            configurable: true,
+            get(this: any) { return toHostFileName(rawGet.call(this)); },
+        });
+    }
+    // services SourceFileObject.getNamedDeclarations — navto (and FAR's
+    // getDeclarationOfName) call it on EVERY program source file. Bundled
+    // libs are RemoteSourceFiles, so the method must exist here; the result
+    // holds RemoteNode handles (cheap) instead
+    // of a host AST. Mirror of services.ts computeNamedDeclarations, but
+    // traversal uses the RemoteNode-native forEachChild (the stock
+    // ts.forEachChild per-kind property reader works too, native is one
+    // hop). `.symbol` is undefined on RemoteNodes — the overload-group
+    // merge then treats same-parent same-name functions as one group,
+    // which declaration merging in .d.ts guarantees anyway.
+    if (RemoteSourceFile?.prototype && typeof RemoteSourceFile.prototype.getNamedDeclarations !== "function") {
+        RemoteSourceFile.prototype.getNamedDeclarations = function (this: any) {
+            if (!this.namedDeclarations) {
+                this.namedDeclarations = tnbComputeNamedDeclarations(this);
+            }
+            return this.namedDeclarations;
+        };
+    }
+    proc.remoteNodeTraversalPatched = true;
 }
 
 /** Keyword kind of the leading operator token that stock exposes as a child but tsgo does not. */
@@ -4361,14 +4332,14 @@ export function createTsgoProgram(
         const content = hostContentByFile.get(hostFileName);
         if (content?.text && (!hasSnapshot || content.fromHost)) {
             const scriptKind = resolveLanguageServiceScriptKind(ls, requestFileName, hostFileName, hasSnapshot);
-            const sf = createSourceFile(hostFileName, content.text, hostSourceFileOptions(options.target ?? 99, ls), /*setParentNodes*/ true, scriptKind);
+            const sf = createSourceFile(hostFileName, content.text, hostSourceFileOptions(options.target ?? 99), /*setParentNodes*/ true, scriptKind);
             return attachHostSourceFileMetadata(sf, hostFileName);
         }
 
         if (!hasSnapshot) {
             const disk = ls?.readFile?.(hostFileName);
             if (typeof disk === "string" && disk.length) {
-                const sf = createSourceFile(hostFileName, disk, hostSourceFileOptions(options.target ?? 99, ls), /*setParentNodes*/ true, inferScriptKind(hostFileName));
+                const sf = createSourceFile(hostFileName, disk, hostSourceFileOptions(options.target ?? 99), /*setParentNodes*/ true, inferScriptKind(hostFileName));
                 return attachHostSourceFileMetadata(sf, hostFileName);
             }
         }
@@ -4381,7 +4352,7 @@ export function createTsgoProgram(
         const ls = hostForLs();
         const scriptKind = resolveLanguageServiceScriptKind(ls, requestFileName, hostFileName, /*fromHostSnapshot*/ true);
         const sf = attachHostSourceFileMetadata(
-            createSourceFile(hostFileName, text, hostSourceFileOptions(options.target ?? 99, ls), /*setParentNodes*/ true, scriptKind),
+            createSourceFile(hostFileName, text, hostSourceFileOptions(options.target ?? 99), /*setParentNodes*/ true, scriptKind),
             hostFileName,
         );
         ensureHostSourceFileBound(sf, options);
@@ -4454,25 +4425,11 @@ export function createTsgoProgram(
         // traverse program.getSourceFiles() and surface declaration entries in
         // lib files; the bridge's never-host-parse rule dropped them from the
         // walk (sim-nav refs-missing cluster). Bundled libs are served via the
-        // tsgo-backed skeleton below by default (issue #6): the RemoteNode view
+        // tsgo-backed skeleton below (issue #6): the RemoteNode view
         // carries statements/positions for LS token walks at a small fraction
         // of the host-AST memory, with getNamedDeclarations / getStart /
         // operator-keyword / jsDoc children patched to stock shape in
-        // installRemoteNodeTraversalHooks. TNB_LIB_SKELETON=0 restores the
-        // previous behavior (host-parse once per content version, reuse via
-        // the stable cache — lib content is fixed per install, same rule as
-        // node_modules .d.ts). createBoundHostSourceFile returns undefined on
-        // empty text → fall through to the tsgo-backed skeleton below.
-        if (softPMaterializeAllForImportTracker && isHostLibFile(hostFileName) && process.env.TNB_LIB_SKELETON === "0") {
-            const libText = host?.readFile?.(hostFileName) ?? "";
-            const hostSf = createBoundHostSourceFile(hostFileName, fileName, libText);
-            if (hostSf) {
-                ensureTnbVersion(hostSf, hostFileName);
-                sfCache.set(cacheKey, hostSf);
-                return rememberStable(hostSf);
-            }
-        }
-
+        // installRemoteNodeTraversalHooks.
         const hostContent = hostContentByFile.get(hostFileName);
         const text = hostContent?.text ?? host?.readFile?.(hostFileName) ?? "";
         const scriptKind = hostContent?.scriptKind ?? inferScriptKind(hostFileName);
@@ -4703,29 +4660,18 @@ export function createTsgoProgram(
             // mismatches) still fall through to the per-file RPC below.
             // Never batch for interactive hosts: an editor asks for one open
             // file, not the whole program.
-            if ((options as any).tscBuild && process.env.TNB_BATCH_DIAG !== "0" && typeof proj.program.getDiagnosticsBatch === "function") {
-                try {
-                    const entries = proj.program.getDiagnosticsBatch() ?? [];
-                    if (process.env.TNB_BATCH_DIAG_DEBUG === "1") {
-                        process.stderr.write(`[batch-diag] entries=${entries.length} keys=${JSON.stringify(entries.slice(0, 3).map((e: any) => toHostFileName(e.fileName)))}\n`);
-                    }
-                    for (const entry of entries) {
-                        const hostFileName = toHostFileName(entry.fileName);
-                        const syntactic = mapTsgoDiagnostics(entry.syntactic, getDiagnosticSourceFile);
-                        const semantic = mapTsgoDiagnostics(entry.semantic, getDiagnosticSourceFile);
-                        // Builder callers pass sourceFile.fileName, which may be
-                        // the canonical (lowercased) path rather than tsgo's
-                        // original-casing name — index under both.
-                        for (const key of new Set([hostFileName, canonicalSourceFilePath(hostFileName)])) {
-                            perFileDiagCache.syntactic.set(key, syntactic);
-                            perFileDiagCache.semantic.set(key, semantic);
-                        }
-                    }
-                }
-                catch (e) {
-                    // Batch is an optimization only — per-file RPCs still serve misses.
-                    if (process.env.TNB_BATCH_DIAG_DEBUG === "1") {
-                        process.stderr.write(`[batch-diag] failed: ${(e as any)?.message}\n`);
+            if ((options as any).tscBuild) {
+                const entries = proj.program.getDiagnosticsBatch() ?? [];
+                for (const entry of entries) {
+                    const hostFileName = toHostFileName(entry.fileName);
+                    const syntactic = mapTsgoDiagnostics(entry.syntactic, getDiagnosticSourceFile);
+                    const semantic = mapTsgoDiagnostics(entry.semantic, getDiagnosticSourceFile);
+                    // Builder callers pass sourceFile.fileName, which may be
+                    // the canonical (lowercased) path rather than tsgo's
+                    // original-casing name — index under both.
+                    for (const key of new Set([hostFileName, canonicalSourceFilePath(hostFileName)])) {
+                        perFileDiagCache.syntactic.set(key, syntactic);
+                        perFileDiagCache.semantic.set(key, semantic);
                     }
                 }
             }
@@ -4736,9 +4682,6 @@ export function createTsgoProgram(
         const cache = getPerFileDiagCache(proj);
         let result = cache.syntactic.get(fileName);
         if (!result) {
-            if (process.env.TNB_BATCH_DIAG_DEBUG === "1") {
-                process.stderr.write(`[batch-diag] syntactic miss: ${fileName}\n`);
-            }
             result = mapTsgoDiagnostics(proj.program.getSyntacticDiagnostics?.(tsgoFileArg(fileName)), getDiagnosticSourceFile);
             cache.syntactic.set(fileName, result);
         }
@@ -4769,7 +4712,7 @@ export function createTsgoProgram(
     let builderMetaCache: { proj: any; byPath: Map<string, TnbBuilderMeta>; byHostFile: Map<string, TnbBuilderMeta> } | undefined;
     const getBuilderMetaState = () => {
         const proj = project;
-        if (!proj?.program || typeof proj.program.getBuilderFileGraph !== "function") return undefined;
+        if (!proj?.program) return undefined;
         // Non-incremental build-mode projects (tsc -b / vue-tsc -b over plain
         // noEmit tsconfigs, e.g. Nuxt-generated ones): the graph has no
         // consumer — Go writes the (non-incremental) buildinfo itself, and the
@@ -5183,27 +5126,9 @@ export function createTsgoProgram(
         // Batch auto-import export index (exportInfoMap cold populate).
         getModuleExportMap: (importingFileName?: string) => {
             const proj = project;
-            if (!proj?.checker || typeof proj.checker.getModuleExportMap !== "function") return undefined;
+            if (!proj?.checker) return undefined;
             try {
-                const batch = proj.checker.getModuleExportMap(importingFileName ? tsgoFileArg(importingFileName) : undefined);
-                // TEMP cont6 dump (not for commit): first divergence between export-map and completion.
-                if (process.env.TNB_C6_DUMP === "1" && batch?.modules) {
-                    try {
-                        const fs = require("node:fs") as typeof import("node:fs");
-                        const watch = new Set(["events", "node:events", "dgram", "node:dgram", "stream", "node:stream", "async_hooks", "node:async_hooks"]);
-                        const rows = [];
-                        for (const m of batch.modules) {
-                            const name = String(m.moduleName ?? "").replace(/^"|"$/g, "");
-                            if (!watch.has(name)) continue;
-                            rows.push({ name, file: m.moduleFileName || "", named: (m.namedExports ?? []).length, def: !!m.defaultExport });
-                        }
-                        fs.appendFileSync("/tmp/tnb-c6-mem-dump.jsonl", JSON.stringify({
-                            t: Date.now(), importingFileName: importingFileName ?? null,
-                            modules: batch.modules.length, rows,
-                        }) + "\n");
-                    } catch { /* ignore */ }
-                }
-                return batch;
+                return proj.checker.getModuleExportMap(importingFileName ? tsgoFileArg(importingFileName) : undefined);
             } catch {
                 return undefined;
             }
@@ -5211,7 +5136,7 @@ export function createTsgoProgram(
         // Batch auto-import module specifier resolution (collectAutoImports cold path).
         getModuleSpecifiersBatch: (importingFileName: string, moduleSymbols: readonly any[], preferences: any) => {
             const proj = project;
-            if (!proj?.checker || typeof proj.checker.getModuleSpecifiersBatch !== "function") return undefined;
+            if (!proj?.checker) return undefined;
             try {
                 return proj.checker.getModuleSpecifiersBatch(
                     tsgoFileArg(importingFileName),
@@ -5293,7 +5218,7 @@ export function createTsgoProgram(
             // a tsgo artifact — validated by Go on read, stamped with the
             // tsgo version — so a JS-serialized file would poison the Go
             // incremental state and every later build would start cold.
-            if (!(options as any).tscBuild && typeof writeFile === "function" && typeof thinProgram.getBuildInfo === "function") {
+            if (!(options as any).tscBuild && typeof writeFile === "function") {
                 let builderBuildInfo: any;
                 try {
                     builderBuildInfo = thinProgram.getBuildInfo();
@@ -5517,10 +5442,7 @@ function collectContainerMemberSymbols(parentSym: any): any[] {
     };
     try {
         if (typeof parentSym.getMembers === "function") {
-            const list = parentSym.getMembers();
-            // v7.0.2+ returns a ReadonlyMap; earlier bridge returned an array.
-            if (list && typeof list.values === "function" && typeof list.get === "function") for (const m of list.values()) push(m);
-            else if (list?.length) for (const m of list) push(m);
+            for (const m of parentSym.getMembers().values()) push(m);
         }
     } catch { /* best-effort */ }
     // Host SymbolObject (post refineNavSymbol) exposes `.members` as a Map /
@@ -5538,9 +5460,7 @@ function collectContainerMemberSymbols(parentSym: any): any[] {
     } catch { /* best-effort */ }
     try {
         if (typeof parentSym.getExports === "function") {
-            const list = parentSym.getExports();
-            if (list && typeof list.values === "function" && typeof list.get === "function") for (const m of list.values()) push(m);
-            else if (list?.length) for (const m of list) push(m);
+            for (const m of parentSym.getExports().values()) push(m);
         }
     } catch { /* best-effort */ }
     try {
@@ -6027,9 +5947,7 @@ function installNodeHandleHooks(s: any): void {
     // this keeps NodeHandle.kind consistent so `ts.isXxx(handle)` type-guards
     // (which compare against fork kind values) fire correctly.
     if (!_kindRemap) _kindRemap = buildKindRemap();
-    if (typeof s.setNodeHandleKindRemap === "function") {
-        s.setNodeHandleKindRemap(remapKind);
-    }
+    s.setNodeHandleKindRemap(remapKind);
     proc.nodeHandlePatched = true;
 }
 
@@ -6109,7 +6027,7 @@ export function createTsgoChecker(program: any): any {
         const openFiles = syncHost ? collectTsgoOpenFileNames(syncHost) : [];
         // Build mode: close the previous solution-build project in the same
         // updateSnapshot call that opens this one (see beginBuildProject).
-        const buildClose = (options as any).tscBuild && process.env.TNB_BUILD_CLOSE !== "0"
+        const buildClose = (options as any).tscBuild
             ? beginBuildProject(configFilePath!)
             : { closeParams: undefined, staleSnapshots: undefined };
         // Build mode: ask tsgo to start the whole-program semantic pass in the
@@ -6117,7 +6035,7 @@ export function createTsgoChecker(program: any): any {
         // builder's work between this call and getGlobalDiagnostics, which
         // then joins the in-flight pass (Go-side singleflight). Never set for
         // interactive hosts: a full check per keystroke would be pure waste.
-        const prefetchDiagnostics = !!(options as any).tscBuild && process.env.TNB_PREFETCH_DIAG !== "0";
+        const prefetchDiagnostics = !!(options as any).tscBuild;
         const snapshot: any = _api.updateSnapshot({
             openProject: configFilePath!,
             ...(openFiles.length > 0 ? { openFiles } : {}),
@@ -6219,11 +6137,6 @@ export function createTsgoChecker(program: any): any {
     let symPrefetchMissThresholdCache: number | undefined;
     const symPrefetchMissThreshold = (): number => {
         if (symPrefetchMissThresholdCache !== undefined) return symPrefetchMissThresholdCache;
-        const env = Number(process.env.TSGO_SYM_PREFETCH_THRESHOLD ?? "");
-        if (Number.isFinite(env) && env > 0) {
-            symPrefetchMissThresholdCache = Math.floor(env);
-            return symPrefetchMissThresholdCache;
-        }
         // Single large programs (e.g. Dify ~6k files): per-file allIdentifiers
         // prefetch at the default 32-miss bar fires hundreds of times and loses
         // to direct RPC; micro-project lint (Volar ~10–200 files) stays at 32.
@@ -6316,9 +6229,8 @@ export function createTsgoChecker(program: any): any {
     /** tryFindAmbientModule memo — keyed unquoted module name; null = miss. */
     const ambientModuleByNameCache = new Map<string, any | null>();
     // Light ambient-module batch for builder referenced-files (module names +
-    // declaration merge only). Prefer Checker.getAmbientModules; fall back to
-    // getModuleExportMap when the method is missing or throws. null = fetch
-    // failed; undefined = not fetched.
+    // declaration merge only) via Checker.getAmbientModules. null = fetched
+    // and empty; undefined = not fetched.
     let ambientModuleBatchCache: any = undefined;
     // Checker-quality ambient symbols for tryFindAmbientModule / export-info
     // rehydrate. Binder-only light symbols lack merged exports and can hang
@@ -6336,12 +6248,10 @@ export function createTsgoChecker(program: any): any {
         pushHostOverlayToTsgo(hostFileName);
         const tsgoChecker = project.checker;
         const tsgoFile = toTsgoFileName(hostFileName);
-        if (typeof tsgoChecker.getSymbolAtPosition === "function") {
-            try {
-                const sym = tsgoChecker.getSymbolAtPosition(tsgoFile, 0);
-                if (sym) return sym;
-            } catch { /* host-bound module */ }
-        }
+        try {
+            const sym = tsgoChecker.getSymbolAtPosition(tsgoFile, 0);
+            if (sym) return sym;
+        } catch { /* host-bound module */ }
         const bridge = resolveRpcSymbol(moduleSymbol);
         if (bridge && typeof bridge.id === "number" && bridge.id !== 0) return bridge;
         return moduleSymbol;
@@ -6429,29 +6339,24 @@ export function createTsgoChecker(program: any): any {
         const bridge = resolveRpcSymbol(moduleSymbol) ?? (isTsgoBridgeSymbol(moduleSymbol) ? moduleSymbol : undefined);
         if (bridge) {
             const checker = rpc();
-            if (typeof checker.resolveExternalModuleSymbol !== "function") {
-                // Stale native-preview: bridge modules without host exports cannot expand export=.
-                if (!moduleSymbol.exports) return moduleSymbol;
-            } else {
-                try {
-                    const resolved = checker.resolveExternalModuleSymbol(bridge);
-                    // Stock returns the input module symbol when there is no export=;
-                    // preserve moduleSymbol identity for downstream === checks.
-                    if (resolved && resolved !== bridge) return resolved;
-                    if (resolved) {
-                        // Authoritative "no export=" from the checker — the
-                        // host exports fallback below cannot find one either
-                        // (the mirror parsed the same content). Materializing
-                        // .exports here cost a getExportsOfSymbol RPC + sorted
-                        // Map per module per generation in the auto-import
-                        // codefix scan.
-                        return moduleSymbol;
-                    }
-                } catch (err) {
-                    // No host fallback — surface RPC/bridge failures instead of
-                    // silently skipping export= property enumeration.
-                    if (!moduleSymbol.exports) throw err;
+            try {
+                const resolved = checker.resolveExternalModuleSymbol(bridge);
+                // Stock returns the input module symbol when there is no export=;
+                // preserve moduleSymbol identity for downstream === checks.
+                if (resolved && resolved !== bridge) return resolved;
+                if (resolved) {
+                    // Authoritative "no export=" from the checker — the
+                    // host exports fallback below cannot find one either
+                    // (the mirror parsed the same content). Materializing
+                    // .exports here cost a getExportsOfSymbol RPC + sorted
+                    // Map per module per generation in the auto-import
+                    // codefix scan.
+                    return moduleSymbol;
                 }
+            } catch (err) {
+                // No host fallback — surface RPC/bridge failures instead of
+                // silently skipping export= property enumeration.
+                if (!moduleSymbol.exports) throw err;
             }
         }
         if (moduleSymbol.exports) {
@@ -6615,21 +6520,7 @@ export function createTsgoChecker(program: any): any {
 
     function getAmbientModuleBatch(): any {
         if (ambientModuleBatchCache !== undefined) return ambientModuleBatchCache ?? undefined;
-        try {
-            const getAmbient = project.checker.getAmbientModules;
-            if (typeof getAmbient === "function") {
-                ambientModuleBatchCache = getAmbient.call(project.checker) ?? null;
-            }
-        }
-        catch { /* fall through to export-map fallback */ }
-        if (ambientModuleBatchCache === undefined) {
-            try {
-                ambientModuleBatchCache = project.checker.getModuleExportMap?.() ?? null;
-            }
-            catch {
-                ambientModuleBatchCache = null;
-            }
-        }
+        ambientModuleBatchCache = project.checker.getAmbientModules() ?? null;
         return ambientModuleBatchCache ?? undefined;
     }
 
@@ -6696,12 +6587,9 @@ export function createTsgoChecker(program: any): any {
         pushHostOverlayToTsgo(fileName);
         const activeProject = _currentProjectRef.project ?? project;
         const t0 = process.env.TSGO_PROFILE === "1" ? Date.now() : 0;
-        let byPos: Map<number, any>;
-        if (typeof activeProject?.checker?.prefetchResolvedReferences === "function") {
-            byPos = activeProject.checker.prefetchResolvedReferences(toTsgoFileName(fileName), "allIdentifiers");
-        } else {
-            return;
-        }
+        const activeChecker = activeProject?.checker;
+        if (!activeChecker) return;
+        const byPos: Map<number, any> = activeChecker.prefetchResolvedReferences(toTsgoFileName(fileName), "allIdentifiers");
         symPrefetched.add(cacheName);
         let pf = symPrefetchByPos.get(cacheName);
         if (!pf) { pf = new Map(); symPrefetchByPos.set(cacheName, pf); }
@@ -7074,7 +6962,7 @@ export function createTsgoChecker(program: any): any {
         if (!target.isLiteral) target.isLiteral = has(TF.StringLiteral | TF.NumberLiteral | TF.BigIntLiteral | TF.BooleanLiteral);
         if (!target.isUnion) target.isUnion = has(TF.Union);
         if (!target.isIntersection) target.isIntersection = has(TF.Intersection);
-        if (!target.isUnionOrIntersection) target.isUnionOrIntersection = has(TF.UnionOrIntersection ?? (TF.Union | TF.Intersection));
+        if (!target.isUnionOrIntersection) target.isUnionOrIntersection = has(TF.UnionOrIntersection);
         if (!target.isTypeParameter) target.isTypeParameter = has(TF.TypeParameter);
         // Mirror stock Type.isClassOrInterface/isClass: read ObjectFlags off
         // Object-flagged types. Class/Interface live in the low bits, which are
@@ -7115,10 +7003,10 @@ export function createTsgoChecker(program: any): any {
         // getSignaturesOfType. Short-circuit for primitive/literal types.
         const TF = s.TypeFlags;
         const SK = s.SignatureKind;
-        const noSigMask = (TF.Never ?? 0) | (TF.Undefined ?? 0) | (TF.Null ?? 0) | (TF.Void ?? 0) |
-            (TF.StringLiteral ?? 0) | (TF.NumberLiteral ?? 0) | (TF.BooleanLiteral ?? 0) |
-            (TF.BigIntLiteral ?? 0) | (TF.EnumLiteral ?? 0) | (TF.TemplateLiteral ?? 0) |
-            (TF.StringMapping ?? 0) | (TF.UniqueESSymbol ?? 0) | (TF.Enum ?? 0);
+        const noSigMask = TF.Never | TF.Undefined | TF.Null | TF.Void |
+            TF.StringLiteral | TF.NumberLiteral | TF.BooleanLiteral |
+            TF.BigIntLiteral | TF.EnumLiteral | TF.TemplateLiteral |
+            TF.StringMapping | TF.UniqueESSymbol | TF.Enum;
         if (!proto.getCallSignatures) {
             proto.getCallSignatures = function () {
                 if (typeof this.flags === "number" && (this.flags & noSigMask) !== 0) return [];
@@ -7242,14 +7130,12 @@ export function createTsgoChecker(program: any): any {
         // getTypeParameterAtPosition — stock SignatureObject delegates to
         // checker.getParameterType; bridge Signature implements it via registry
         // RPC. Wrap to fixupType for LS consumers.
-        if (proto.getTypeParameterAtPosition) {
-            const orig = proto.getTypeParameterAtPosition;
-            proto.getTypeParameterAtPosition = function (pos: number) {
-                const t = orig.call(this, pos);
-                if (t) fixupType(t);
-                return t;
-            };
-        }
+        const origGetTypeParameterAtPosition = proto.getTypeParameterAtPosition;
+        proto.getTypeParameterAtPosition = function (pos: number) {
+            const t = origGetTypeParameterAtPosition.call(this, pos);
+            if (t) fixupType(t);
+            return t;
+        };
         // getDeclaration — tsgo stores it as `this.declaration` (a NodeHandle).
         if (!proto.getDeclaration) {
             proto.getDeclaration = function () { return this.declaration; };
@@ -7356,46 +7242,14 @@ export function createTsgoChecker(program: any): any {
                     if (Object.prototype.hasOwnProperty.call(this, "__tnbExports")) return this.__tnbExports;
                     try {
                         const list = typeof this.getExports === "function" ? this.getExports() : undefined;
-                        // v7.0.2+ getExports() returns a ReadonlyMap already in the
+                        // getExports() returns a ReadonlyMap already in the
                         // checker's canonical (declaration) order — use it directly.
                         if (list && typeof list.get === "function" && typeof list.values === "function") {
                             this.__tnbExports = list.size ? list : undefined;
                             return this.__tnbExports;
                         }
-                        if (!list?.length) {
-                            this.__tnbExports = undefined;
-                            return undefined;
-                        }
-                        // Match stock SymbolTable insertion (= declaration) order so
-                        // firstOrUndefinedIterator(exports.values()) picks the same
-                        // enum member as stock (e.g. Color.Red not Color.Green).
-                        // Sort key: bare NodeHandle (path, index) when available —
-                        // node indexes are assigned in document order, so this
-                        // reproduces position order without resolving the remote
-                        // node (NodeHandle.pos → resolveSelf → getSourceFile RPC
-                        // per declaration; codefix export scans hit this for
-                        // every export of every module).
-                        const declKey = (s: any): [string, number] => {
-                            const d = s?.valueDeclaration ?? s?.declarations?.[0];
-                            if (d == null) return ["", 0];
-                            if (typeof d.index === "number" && typeof d.path === "string") {
-                                return [d.path, d.index];
-                            }
-                            const pos = typeof d.pos === "number" ? d.pos : 0;
-                            return [String(d.getSourceFile?.()?.fileName ?? ""), pos];
-                        };
-                        const sorted = list.slice().sort((a: any, b: any) => {
-                            const [fa, ka] = declKey(a);
-                            const [fb, kb] = declKey(b);
-                            return fa < fb ? -1 : fa > fb ? 1 : ka - kb;
-                        });
-                        const map = new Map<string, any>();
-                        for (const s of sorted) {
-                            const key = String(s?.escapedName ?? s?.name ?? "");
-                            if (key) map.set(key, s);
-                        }
-                        this.__tnbExports = map.size ? map : undefined;
-                        return this.__tnbExports;
+                        this.__tnbExports = undefined;
+                        return undefined;
                     } catch {
                         this.__tnbExports = undefined;
                         return undefined;
@@ -8194,7 +8048,7 @@ export function createTsgoChecker(program: any): any {
         return refineNavSymbol(resolvePropertyOfType(exportEqualsType, memberName));
     }
 
-    function getSymbolFlagsImpl(symbol: any, excludeTypeOnlyMeanings?: boolean, excludeLocalMeanings?: boolean): number {
+    function getSymbolFlagsImpl(symbol: any, excludeLocalMeanings?: boolean): number {
         if (!symbol) return 0;
         let flags = excludeLocalMeanings ? 0 : (typeof symbol.flags === "number" ? symbol.flags : 0);
         let current = symbol;
@@ -8533,7 +8387,7 @@ export function createTsgoChecker(program: any): any {
                 // (`type.symbol === …`) and definitionFromType (`t.symbol && …`).
                 const TF = sync.TypeFlags;
                 return {
-                    flags: TF?.Any ?? 1,
+                    flags: TF.Any,
                     symbol: undefined,
                     getFlags() { return this.flags; },
                     getSymbol() { return undefined; },
@@ -8904,14 +8758,14 @@ export function createTsgoChecker(program: any): any {
             enclosingDeclaration?: any,
             flags?: number,
             writer?: any,
-            maximumLength?: number,
+            _maximumLength?: number,
             _verbosityLevel?: number,
             _out?: any,
         ): void {
             if (!type || !writer) return;
             ensureProject();
             const tsgoLocation = mapHostEnclosingToTsgo(enclosingDeclaration);
-            const nodeBuilderFlags = toWriteTypeNodeBuilderFlags(flags, maximumLength);
+            const nodeBuilderFlags = toWriteTypeNodeBuilderFlags(flags);
             const typeNode = project.checker.typeToTypeNode(type, tsgoLocation, nodeBuilderFlags);
             if (typeNode) {
                 attachTypeParameterSymbolsFromType(type, typeNode);
@@ -8962,8 +8816,6 @@ export function createTsgoChecker(program: any): any {
         ): void {
             if (!signature || !writer) return;
             ensureProject();
-            // Accept maximumLength/verbosityLevel for stock signature parity; RPC
-            // signatureToString has no VerbosityContext → density tracked as (b).
             const text = checkerProxyRef.signatureToString(signature, enclosing, flags, kind) ?? "";
             if (text) writer.write?.(text);
         },
@@ -9675,45 +9527,18 @@ export function createTsgoChecker(program: any): any {
                 // Pass IndexInfo shape through; sync API reconstructs from key/value/readonly/declaration.
                 const keyId = info.keyType?.id;
                 const valId = (info.type ?? info.valueType)?.id;
-                if (process.env.TNB_TRACE_INDEXINFO === "1") {
-                    try {
-                        const fs = require("fs") as typeof import("fs");
-                        fs.appendFileSync("/tmp/tnb-indexinfo-trace.jsonl", JSON.stringify({
-                            keyId, valId, hasDecl: !!info.declaration, declKind: info.declaration?.kind,
-                            isReadonly: !!info.isReadonly, hasLocation: !!tsgoLocation,
-                        }) + "\n");
-                    } catch { /* ignore */ }
-                }
                 if (typeof keyId !== "number" || typeof valId !== "number") {
-                    if (process.env.TNB_TRACE_INDEXINFO === "1") {
-                        try {
-                            const fs = require("fs") as typeof import("fs");
-                            fs.appendFileSync("/tmp/tnb-indexinfo-trace.jsonl", JSON.stringify({ err: "missing type ids", keyId, valId }) + "\n");
-                        } catch { /* ignore */ }
-                    }
                     return undefined;
                 }
                 const node = project.checker.indexInfoToIndexSignatureDeclaration(info, tsgoLocation, flags);
                 if (!node) {
-                    if (process.env.TNB_TRACE_INDEXINFO === "1") {
-                        try {
-                            const fs = require("fs") as typeof import("fs");
-                            fs.appendFileSync("/tmp/tnb-indexinfo-trace.jsonl", JSON.stringify({ err: "rpc returned empty", keyId, valId }) + "\n");
-                        } catch { /* ignore */ }
-                    }
                     return undefined;
                 }
                 applySingleLineEmitFlagsToDeclaration(node);
                 stampIdentifierEscapedText(node);
                 // textChanges.insertMemberAtStart needs a mutable host AST node.
                 return hostifyDecodedDeclarationNode(node) ?? node;
-            } catch (e) {
-                if (process.env.TNB_TRACE_INDEXINFO === "1") {
-                    try {
-                        const fs = require("fs") as typeof import("fs");
-                        fs.appendFileSync("/tmp/tnb-indexinfo-trace.jsonl", JSON.stringify({ err: String((e as any)?.message ?? e) }) + "\n");
-                    } catch { /* ignore */ }
-                }
+            } catch {
                 return undefined;
             }
         },
@@ -10093,6 +9918,9 @@ export function createTsgoChecker(program: any): any {
         // Delegate to the same Go semantic(+syntactic) pipeline Program uses.
         // Deviation: sourceFile undefined → [] (stock = whole program); consumers
         // of this path (addMissingAwait) always pass a SourceFile.
+        // Deliberate stubs: suggestion/global diagnostics are not served by the
+        // tsgo pipeline (Go runs syntactic+semantic only); returning [] keeps
+        // LS callers that iterate both lists working without a fake pass.
         getSuggestionDiagnostics(): readonly any[] { return []; },
         getGlobalDiagnostics(): readonly any[] { return []; },
         getDiagnostics(sourceFile?: any, _cancellationToken?: any): readonly any[] {
@@ -10188,14 +10016,6 @@ export function createTsgoChecker(program: any): any {
                 // Stock never puts module-default / re-export aliases into scope;
                 // filtering them restores the `default` keyword completion slot.
                 result = result.filter((sym: any) => !isStolenDefaultKeywordScopeSymbol(sym));
-                if (process.env.TNB_SCOPE_TRACE === "1") {
-                    try {
-                        require("node:fs").appendFileSync(
-                            "/tmp/tnb-scope-trace.log",
-                            `[scope] ${symCacheFileName(sf.fileName)}:${start} hostBound=${!!sf.__tnbHostBound} syms=${result.length}\n`,
-                        );
-                    } catch { /* ignore */ }
-                }
                 symbolsInScopeCache.set(scopeKey, result);
                 return result;
             }
@@ -10300,8 +10120,8 @@ export function createTsgoChecker(program: any): any {
         },
         // Merging is a TS-specific concern; tsgo symbols are already merged.
         getMergedSymbol: (s: any) => s,
-        getSymbolFlags(symbol: any, excludeTypeOnlyMeanings?: boolean, excludeLocalMeanings?: boolean): number {
-            return getSymbolFlagsImpl(symbol, excludeTypeOnlyMeanings, excludeLocalMeanings);
+        getSymbolFlags(symbol: any, excludeLocalMeanings?: boolean): number {
+            return getSymbolFlagsImpl(symbol, excludeLocalMeanings);
         },
         // ── Intrinsic-symbol predicates ──
         // Rename (getSymbolKind), symbolDisplay, exportInfoMap and

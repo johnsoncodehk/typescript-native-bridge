@@ -36,11 +36,7 @@ func (w *symbolWalker) visitType(t *Type) {
 		w.typeParameters = append(w.typeParameters, t)
 	}
 
-	// Reuse visitSymbol to visit the type's symbol; bail if accept declines
-	// (accept always returns true for this narrow RPC).
-	if w.visitSymbol(t.symbol) {
-		return
-	}
+	w.visitSymbol(t.symbol)
 
 	if t.flags&TypeFlagsObject != 0 {
 		objectFlags := t.objectFlags
@@ -152,19 +148,15 @@ func (w *symbolWalker) visitObjectType(t *Type) {
 	}
 }
 
-// visitSymbol returns true if the walker should bail on recurring into the type
-// (accept declined). Accept always returns true here, so shouldBail is always false
-// after a successful visit; returns false when symbol is nil / already visited.
-func (w *symbolWalker) visitSymbol(symbol *ast.Symbol) bool {
+func (w *symbolWalker) visitSymbol(symbol *ast.Symbol) {
 	if symbol == nil {
-		return false
+		return
 	}
 	symbolId := ast.GetSymbolId(symbol)
 	if w.visitedSymbols[symbolId] {
-		return false
+		return
 	}
 	w.visitedSymbols[symbolId] = true
-	// accept always true for this narrow RPC
 	w.visitType(w.c.getTypeOfSymbol(symbol))
 	if symbol.Exports != nil {
 		for _, exported := range symbol.Exports {
@@ -178,5 +170,4 @@ func (w *symbolWalker) visitSymbol(symbol *ast.Symbol) bool {
 			w.visitSymbol(entity)
 		}
 	}
-	return false
 }

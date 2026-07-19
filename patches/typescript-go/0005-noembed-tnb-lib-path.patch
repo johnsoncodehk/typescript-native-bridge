@@ -1,5 +1,5 @@
 diff --git a/internal/bundled/noembed.go b/internal/bundled/noembed.go
-index 39b204b45..866f99caa 100644
+index 39b204b45..42f6ef67d 100644
 --- a/internal/bundled/noembed.go
 +++ b/internal/bundled/noembed.go
 @@ -2,11 +2,17 @@
@@ -20,7 +20,7 @@ index 39b204b45..866f99caa 100644
  
  	"github.com/microsoft/typescript-go/internal/tspath"
  	"github.com/microsoft/typescript-go/internal/vfs"
-@@ -29,10 +35,45 @@ var executableDir = sync.OnceValue(func() string {
+@@ -29,10 +35,46 @@ var executableDir = sync.OnceValue(func() string {
  	return tspath.GetDirectoryPath(exe)
  })
  
@@ -33,8 +33,8 @@ index 39b204b45..866f99caa 100644
 +//     the ONLY channel that works there — the CRT environ that libc getenv
 +//     reads is initialized at process start and never sees that write.
 +//   - libc getenv: on POSIX, Go's os.Getenv reads the runtime-init snapshot and
-+//     can miss a libc setenv issued right before koffi.load; libc getenv reads
-+//     the live CRT environ instead.
++//     can miss a libc setenv issued right before require("bridge.node"); libc
++//     getenv reads the live CRT environ instead.
 +func getenvLive(key string) string {
 +	if v := os.Getenv(key); v != "" {
 +		return v
@@ -54,7 +54,8 @@ index 39b204b45..866f99caa 100644
  	}
 +	// Prefer TNB_LIB_PATH when set (c-shared dylib loaded by node: os.Executable()
 +	// is the node binary, not the dylib). Require lib.d.ts sentinel in that dir.
-+	// Use libc getenv: JS sets the var via process.env immediately before koffi.load.
++	// Use libc getenv: JS sets the var via process.env immediately before
++	// require("bridge.node").
 +	if env := getenvLive("TNB_LIB_PATH"); env != "" {
 +		dir := tspath.NormalizeSlashes(env)
 +		libdts := tspath.CombinePaths(dir, "lib.d.ts")

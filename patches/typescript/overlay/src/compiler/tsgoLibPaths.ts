@@ -20,21 +20,6 @@ export function bundledLibPathToHostPath(bundledPath: string): string {
     return path.join(getTnbPackageRoot(), "lib", libFile);
 }
 
-export function hostPathToBundledLibPath(fileName: string): string | undefined {
-    if (isBundledLibPath(fileName)) return fileName;
-    const path = require("path") as typeof import("path");
-    const libDir = path.join(getTnbPackageRoot(), "lib");
-    const normalized = path.normalize(fileName);
-    if (!normalized.startsWith(libDir + path.sep) && normalized !== libDir) return undefined;
-    const rel = path.relative(libDir, normalized).replace(/\\/g, "/");
-    if (!rel || rel.startsWith("..")) return undefined;
-    // tsgo's bundled:///libs/ only contains lib.*.d.ts. Other files under lib/
-    // (typescript.d.ts, tsc.js, etc.) are real on-disk files that tsgo resolves
-    // as host paths — mapping them to bundled:/// would make tsgo fail to find them.
-    if (!/^lib\.[^/]+\.d\.ts$/i.test(rel)) return undefined;
-    return BUNDLED_LIB_PREFIX + rel;
-}
-
 export function toHostFileName(fileName: string): string {
     return isBundledLibPath(fileName) ? bundledLibPathToHostPath(fileName) : fileName;
 }

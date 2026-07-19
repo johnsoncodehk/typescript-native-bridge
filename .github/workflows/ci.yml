@@ -121,7 +121,7 @@ jobs:
           # bridge in-process (they resolve the repo from import.meta.dirname/..).
           # Starts are staggered to spread the tsserver boot spike.
           group1="triage-f2qi-names triage-xrefs-diag-variants triage-tostring-gtd-vue triage-adv6b-generic-sig triage-sim-edit triage-f2hl-jsdoc triage-completion-details-array triage-refs-exportspec"
-          group2="triage-f2r5-defcases triage-f2r6-samevue triage-f2r6-libref triage-f2r6-xvue triage-sim-xfile triage-f2hl-typesref triage-geterr-5823 triage-quickinfo-emptyparity triage-ambient-rpc-fallback triage-completion-parity"
+          group2="triage-f2r5-defcases triage-f2r6-samevue triage-f2r6-libref triage-f2r6-xvue triage-sim-xfile triage-f2hl-typesref triage-geterr-5823 triage-quickinfo-emptyparity triage-completion-parity"
           group3="triage-qi-delete-min triage-defineprops-refs triage-impl-kind triage-rpcsym-nameless triage-rpcsym-adversarial triage-f2hl-augment triage-orphan-leak triage-parent-watch-acceptance triage-f2hl-defaultkw triage-adv6a-jsx-spelling"
           pids=()
           i=0

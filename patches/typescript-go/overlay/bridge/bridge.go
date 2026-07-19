@@ -1,4 +1,4 @@
-// Package main is a Proof-of-Concept NAPI/FFI bridge for typescript-go.
+// Package main is the NAPI bridge for typescript-go.
 //
 // It builds as a NAPI addon (`go build -buildmode=c-shared` → bridge.node,
 // see napi_shim.c) that Node.js loads directly via require(). The bridge
@@ -9,13 +9,13 @@
 //
 // Two call paths:
 //   - BridgeCall        -> JSON envelope string  {"ok":true,"data":...} | {"ok":false,"error":"..."}
-//   - BridgeCallBinary  -> raw bytes (for getSourceFile etc.), single-copy into a Node Buffer
+//   - BridgeCallBinary  -> raw bytes (for getSourceFile etc.), zero-copy into a Node Buffer
 //
 // Memory model: string envelopes reuse a process-lifetime C buffer (the NAPI
 // shim copies to V8 synchronously before the next call). Binary responses are
-// pinned Go slices (cgo.Handle) handed to V8 with zero copies — the pin is
-// released by BridgeReleaseBinary, immediately after a copy or from the
-// external buffer's finalizer on GC.
+// pinned Go slices (runtime.Pinner) handed to V8 as external buffers with
+// zero copies — the pin is released by BridgeReleaseBinary from the external
+// buffer's finalizer on GC.
 package main
 
 /*
@@ -33,10 +33,8 @@ import "C"
 
 import (
 	"context"
-	"encoding/base64"
 	"os"
 	"runtime"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -68,7 +66,7 @@ type sessionEntry struct {
 
 // envelope is the wire format returned to JS.
 type envelope struct {
-	OK    bool       `json:"ok"`
+	OK bool `json:"ok"`
 	// No omitempty: v2 (go-json-experiment) treats a jsontext.Value that
 	// marshals to `[]` or `null` as "empty" and drops the field, which makes
 	// empty-array results (e.g. getSignaturesOfType with no signatures)
@@ -102,16 +100,9 @@ func returnEnvelope(env envelope) *C.char {
 }
 
 // bridgeCheckerPoolOptions returns checker pool sizing for the in-process bridge.
-// Default MaxCheckers=5 (1 diagnostics + 4 query) aligns with tsgo CLI parallelism.
-// Override with TSGO_CHECKERS (minimum 2).
+// MaxCheckers=5 (1 diagnostics + 4 query) aligns with tsgo CLI parallelism.
 func bridgeCheckerPoolOptions() project.CheckerPoolOptions {
-	opts := project.CheckerPoolOptions{MaxCheckers: 5}
-	if v := os.Getenv("TSGO_CHECKERS"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n >= 2 {
-			opts.MaxCheckers = n
-		}
-	}
-	return opts
+	return project.CheckerPoolOptions{MaxCheckers: 5}
 }
 
 // pinnedParseCacheKey reports whether a parse-cache entry should be pinned for
@@ -123,7 +114,6 @@ func bridgeCheckerPoolOptions() project.CheckerPoolOptions {
 // includes the content hash, so changed files miss and re-parse under a new
 // key. Cost is memory, bounded by the union of node_modules/lib declaration
 // files seen by the session (what a tsslint-style process-global cache holds).
-// Kill switch: TNB_PIN_PARSE_CACHE=0.
 func pinnedParseCacheKey(key project.ParseCacheKey) bool {
 	return tspath.IsDeclarationFileName(key.FileName) &&
 		(strings.Contains(key.FileName, "/node_modules/") || strings.HasPrefix(key.FileName, "bundled://"))
@@ -133,20 +123,10 @@ var watchdogOnce sync.Once
 
 // startOrphanWatchdog kills this process if its parent dies. This is the only
 // mechanism that works when the Node main thread is blocked inside a
-// synchronous FFI call: JS timers and the tinypool IPC-disconnect handler all
+// synchronous NAPI call: JS timers and the tinypool IPC-disconnect handler all
 // need the event loop, but this goroutine runs on its own Go thread.
-//
-// Default-on only inside test runners (VITEST / JEST set these envs in
-// workers). Other embedders opt in with TNB_PPID_WATCHDOG=1; opt out with =0.
 func startOrphanWatchdog() {
 	watchdogOnce.Do(func() {
-		v := os.Getenv("TNB_PPID_WATCHDOG")
-		if v == "0" {
-			return
-		}
-		if v != "1" && os.Getenv("VITEST") == "" && os.Getenv("JEST_WORKER_ID") == "" {
-			return
-		}
 		if os.Getppid() <= 1 {
 			return // already reparented at startup; don't arm
 		}
@@ -176,11 +156,8 @@ func BridgeNewSession(cwd *C.char) *C.char {
 
 	fs := bundled.WrapFS(osvfs.FS())
 
-	var parseCache *project.ParseCache
-	if os.Getenv("TNB_PIN_PARSE_CACHE") != "0" {
-		parseCache = project.NewParseCache(project.RefCountCacheOptions{})
-		parseCache.SetPin(pinnedParseCacheKey)
-	}
+	parseCache := project.NewParseCache(project.RefCountCacheOptions{})
+	parseCache.SetPin(pinnedParseCacheKey)
 
 	ps := project.NewSession(&project.SessionInit{
 		BackgroundCtx: context.Background(),
@@ -216,10 +193,6 @@ func BridgeNewSession(cwd *C.char) *C.char {
 // paramsJson may be NULL (treated as "null"). Returns a JSON envelope.
 // On success, env.data is the handler's JSON result.
 //
-// If the handler returns api.RawBinary (only getSourceFile/echo with
-// UseBinaryResponses=true), this path base64-encodes it as a safety net —
-// callers should use BridgeCallBinary for those methods instead.
-//
 //export BridgeCall
 func BridgeCall(session C.int64_t, method *C.char, paramsJson *C.char) *C.char {
 	mu.Lock()
@@ -244,18 +217,9 @@ func BridgeCall(session C.int64_t, method *C.char, paramsJson *C.char) *C.char {
 	}
 
 	var dataBytes []byte
-	switch r := res.(type) {
+	switch res.(type) {
 	case nil:
 		dataBytes = []byte("null")
-	case api.RawBinary:
-		// Safety net: callers should route binary methods through
-		// BridgeCallBinary. If they land here, return base64 so the envelope
-		// stays valid JSON.
-		if r == nil {
-			dataBytes = []byte("null")
-		} else {
-			dataBytes = []byte(`"` + base64.StdEncoding.EncodeToString([]byte(r)) + `"`)
-		}
 	default:
 		dataBytes, err = json.Marshal(res)
 		if err != nil {
@@ -272,12 +236,12 @@ func BridgeCall(session C.int64_t, method *C.char, paramsJson *C.char) *C.char {
 // methods, the JSON-marshaled bytes are returned (caller can JSON.parse).
 //
 // Returns a struct by value: { void* data; int64_t len; uint64_t handle }.
-// data points INTO the Go slice (no copy on this side); the slice is pinned via
-// cgo.NewHandle so Go's (non-moving) GC keeps it valid. Ownership of the pin
-// transfers to the caller (napi_shim.c), which must call BridgeReleaseBinary
-// exactly once — immediately after copying, or from the external buffer's
-// finalizer on GC in the zero-copy path. len is 0 for nil/empty results
-// (handle is 0 then; nothing to release).
+// data points INTO the Go slice (no copy); the slice is pinned via
+// runtime.Pinner so Go's (non-moving) GC keeps it valid. Ownership of the pin
+// transfers to the caller (napi_shim.c), which wraps the view in a V8 external
+// buffer and calls BridgeReleaseBinary exactly once, from the buffer's
+// finalizer on GC. len is 0 for nil/empty results (handle is 0 then; nothing
+// to release).
 //
 //export BridgeCallBinary
 func BridgeCallBinary(session C.int64_t, method *C.char, paramsJson *C.char) C.struct_BridgeBinary {
@@ -301,13 +265,7 @@ func BridgeCallBinary(session C.int64_t, method *C.char, paramsJson *C.char) C.s
 
 	res, err := entry.api.HandleRequest(context.Background(), methodStr, params)
 	if err != nil {
-		// No way to surface an error through the binary path without a side
-		// channel; fall back to a JSON error envelope so the caller can detect
-		// it by parsing. The contract is: callers use BridgeCallBinary only for
-		// methods known to return binary.
-		errEnv := envelope{OK: false, Error: err.Error()}
-		b, _ := json.Marshal(errEnv)
-		return pinBinary(b)
+		return empty
 	}
 
 	var bytes []byte
@@ -351,8 +309,8 @@ func pinBinary(b []byte) C.struct_BridgeBinary {
 }
 
 // BridgeReleaseBinary releases a pin from pinBinary. Called exactly once per
-// BridgeCallBinary result: immediately after the caller copies the bytes, or
-// from the external buffer's finalizer when V8 is done with the zero-copy view.
+// BridgeCallBinary result, from the V8 external buffer's finalizer when the
+// zero-copy view is garbage collected.
 //
 //export BridgeReleaseBinary
 func BridgeReleaseBinary(handle C.uint64_t) {

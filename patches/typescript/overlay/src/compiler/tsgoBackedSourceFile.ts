@@ -1,5 +1,4 @@
 // tsgo-backed SourceFile — tsgo RemoteSourceFile AST with real/skeleton file metadata.
-// manager consume the standard ts.SourceFile shape unchanged.
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
@@ -124,16 +123,11 @@ export function createSkeletonSourceFile(
 
 function patchLineHelpers(shell: any, realSf: any): void {
     if (typeof shell.getLineStarts === "function") return;
-    if (typeof realSf.getLineStarts === "function") {
-        const ls = realSf.getLineStarts();
-        shell.getLineStarts = () => ls;
-        shell.getLineAndCharacterOfPosition = (pos: number) => computeLineAndCharacterOfPosition(ls, pos);
-        shell.getPositionOfLineAndCharacter = (line: number, ch: number) =>
-            computePositionOfLineAndCharacter(ls, line, ch);
-        return;
-    }
-    const fileName = realSf.fileName as string | undefined;
-    installLazyLineHelpers(shell, () => (realSf.text ?? shell.text ?? "") as string, fileName);
+    const ls = realSf.getLineStarts();
+    shell.getLineStarts = () => ls;
+    shell.getLineAndCharacterOfPosition = (pos: number) => computeLineAndCharacterOfPosition(ls, pos);
+    shell.getPositionOfLineAndCharacter = (line: number, ch: number) =>
+        computePositionOfLineAndCharacter(ls, line, ch);
 }
 
 export function getTsgoBackedSourceFile(realSf: any): any | undefined {
@@ -141,12 +135,7 @@ export function getTsgoBackedSourceFile(realSf: any): any | undefined {
     const fileName = realSf.fileName;
     if (_backedCache.has(fileName)) return _backedCache.get(fileName);
 
-    let project: any;
-    try {
-        project = _tsgoProjectGetter();
-    } catch {
-        return undefined;
-    }
+    const project = _tsgoProjectGetter();
     if (!project) return undefined;
 
     let tsgoSf: any;
@@ -184,10 +173,4 @@ function installGetChildrenForLanguageService(shell: any, skeletonSf?: any): voi
         };
         return;
     }
-    shell.getChildren = () => [];
-}
-
-export function clearTsgoBackedSourceFileCache(): void {
-    _backedCache.clear();
-    _lineStartsCache.clear();
 }

@@ -1,7 +1,6 @@
 package api
 
 import (
-	"context"
 	"strings"
 
 	"github.com/microsoft/typescript-go/internal/ast"
@@ -30,8 +29,7 @@ type AmbientModuleResponse struct {
 // type checker. Builder/referenced-files callers only need merged declaration
 // sets (to detect cross-file ambient edges); paying NewChecker here dominated
 // Elk cold builds (~700ms) even after stripping export-map work.
-func computeAmbientModules(ctx context.Context, program *compiler.Program, sd *snapshotData, project ProjectID) (*AmbientModulesResponse, error) {
-	_ = ctx
+func computeAmbientModules(program *compiler.Program, sd *snapshotData, project ProjectID) (*AmbientModulesResponse, error) {
 	program.BindSourceFiles()
 
 	byName := make(map[string]*ast.Symbol)
@@ -75,9 +73,7 @@ func computeAmbientModules(ctx context.Context, program *compiler.Program, sd *s
 		} else {
 			altName = `"node:` + raw + `"`
 		}
-		if altName != ambient.Name {
-			addModule(byName[altName])
-		}
+		addModule(byName[altName])
 	}
 
 	return resp, nil
