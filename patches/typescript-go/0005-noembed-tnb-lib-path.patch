@@ -1,5 +1,5 @@
 diff --git a/internal/bundled/noembed.go b/internal/bundled/noembed.go
-index 39b204b45..c2f3a1cf8 100644
+index 39b204b45..866f99caa 100644
 --- a/internal/bundled/noembed.go
 +++ b/internal/bundled/noembed.go
 @@ -2,11 +2,17 @@
@@ -20,15 +20,25 @@ index 39b204b45..c2f3a1cf8 100644
  
  	"github.com/microsoft/typescript-go/internal/tspath"
  	"github.com/microsoft/typescript-go/internal/vfs"
-@@ -29,10 +35,35 @@ var executableDir = sync.OnceValue(func() string {
+@@ -29,10 +35,45 @@ var executableDir = sync.OnceValue(func() string {
  	return tspath.GetDirectoryPath(exe)
  })
  
-+// getenvLive reads the process environ via libc so values set with setenv
-+// immediately before dlopen (Node process.env.TNB_LIB_PATH = ...) are visible.
-+// Go's os.Getenv may miss a key that was absent from the snapshot taken at
-+// runtime init depending on how/when the key was introduced.
++// getenvLive reads the live process environment for keys set immediately
++// before dlopen (Node process.env.TNB_LIB_PATH = ...).
++//
++// Two channels are needed:
++//   - os.Getenv: on Windows this resolves through the Win32 environment block,
++//     which Node's process.env write (SetEnvironmentVariableW) updates. It is
++//     the ONLY channel that works there — the CRT environ that libc getenv
++//     reads is initialized at process start and never sees that write.
++//   - libc getenv: on POSIX, Go's os.Getenv reads the runtime-init snapshot and
++//     can miss a libc setenv issued right before koffi.load; libc getenv reads
++//     the live CRT environ instead.
 +func getenvLive(key string) string {
++	if v := os.Getenv(key); v != "" {
++		return v
++	}
 +	ckey := C.CString(key)
 +	defer C.free(unsafe.Pointer(ckey))
 +	cval := C.getenv(ckey)

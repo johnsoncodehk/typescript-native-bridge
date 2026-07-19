@@ -363,8 +363,10 @@ function loadBridgeDeps(): void {
             : "asyncpreemptoff=1";
     }
     // noembed: point tsgo at TNB lib/ before dlopen. Go may snapshot environ at
-    // runtime init, so noembed.go reads TNB_LIB_PATH via libc getenv (live), which
-    // sees this setenv as long as it happens before koffi.load below.
+    // runtime init; noembed.go's getenvLive therefore checks os.Getenv (Win32
+    // block — the only channel that sees SetEnvironmentVariableW on Windows)
+    // and libc getenv (live CRT environ for POSIX setenv) — both see this write
+    // as long as it happens before koffi.load below.
     // External non-empty override wins — do not clobber a pre-set path.
     if (!process.env.TNB_LIB_PATH) {
         process.env.TNB_LIB_PATH = path.join(packageRoot, "lib");
