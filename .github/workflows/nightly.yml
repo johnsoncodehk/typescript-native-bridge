@@ -92,6 +92,7 @@ jobs:
         env:
           VOLAR_ROOT: ${{ runner.temp }}/volar
           STOCK_TSSERVER_PATH: ${{ runner.temp }}/volar-stock/package/lib/tsserver.js
+          SIM_NAV_BASELINE: ${{ github.workspace }}/${{ env.BASELINE }}
         run: |
           set -u
           # Shards need ISOLATED PARENT DIRS: the harness lock file lives at

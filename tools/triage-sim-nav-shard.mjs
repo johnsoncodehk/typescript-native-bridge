@@ -1,16 +1,25 @@
 #!/usr/bin/env node
 /**
- * IDE nav roam: long-session quickinfo / definitionAndBoundSpan / references /
- * documentHighlights + geterr diag parity — TNB vs stock.
+ * IDE nav roam: long-session quickinfo / definitionAndBoundSpan / references
+ * + geterr diag parity — TNB vs stock. (documentHighlights was dropped: its
+ * compared surface is a strict subset of references on the same FAR
+ * machinery, and it diverged zero times in gate history; f2hl-* witnesses
+ * keep the targeted highlights coverage.)
  *
- * Deterministic identifier sampling; dual sequential withTsserver sessions.
+ * Deterministic identifier sampling, deduped: only the first sampled
+ * occurrence of each identifier per file is probed (repeat occurrences resolve
+ * to the same symbol), plus every position the baseline records as divergent.
+ * Dual concurrent withTsserver sessions.
  * Usage: node tools/triage-sim-nav-shard.mjs
  * SUMMARY: total=T match=M diff=D docdiff=DD diagmsg=DM skip=S
  */
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { resolveVolarRoot } from './volar-root.mjs';
 import { tnbHarnessEnv, withTsserver } from './tsserver-harness.mjs';
+
+const toolsDir = path.dirname(fileURLToPath(import.meta.url));
 
 const volarRoot = resolveVolarRoot();
 const stockPath = process.env.STOCK_TSSERVER_PATH ?? '/tmp/stock-ts-p3/package/lib/tsserver.js';
@@ -32,7 +41,7 @@ const CMD_TIMEOUT_MS = 30_000;
 const SESSION_DEADLINE_MS = 12 * 60 * 60 * 1000;
 const MAX_POS_PER_FILE = 80;
 const IDENT_RE = /[A-Za-z_$][A-Za-z0-9_$]*/g;
-const NAV_CMDS = ['quickinfo', 'definitionAndBoundSpan', 'references', 'documentHighlights'];
+const NAV_CMDS = ['quickinfo', 'definitionAndBoundSpan', 'references'];
 
 const harnessArgs = [
 	'--disableAutomaticTypingAcquisition',
@@ -94,6 +103,50 @@ function samplePositions(text) {
 	return out;
 }
 
+// Repeat occurrences of one identifier in a file resolve to the same symbol
+// for most samples, so probing every occurrence pays ~38% more units for
+// near-duplicate answers. Keep the first sampled occurrence, plus every
+// position the baseline records as divergent — the gate's known-discriminating
+// set must never be sampled away. SIM_NAV_BASELINE points at the baseline JSON
+// (needed when running from an isolated tools/ copy); default is the newest
+// nav-results in the sibling test/baselines/.
+function loadBaselineDiffPositions() {
+	let file = process.env.SIM_NAV_BASELINE;
+	if (!file) {
+		const dir = path.join(toolsDir, '..', 'test', 'baselines');
+		let best = null;
+		try {
+			for (const name of fs.readdirSync(dir)) {
+				const m = /^nav-results-.+-t(\d+)\.json$/.exec(name);
+				if (m && (!best || Number(m[1]) > best.t)) best = { t: Number(m[1]), name };
+			}
+		} catch {
+			// no baselines dir — fall through with an empty keep-set
+		}
+		if (best) file = path.join(dir, best.name);
+	}
+	const keep = new Map(); // file -> Set<line:offset>
+	if (!file) return keep;
+	const base = JSON.parse(fs.readFileSync(file, 'utf8'));
+	for (const d of [...(base.diffs ?? []), ...(base.docdiffs ?? [])]) {
+		const m = /^nav:(.*):(\d+):(\d+):(\w+)$/.exec(d.key ?? '');
+		if (!m) continue;
+		if (!keep.has(m[1])) keep.set(m[1], new Set());
+		keep.get(m[1]).add(`${m[2]}:${m[3]}`);
+	}
+	return keep;
+}
+
+function dedupPositions(text, positions, keepLineCols) {
+	const seen = new Set();
+	return positions.filter((pos) => {
+		const id = /^[A-Za-z_$][A-Za-z0-9_$]*/.exec(text.slice(pos.off, pos.off + 64))?.[0] ?? '';
+		const keep = !seen.has(id) || (keepLineCols?.has(`${pos.line}:${pos.offset}`) ?? false);
+		seen.add(id);
+		return keep;
+	});
+}
+
 function collectFileSet() {
 	const vue = walkFiles(testWorkspacePath, ['.vue']);
 	const ts = [
@@ -101,10 +154,11 @@ function collectFileSet() {
 		...walkFiles(path.join(testWorkspacePath, 'tsconfigProject'), ['.ts']),
 	];
 	const files = [...vue, ...ts].sort((a, b) => a.localeCompare(b));
+	const baselineKeep = loadBaselineDiffPositions();
 	const entries = [];
 	for (const file of files) {
 		const content = fs.readFileSync(file, 'utf8');
-		const positions = samplePositions(content);
+		const positions = dedupPositions(content, samplePositions(content), baselineKeep.get(file));
 		const rawIdents = [...content.matchAll(IDENT_RE)].length;
 		entries.push({ file, content, positions, rawIdents });
 	}
@@ -145,22 +199,6 @@ function extractLocsFromRefs(body) {
 		line: r.start?.line ?? 0,
 		offset: r.start?.offset ?? 0,
 	}));
-}
-
-function extractLocsFromHighlights(body) {
-	const items = Array.isArray(body) ? body : [];
-	const locs = [];
-	for (const item of items) {
-		const file = String(item.file ?? '');
-		for (const span of item.highlightSpans ?? []) {
-			locs.push({
-				file,
-				line: span.start?.line ?? 0,
-				offset: span.start?.offset ?? 0,
-			});
-		}
-	}
-	return locs;
 }
 
 function sortLocSet(locs) {
@@ -253,19 +291,12 @@ function truncate(obj, max = 2000) {
 	return s.slice(0, max) + `…(+${s.length - max} chars)`;
 }
 
-function cmdArgs(file, line, offset, cmd) {
-	const base = { file, line, offset };
-	if (cmd === 'documentHighlights') return { ...base, filesToSearch: [file] };
-	return base;
-}
-
 function normalizeNavResult(cmd, resp, side) {
 	const success = !!resp?.success;
 	const body = resp?.body;
 	let locs = [];
 	if (cmd === 'definitionAndBoundSpan') locs = extractLocsFromDefs(body);
 	else if (cmd === 'references') locs = extractLocsFromRefs(body);
-	else if (cmd === 'documentHighlights') locs = extractLocsFromHighlights(body);
 
 	const summary = {
 		success,
@@ -536,7 +567,7 @@ async function runSide(label, tsserverPath, envExtra) {
 							}
 
 							if (op.type === 'nav') {
-								const args = cmdArgs(op.file, op.line, op.offset, op.cmd);
+								const args = { file: op.file, line: op.line, offset: op.offset };
 								const resp = await send(op.cmd, args, CMD_TIMEOUT_MS);
 								const norm = normalizeNavResult(op.cmd, resp, label);
 								results.set(op.key, {
@@ -681,7 +712,7 @@ async function replaySingle(label, tsserverPath, envExtra, op) {
 				};
 			}
 
-			const args = cmdArgs(op.file, op.line, op.offset, op.cmd);
+			const args = { file: op.file, line: op.line, offset: op.offset };
 			const resp = await send(op.cmd, args, CMD_TIMEOUT_MS);
 			const norm = normalizeNavResult(op.cmd, resp, label);
 			return {
