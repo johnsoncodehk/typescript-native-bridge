@@ -150,12 +150,9 @@ static napi_value fn_call_binary(napi_env env, napi_callback_info info) {
 		return nul;
 	}
 	napi_value buf = NULL;
-	// External buffers exist since Node 8/NAPIv1 — every supported runtime
-	// (engines floor is Node 20) has them. A failure here is a real bug:
-	// surface it via the pending napi exception instead of degrading.
-	if (napi_create_external_buffer(env, (size_t)res.len, res.data, finalize_release, (void*)(uintptr_t)res.handle, &buf) != napi_ok) {
-		return NULL;
-	}
+	// On failure buf stays NULL, which propagates the pending napi
+	// exception — no status ceremony needed.
+	napi_create_external_buffer(env, (size_t)res.len, res.data, finalize_release, (void*)(uintptr_t)res.handle, &buf);
 	return buf;
 }
 
