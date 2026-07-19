@@ -19,7 +19,7 @@ import { bindSourceFile } from "./binder.js";
 import { createSourceFile } from "./parser.js";
 import { SyntaxKind, SymbolFlags, SymbolFormatFlags, NodeFlags, ModifierFlags, JSDocParsingMode, ModuleKind, StructureIsReused, EmitHint, EmitFlags, ContextFlags, type Path, type Program, type TypeChecker } from "./types.js";
 import { getBuildInfoText, getTsBuildInfoEmitOutputFilePath, createPrinterWithRemoveComments } from "./emitter.js";
-import { usingSingleLineStringWriter } from "./utilities.js";
+import { usingSingleLineStringWriter, canHaveJSDoc } from "./utilities.js";
 import { getParseTreeNode, isFunctionLike } from "./utilitiesPublic.js";
 import { setEmitFlags, addEmitFlags } from "./factory/emitNode.js";
 import { getModeForResolutionAtIndex } from "./program.js";
@@ -3711,6 +3711,20 @@ function patchRemoteNodeKinds(sampleNode: any): void {
 }
 
 /** RemoteNode/RemoteSourceFile expose forEachChild but not getChildren; LS token walks need both. */
+// jsDoc memo per RemoteNode instance (immutable per blob generation). The
+// vendored getter walks the node's whole child chain — JSDoc is encoded
+// trailing by the Go encoder — so repeat token walks re-scanned it per call.
+// canHaveJSDoc (stock's own kind predicate) gates the scan: kinds that can
+// never carry JSDoc skip it in O(1).
+function tnbJsDocOf(node: any): any[] | undefined {
+    if (!canHaveJSDoc(node)) return undefined;
+    // canHaveJSDoc narrows `node` to HasJSDoc; the memo is an ad-hoc field.
+    const anyNode: any = node;
+    if ("__tnbJsDocMemo" in anyNode) return anyNode.__tnbJsDocMemo;
+    const jd = anyNode.jsDoc;
+    anyNode.__tnbJsDocMemo = jd;
+    return jd;
+}
 function installRemoteNodeTraversalHooks(): void {
     const proc = tnbBridgeProcessState();
     if (proc.remoteNodeTraversalPatched) return;
@@ -3720,10 +3734,16 @@ function installRemoteNodeTraversalHooks(): void {
     if (!RemoteNode?.prototype || typeof RemoteNode.prototype.forEachChild !== "function") return;
     if (typeof RemoteNode.prototype.getChildren !== "function") {
         RemoteNode.prototype.getChildren = function (this: any, _sourceFile?: any) {
+            // Token walks (getTokenAtPosition ← FAR keyword references) descend
+            // from the SourceFile root per candidate, re-walking the same upper
+            // nodes thousands of times per file; memoize per RemoteNode instance
+            // (immutable per blob generation).
+            if (this.__tnbChildrenMemo) return this.__tnbChildrenMemo;
             // Stock getChildren includes jsDoc children (forEachChild does
             // not) — FAR follows {@link} references inside JSDoc comments
             // (sim-nav lib.es2015.iterable {@link Iterator} cluster, #6).
-            const children: any[] = this.jsDoc ? [...this.jsDoc] : [];
+            const jd = tnbJsDocOf(this);
+            const children: any[] = jd ? [...jd] : [];
             const jsDocCount = children.length;
             // RemoteNode.forEachChild stops when the visitor returns truthy;
             // Array.push does, so token walks must not return push's length.
@@ -3744,6 +3764,7 @@ function installRemoteNodeTraversalHooks(): void {
                 const token = tnbSynthesizeKeywordToken(this, kwKind);
                 if (token) children.splice(jsDocCount, 0, token);
             }
+            this.__tnbChildrenMemo = children;
             return children;
         };
     }
