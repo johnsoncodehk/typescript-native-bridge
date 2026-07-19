@@ -35,17 +35,16 @@ const cases = [
 ];
 
 let failures = 0;
-const handle = Number(JSON.parse(addon.newSession(cwd)).data);
+const handle = addon.newSession(cwd);
 if (!handle) { console.error('newSession failed'); process.exit(1); }
 
 for (const [name, payload] of cases) {
 	const paramsJson = payload === null ? null : JSON.stringify(payload);
 	const expected = paramsJson ?? 'null';
-	// string path: echo returns RawBinary, and BridgeCall's safety net
-	// base64-encodes RawBinary results — decode before comparing.
-	const env = addon.call(BigInt(handle), 'echo', paramsJson);
-	const parsed = JSON.parse(env);
-	const gotStr = parsed.ok ? Buffer.from(String(parsed.data), 'base64').toString('utf8') : `ERR:${parsed.error}`;
+	// string path: echo returns RawBinary, which the Go side json.Marshal's as
+	// a base64 JSON doc — decode before comparing. Errors throw (napi).
+	const doc = addon.call(BigInt(handle), 'echo', paramsJson);
+	const gotStr = Buffer.from(String(JSON.parse(doc)), 'base64').toString('utf8');
 	if (gotStr !== expected) {
 		failures++;
 		console.log(`FAIL ${name} (string): expected ${expected.length}B, got ${gotStr.length}B`);
@@ -62,14 +61,14 @@ for (const [name, payload] of cases) {
 	console.log(`ok ${name} (${expected.length}B ×2 paths)`);
 }
 
-// Reusable-buffer stability: alternate payload sizes 60 times; every envelope
+// Reusable-buffer stability: alternate payload sizes 60 times; every doc
 // must stay intact (stale-pointer/reuse corruption would garble earlier reads).
 let stable = true;
 let prev = '';
 for (let i = 0; i < 60; i++) {
 	const p = JSON.stringify({ i, pad: 'y'.repeat((i % 7) * 1000) });
-	const env = addon.call(BigInt(handle), 'echo', p);
-	const data = Buffer.from(String(JSON.parse(env).data), 'base64').toString('utf8');
+	const doc = addon.call(BigInt(handle), 'echo', p);
+	const data = Buffer.from(String(JSON.parse(doc)), 'base64').toString('utf8');
 	if (data !== p) { stable = false; console.log(`FAIL stability iter ${i}`); break; }
 	prev = data;
 }

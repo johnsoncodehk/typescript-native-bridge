@@ -363,8 +363,8 @@ function loadBridgeDeps(): void {
         process.env.TNB_LIB_PATH = path.join(packageRoot, "lib");
     }
     // The bridge is a NAPI addon (bridge.node) — Node dlopens it directly via
-    // require(); no FFI library. napi_shim.c exposes plain JS functions with
-    // the same contract the koffi declarations had (strings/Buffer/int64).
+    // require(); no FFI library. napi_shim.c exposes plain JS functions
+    // (strings/Buffer/bool/null/int64 in and out; errors are thrown).
     _bridgeAddon = require(resolvedBridge);
     _bridgeFns = {
         BridgeNewSession: _bridgeAddon.newSession,
@@ -459,19 +459,12 @@ function isStableHostSfPath(p: string): boolean {
 // dominated the getCodeFixes wall.
 const _nodeIndexBySf = new WeakMap<object, Map<number, any[]>>();
 
-function parseBridgeEnvelope(str: string | null): any {
-    if (str == null) throw new Error("tsgoChecker: bridge returned null");
-    const env = JSON.parse(str);
-    if (!env.ok) throw new Error(env.error || "tsgoChecker: unknown bridge error");
-    return env.data ?? null;
-}
-
 class BridgeClient {
     private handle: number;
     private handleBigInt: bigint;
 
     constructor(cwd: string) {
-        this.handle = Number(parseBridgeEnvelope(_bridgeFns.BridgeNewSession(cwd)));
+        this.handle = _bridgeFns.BridgeNewSession(cwd);
         this.handleBigInt = BigInt(this.handle);
     }
 
@@ -480,9 +473,11 @@ class BridgeClient {
         noteRpc(method);
         const paramsJson = params == null ? null : JSON.stringify(params);
         const traceId = _rpcTraceEnter(method, false, this.handle);
-        const str = _bridgeFns.BridgeCall(this.handleBigInt, method, paramsJson);
+        const r = _bridgeFns.BridgeCall(this.handleBigInt, method, paramsJson);
         _rpcTraceExit(traceId, method);
-        const result = parseBridgeEnvelope(str);
+        // Envelope-free: scalars (null/bool) arrive as JS values; a string is
+        // the raw result JSON (objects/arrays/string results) to parse.
+        const result = typeof r === "string" ? JSON.parse(r) : r;
         if (process.env.TSGO_PROFILE === "1") _profRpc(method, Date.now() - t0);
         return result;
     }

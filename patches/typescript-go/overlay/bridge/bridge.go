@@ -7,11 +7,13 @@
 // Session.HandleRequest, so there is zero handler duplication. The only thing
 // we remove is the IPC transport: calls are direct in-process function calls.
 //
-// Two call paths:
-//   - BridgeCall        -> JSON envelope string  {"ok":true,"data":...} | {"ok":false,"error":"..."}
+// Two call paths, both envelope-free:
+//   - BridgeCall        -> { kind, data }: null/bool results ride the kind
+//     tag, JSON payloads cross as raw doc strings (JS parses the payload,
+//     never a wrapper), errors are thrown by the shim as napi exceptions
 //   - BridgeCallBinary  -> raw bytes (for getSourceFile etc.), zero-copy into a Node Buffer
 //
-// Memory model: string envelopes reuse a process-lifetime C buffer (the NAPI
+// Memory model: text results reuse a process-lifetime C buffer (the NAPI
 // shim copies to V8 synchronously before the next call). Binary responses are
 // pinned Go slices (runtime.Pinner) handed to V8 as external buffers with
 // zero copies — the pin is released by BridgeReleaseBinary from the external
@@ -23,11 +25,13 @@ package main
 #include <stdlib.h>
 #include <string.h>
 
-// BridgeBinary is returned by value from BridgeCallBinary. Layout matches
-// napi_shim.c's declaration: { void* data; int64_t len; uint64_t handle; }.
-// data is a view into the pinned Go slice; handle releases the pin via
-// BridgeReleaseBinary.
-struct BridgeBinary { void* data; long long len; unsigned long long handle; };
+// BridgeText is returned by value from BridgeCall, BridgeBinary from
+// BridgeCallBinary. Layouts match napi_shim.c's declarations. For text, kind
+// is 0=JSON doc, 1=null, 2=true, 3=false, 4=error (data is the message). For
+// binary, kind is 0=ok or 4=error; data is a view into the pinned Go slice
+// and handle releases the pin via BridgeReleaseBinary.
+struct BridgeText { char* data; long long kind; };
+struct BridgeBinary { void* data; long long len; unsigned long long handle; long long kind; };
 */
 import "C"
 
@@ -55,7 +59,8 @@ var (
 	nextID   int64
 	sessions = make(map[int64]*sessionEntry, 4)
 
-	// resultBuf is a single reusable C buffer for JSON envelope responses.
+	// resultBuf is a single reusable C buffer for text responses (JSON docs
+	// and error messages).
 	resultBuf    *C.char
 	resultBufLen C.size_t
 )
@@ -64,26 +69,21 @@ type sessionEntry struct {
 	api *api.Session
 }
 
-// envelope is the wire format returned to JS.
-type envelope struct {
-	OK bool `json:"ok"`
-	// No omitempty: v2 (go-json-experiment) treats a jsontext.Value that
-	// marshals to `[]` or `null` as "empty" and drops the field, which makes
-	// empty-array results (e.g. getSignaturesOfType with no signatures)
-	// vanish from the envelope — the JS side then reads `data` as null and
-	// crashes on `.map`. Always emit `data` (null when absent).
-	Data  json.Value `json:"data"`
-	Error string     `json:"error,omitempty"`
-}
+// Wire kinds shared with napi_shim.c: null/bool results ride the tag so JS
+// never parses a wrapper; textDoc carries the raw result JSON; textError
+// carries the message the shim throws as a napi exception.
+const (
+	textDoc C.longlong = iota
+	textNull
+	textTrue
+	textFalse
+	textError
+)
 
-// returnEnvelope marshals env and writes it into the reusable result buffer,
-// returning a pointer to that buffer. The pointer remains valid until the next
-// bridge call. Always non-NULL.
-func returnEnvelope(env envelope) *C.char {
-	b, err := json.Marshal(env)
-	if err != nil {
-		b = []byte(`{"ok":false,"error":"marshal envelope failed"}`)
-	}
+// returnText writes b into the reusable result buffer, returning a pointer to
+// that buffer with the given kind. The pointer remains valid until the next
+// bridge call.
+func returnText(b []byte, kind C.longlong) C.struct_BridgeText {
 	need := C.size_t(len(b) + 1)
 	if resultBuf == nil || resultBufLen < need {
 		if resultBuf != nil {
@@ -96,7 +96,7 @@ func returnEnvelope(env envelope) *C.char {
 		C.memcpy(unsafe.Pointer(resultBuf), unsafe.Pointer(&b[0]), C.size_t(len(b)))
 	}
 	(*[1 << 30]byte)(unsafe.Pointer(resultBuf))[len(b)] = 0
-	return resultBuf
+	return C.struct_BridgeText{data: resultBuf, kind: kind}
 }
 
 // bridgeCheckerPoolOptions returns checker pool sizing for the in-process bridge.
@@ -146,10 +146,10 @@ func startOrphanWatchdog() {
 }
 
 // BridgeNewSession creates a project session + api session rooted at cwd.
-// Returns a JSON envelope. On success, env.data is the session handle (number).
+// Returns the session handle.
 //
 //export BridgeNewSession
-func BridgeNewSession(cwd *C.char) *C.char {
+func BridgeNewSession(cwd *C.char) C.int64_t {
 	startOrphanWatchdog()
 
 	cwdStr := C.GoString(cwd)
@@ -185,21 +185,21 @@ func BridgeNewSession(cwd *C.char) *C.char {
 	sessions[id] = &sessionEntry{api: as}
 	mu.Unlock()
 
-	handleBytes, _ := json.Marshal(id)
-	return returnEnvelope(envelope{OK: true, Data: json.Value(handleBytes)})
+	return C.int64_t(id)
 }
 
 // BridgeCall invokes api.Session.HandleRequest(method, params) directly.
-// paramsJson may be NULL (treated as "null"). Returns a JSON envelope.
-// On success, env.data is the handler's JSON result.
+// paramsJson may be NULL (treated as "null"). On success, data is the handler's
+// raw JSON result; null/bool results ride the kind tag instead so JS never
+// parses a wrapper.
 //
 //export BridgeCall
-func BridgeCall(session C.int64_t, method *C.char, paramsJson *C.char) *C.char {
+func BridgeCall(session C.int64_t, method *C.char, paramsJson *C.char) C.struct_BridgeText {
 	mu.Lock()
 	entry, ok := sessions[int64(session)]
 	mu.Unlock()
 	if !ok {
-		return returnEnvelope(envelope{OK: false, Error: "invalid session handle"})
+		return returnText([]byte("invalid session handle"), textError)
 	}
 
 	methodStr := C.GoString(method)
@@ -213,21 +213,25 @@ func BridgeCall(session C.int64_t, method *C.char, paramsJson *C.char) *C.char {
 
 	res, err := entry.api.HandleRequest(context.Background(), methodStr, params)
 	if err != nil {
-		return returnEnvelope(envelope{OK: false, Error: err.Error()})
+		return returnText([]byte(err.Error()), textError)
+	}
+	if res == nil {
+		return C.struct_BridgeText{kind: textNull}
 	}
 
-	var dataBytes []byte
-	switch res.(type) {
-	case nil:
-		dataBytes = []byte("null")
-	default:
-		dataBytes, err = json.Marshal(res)
-		if err != nil {
-			return returnEnvelope(envelope{OK: false, Error: "marshal result: " + err.Error()})
-		}
+	dataBytes, err := json.Marshal(res)
+	if err != nil {
+		return returnText([]byte("marshal result: "+err.Error()), textError)
 	}
-
-	return returnEnvelope(envelope{OK: true, Data: json.Value(dataBytes)})
+	switch string(dataBytes) {
+	case "null":
+		return C.struct_BridgeText{kind: textNull}
+	case "true":
+		return C.struct_BridgeText{kind: textTrue}
+	case "false":
+		return C.struct_BridgeText{kind: textFalse}
+	}
+	return returnText(dataBytes, textDoc)
 }
 
 // BridgeCallBinary invokes HandleRequest and returns the result as raw bytes.
@@ -235,13 +239,14 @@ func BridgeCall(session C.int64_t, method *C.char, paramsJson *C.char) *C.char {
 // api.RawBinary which is handed straight through with no base64. For non-binary
 // methods, the JSON-marshaled bytes are returned (caller can JSON.parse).
 //
-// Returns a struct by value: { void* data; int64_t len; uint64_t handle }.
-// data points INTO the Go slice (no copy); the slice is pinned via
-// runtime.Pinner so Go's (non-moving) GC keeps it valid. Ownership of the pin
-// transfers to the caller (napi_shim.c), which wraps the view in a V8 external
-// buffer and calls BridgeReleaseBinary exactly once, from the buffer's
-// finalizer on GC. len is 0 for nil/empty results (handle is 0 then; nothing
-// to release).
+// Returns a struct by value: { void* data; int64_t len; uint64_t handle;
+// int64_t kind }. kind 0 = ok: data points INTO the Go slice (no copy); the
+// slice is pinned via runtime.Pinner so Go's (non-moving) GC keeps it valid.
+// Ownership of the pin transfers to the caller (napi_shim.c), which wraps the
+// view in a V8 external buffer and calls BridgeReleaseBinary exactly once,
+// from the buffer's finalizer on GC. len is 0 for nil/empty results (handle
+// is 0 then; nothing to release). kind 4 = error: data/len hold the message
+// in resultBuf and the shim throws it.
 //
 //export BridgeCallBinary
 func BridgeCallBinary(session C.int64_t, method *C.char, paramsJson *C.char) C.struct_BridgeBinary {
@@ -251,7 +256,7 @@ func BridgeCallBinary(session C.int64_t, method *C.char, paramsJson *C.char) C.s
 	entry, ok := sessions[int64(session)]
 	mu.Unlock()
 	if !ok {
-		return empty
+		return returnBinaryError("invalid session handle")
 	}
 
 	methodStr := C.GoString(method)
@@ -265,7 +270,7 @@ func BridgeCallBinary(session C.int64_t, method *C.char, paramsJson *C.char) C.s
 
 	res, err := entry.api.HandleRequest(context.Background(), methodStr, params)
 	if err != nil {
-		return empty
+		return returnBinaryError(err.Error())
 	}
 
 	var bytes []byte
@@ -277,7 +282,7 @@ func BridgeCallBinary(session C.int64_t, method *C.char, paramsJson *C.char) C.s
 	default:
 		bytes, err = json.Marshal(res)
 		if err != nil {
-			return empty
+			return returnBinaryError("marshal result: " + err.Error())
 		}
 	}
 
@@ -285,6 +290,13 @@ func BridgeCallBinary(session C.int64_t, method *C.char, paramsJson *C.char) C.s
 		return empty
 	}
 	return pinBinary(bytes)
+}
+
+// returnBinaryError reports msg on the binary path: the message rides the
+// reusable text buffer and kind 4 tells the shim to throw it.
+func returnBinaryError(msg string) C.struct_BridgeBinary {
+	t := returnText([]byte(msg), textError)
+	return C.struct_BridgeBinary{data: unsafe.Pointer(t.data), len: C.longlong(len(msg)), kind: textError}
 }
 
 // pinBinary pins b via runtime.Pinner (the cgo-legal way to return a Go heap

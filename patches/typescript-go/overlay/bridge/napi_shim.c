@@ -3,13 +3,14 @@
 // Node loads bridge.node directly via require(); no FFI library needed.
 //
 // Marshalling contract (deliberately tiny — see the design discussion):
-//   - Shapes: strings in, string-or-Buffer out, int64 session handle. Nothing
-//     else ever crosses the boundary (envelopes are JSON, parsed in JS).
+//   - Shapes: strings in, string-or-Buffer-or-bool-or-null out, int64 session
+//     handle. Nothing else ever crosses the boundary.
 //   - Inputs: JS strings are copied into shim-owned buffers (C.GoString copies
 //     again on the Go side), freed before the shim returns.
-//   - String results: Go-owned reusable buffer (resultBuf in bridge.go),
-//     copied into V8 by napi_create_string_utf8. Nothing to free — Go keeps
-//     ownership and recycles it on the next call.
+//   - Text results: kind-tagged (0=JSON doc string, 1=null, 2/3=bool, 4=error
+//     message — thrown). JSON docs live in a Go-owned reusable buffer
+//     (resultBuf in bridge.go), copied into V8 by napi_create_string_utf8.
+//     Null/bool results ride the tag so JS never parses a wrapper envelope.
 //   - Binary results: Go pins the slice via runtime.Pinner and hands V8 a
 //     view — zero copies. The pin releases from the external buffer's
 //     finalizer on GC. External buffers exist since Node 8 (our engine floor
@@ -23,9 +24,10 @@
 #include <stdlib.h>
 
 // cgo-exported Go entry points (bridge.go).
-struct BridgeBinary { void* data; long long len; unsigned long long handle; };
-extern char* BridgeNewSession(char* cwd);
-extern char* BridgeCall(int64_t session, char* method, char* paramsJson);
+struct BridgeText { char* data; long long kind; };
+struct BridgeBinary { void* data; long long len; unsigned long long handle; long long kind; };
+extern long long BridgeNewSession(char* cwd);
+extern struct BridgeText BridgeCall(int64_t session, char* method, char* paramsJson);
 extern struct BridgeBinary BridgeCallBinary(int64_t session, char* method, char* paramsJson);
 extern void BridgeDisposeSession(int64_t session);
 extern void BridgeReleaseBinary(unsigned long long handle);
@@ -78,7 +80,7 @@ static napi_value js_string(napi_env env, const char* s) {
 	return out;
 }
 
-// newSession(cwd: string): string (JSON envelope with the session handle)
+// newSession(cwd: string): number (session handle)
 static napi_value fn_new_session(napi_env env, napi_callback_info info) {
 	napi_value argv[1];
 	size_t argc = 1;
@@ -86,9 +88,11 @@ static napi_value fn_new_session(napi_env env, napi_callback_info info) {
 	bool ok;
 	char* cwd = arg_string(env, argv[0], &ok);
 	if (!ok) return NULL;
-	char* out = BridgeNewSession(cwd);
+	long long handle = BridgeNewSession(cwd);
 	free(cwd);
-	return js_string(env, out);
+	napi_value out = NULL;
+	napi_create_double(env, (double)handle, &out);
+	return out;
 }
 
 // Shared argument extraction for call / callBinary.
@@ -112,16 +116,35 @@ static bool call_args(napi_env env, napi_callback_info info, int64_t* session, c
 	return true;
 }
 
-// call(session, method, paramsJson | null): string (JSON envelope)
+// call(session, method, paramsJson | null): string | boolean | null
+// kind 0: JSON doc string (JS parses the payload itself); 1: null; 2/3: bool;
+// 4: error message — thrown.
 static napi_value fn_call(napi_env env, napi_callback_info info) {
 	int64_t session;
 	char* method;
 	char* params;
 	if (!call_args(env, info, &session, &method, &params)) return NULL;
-	char* out = BridgeCall(session, method, params);
+	struct BridgeText res = BridgeCall(session, method, params);
 	free(method);
 	free(params);
-	return js_string(env, out);
+	switch (res.kind) {
+	case 1: {
+		napi_value nul;
+		napi_get_null(env, &nul);
+		return nul;
+	}
+	case 2:
+	case 3: {
+		napi_value b;
+		napi_get_boolean(env, res.kind == 2, &b);
+		return b;
+	}
+	case 4:
+		napi_throw_error(env, NULL, res.data);
+		return NULL;
+	default:
+		return js_string(env, res.data);
+	}
 }
 
 // Zero-copy release: the external buffer's finalizer runs on the env thread
@@ -144,6 +167,10 @@ static napi_value fn_call_binary(napi_env env, napi_callback_info info) {
 	struct BridgeBinary res = BridgeCallBinary(session, method, params);
 	free(method);
 	free(params);
+	if (res.kind == 4) {
+		napi_throw_error(env, NULL, (const char*)res.data);
+		return NULL;
+	}
 	if (res.len <= 0 || res.data == NULL) {
 		napi_value nul;
 		napi_get_null(env, &nul);
