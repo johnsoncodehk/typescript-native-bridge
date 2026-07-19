@@ -10,8 +10,11 @@
 //   - String results: Go-owned reusable buffer (resultBuf in bridge.go),
 //     copied into V8 by napi_create_string_utf8. Nothing to free — Go keeps
 //     ownership and recycles it on the next call.
-//   - Binary results: Go-owned reusable buffer (binBuf), copied by
-//     napi_create_buffer_copy. Same ownership rule.
+//   - Binary results: Go pins the slice via cgo.Handle and hands V8 a view —
+//     zero copies. The pin is released by BridgeReleaseBinary, either from the
+//     external buffer's finalizer on GC (default) or right after
+//     napi_create_buffer_copy (TNB_ZERO_COPY=0 fallback). Go's GC is
+//     non-moving, so the view stays valid until release.
 //   - Everything synchronous on the JS thread. No async NAPI, no callbacks,
 //     no thread-safe functions.
 
@@ -20,11 +23,12 @@
 #include <stdlib.h>
 
 // cgo-exported Go entry points (bridge.go).
-struct BridgeBinary { void* data; long long len; };
+struct BridgeBinary { void* data; long long len; unsigned long long handle; };
 extern char* BridgeNewSession(char* cwd);
 extern char* BridgeCall(int64_t session, char* method, char* paramsJson);
 extern struct BridgeBinary BridgeCallBinary(int64_t session, char* method, char* paramsJson);
 extern void BridgeDisposeSession(int64_t session);
+extern void BridgeReleaseBinary(unsigned long long handle);
 
 // Required string argument → fresh NUL-terminated buffer (caller frees).
 // Returns NULL with nothing set if conversion fails (napi raises then).
@@ -120,6 +124,26 @@ static napi_value fn_call(napi_env env, napi_callback_info info) {
 	return js_string(env, out);
 }
 
+// Zero-copy control: TNB_ZERO_COPY=0 forces the copy path. Default hands V8 a
+// view of the pinned Go slice (no copies anywhere); the pin releases via
+// BridgeReleaseBinary — from the external buffer's finalizer on GC, or right
+// after napi_create_buffer_copy in the fallback. Read once; env is fixed
+// before require().
+static int zero_copy_enabled(void) {
+	static int cached = -1;
+	if (cached < 0) {
+		const char* v = getenv("TNB_ZERO_COPY");
+		cached = (v && v[0] == '0' && v[1] == '\0') ? 0 : 1;
+	}
+	return cached;
+}
+
+static void finalize_release(napi_env env, void* data, void* hint) {
+	(void)env;
+	(void)data;
+	BridgeReleaseBinary((unsigned long long)(uintptr_t)hint);
+}
+
 // callBinary(session, method, paramsJson | null): Buffer | null
 static napi_value fn_call_binary(napi_env env, napi_callback_info info) {
 	int64_t session;
@@ -135,9 +159,21 @@ static napi_value fn_call_binary(napi_env env, napi_callback_info info) {
 		return nul;
 	}
 	napi_value buf = NULL;
-	void* dst = NULL;
-	// V8 copies the bytes; Go keeps the source (reusable binBuf).
-	napi_create_buffer_copy(env, (size_t)res.len, res.data, &dst, &buf);
+	if (zero_copy_enabled()) {
+		// True zero-copy: V8 views the pinned Go slice directly; the finalizer
+		// releases the pin (GC-safe — Go's GC is non-moving and the slice stays
+		// alive until BridgeReleaseBinary runs).
+		if (napi_create_external_buffer(env, (size_t)res.len, res.data, finalize_release, (void*)(uintptr_t)res.handle, &buf) != napi_ok) {
+			void* dst = NULL;
+			napi_create_buffer_copy(env, (size_t)res.len, res.data, &dst, &buf);
+			BridgeReleaseBinary(res.handle);
+		}
+	}
+	else {
+		void* dst = NULL;
+		napi_create_buffer_copy(env, (size_t)res.len, res.data, &dst, &buf);
+		BridgeReleaseBinary(res.handle);
+	}
 	return buf;
 }
 

@@ -11,9 +11,11 @@
 //   - BridgeCall        -> JSON envelope string  {"ok":true,"data":...} | {"ok":false,"error":"..."}
 //   - BridgeCallBinary  -> raw bytes (for getSourceFile etc.), single-copy into a Node Buffer
 //
-// Memory model: both paths write into reusable C buffers. Calls are fully
-// synchronous, so the NAPI shim copies the data out to V8 before the next call
-// reuses the buffer. Zero per-call malloc, zero leaks.
+// Memory model: string envelopes reuse a process-lifetime C buffer (the NAPI
+// shim copies to V8 synchronously before the next call). Binary responses are
+// pinned Go slices (cgo.Handle) handed to V8 with zero copies — the pin is
+// released by BridgeReleaseBinary, immediately after a copy or from the
+// external buffer's finalizer on GC.
 package main
 
 /*
@@ -22,8 +24,10 @@ package main
 #include <string.h>
 
 // BridgeBinary is returned by value from BridgeCallBinary. Layout matches
-// napi_shim.c's declaration: { void* data; int64_t len; }.
-struct BridgeBinary { void* data; long long len; };
+// napi_shim.c's declaration: { void* data; int64_t len; uint64_t handle; }.
+// data is a view into the pinned Go slice; handle releases the pin via
+// BridgeReleaseBinary.
+struct BridgeBinary { void* data; long long len; unsigned long long handle; };
 */
 import "C"
 
@@ -31,9 +35,11 @@ import (
 	"context"
 	"encoding/base64"
 	"os"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unsafe"
 
@@ -54,11 +60,6 @@ var (
 	// resultBuf is a single reusable C buffer for JSON envelope responses.
 	resultBuf    *C.char
 	resultBufLen C.size_t
-
-	// binBuf is a single reusable C buffer for binary responses (getSourceFile).
-	// Grows only; never freed (one buffer for the process lifetime).
-	binBuf    unsafe.Pointer
-	binBufLen C.size_t
 )
 
 type sessionEntry struct {
@@ -98,17 +99,6 @@ func returnEnvelope(env envelope) *C.char {
 	}
 	(*[1 << 30]byte)(unsafe.Pointer(resultBuf))[len(b)] = 0
 	return resultBuf
-}
-
-// ensureBinBuf grows the reusable binary buffer to at least need bytes.
-func ensureBinBuf(need C.size_t) {
-	if binBuf == nil || binBufLen < need {
-		if binBuf != nil {
-			C.free(binBuf)
-		}
-		binBuf = C.malloc(need)
-		binBufLen = need
-	}
 }
 
 // bridgeCheckerPoolOptions returns checker pool sizing for the in-process bridge.
@@ -281,13 +271,17 @@ func BridgeCall(session C.int64_t, method *C.char, paramsJson *C.char) *C.char {
 // api.RawBinary which is handed straight through with no base64. For non-binary
 // methods, the JSON-marshaled bytes are returned (caller can JSON.parse).
 //
-// Returns a struct by value: { void* data; int64_t len }. data points into the
-// reusable binary buffer and stays valid until the next bridge call. len is 0
-// for nil/empty results.
+// Returns a struct by value: { void* data; int64_t len; uint64_t handle }.
+// data points INTO the Go slice (no copy on this side); the slice is pinned via
+// cgo.NewHandle so Go's (non-moving) GC keeps it valid. Ownership of the pin
+// transfers to the caller (napi_shim.c), which must call BridgeReleaseBinary
+// exactly once — immediately after copying, or from the external buffer's
+// finalizer on GC in the zero-copy path. len is 0 for nil/empty results
+// (handle is 0 then; nothing to release).
 //
 //export BridgeCallBinary
 func BridgeCallBinary(session C.int64_t, method *C.char, paramsJson *C.char) C.struct_BridgeBinary {
-	empty := C.struct_BridgeBinary{data: nil, len: 0}
+	empty := C.struct_BridgeBinary{data: nil, len: 0, handle: 0}
 
 	mu.Lock()
 	entry, ok := sessions[int64(session)]
@@ -308,14 +302,12 @@ func BridgeCallBinary(session C.int64_t, method *C.char, paramsJson *C.char) C.s
 	res, err := entry.api.HandleRequest(context.Background(), methodStr, params)
 	if err != nil {
 		// No way to surface an error through the binary path without a side
-		// channel; fall back to a JSON error envelope written into the binary
-		// buffer so the caller can detect it by parsing. The contract is:
-		// callers use BridgeCallBinary only for methods known to return binary.
+		// channel; fall back to a JSON error envelope so the caller can detect
+		// it by parsing. The contract is: callers use BridgeCallBinary only for
+		// methods known to return binary.
 		errEnv := envelope{OK: false, Error: err.Error()}
 		b, _ := json.Marshal(errEnv)
-		ensureBinBuf(C.size_t(len(b)))
-		C.memcpy(binBuf, unsafe.Pointer(&b[0]), C.size_t(len(b)))
-		return C.struct_BridgeBinary{data: binBuf, len: C.longlong(len(b))}
+		return pinBinary(b)
 	}
 
 	var bytes []byte
@@ -334,9 +326,39 @@ func BridgeCallBinary(session C.int64_t, method *C.char, paramsJson *C.char) C.s
 	if len(bytes) == 0 {
 		return empty
 	}
-	ensureBinBuf(C.size_t(len(bytes)))
-	C.memcpy(binBuf, unsafe.Pointer(&bytes[0]), C.size_t(len(bytes)))
-	return C.struct_BridgeBinary{data: binBuf, len: C.longlong(len(bytes))}
+	return pinBinary(bytes)
+}
+
+// pinBinary pins b via runtime.Pinner (the cgo-legal way to return a Go heap
+// pointer: cgo.Handle would keep the object alive but does NOT mark the
+// pointer pinned, and the runtime's cgoCheckResult panics on it) and returns
+// the view + a registry id for BridgeReleaseBinary.
+var (
+	binPinnerNext uint64
+	binPinners    sync.Map // uint64 -> *runtime.Pinner
+)
+
+func pinBinary(b []byte) C.struct_BridgeBinary {
+	p := &runtime.Pinner{}
+	p.Pin(&b[0])
+	id := atomic.AddUint64(&binPinnerNext, 1)
+	binPinners.Store(id, p)
+	return C.struct_BridgeBinary{
+		data:   unsafe.Pointer(&b[0]),
+		len:    C.longlong(len(b)),
+		handle: C.uint64_t(id),
+	}
+}
+
+// BridgeReleaseBinary releases a pin from pinBinary. Called exactly once per
+// BridgeCallBinary result: immediately after the caller copies the bytes, or
+// from the external buffer's finalizer when V8 is done with the zero-copy view.
+//
+//export BridgeReleaseBinary
+func BridgeReleaseBinary(handle C.uint64_t) {
+	if p, ok := binPinners.LoadAndDelete(uint64(handle)); ok {
+		p.(*runtime.Pinner).Unpin()
+	}
 }
 
 // BridgeDisposeSession closes the session and releases all refs.
