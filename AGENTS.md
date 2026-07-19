@@ -20,6 +20,7 @@ Reference implementation of the style: `patches/typescript-go/overlay/bridge/nap
 - **One harness, parameterized** — never fork a diagnostic script to vary it (shards, file filters, output paths); add the parameter to the original. Two copies rot independently.
 - **Mechanism changes sweep their vocabulary** — when a mechanism is replaced, grep its name (`koffi`, `create_buffer_copy`, …) across `patches/`, `tools/`, and comments in the same change. Comments describe the current contract, not the history of contracts.
 - **Deletions are verified by the gates, not hedged by switches** — the gates below are why the rules above are safe. If a deletion feels risky, the answer is a witness, not a fallback.
+- **Elegance is reviewed after it works, before it commits** — elegance is often only visible once a working solution exists, so re-read the landed diff with fresh eyes and converge on the better shape immediately instead of defending the first draft. The top smell is duplicated truth: a mirrored table/set that upstream owns will rot — call the source instead (import `canHaveJSDoc`, don't copy its kind set). Second smell: a cache that hides the problem — a memo amortizes a wasteful access but doesn't remove it; accept it only when making the information present by construction costs an upstream format change. Third: hidden contracts — shared mutable results and ad-hoc fields on foreign objects are invisible coupling; if you rely on one, name it in the commit and let the gates prove it.
 
 ## Repo in one paragraph
 
