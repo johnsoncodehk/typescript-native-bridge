@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Perf diagnosis: decompose edit→quickinfo / edit→completion into bridge RPCs.
-// Uses env-gated TNB_TRACE_RPC / TNB_RPC_TRACE (default off). Harness lock = 1.
+// Uses env-gated TNB_TRACE_RPC (default off). Harness lock = 1.
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { resolveVolarRoot } from './volar-root.mjs';
@@ -13,8 +13,7 @@ const testWorkspacePath = path.join(volarRoot, 'test-workspace');
 const mainVue = path.join(testWorkspacePath, 'component-meta/#4577/main.vue');
 const baseContent = fs.readFileSync(mainVue, 'utf8');
 
-const TRACE_FILE = process.env.TNB_RPC_TRACE_FILE
-	|| process.env.TNB_TRACE_RPC_FILE
+const TRACE_FILE = process.env.TNB_TRACE_RPC_FILE
 	|| '/tmp/tnb-perf-edit-rpc.log';
 const OUT_SUM = process.env.TNB_PERF_SUM || '/tmp/tnb-perf-edit-rpc-summary.json';
 const MODE = process.env.TNB_PERF_MODE || 'both'; // qi | comp | both
@@ -86,8 +85,6 @@ function summarizePhase(logText, phase) {
 async function oneRun(runIdx) {
 	const env = tnbHarnessEnv({
 		TNB_TRACE_RPC: '1',
-		TNB_RPC_TRACE: '1',
-		TNB_RPC_TRACE_FILE: TRACE_FILE,
 		TNB_TRACE_RPC_FILE: TRACE_FILE,
 	});
 	return withTsserver({ tsserverPath: tnbPath, args: harnessArgs, env }, async ({ send }) => {

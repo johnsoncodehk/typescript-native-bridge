@@ -4,7 +4,7 @@
  * documentHighlights + geterr diag parity — TNB vs stock.
  *
  * Deterministic identifier sampling; dual sequential withTsserver sessions.
- * Usage: node tools/triage-sim-nav.mjs
+ * Usage: node tools/triage-sim-nav-shard.mjs
  * SUMMARY: total=T match=M diff=D docdiff=DD diagmsg=DM skip=S
  */
 import * as fs from 'node:fs';
@@ -17,10 +17,9 @@ const stockPath = process.env.STOCK_TSSERVER_PATH ?? '/tmp/stock-ts-p3/package/l
 const tnbPath = path.join(volarRoot, 'node_modules/typescript/lib/tsserver.js');
 const pluginProbe = path.join(volarRoot, 'packages/language-server');
 const testWorkspacePath = path.join(volarRoot, 'test-workspace');
-// Shard wrapper of triage-sim-nav.mjs (declared new triage tool; logic identical,
-// only the file set is sharded and outputs are env-overridable). Run N shards in
-// parallel from isolated tools/ copies (harness lock is per tools-dir parent), then
-// merge shard JSONs. Compare keys are disjoint across shards (keyed by file:pos:cmd).
+// The sim-nav harness. Run N shards in parallel from isolated tools/ copies
+// (harness lock is per tools-dir parent), then merge shard JSONs. Compare keys
+// are disjoint across shards (keyed by file:pos:cmd).
 const SHARD_INDEX = Math.max(0, Number.parseInt(process.env.SIM_NAV_SHARD_INDEX ?? '0', 10) || 0);
 const SHARD_COUNT = Math.max(1, Number.parseInt(process.env.SIM_NAV_SHARD_COUNT ?? '1', 10) || 1);
 const THROW_FILE =
@@ -106,7 +105,6 @@ function collectFileSet() {
 	for (const file of files) {
 		const content = fs.readFileSync(file, 'utf8');
 		const positions = samplePositions(content);
-		IDENT_RE.lastIndex = 0;
 		const rawIdents = [...content.matchAll(IDENT_RE)].length;
 		entries.push({ file, content, positions, rawIdents });
 	}

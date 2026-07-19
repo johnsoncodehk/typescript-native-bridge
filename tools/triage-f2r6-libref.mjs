@@ -94,7 +94,7 @@ console.log('=== WITNESS f2r6-libref ===');
 	console.log('  TNB norm', tnb.norm.slice(0, 10));
 	console.log('  STOCK norm', stock.norm.slice(0, 10));
 }
-// Case D: pure .ts INSIDE test-workspace (controls project routing; plugin loaded)
+// Case C: pure .ts INSIDE test-workspace (controls project routing; plugin loaded)
 {
 	const tsInTw = path.join(tw, 'tsc/#2225/plain-probe.ts');
 	fs.writeFileSync(tsInTw, `console.log(1);\nconsole.log(2);\n`);
@@ -103,7 +103,7 @@ console.log('=== WITNESS f2r6-libref ===');
 	const tnb = await run('TNB', tnbPath, tnbHarnessEnv(), open, q);
 	const stock = await run('STOCK', stockPath, process.env, open, q);
 	const v = verdictOf(tnb, stock);
-	console.log(`D pure-ts-in-workspace: verdict=${v.verdict} TNB n=${tnb.locs.length} STOCK n=${stock.locs.length}`);
+	console.log(`C pure-ts-in-workspace: verdict=${v.verdict} TNB n=${tnb.locs.length} STOCK n=${stock.locs.length}`);
 	console.log('  onlyStock', v.onlyStock);
 	console.log('  onlyTnb', v.onlyTnb);
 	console.log(`  TNB project=${tnb.projectName} files=${tnb.projectFiles} lib=${JSON.stringify(tnb.libInProject)}`);

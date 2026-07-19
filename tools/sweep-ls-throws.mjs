@@ -376,7 +376,7 @@ async function sweepFile(send, filePath, content, fileBase, meta) {
 			startOffset: start.offset,
 			endLine: end.line,
 			endOffset: end.offset,
-			errorCodes: codes.length ? codes : [d.code].filter(c => typeof c === 'number'),
+			errorCodes: codes,
 		}, meta);
 	}
 }

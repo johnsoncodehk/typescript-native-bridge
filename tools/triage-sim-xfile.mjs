@@ -646,21 +646,20 @@ async function main() {
 
 	const match = units.filter(u => u.status === 'MATCH').length;
 	const diff = units.filter(u => u.status === 'DIFF').length;
-	const skip = units.filter(u => u.status === 'SKIP').length;
 	const total = units.length;
 	const byScene = {};
 	for (const u of units) {
-		byScene[u.scene] ??= { total: 0, match: 0, diff: 0, skip: 0 };
+		byScene[u.scene] ??= { total: 0, match: 0, diff: 0 };
 		byScene[u.scene].total++;
 		byScene[u.scene][u.status.toLowerCase()]++;
 	}
-	const summaryLine = `SUMMARY: total=${total} match=${match} diff=${diff} skip=${skip}`;
+	const summaryLine = `SUMMARY: total=${total} match=${match} diff=${diff}`;
 	console.log(summaryLine);
 	console.log('byScene', JSON.stringify(byScene));
 
 	const result = {
-		summaryLine, total, match, diff, skip,
-		conserved: total === match + diff + skip,
+		summaryLine, total, match, diff,
+		conserved: total === match + diff,
 		byScene, pickedSymbols, alignNote, units,
 		throwsFile: throwFile,
 		throwsExists: fs.existsSync(throwFile),
@@ -673,7 +672,7 @@ async function main() {
 	};
 	fs.writeFileSync(outJson, JSON.stringify(result, null, 2));
 	console.log('wrote', outJson);
-	if (total !== match + diff + skip) { console.error('CONSERVATION FAIL'); process.exit(2); }
+	if (total !== match + diff) { console.error('CONSERVATION FAIL'); process.exit(2); }
 	process.exit(0);
 }
 

@@ -5,7 +5,7 @@
 //   node tools/sim-nav-merge.mjs --out <merged.json> <shard.json...>
 //   node tools/sim-nav-merge.mjs --baseline <baseline.json> <merged.json>
 //
-// Shard payloads are triage-sim-nav.mjs OUT_JSON files (SIM_NAV_SHARD_*).
+// Shard payloads are triage-sim-nav-shard.mjs OUT_JSON files (SIM_NAV_SHARD_*).
 // Merged shape matches the committed baselines: scalar counters summed,
 // `compareKeys` = total probed units, and `diffs`/`docdiffs`/`diagmsgs`
 // unioned by `key` (shards probe disjoint unit sets).

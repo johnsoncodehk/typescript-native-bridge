@@ -2,8 +2,8 @@
 /**
  * NAPI bridge fuzz: round-trip pathological payloads through echo (string and
  * binary paths) and verify byte-identical envelopes. The shim's contract:
- * string results are Go-owned buffers V8 copies; binary results are copied by
- * napi_create_buffer_copy. Any marshalling bug (truncation, encoding drift,
+ * string results are Go-owned buffers V8 copies; binary results are zero-copy
+ * napi_create_external_buffer views. Any marshalling bug (truncation, encoding drift,
  * use-after-reuse) shows up as a mismatch here.
  *
  * Usage: node tools/triage-napi-fuzz.mjs
@@ -74,10 +74,6 @@ for (let i = 0; i < 60; i++) {
 	prev = data;
 }
 console.log(`stability: ${stable ? 'ok (60 alternating calls)' : 'FAIL'} prev=${prev.length}B`);
-
-// Binary large blob: getSourceFile on a lib file (exercises the big-copy path).
-const cfg = JSON.parse(addon.call(BigInt(handle), 'parseConfigFile', JSON.stringify({ file: path.join(repoRoot, 'typescript', 'src', 'tsconfig.json') })));
-console.log('parseConfigFile ok:', !!cfg.ok);
 
 addon.disposeSession(BigInt(handle));
 console.log(failures === 0 && stable ? 'VERDICT: PASS' : `VERDICT: FAIL (${failures})`);

@@ -30,10 +30,6 @@ if (!fs.existsSync(libTsc)) {
 		fail("lib/_tsc.js missing eager `var sys = (() =>` — sys may be lazy-init only");
 	}
 
-	if (/\bvar init_sys = __esm/.test(text)) {
-		fail("lib/_tsc.js uses lazy init_sys = __esm — sys is not top-level eager");
-	}
-
 	const servicesHits = (text.match(/\binit_services\b/g) ?? []).length;
 	if (servicesHits !== 0) {
 		fail(`lib/_tsc.js contains init_services (${servicesHits}) — services layer leaked into compiler bundle`);

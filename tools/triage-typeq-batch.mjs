@@ -330,7 +330,7 @@ function normalizeQuickInfo(res) {
 		body: {
 			kind: body.kind,
 			displayString: body.displayString ?? (body.displayParts ?? []).map(p => p.text).join(''),
-			documentation: body.documentation ?? (body.documentation ?? []),
+			documentation: body.documentation ?? [],
 		},
 	};
 }

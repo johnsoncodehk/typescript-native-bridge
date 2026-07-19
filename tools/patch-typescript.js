@@ -23,7 +23,8 @@ if (!fs.existsSync(path.join(subDir, ".git"))) {
 }
 
 if (!checkOnly) {
-	spawnSync(process.execPath, [path.join(__dirname, "sync-vendor-native-preview.js")], { stdio: "inherit" });
+	const result = spawnSync(process.execPath, [path.join(__dirname, "sync-vendor-native-preview.js")], { stdio: "inherit" });
+	if (result.status !== 0) process.exit(result.status ?? 1);
 }
 
 applyOverlay(subDir, path.join(patchDir, "overlay"), checkOnly);

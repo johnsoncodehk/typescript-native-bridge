@@ -58,7 +58,6 @@ async function run(label, tsserverPath, env, prefs) {
 			const tComp = Date.now();
 			const comp = await send('completionInfo', {
 				file: mainVue, line: INSERT_LINE, offset: typed.length + 1,
-				triggerKind: typed.length === 1 ? undefined : undefined,
 			});
 			const compMs = Date.now() - tComp;
 			const entries = comp?.body?.entries?.length ?? 0;

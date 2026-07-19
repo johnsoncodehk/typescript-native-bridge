@@ -118,10 +118,7 @@ if (stats) {
 		fail(`total RPC count is ${total} — the tsgo-backed path did not run (wrong workload or regression)`);
 	}
 
-	let baseline = { maxGetSourceFileRpc: rpc };
-	if (fs.existsSync(baselinePath)) {
-		baseline = JSON.parse(fs.readFileSync(baselinePath, "utf8"));
-	}
+	const baseline = JSON.parse(fs.readFileSync(baselinePath, "utf8"));
 	if (rpc > baseline.maxGetSourceFileRpc) {
 		fail(
 			`getSourceFile RPC count regressed: ${rpc} > baseline ${baseline.maxGetSourceFileRpc} ` +

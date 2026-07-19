@@ -1,6 +1,6 @@
 "use strict";
 // Go reads GODEBUG when the runtime starts (process spawn / re-exec).
-// Setting process.env in JS before koffi.load is too late for parsedebugvars.
+// Setting process.env in JS before require("bridge.node") is too late for parsedebugvars.
 
 function ensureGodebugReexec() {
 	if (process.env.TNB_SKIP_ASYNC_PREEMPT_OFF === "1") return;
@@ -51,7 +51,7 @@ function startParentWatch() {
 			if (err && err.code === "ESRCH") process.exit(0);
 		}
 	}, 2000);
-	if (typeof timer.unref === "function") timer.unref();
+	timer.unref();
 }
 
 module.exports = { ensureGodebugReexec, startParentWatch };

@@ -17,7 +17,6 @@ const git = (args) => spawnSync("git", ["-C", subDir, ...args], { encoding: "utf
 // independently). savePatch realigns EOL to HEAD first, so the per-file
 // diffs below inherit the same normalization.
 const osvfsRel = "internal/vfs/osvfs/os.go";
-const outDirRel = "_packages/native-preview/tsconfig.json";
 const resolveExternalModuleSymbolRel = [
 	"internal/api/proto.go",
 	"internal/api/session.go",
@@ -30,7 +29,6 @@ const noembedRel = "internal/bundled/noembed.go";
 saveOverlay(subDir, path.join(patchDir, "overlay"));
 savePatch(subDir, path.join(patchDir, "0001-bridge-inplace.patch"), [
 	osvfsRel,
-	outDirRel,
 	...resolveExternalModuleSymbolRel,
 	noembedRel,
 ]);
@@ -58,6 +56,5 @@ function saveFilesPatch(rels, patchName) {
 }
 
 saveSingleFilePatch(osvfsRel, "0002-osvfs-executable-fallback.patch");
-saveSingleFilePatch(outDirRel, "0003-native-preview-outdir.patch");
 saveFilesPatch(resolveExternalModuleSymbolRel, "0004-resolve-external-module-symbol.patch");
 saveSingleFilePatch(noembedRel, "0005-noembed-tnb-lib-path.patch");

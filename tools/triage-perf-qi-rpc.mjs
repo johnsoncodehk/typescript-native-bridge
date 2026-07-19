@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Perf diagnosis: edit→quickinfo wall vs createTsgoProgram stage timers + RPC.
-// Requires TNB_TRACE_RPC / TNB_RPC_TRACE (default off). Uses withTsserver (lock=1).
+// Requires TNB_TRACE_RPC (default off). Uses withTsserver (lock=1).
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { resolveVolarRoot } from './volar-root.mjs';
@@ -12,7 +12,7 @@ const pluginProbe = path.join(volarRoot, 'packages/language-server');
 const testWorkspacePath = path.join(volarRoot, 'test-workspace');
 const mainVue = path.join(testWorkspacePath, 'component-meta/#4577/main.vue');
 const baseContent = fs.readFileSync(mainVue, 'utf8');
-const TRACE = process.env.TNB_RPC_TRACE_FILE || '/tmp/tnb-perf-qi-rpc.log';
+const TRACE = process.env.TNB_TRACE_RPC_FILE || '/tmp/tnb-perf-qi-rpc.log';
 const REPEATS = Math.max(3, Number(process.env.TNB_PERF_REPEATS || 3));
 const INSERT_LINE = 12;
 const QI = { line: 11, offset: 13 };
@@ -30,7 +30,7 @@ for (let run = 1; run <= REPEATS; run++) {
 	await withTsserver({
 		tsserverPath: tnbPath,
 		args,
-		env: tnbHarnessEnv({ TNB_TRACE_RPC: '1', TNB_RPC_TRACE_FILE: TRACE }),
+		env: tnbHarnessEnv({ TNB_TRACE_RPC: '1', TNB_TRACE_RPC_FILE: TRACE }),
 	}, async ({ send }) => {
 		await send('configure', { preferences: {} });
 		await send('updateOpen', {

@@ -29,12 +29,8 @@ const patterns = [
 function countMatches() {
 	const pids = new Set();
 	for (const pattern of patterns) {
-		try {
-			const out = execSync(`pgrep -f '${pattern}' 2>/dev/null || true`, { encoding: 'utf8' }).trim();
-			for (const pid of out.split('\n').filter(Boolean)) pids.add(pid);
-		} catch {
-			// pgrep returns 1 when no match
-		}
+		const out = execSync(`pgrep -f '${pattern}' 2>/dev/null || true`, { encoding: 'utf8' }).trim();
+		for (const pid of out.split('\n').filter(Boolean)) pids.add(pid);
 	}
 	return pids.size;
 }
@@ -54,11 +50,7 @@ if (!process.argv.includes('--kill')) {
 const maxRounds = 5;
 for (let round = 1; round <= maxRounds; round++) {
 	for (const pattern of patterns) {
-		try {
-			execSync(`pkill -9 -f '${pattern}' 2>/dev/null || true`);
-		} catch {
-			// ignore
-		}
+		execSync(`pkill -9 -f '${pattern}' 2>/dev/null || true`);
 	}
 	execSync('sleep 1');
 	const remaining = countMatches();

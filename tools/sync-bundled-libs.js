@@ -43,8 +43,8 @@ for (const name of intersection) {
 	const src = path.join(bundledDir, name);
 	const dest = path.join(libDir, name);
 	const srcBuf = fs.readFileSync(src);
-	const destBuf = fs.existsSync(dest) ? fs.readFileSync(dest) : null;
-	if (!destBuf || !srcBuf.equals(destBuf)) {
+	const destBuf = fs.readFileSync(dest);
+	if (!srcBuf.equals(destBuf)) {
 		fs.copyFileSync(src, dest);
 		changed++;
 	}

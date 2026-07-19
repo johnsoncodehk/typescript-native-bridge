@@ -169,7 +169,6 @@ function buildSessionScript(sessionIndex) {
 			insertions = remapInsertions(insertions, sOff, sOff, newText.length);
 			insertions.push({ start: sOff, length: newText.length, text: newText });
 			content = applyEdit(content, start, end, newText);
-			const probe = { line, offset: col }; // caret after insert → after the '.'
 			const after = offsetToLineCol(content, sOff + newText.length);
 			entry.commands.push(updateOpenChange(file, [{ start, end, newText }]));
 			entry.commands.push({
@@ -341,7 +340,7 @@ async function replayScript(label, tsserverPath, env, script, { maxStep = Infini
 					r(body);
 				}
 			},
-		}, async ({ send, server }) => {
+		}, async ({ send }) => {
 			const safeSend = async (command, args) => {
 				try {
 					return await send(command, args, CMD_TIMEOUT_MS);
@@ -465,8 +464,6 @@ async function replayScript(label, tsserverPath, env, script, { maxStep = Infini
 					throw err;
 				}
 			}
-
-			void server;
 		});
 	} catch (err) {
 		if (!crashed) {
@@ -477,92 +474,9 @@ async function replayScript(label, tsserverPath, env, script, { maxStep = Infini
 	return { label, results, crashed };
 }
 
-/** Replay open + only steps in `stepIndices` (1-based). */
-async function replayPrefix(label, tsserverPath, env, script, stepIndices) {
-	const subset = {
-		...script,
-		steps: script.steps.filter(s => stepIndices.includes(s.step)),
-		finale: null,
-	};
-	// Re-map: apply only selected steps but they assume prior content edits —
-	// For SHORT test we need contiguous suffix ending at target applied to original.
-	// Rebuild a synthetic script that applies those steps' textChanges in order
-	// as recorded (they were generated against evolving content, so only a
-	// contiguous prefix from step 1 works correctly). For ≤3-step SHORT we try
-	// suffixes by regenerating from a content simulator — see classifyDiff.
-	return replayScript(label, tsserverPath, env, subset, {
-		maxStep: subset.steps.length,
-		classifyMode: true,
-	});
-}
-
 /**
- * Rebuild script that contains only the last K steps before and including
- * targetStep, by re-simulating edits from original for that window only.
- * For K-step suffix starting mid-session, recompute positions from a parallel
- * content sim that applies ALL prior edits then records only last K commands.
- */
-function buildSuffixScript(fullScript, targetStep, k) {
-	const startStep = Math.max(1, targetStep - k + 1);
-	const seed = fullScript.seed;
-	const rng = mulberry32(seed);
-	let content = fullScript.originalContent;
-	let insertions = [];
-	const kept = [];
-
-	for (let step = 1; step <= targetStep; step++) {
-		const opOrig = fullScript.steps[step - 1];
-		// Consume the same RNG draws as buildSessionScript even for skipped ops.
-		const opRoll = OPS[Math.floor(rng() * OPS.length)];
-		void opRoll;
-		const stepMeta = opOrig;
-		if (stepMeta.op === 'skip') {
-			if (step >= startStep) kept.push(stepMeta);
-			continue;
-		}
-		// Re-apply using recorded commands' textChanges (source of truth)
-		const changeCmd = stepMeta.commands.find(c => c.command === 'updateOpen');
-		const tc = changeCmd?.arguments?.changedFiles?.[0]?.textChanges?.[0];
-		if (tc) {
-			content = applyEdit(content, tc.start, tc.end, tc.newText);
-		}
-		if (step >= startStep) kept.push(stepMeta);
-	}
-
-	return {
-		...fullScript,
-		steps: kept,
-		// Suffix scripts still open original; commands' line/col were computed
-		// in the FULL session context. Applying a mid-session textChange on
-		// original content is wrong. So SHORT must use contiguous prefix from 1.
-	};
-}
-
-/**
- * SHORT = DIFF still appears when replaying open + steps 1..target with
- * targetStep <= 3, OR when replaying only the single target step is impossible
- * on original — handout: 「開檔→跳到該步的最小前綴」「≤3 步內復現」.
- * We try prefixes of length L=1..min(3,target) ending at target:
- *   steps (target-L+1)..target applied AFTER replaying 1..(target-L) silently? 
- * Simpler interpretation used here:
- *   If targetStep <= 3: replay full prefix 1..target → if DIFF remains, SHORT.
- *   If targetStep > 3: try replay of only steps (target-2)..target on a server
- *   that first silently applies 1..(target-3) — that's still >3 visible compare
- *   steps. Handout means: can reproduce with a fresh server and ≤3 edit steps
- *   total. So try prefixes of the FULL sequence truncated to last K=1..3 steps
- *   by regenerating a mini-session — only works if those K steps' coordinates
- *   are re-derived from original.
- *
- * Practical approach matching handout + SEQ fallback:
- *   Replay open + steps 1..min(target,3) and compare the last step's fp when
- *   target<=3. When target>3, attempt replay of open + steps 1..target but only
- *   classify SHORT if target<=3; else mark SEQ with full script path.
- *   Additionally: try replaying open + ONLY step `target` after regenerating
- *   that one edit against original (same op/seed-position attempt) — too fragile.
- *
- * Final rule (stable, honest):
- *   Fresh server, replay steps 1..targetStep. If targetStep <= 3 and DIFF
- *   reproduces → SHORT. Else → SEQ. (「≤3 步內」= 整段前綴長度 ≤3)
+ * Fresh server, replay steps 1..targetStep. If targetStep <= 3 and DIFF
+ * reproduces → SHORT. Else → SEQ. (「≤3 步內」= 整段前綴長度 ≤3)
  */
 async function classifyDiff(script, targetStep, stockFp, tnbFp) {
 	if (targetStep <= 3) {

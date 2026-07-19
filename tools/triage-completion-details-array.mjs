@@ -5,8 +5,7 @@
  * modules (`ref` from 'vue', whose realpath lives under node_modules/.pnpm/...).
  *
  * Why the legacy probes missed it: the singular `entryName` form is rejected
- * by the tsserver handler (returns an empty array), so tools using it (e.g.
- * triage-completion-details-data.mjs before its array-form fix) could never
+ * by the tsserver handler (returns an empty array), so tools using it could never
  * reach the crashing path. The array form reaches getCompletionEntryDetails →
  * getCompletionEntryCodeActionsAndSourceDisplay → getImportCompletionAction →
  * module-specifier computation; with an empty project symlink cache the pnpm

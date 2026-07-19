@@ -7,7 +7,7 @@
 set -u
 
 VOLAR_DIR="${VOLAR_DIR:?set VOLAR_DIR to the volar repo root}"
-export TNB_RPC_TRACE="${TNB_RPC_TRACE:-1}"
+export TNB_TRACE_RPC="${TNB_TRACE_RPC:-1}"
 export GOGC=5
 
 if [[ "${REPRO:-}" == "1" ]]; then

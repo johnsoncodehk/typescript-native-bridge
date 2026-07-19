@@ -16,7 +16,7 @@ const mainVue = path.join(testWorkspacePath, 'component-meta/#4577/main.vue');
 const fixtureTs = path.join(testWorkspacePath, 'tsconfigProject/fixture.ts');
 const projectRootTs = path.join(testWorkspacePath, 'tsconfigProject');
 
-const OUT = process.env.BASELINE_OUT || process.env.COMPARE_OUT || '';
+const OUT = process.env.BASELINE_OUT || '';
 const COMPARE = process.env.COMPARE_BASELINE || '';
 const ALLOWLIST = new Set(
 	(process.env.PARITY_ALLOWLIST || '')
