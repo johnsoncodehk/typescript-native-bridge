@@ -173,31 +173,19 @@ jobs:
           set -euo pipefail
           for d in subpkgs/*; do
             echo "== publishing $(basename "$d") =="
-            (cd "$d" && npm publish --provenance --tag bridge)
+            (cd "$d" && npm publish --provenance --tag latest)
           done
         env:
           # Empty when the secret is unset: npm then falls back to OIDC trusted publishing.
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       - name: Publish main package
-        # --tag bridge: the version is a semver prerelease (x.y.z-bridge.N…);
-        # npm refuses to publish prereleases to the implicit `latest` tag.
-        run: npm publish --provenance --tag bridge
+        # --tag latest: the version is a semver prerelease (x.y.z-bridge.N…),
+        # so npm requires an EXPLICIT tag (default would be rejected), but an
+        # explicit `latest` is accepted. latest is the release channel until a
+        # stable line exists; `bridge` stays as an alias for the bridge.0 line.
+        run: npm publish --provenance --tag latest
         working-directory: staging
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-
-      - name: Point latest at the release
-        # The bridge line is the only real content today; keep `latest` in sync
-        # so bare `npm i` never resolves to a stale placeholder (issue #8).
-        # dist-tag add needs no OTP under trusted publishing/OIDC.
-        run: |
-          set -euo pipefail
-          V="$(node -p "require('./staging/package.json').version")"
-          npm dist-tag add "typescript-native-bridge@$V" latest
-          for p in darwin-arm64 darwin-x64 linux-x64 linux-arm64 linux-arm win32-x64 win32-arm64; do
-            npm dist-tag add "@typescript-native-bridge/$p@$V" latest
-          done
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
