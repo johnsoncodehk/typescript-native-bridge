@@ -718,12 +718,14 @@ const tnbEnv = tnbHarnessEnv({
 	TNB_TRACE_THROW_FILE: THROW_FILE,
 });
 
-log('=== TNB long session ===');
-const tnbRun = await runSide('TNB', tnbPath, tnbEnv);
+// TNB and STOCK drive independent tsserver processes; the harness lock is
+// reentrant within this process, so run both sides concurrently.
+log('=== TNB + STOCK long sessions (concurrent) ===');
+const [tnbRun, stockRun] = await Promise.all([
+	runSide('TNB', tnbPath, tnbEnv),
+	runSide('STOCK', stockPath, {}),
+]);
 log(`TNB done results=${tnbRun.results.size} findings=${tnbRun.findings.length}`);
-
-log('=== STOCK long session ===');
-const stockRun = await runSide('STOCK', stockPath, {});
 log(`STOCK done results=${stockRun.results.size} findings=${stockRun.findings.length}`);
 
 let match = 0;
