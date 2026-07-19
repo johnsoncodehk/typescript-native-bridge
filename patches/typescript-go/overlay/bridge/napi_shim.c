@@ -5,8 +5,10 @@
 // Marshalling contract (deliberately tiny — see the design discussion):
 //   - Shapes: strings in, string-or-Buffer-or-bool-or-null out, int64 session
 //     handle. Nothing else ever crosses the boundary.
-//   - Inputs: JS strings are copied into shim-owned buffers (C.GoString copies
-//     again on the Go side), freed before the shim returns.
+//   - Inputs: method names are converted once and cached for the process
+//     lifetime (lever 4); params strings convert into a per-env grow-once
+//     scratch buffer (the call is synchronous and Go copies before return).
+//     Neither path allocates per call.
 //   - Text results: kind-tagged (0=JSON doc string, 1=null, 2/3=bool, 4=error
 //     message — thrown). JSON docs live in a Go-owned reusable buffer
 //     (resultBuf in bridge.go), copied into V8 by napi_create_string_utf8.
@@ -32,6 +34,28 @@ extern struct BridgeText BridgeCall(int64_t session, char* method, char* paramsJ
 extern struct BridgeBinary BridgeCallBinary(int64_t session, char* method, char* paramsJson);
 extern void BridgeDisposeSession(int64_t session);
 extern void BridgeReleaseBinary(unsigned long long handle);
+
+// Per-env reusable scratch for params conversion. The bridge call is
+// synchronous and Go copies the params (C.GoString) before returning, so one
+// grow-on-demand buffer per env replaces a malloc/free pair per call.
+struct ShimInstance {
+	char* paramsBuf;
+	size_t paramsBufLen;
+};
+
+static void finalize_instance(napi_env env, void* data, void* hint) {
+	(void)env;
+	(void)hint;
+	struct ShimInstance* i = (struct ShimInstance*)data;
+	free(i->paramsBuf);
+	free(i);
+}
+
+static struct ShimInstance* instance(napi_env env) {
+	struct ShimInstance* i = NULL;
+	napi_get_instance_data(env, (void**)&i);
+	return i;
+}
 
 // Required string argument → fresh NUL-terminated buffer (caller frees).
 // Returns NULL with nothing set if conversion fails (napi raises then).
@@ -109,12 +133,29 @@ static char* arg_method(napi_env env, napi_value v, bool* ok, bool* cached) {
 	return arg_string(env, v, ok);
 }
 
-// Optional string argument: NULL for null/undefined.
-static char* arg_string_opt(napi_env env, napi_value v, bool* ok) {
+// Params argument → per-env scratch buffer (never freed by the caller;
+// overwritten by the next call, which is fine because Go copies it during
+// this call). NULL for null/undefined.
+static char* arg_params(napi_env env, napi_value v, bool* ok) {
 	napi_valuetype t = napi_undefined;
 	if (napi_typeof(env, v, &t) != napi_ok) { *ok = false; return NULL; }
 	if (t == napi_null || t == napi_undefined) { *ok = true; return NULL; }
-	return arg_string(env, v, ok);
+	*ok = false;
+	size_t len = 0;
+	if (napi_get_value_string_utf8(env, v, NULL, 0, &len) != napi_ok) return NULL;
+	struct ShimInstance* i = instance(env);
+	if (i->paramsBufLen < len + 1) {
+		char* nb = (char*)realloc(i->paramsBuf, len + 1);
+		if (!nb) {
+			napi_throw_error(env, NULL, "tnb bridge: out of memory");
+			return NULL;
+		}
+		i->paramsBuf = nb;
+		i->paramsBufLen = len + 1;
+	}
+	if (napi_get_value_string_utf8(env, v, i->paramsBuf, len + 1, NULL) != napi_ok) return NULL;
+	*ok = true;
+	return i->paramsBuf;
 }
 
 // Session handle: accept Number or BigInt.
@@ -165,7 +206,7 @@ static bool call_args(napi_env env, napi_callback_info info, int64_t* session, c
 	bool ok;
 	*method = arg_method(env, argv[1], &ok, methodCached);
 	if (!ok) return false;
-	*params = arg_string_opt(env, argv[2], &ok);
+	*params = arg_params(env, argv[2], &ok);
 	if (!ok) {
 		if (!*methodCached) free(*method);
 		*method = NULL;
@@ -185,7 +226,6 @@ static napi_value fn_call(napi_env env, napi_callback_info info) {
 	if (!call_args(env, info, &session, &method, &methodCached, &params)) return NULL;
 	struct BridgeText res = BridgeCall(session, method, params);
 	if (!methodCached) free(method);
-	free(params);
 	switch (res.kind) {
 	case 1: {
 		napi_value nul;
@@ -226,7 +266,6 @@ static napi_value fn_call_binary(napi_env env, napi_callback_info info) {
 	if (!call_args(env, info, &session, &method, &methodCached, &params)) return NULL;
 	struct BridgeBinary res = BridgeCallBinary(session, method, params);
 	if (!methodCached) free(method);
-	free(params);
 	if (res.kind == 4) {
 		napi_throw_error(env, NULL, (const char*)res.data);
 		return NULL;
@@ -261,6 +300,11 @@ static bool set_fn(napi_env env, napi_value exports, const char* name, napi_call
 }
 
 napi_value napi_register_module_v1(napi_env env, napi_value exports) {
+	struct ShimInstance* inst = (struct ShimInstance*)calloc(1, sizeof(struct ShimInstance));
+	if (!inst || napi_set_instance_data(env, inst, finalize_instance, NULL) != napi_ok) {
+		napi_throw_error(env, NULL, "tnb bridge: out of memory");
+		return NULL;
+	}
 	set_fn(env, exports, "newSession", fn_new_session);
 	set_fn(env, exports, "call", fn_call);
 	set_fn(env, exports, "callBinary", fn_call_binary);
