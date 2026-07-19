@@ -187,8 +187,8 @@ jobs:
       - name: Publish main package
         # --tag latest: the version is a semver prerelease (x.y.z-bridge.N…),
         # so npm requires an EXPLICIT tag (default would be rejected), but an
-        # explicit `latest` is accepted. latest is the release channel until a
-        # stable line exists; `bridge` stays as an alias for the bridge.0 line.
+        # explicit `latest` is accepted. latest is the only dist-tag; no
+        # per-line alias tags are kept.
         run: npm publish --provenance --tag latest
         working-directory: staging
         env:

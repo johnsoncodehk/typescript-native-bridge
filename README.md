@@ -103,7 +103,7 @@ If packages use `catalog:typescript`, update the **catalog entry** as well (see
 Install with the alias **and** the `$typescript` override reference, as shown —
 putting `npm:typescript-native-bridge@…` directly inside `overrides` is rejected or
 mis-resolved by some npm versions (issue #8). `<version>` can be an exact version
-(e.g. `^6.0.3-bridge.0.tsgo.7.0.2`) or the `bridge` dist-tag.
+(e.g. `^6.0.3-bridge.0.tsgo.7.0.2`) or the `latest` dist-tag.
 
 ### yarn
 
