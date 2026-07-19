@@ -22,6 +22,7 @@
 #include <node_api.h>
 #include <stdint.h>
 #include <stdlib.h>
+#include <string.h>
 
 // cgo-exported Go entry points (bridge.go).
 struct BridgeText { char* data; long long kind; };
@@ -49,6 +50,63 @@ static char* arg_string(napi_env env, napi_value v, bool* ok) {
 	}
 	*ok = true;
 	return buf;
+}
+
+// Method-name C-string cache (issue #10 lever 4): RPC method names are a
+// small, slowly-changing set, so each distinct name is converted once and
+// kept for the process lifetime — repeat calls cost one utf8 read + a probe,
+// skipping the per-call malloc/free. Entries are never freed, which also
+// keeps their pointers stable for the lifetime of the process.
+#define METHOD_CACHE_SIZE 256
+#define METHOD_NAME_MAX 128
+static char* methodCache[METHOD_CACHE_SIZE];
+
+static unsigned method_hash(const char* s, size_t len) {
+	unsigned h = 2166136261u;
+	for (size_t i = 0; i < len; i++) { h ^= (unsigned char)s[i]; h *= 16777619u; }
+	return h;
+}
+
+// Method argument → NUL-terminated string. *cached=true means cache-owned
+// (never free); false means a per-call malloc the caller frees. NULL with
+// nothing set on conversion failure (napi raises then).
+static char* arg_method(napi_env env, napi_value v, bool* ok, bool* cached) {
+	char buf[METHOD_NAME_MAX];
+	size_t written = 0;
+	*cached = false;
+	*ok = false;
+	// One read when the name fits (all real methods); fall back to the
+	// two-read malloc path for anything longer.
+	if (napi_get_value_string_utf8(env, v, buf, sizeof buf, &written) != napi_ok) return NULL;
+	if (written >= sizeof buf) {
+		// Longer than the cache read buffer: plain per-call conversion.
+		return arg_string(env, v, ok);
+	}
+	unsigned h = method_hash(buf, written) % METHOD_CACHE_SIZE;
+	for (unsigned i = 0; i < METHOD_CACHE_SIZE; i++) {
+		unsigned slot = (h + i) % METHOD_CACHE_SIZE;
+		char* entry = methodCache[slot];
+		if (!entry) {
+			char* copy = (char*)malloc(written + 1);
+			if (!copy) {
+				napi_throw_error(env, NULL, "tnb bridge: out of memory");
+				return NULL;
+			}
+			memcpy(copy, buf, written + 1); // utf8 read NUL-terminates
+			methodCache[slot] = copy;
+			*cached = true;
+			*ok = true;
+			return copy;
+		}
+		if (memcmp(entry, buf, written + 1) == 0) {
+			*cached = true;
+			*ok = true;
+			return entry;
+		}
+	}
+	// Full table is only reachable with >256 distinct junk names — the caller
+	// then pays the old per-call malloc for those.
+	return arg_string(env, v, ok);
 }
 
 // Optional string argument: NULL for null/undefined.
@@ -97,7 +155,7 @@ static napi_value fn_new_session(napi_env env, napi_callback_info info) {
 
 // Shared argument extraction for call / callBinary.
 // Returns false with any allocated memory already freed.
-static bool call_args(napi_env env, napi_callback_info info, int64_t* session, char** method, char** params) {
+static bool call_args(napi_env env, napi_callback_info info, int64_t* session, char** method, bool* methodCached, char** params) {
 	napi_value argv[3];
 	size_t argc = 3;
 	*method = NULL;
@@ -105,11 +163,11 @@ static bool call_args(napi_env env, napi_callback_info info, int64_t* session, c
 	napi_get_cb_info(env, info, &argc, argv, NULL, NULL);
 	*session = arg_int64(env, argv[0]);
 	bool ok;
-	*method = arg_string(env, argv[1], &ok);
+	*method = arg_method(env, argv[1], &ok, methodCached);
 	if (!ok) return false;
 	*params = arg_string_opt(env, argv[2], &ok);
 	if (!ok) {
-		free(*method);
+		if (!*methodCached) free(*method);
 		*method = NULL;
 		return false;
 	}
@@ -122,10 +180,11 @@ static bool call_args(napi_env env, napi_callback_info info, int64_t* session, c
 static napi_value fn_call(napi_env env, napi_callback_info info) {
 	int64_t session;
 	char* method;
+	bool methodCached;
 	char* params;
-	if (!call_args(env, info, &session, &method, &params)) return NULL;
+	if (!call_args(env, info, &session, &method, &methodCached, &params)) return NULL;
 	struct BridgeText res = BridgeCall(session, method, params);
-	free(method);
+	if (!methodCached) free(method);
 	free(params);
 	switch (res.kind) {
 	case 1: {
@@ -162,10 +221,11 @@ static void finalize_release(napi_env env, void* data, void* hint) {
 static napi_value fn_call_binary(napi_env env, napi_callback_info info) {
 	int64_t session;
 	char* method;
+	bool methodCached;
 	char* params;
-	if (!call_args(env, info, &session, &method, &params)) return NULL;
+	if (!call_args(env, info, &session, &method, &methodCached, &params)) return NULL;
 	struct BridgeBinary res = BridgeCallBinary(session, method, params);
-	free(method);
+	if (!methodCached) free(method);
 	free(params);
 	if (res.kind == 4) {
 		napi_throw_error(env, NULL, (const char*)res.data);
