@@ -890,9 +890,6 @@ const _stats = {
     getSymMs: 0,
     getSymHitCount: 0,
     getSymRpcCount: 0,
-    symPrefetchMs: 0,
-    symPrefetchFiles: 0,
-    symPrefetchRefs: 0,
     indexBuildMs: 0,
     indexBuildCount: 0,
     rpcCount: 0,
@@ -3336,7 +3333,6 @@ function _maybePrintStats(): void {
     process.stderr.write(
         `[tsgo-profile] projectsLoaded=${_stats.projectsLoaded} projectLoadMs=${_stats.projectLoadMs}` +
         ` parentSet=${_stats.parentSetFiles}/${_stats.parentSetMs.toFixed(0)}ms` +
-        ` symPrefetch=${_stats.symPrefetchFiles}/${_stats.symPrefetchRefs}refs/${_stats.symPrefetchMs.toFixed(0)}ms` +
         ` queries=${_stats.queryCount} queryMs=${_stats.queryMs.toFixed(0)}` +
         ` getType=${_stats.getTypeCount}/${_stats.getTypeMs.toFixed(0)}ms` +
         ` getSym=${_stats.getSymCount}/${_stats.getSymMs.toFixed(0)}ms` +
@@ -6121,25 +6117,6 @@ export function createTsgoChecker(program: any): any {
     // getSymbolAtLocation, which resolves the vast majority of the ~30k
     // scope-manager identifier queries without touching the node index.
     const symByPos = new Map<string, Map<string, any>>();
-    // Start-keyed symbols from the allIdentifiers prefetch RPC (returns only
-    // start positions, never undefined, always real symbol sites). Kept
-    // separate from the exact-span symByPos so start-keyed entries can never
-    // collide with a different token's span keys.
-    const symPrefetchByPos = new Map<string, Map<number, any>>();
-    const symPrefetched = new Set<string>();
-    /** Per-file cache misses before batch prefetch — sparse files stay on direct RPC. */
-    const symMissCountByFile = new Map<string, number>();
-    let symPrefetchMissThresholdCache: number | undefined;
-    const symPrefetchMissThreshold = (): number => {
-        if (symPrefetchMissThresholdCache !== undefined) return symPrefetchMissThresholdCache;
-        // Single large programs (e.g. Dify ~6k files): per-file allIdentifiers
-        // prefetch at the default 32-miss bar fires hundreds of times and loses
-        // to direct RPC; micro-project lint (Volar ~10–200 files) stays at 32.
-        ensureProject();
-        const fileCount = project?.program?.getSourceFileNames?.()?.length ?? 0;
-        symPrefetchMissThresholdCache = Math.max(32, Math.min(256, Math.floor(fileCount / 40)));
-        return symPrefetchMissThresholdCache;
-    };
     const symCacheFileName = (fileName: string): string => {
         const h = hostForOverlaySyncLocal();
         return resolveHostFileName(fileName, h);
@@ -6163,13 +6140,7 @@ export function createTsgoChecker(program: any): any {
         if (!fc) return { found: false, sym: undefined };
         const key = `${start}:${end}`;
         if (fc.has(key)) return { found: true, sym: fc.get(key) };
-        const pf = symPrefetchByPos.get(symCacheFileName(fileName));
-        if (pf?.has(start)) return { found: true, sym: pf.get(start) };
         return { found: false, sym: undefined };
-    };
-    const isIdentifierLikeNode = (node: any): boolean => {
-        const k = node.kind;
-        return k === SyntaxKind.Identifier || k === SyntaxKind.PrivateIdentifier;
     };
     // Mirrors Go tryGetImportFromModuleSpecifier coverage (the sites the
     // allIdentifiers prefetch and SourceFile.imports both include): static
@@ -6195,8 +6166,6 @@ export function createTsgoChecker(program: any): any {
                 return false;
         }
     };
-    const isPrefetchCoveredNode = (node: any): boolean =>
-        isIdentifierLikeNode(node) || isModuleSpecifierStringLiteral(node);
     const storeSymCache = (fileName: string, start: number, end: number, sym: any): void => {
         const fc = getSymFileCache(fileName, true)!;
         fc.set(`${start}:${end}`, sym);
@@ -6207,9 +6176,6 @@ export function createTsgoChecker(program: any): any {
     // host-bound symbols are real TS symbol objects). Cleared on snapshot
     // refresh alongside symByPos.
     let refinedSymBySym = new WeakMap<any, any>();
-    // Files where prefetchResolvedReferences ran — skip expensive node-tree
-    // fallback on cache miss; prefetch + getSymbolAtPosition is enough.
-    const symPrefetchPopulated = new Set<string>();
     // Files whose import/export module-specifier symbols were batch-resolved
     // in one getSymbolsAtLocations RPC over the tsgo SourceFile's `imports`
     // list (see ensureModuleSpecifierSymbolsPrefetched). Multi-project lint
@@ -6475,7 +6441,7 @@ export function createTsgoChecker(program: any): any {
         }
         // Only invalidate symbol/type caches when host content actually changed.
         // openFiles-only snapshot bumps (disk lint prefetch) must not wipe
-        // symByPos between per-file batch prefetches.
+        // symByPos between per-file resolution bursts.
         if (openFilesWithContent.length === 0) return;
         _rpcTraceEvent(
             "overlay.refresh.clearCaches",
@@ -6485,16 +6451,12 @@ export function createTsgoChecker(program: any): any {
             + ` properties=${propertiesCache.size}`,
         );
         symByPos.clear();
-        symPrefetchByPos.clear();
         hostBoundSfMemo.clear();
-        symPrefetched.clear();
-        symPrefetchPopulated.clear();
         moduleSpecPrefetched.clear();
         symbolsInScopeCache.clear();
         ambientModuleByNameCache.clear();
         ambientModuleBatchCache = undefined;
         ambientModuleExportBatchCache = undefined;
-        symMissCountByFile.clear();
         rpcSymbolCache.clear();
         nodeTypeCache.clear();
         typeOfSymbolCache.clear();
@@ -6574,29 +6536,6 @@ export function createTsgoChecker(program: any): any {
         if (sf && typeof sf === "object") _nodeIndexBySf.set(sf, idx);
         if (process.env.TSGO_PROFILE === "1") { _stats.indexBuildMs += Date.now() - t0; _stats.indexBuildCount++; }
         return idx;
-    }
-
-    function ensureFileSymbolsPrefetched(fileName: string): void {
-        const cacheName = symCacheFileName(fileName);
-        if (symPrefetched.has(cacheName)) return;
-        pushHostOverlayToTsgo(fileName);
-        const activeProject = _currentProjectRef.project ?? project;
-        const t0 = process.env.TSGO_PROFILE === "1" ? Date.now() : 0;
-        const activeChecker = activeProject?.checker;
-        if (!activeChecker) return;
-        const byPos: Map<number, any> = activeChecker.prefetchResolvedReferences(toTsgoFileName(fileName), "allIdentifiers");
-        symPrefetched.add(cacheName);
-        let pf = symPrefetchByPos.get(cacheName);
-        if (!pf) { pf = new Map(); symPrefetchByPos.set(cacheName, pf); }
-        for (const [pos, sym] of byPos) {
-            pf.set(pos, sym);
-        }
-        symPrefetchPopulated.add(cacheName);
-        if (process.env.TSGO_PROFILE === "1") {
-            _stats.symPrefetchFiles++;
-            _stats.symPrefetchRefs += byPos.size;
-            _stats.symPrefetchMs += Date.now() - t0;
-        }
     }
 
     /**
@@ -8292,7 +8231,7 @@ export function createTsgoChecker(program: any): any {
                         }
                     }
                 }
-                if (!sym && !symPrefetchPopulated.has(cacheName)) {
+                if (!sym) {
                     // Deferred node-index fallback for plain disk files —
                     // reached only when the positional query resolved nothing
                     // (e.g. non-token nodes whose interior token has no symbol).
@@ -8331,33 +8270,9 @@ export function createTsgoChecker(program: any): any {
                     }
                 }
             }
-            const missCount = (symMissCountByFile.get(cacheName) ?? 0) + 1;
-            symMissCountByFile.set(cacheName, missCount);
-            // Sparse files: direct per-position RPC until miss density justifies
-            // one whole-file prefetch (break-even ~32 × 12µs vs one batch walk).
-            if (!symPrefetched.has(cacheName) && missCount < symPrefetchMissThreshold()) {
-                return resolveSymbolRpc();
-            }
-            if (!symPrefetched.has(cacheName)) {
-                ensureFileSymbolsPrefetched(sf.fileName);
-            }
-            {
-                const cached = probeSymCache(cacheName, start, end);
-                if (cached.found) {
-                    recordHit();
-                    if (_traceSymEnabled) traceSym(`getSymbolAtLocation return path=cache sym=${traceSymSymbol(cached.sym)}`);
-                    return finish(cached.sym);
-                }
-            }
-            // allIdentifiers prefetch is exhaustive on plain disk files; host-bound
-            // virtual TS (Volar) has binder sites prefetch misses (e.g. PropertyAccess
-            // names on __VLS_intrinsics.*) — keep per-position resolution alive.
-            if (symPrefetchPopulated.has(cacheName) && isPrefetchCoveredNode(node) && !sf.__tnbHostBound) {
-                storeSymCache(cacheName, start, end, undefined);
-                recordHit();
-                traceSym("getSymbolAtLocation return path=prefetch-neg sym=undefined");
-                return undefined;
-            }
+            // Direct per-position RPC (~18µs on this bridge, measured): the
+            // whole-file allIdentifiers prefetch never broke even once its
+            // transfer + JS hydration was counted, so it was removed.
             return resolveSymbolRpc();
         },
         getTypeOfSymbolAtLocation(symbol: any, location: any): any {
