@@ -5415,7 +5415,7 @@ export function createTsgoProgram(
     programCtx.thinProgram = thinProgram;
     _hostProgramRef = thinProgram;
 
-    return new Proxy(thinProgram, {
+    const proxy = new Proxy(thinProgram, {
         get(target: any, prop: string | symbol, receiver: any) {
             if (prop in target) return Reflect.get(target, prop, receiver);
             if (typeof prop !== "string") return undefined;
@@ -5428,6 +5428,12 @@ export function createTsgoProgram(
         ownKeys: () => Object.keys(thinProgram),
         getOwnPropertyDescriptor: (target: any, p) => Object.getOwnPropertyDescriptor(target, p),
     });
+    // Stock BuilderProgram.getProgram/getProgramOrUndefined return the current
+    // program (undefined after release); the tsgo-backed proxy IS that program
+    // and has no release semantics.
+    thinProgram.getProgram = () => proxy;
+    thinProgram.getProgramOrUndefined = () => proxy;
+    return proxy;
 }
 
 /**
