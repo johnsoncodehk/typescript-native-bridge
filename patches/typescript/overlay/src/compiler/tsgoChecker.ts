@@ -7867,6 +7867,17 @@ export function createTsgoChecker(program: any): any {
             // export-assignment statement as an extra definition.
             case SyntaxKind.OpenBraceToken:
                 return { action: "undefined" };
+            // Object/array literals themselves (issue #5): stock's switch has
+            // no case and these carry no binder symbol → undefined. FAR's
+            // getAdjustedLocation maps an `export` keyword to its
+            // ExportAssignment's expression (the whole `{}`), which the
+            // positional RPC latches to the synthetic `default` symbol —
+            // references on the keyword then found the `default` keyword where
+            // stock answers none. Same latch class as OpenBraceToken, one AST
+            // level up.
+            case SyntaxKind.ObjectLiteralExpression:
+            case SyntaxKind.ArrayLiteralExpression:
+                return { action: "undefined" };
             // JSDocComment only (not the whole FirstJSDocNode..LastJSDocNode
             // range): stock returns undefined for the comment container, and
             // allowing positional/cache hits here poisons quickinfo inside
