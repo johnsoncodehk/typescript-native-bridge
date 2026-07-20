@@ -4,6 +4,7 @@
 //
 //   node tools/sim-nav-merge.mjs --out <merged.json> <shard.json...>
 //   node tools/sim-nav-merge.mjs --baseline <baseline.json> <merged.json>
+//   node tools/sim-nav-merge.mjs --slim <merged.json> <baseline-out.json>
 //
 // Shard payloads are triage-sim-nav-shard.mjs OUT_JSON files (SIM_NAV_SHARD_*).
 // Merged shape matches the committed baselines: scalar counters summed,
@@ -13,6 +14,10 @@
 // Baseline check: fail when the current run has ANY key absent from the
 // baseline in any channel (new divergence). Convergences (baseline keys now
 // matching) are reported but pass — refresh the baseline file to absorb them.
+//
+// --slim writes the committed-baseline form of a merged run: keys, counters
+// and classification labels only — bulky tnb/stock snippets, locs and replay
+// payloads stay in the (uncommitted) merged JSON for triage.
 
 import fs from "node:fs";
 
@@ -20,6 +25,10 @@ const args = process.argv.slice(2);
 const mode = args[0];
 const read = (f) => JSON.parse(fs.readFileSync(f, "utf8"));
 const CHANNELS = ["diffs", "docdiffs", "diagmsgs"];
+
+// Keys are test-workspace-relative; legacy baselines embedded absolute paths.
+// Strip everything up to the last test-workspace/ so old and new compare equal.
+const normKey = (key) => String(key ?? "").replace(/^((?:nav|diag):).*test-workspace\//, "$1");
 
 if (mode === "--out") {
 	const out = args[1];
@@ -64,8 +73,8 @@ if (mode === "--out") {
 	const cur = read(currentPath);
 	let rc = 0;
 	for (const ch of CHANNELS) {
-		const baseKeys = new Set((base[ch] ?? []).map((d) => d.key));
-		const curKeys = new Set((cur[ch] ?? []).map((d) => d.key));
+		const baseKeys = new Set((base[ch] ?? []).map((d) => normKey(d.key)));
+		const curKeys = new Set((cur[ch] ?? []).map((d) => normKey(d.key)));
 		const added = [...curKeys].filter((k) => !baseKeys.has(k));
 		const fixed = [...baseKeys].filter((k) => !curKeys.has(k));
 		console.log(`${ch}: baseline=${baseKeys.size} current=${curKeys.size} new=${added.length} fixed=${fixed.length}`);
@@ -84,7 +93,33 @@ if (mode === "--out") {
 		console.log("sim-nav baseline check ok — no new divergences");
 	}
 	process.exit(rc);
+} else if (mode === "--slim") {
+	const [currentPath, outPath] = args.slice(1);
+	if (!currentPath || !outPath) {
+		console.error("usage: node tools/sim-nav-merge.mjs --slim <merged.json> <baseline-out.json>");
+		process.exit(2);
+	}
+	const j = read(currentPath);
+	const slim = {
+		summaryLine: j.summaryLine,
+		total: j.total, match: j.match, diff: j.diff, docdiff: j.docdiff, diagmsg: j.diagmsg, skip: j.skip,
+		compareKeys: j.compareKeys,
+		diffs: (j.diffs ?? []).map((d) => ({
+			key: d.key, file: d.file, line: d.line, offset: d.offset, cmd: d.cmd,
+			detail: d.detail, locClass: d.locClass, seqClass: d.seqClass,
+		})),
+		docdiffs: (j.docdiffs ?? []).map((d) => ({ key: d.key })),
+		diagmsgs: (j.diagmsgs ?? []).map((d) => ({ key: d.key })),
+	};
+	// Committed baselines must be portable — refuse machine-local key prefixes.
+	const local = CHANNELS.flatMap((ch) => slim[ch]).filter((d) => /^(?:nav|diag):(?:\/|[A-Za-z]:[\\/])/.test(d.key));
+	if (local.length) {
+		console.error(`--slim: ${local.length} keys carry absolute paths (e.g. ${local[0].key}) — regenerate with a current triage-sim-nav-shard.mjs`);
+		process.exit(1);
+	}
+	fs.writeFileSync(outPath, JSON.stringify(slim, null, 2));
+	console.log(`wrote slim baseline ${outPath} (${slim.diffs.length} diffs, ${slim.docdiffs.length} docdiffs, ${slim.diagmsgs.length} diagmsgs)`);
 } else {
-	console.error("usage: --out <merged.json> <shard.json...> | --baseline <baseline.json> <merged.json>");
+	console.error("usage: --out <merged.json> <shard.json...> | --baseline <baseline.json> <merged.json> | --slim <merged.json> <baseline-out.json>");
 	process.exit(2);
 }

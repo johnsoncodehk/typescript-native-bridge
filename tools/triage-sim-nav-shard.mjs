@@ -26,6 +26,9 @@ const stockPath = process.env.STOCK_TSSERVER_PATH ?? '/tmp/stock-ts-p3/package/l
 const tnbPath = path.join(volarRoot, 'node_modules/typescript/lib/tsserver.js');
 const pluginProbe = path.join(volarRoot, 'packages/language-server');
 const testWorkspacePath = path.join(volarRoot, 'test-workspace');
+// Compare keys use test-workspace-relative paths so committed baselines stay
+// portable across checkouts (nightly CI vs local machines).
+const relPath = (file) => path.relative(testWorkspacePath, file).split(path.sep).join('/');
 // The sim-nav harness. Run N shards in parallel from isolated tools/ copies
 // (harness lock is per tools-dir parent), then merge shard JSONs. Compare keys
 // are disjoint across shards (keyed by file:pos:cmd).
@@ -131,8 +134,13 @@ function loadBaselineDiffPositions() {
 	for (const d of [...(base.diffs ?? []), ...(base.docdiffs ?? [])]) {
 		const m = /^nav:(.*):(\d+):(\d+):(\w+)$/.exec(d.key ?? '');
 		if (!m) continue;
-		if (!keep.has(m[1])) keep.set(m[1], new Set());
-		keep.get(m[1]).add(`${m[2]}:${m[3]}`);
+		// Legacy baselines embedded absolute paths; strip to the
+		// test-workspace-relative form current keys use. The keep-set is
+		// looked up by absolute file path.
+		const rel = path.isAbsolute(m[1]) ? m[1].replace(/^.*test-workspace\//, '') : m[1];
+		const abs = path.join(testWorkspacePath, rel);
+		if (!keep.has(abs)) keep.set(abs, new Set());
+		keep.get(abs).add(`${m[2]}:${m[3]}`);
 	}
 	return keep;
 }
@@ -160,7 +168,7 @@ function collectFileSet() {
 		const content = fs.readFileSync(file, 'utf8');
 		const positions = dedupPositions(content, samplePositions(content), baselineKeep.get(file));
 		const rawIdents = [...content.matchAll(IDENT_RE)].length;
-		entries.push({ file, content, positions, rawIdents });
+		entries.push({ file, rel: relPath(file), content, positions, rawIdents });
 	}
 	return entries;
 }
@@ -418,16 +426,17 @@ function buildOps(entries) {
 	const ops = [];
 	for (const e of entries) {
 		ops.push({ type: 'open', file: e.file, content: e.content });
-		ops.push({ type: 'geterr', file: e.file, key: `diag:${e.file}` });
+		ops.push({ type: 'geterr', file: e.file, rel: e.rel, key: `diag:${e.rel}` });
 		for (const pos of e.positions) {
 			for (const cmd of NAV_CMDS) {
 				ops.push({
 					type: 'nav',
 					file: e.file,
+					rel: e.rel,
 					line: pos.line,
 					offset: pos.offset,
 					cmd,
-					key: `nav:${e.file}:${pos.line}:${pos.offset}:${cmd}`,
+					key: `nav:${e.rel}:${pos.line}:${pos.offset}:${cmd}`,
 				});
 			}
 		}
@@ -914,7 +923,7 @@ const payload = {
 	findings: [...tnbRun.findings, ...stockRun.findings],
 	diffs: diffs.map((d) => ({
 		key: d.key,
-		file: d.op?.file,
+		file: d.op?.rel,
 		line: d.op?.line,
 		offset: d.op?.offset,
 		cmd: d.key.startsWith('diag:') ? 'geterr' : d.op?.cmd,
