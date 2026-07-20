@@ -13,14 +13,16 @@
 //     message — thrown). JSON docs live in a Go-owned reusable buffer
 //     (resultBuf in bridge.go), copied into V8 by napi_create_string_utf8.
 //     Null/bool results ride the tag so JS never parses a wrapper envelope.
-//   - Binary results: Go copies the slice into a reusable C buffer (binBuf)
-//     and the shim copies it into a V8-allocated buffer — one memcpy, no
-//     finalizer, no pin. Zero-copy external buffers are off the table: V8's
-//     sandbox (always on in Electron utility processes, e.g. VS Code's
-//     tsserver host) rejects external buffers backed by non-sandbox memory,
-//     and a Go heap pointer is never sandbox memory —
-//     napi_create_external_buffer fails and every binary call silently
-//     returns undefined (session-wide RemoteSourceFile/NodeHandle death).
+//   - Binary results: Go pins the slice (runtime.Pinner — the cgo-legal way
+//     to hand a Go pointer across) and the shim copies it into a V8-allocated
+//     buffer — one memcpy, the irreducible sandbox crossing. The pin is
+//     released synchronously right after the copy via BridgeReleaseBinary.
+//     Zero-copy external buffers are off the table: V8's sandbox (always on
+//     in Electron utility processes, e.g. VS Code's tsserver host) rejects
+//     external buffers backed by non-sandbox memory, and a Go heap pointer is
+//     never sandbox memory — napi_create_external_buffer fails and every
+//     binary call silently returns undefined (session-wide
+//     RemoteSourceFile/NodeHandle death).
 //   - Everything synchronous on the JS thread. No async NAPI, no callbacks,
 //     no thread-safe functions.
 
@@ -31,10 +33,11 @@
 
 // cgo-exported Go entry points (bridge.go).
 struct BridgeText { char* data; long long kind; };
-struct BridgeBinary { void* data; long long len; long long kind; };
+struct BridgeBinary { void* data; long long len; unsigned long long handle; long long kind; };
 extern long long BridgeNewSession(char* cwd);
 extern struct BridgeText BridgeCall(int64_t session, char* method, char* paramsJson);
 extern struct BridgeBinary BridgeCallBinary(int64_t session, char* method, char* paramsJson);
+extern void BridgeReleaseBinary(unsigned long long handle);
 extern void BridgeDisposeSession(int64_t session);
 
 // Per-env reusable scratch for params conversion. The bridge call is
@@ -266,13 +269,18 @@ static napi_value fn_call_binary(napi_env env, napi_callback_info info) {
 		napi_get_null(env, &nul);
 		return nul;
 	}
-	// V8-allocated buffer (sandbox-legal on every runtime) + one memcpy from
-	// the Go-owned binBuf. The buffer is uninitialized; res.data stays valid
-	// for the whole synchronous call, so the copy is race-free.
+	// V8-allocated buffer (sandbox-legal on every runtime) + one memcpy out of
+	// the pinned Go slice — the single copy on the binary path. The pin is
+	// released synchronously right after the copy: the slice never escapes to
+	// a finalizer, so the release is deterministic and exactly-once.
 	napi_value buf = NULL;
 	void* out = NULL;
-	if (napi_create_buffer(env, (size_t)res.len, &out, &buf) != napi_ok) return NULL;
+	if (napi_create_buffer(env, (size_t)res.len, &out, &buf) != napi_ok) {
+		BridgeReleaseBinary(res.handle);
+		return NULL;
+	}
 	memcpy(out, res.data, (size_t)res.len);
+	BridgeReleaseBinary(res.handle);
 	return buf;
 }
 
