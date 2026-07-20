@@ -681,48 +681,64 @@ async function runSide(label, tsserverPath, envExtra) {
 	return { results, findings };
 }
 
-async function replaySingle(label, tsserverPath, envExtra, op) {
+/**
+ * Classify replay, grouped by file: one fresh session per (side, file) runs
+ * all of that file's diff ops in sequence, instead of a fresh boot per op
+ * (1172 ops share 255 files — per-op boots dominated the shard wall).
+ * Semantics: the fresh-boot-per-op gold standard weakens to per-file
+ * isolation; seqClass stays informational triage metadata — the baseline
+ * gate compares divergence KEYS only, so verdicts are unaffected.
+ */
+async function replayGroup(label, tsserverPath, envExtra, file, ops) {
 	const eventState = { waiter: null };
 	const onEvent = makeEventRouter(eventState);
-	const entry = globalThis.__navEntryByFile.get(op.file);
+	const entry = globalThis.__navEntryByFile.get(file);
+	const out = new Map();
 
 	return withTsserver(
 		{
 			tsserverPath,
 			args: harnessArgs,
 			env: envExtra,
-			deadlineMs: 120_000,
+			deadlineMs: 120_000 + ops.length * 10_000,
 			onEvent,
 		},
 		async ({ send }) => {
 			await send('configure', { preferences: {} }, CMD_TIMEOUT_MS);
-			await openFile(send, op.file, entry.content, null);
+			await openFile(send, file, entry.content, null);
 
-			if (op.type === 'geterr' || (op.key && String(op.key).startsWith('diag:'))) {
-				const diags = await runGeterr(send, eventState, op.file);
-				return {
-					type: 'geterr',
-					file: op.file,
-					...diags,
-					rawSnippet: truncate({
-						syntax: normalizeDiagSet(diags.syntax).map((x) => x.key),
-						semantic: normalizeDiagSet(diags.semantic).map((x) => x.key),
-						suggestion: normalizeDiagSet(diags.suggestion).map((x) => x.key),
-					}),
-				};
+			for (const op of ops) {
+				try {
+					if (op.type === 'geterr' || (op.key && String(op.key).startsWith('diag:'))) {
+						const diags = await runGeterr(send, eventState, op.file);
+						out.set(op.key, {
+							type: 'geterr',
+							file: op.file,
+							...diags,
+							rawSnippet: truncate({
+								syntax: normalizeDiagSet(diags.syntax).map((x) => x.key),
+								semantic: normalizeDiagSet(diags.semantic).map((x) => x.key),
+								suggestion: normalizeDiagSet(diags.suggestion).map((x) => x.key),
+							}),
+						});
+						continue;
+					}
+					const args = { file: op.file, line: op.line, offset: op.offset };
+					const resp = await send(op.cmd, args, CMD_TIMEOUT_MS);
+					const norm = normalizeNavResult(op.cmd, resp, label);
+					out.set(op.key, {
+						type: 'nav',
+						file: op.file,
+						line: op.line,
+						offset: op.offset,
+						cmd: op.cmd,
+						...norm,
+					});
+				} catch (err) {
+					out.set(op.key, { error: err?.message ?? String(err), rawSnippet: truncate({ error: err?.message ?? String(err) }) });
+				}
 			}
-
-			const args = { file: op.file, line: op.line, offset: op.offset };
-			const resp = await send(op.cmd, args, CMD_TIMEOUT_MS);
-			const norm = normalizeNavResult(op.cmd, resp, label);
-			return {
-				type: 'nav',
-				file: op.file,
-				line: op.line,
-				offset: op.offset,
-				cmd: op.cmd,
-				...norm,
-			};
+			return out;
 		},
 	);
 }
@@ -819,24 +835,50 @@ const skipClassify = process.env.SIM_NAV_SKIP_CLASSIFY === '1' || process.env.SI
 if (skipClassify) {
 	log(`SIM_NAV_SKIP_CLASSIFY=1 — skipping classify replay (${diffs.length} diffs unclassified)`);
 } else {
-	for (let i = 0; i < diffs.length; i++) {
-		const d = diffs[i];
-		log(`replay ${i + 1}/${diffs.length} ${d.key}`);
+	// Group replays by file (see replayGroup): 1172 ops share 255 files.
+	const replaysByFile = new Map();
+	for (const d of diffs) {
+		const f = d.op?.file ?? d.file;
+		if (!replaysByFile.has(f)) replaysByFile.set(f, []);
+		replaysByFile.get(f).push(d);
+	}
+	let replayDone = 0;
+	for (const [file, group] of replaysByFile) {
+		log(`replay ${replayDone + 1}-${replayDone + group.length}/${diffs.length} ${file} (${group.length} ops)`);
+		replayDone += group.length;
+		let tnbMap;
+		let stockMap;
+		let bootErr = null;
 		try {
-			const tnbR = await replaySingle('TNB', tnbPath, tnbEnv, d.op);
-			const stockR = await replaySingle('STOCK', stockPath, {}, d.op);
-			const isDiag = d.key.startsWith('diag:');
-			const replayCmp = isDiag ? compareDiag(tnbR, stockR) : compareNav(d.op.cmd, tnbR, stockR);
-			d.seqClass = replayCmp.kind === 'MATCH' ? 'SEQ-ONLY' : 'ALWAYS';
-			d.replay = {
-				tnb: tnbR?.rawSnippet ?? truncate(tnbR),
-				stock: stockR?.rawSnippet ?? truncate(stockR),
-				replayKind: replayCmp.kind,
-				replayDetail: replayCmp.detail,
-			};
+			[tnbMap, stockMap] = await Promise.all([
+				replayGroup('TNB', tnbPath, tnbEnv, file, group.map((d) => d.op)),
+				replayGroup('STOCK', stockPath, {}, file, group.map((d) => d.op)),
+			]);
 		} catch (err) {
-			d.seqClass = 'ALWAYS';
-			d.replay = { error: err?.message ?? String(err) };
+			bootErr = err?.message ?? String(err);
+		}
+		for (const d of group) {
+			if (bootErr) {
+				d.seqClass = 'ALWAYS';
+				d.replay = { error: bootErr };
+				continue;
+			}
+			try {
+				const tnbR = tnbMap?.get(d.key);
+				const stockR = stockMap?.get(d.key);
+				const isDiag = d.key.startsWith('diag:');
+				const replayCmp = isDiag ? compareDiag(tnbR, stockR) : compareNav(d.op.cmd, tnbR, stockR);
+				d.seqClass = replayCmp.kind === 'MATCH' ? 'SEQ-ONLY' : 'ALWAYS';
+				d.replay = {
+					tnb: tnbR?.rawSnippet ?? truncate(tnbR),
+					stock: stockR?.rawSnippet ?? truncate(stockR),
+					replayKind: replayCmp.kind,
+					replayDetail: replayCmp.detail,
+				};
+			} catch (err) {
+				d.seqClass = 'ALWAYS';
+				d.replay = { error: err?.message ?? String(err) };
+			}
 		}
 	}
 }
