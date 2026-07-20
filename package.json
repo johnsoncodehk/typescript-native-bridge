@@ -36,6 +36,7 @@
 		"check:lib-sync": "node tools/check-lib-sync.mjs",
 		"check:bundle-shape": "node tools/check-bundle-shape.mjs",
 		"check:sourcefile-guard": "node tools/check-sourcefile-guard.mjs",
+		"check:sim-nav": "node tools/sim-nav-parallel.mjs",
 		"check:lib": "node tools/check-lib-sync.mjs && node tools/check-bundle-shape.mjs",
 		"refresh": "npm run patch:ts && npm run patch:tsgo && npm run check:lib",
 		"build:js": "node tools/patch-tsgo.js && cd typescript-go/_packages/native-preview && npm install --no-save @types/node && npx tsc -b && cd ../../.. && node tools/sync-vendor-native-preview.js",

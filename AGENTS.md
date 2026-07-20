@@ -30,7 +30,7 @@ TNB is a tsgo-backed TypeScript fork: upstream `microsoft/TypeScript` and `micro
 
 - `npm run check:lib` / `check:enums` / `check:sourcefile-guard`
 - Witnesses: `node tools/triage-sim-xfile.mjs`, `triage-sim-edit.mjs`, `triage-quickinfo-emptyparity.mjs`, f2hl/f2r6 series, `triage-refs-exportspec.mjs`, `triage-display-tokens.mjs`, `triage-computed-literal.mjs`, `triage-napi-fuzz.mjs`
-- Big net: sim-nav 4 shards vs `test/baselines/` (`SIM_NAV_SHARD_COUNT=4 node tools/triage-sim-nav-shard.mjs`, merge with `tools/sim-nav-merge.mjs`) — no new divergences allowed
+- Big net: sim-nav vs `test/baselines/` (`npm run check:sim-nav` — 4 parallel shards from isolated tools copies, merged and baseline-gated by `tools/sim-nav-parallel.mjs`) — no new divergences allowed
 - volar suite: `npm test` in the volar checkout (205 tests)
 
 ## Conventions
