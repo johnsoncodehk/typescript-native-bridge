@@ -11,7 +11,7 @@ permissions:
 env:
   VOLAR_BRANCH: feat/tnb-migration
   VOLAR_SHA: 398ac0a71 # vuejs/language-tools@feat/tnb-migration, pinned for reproducibility
-  BASELINE: test/baselines/nav-results-d13c30f-t8.json
+  BASELINE: test/baselines/nav-results-b2efcb9-t12.json
 
 jobs:
   sim-nav:
