@@ -3298,6 +3298,20 @@ function isExtraExtensionFileName(fileName: string): boolean {
     if (dot < 0) return false;
     return !BUILTIN_SCRIPT_EXTENSIONS.has(fileName.slice(dot).toLowerCase());
 }
+/**
+ * ts.extensionFromPath Debug-fails on extra extensions ("File x.vue has
+ * unknown extension") — the thin program resolves .vue module specifiers, so
+ * it must compute the extension field without tripping that assert. Extra
+ * extensions hold embedded TS (resolveLanguageServiceScriptKind reports them
+ * as TS), so Extension.Ts is their honest value.
+ */
+function extensionFromPathOrTs(fileName: string): any {
+    const dot = fileName.lastIndexOf(".");
+    if (dot >= 0 && BUILTIN_SCRIPT_EXTENSIONS.has(fileName.slice(dot).toLowerCase())) {
+        return ts.extensionFromPath(fileName);
+    }
+    return ts.Extension.Ts;
+}
 /** Extra extensions for tsgo when the project contains non-TS root files (.vue, …). */
 function collectExtraFileExtensions(fileNames: Iterable<string>, options: any): any[] | undefined {
     // Explicit opt-out in tsconfig must be respected (tsgo mirrors this).
@@ -5356,7 +5370,7 @@ export function createTsgoProgram(
                 return {
                     resolvedModule: {
                         resolvedFileName: fileName,
-                        extension: ts.extensionFromPath(fileName),
+                        extension: extensionFromPathOrTs(fileName),
                         isExternalLibraryImport: fileName.includes("/node_modules/"),
                     },
                     failedLookupLocations: [],
@@ -5404,7 +5418,7 @@ export function createTsgoProgram(
                     resolvedModule: {
                         resolvedFileName: fileName,
                         originalPath,
-                        extension: ts.extensionFromPath(fileName),
+                        extension: extensionFromPathOrTs(fileName),
                     },
                 }, /*moduleName*/ "");
             }
