@@ -487,8 +487,9 @@ class BridgeClient {
         noteRpc(method);
         const paramsJson = params == null ? null : JSON.stringify(params);
         const traceId = _rpcTraceEnter(method, true, this.handle);
-        // NAPI addon returns a zero-copy external Buffer wrapping the Go-owned
-        // binBuf (released back to Go on GC), or null for empty results.
+        // NAPI addon returns the blob as a V8-allocated Buffer (one memcpy
+        // out of Go's reusable binBuf — external buffers are not sandbox-
+        // legal on Electron), or null for empty results.
         const buf = _bridgeFns.BridgeCallBinary(this.handleBigInt, method, paramsJson);
         _rpcTraceExit(traceId, method);
         if (process.env.TSGO_PROFILE === "1") _profRpc(method, Date.now() - t0);

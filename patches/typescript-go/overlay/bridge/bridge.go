@@ -11,13 +11,18 @@
 //   - BridgeCall        -> { kind, data }: null/bool results ride the kind
 //     tag, JSON payloads cross as raw doc strings (JS parses the payload,
 //     never a wrapper), errors are thrown by the shim as napi exceptions
-//   - BridgeCallBinary  -> raw bytes (for getSourceFile etc.), zero-copy into a Node Buffer
+//   - BridgeCallBinary  -> raw bytes (for getSourceFile etc.), copied into a
+//     V8-allocated Node Buffer with one memcpy
 //
 // Memory model: text results reuse a process-lifetime C buffer (the NAPI
-// shim copies to V8 synchronously before the next call). Binary responses are
-// pinned Go slices (runtime.Pinner) handed to V8 as external buffers with
-// zero copies — the pin is released by BridgeReleaseBinary from the external
-// buffer's finalizer on GC.
+// shim copies to V8 synchronously before the next call). Binary results use a
+// second reusable C buffer the same way — the shim copies into a V8-allocated
+// buffer with one memcpy. Zero-copy external buffers are off the table: V8's
+// sandbox (always on in Electron utility processes, e.g. VS Code's tsserver
+// host) rejects external buffers backed by non-sandbox memory, and a Go heap
+// pointer is never sandbox memory. napi_create_external_buffer then fails
+// silently (undefined for every binary call — issue: every RemoteSourceFile
+// decode and NodeHandle resolve dies session-wide).
 package main
 
 /*
@@ -28,20 +33,18 @@ package main
 // BridgeText is returned by value from BridgeCall, BridgeBinary from
 // BridgeCallBinary. Layouts match napi_shim.c's declarations. For text, kind
 // is 0=JSON doc, 1=null, 2=true, 3=false, 4=error (data is the message). For
-// binary, kind is 0=ok or 4=error; data is a view into the pinned Go slice
-// and handle releases the pin via BridgeReleaseBinary.
+// binary, kind is 0=ok or 4=error; data is a view into the reusable C buffer
+// (valid until the next bridge call — the shim copies synchronously).
 struct BridgeText { char* data; long long kind; };
-struct BridgeBinary { void* data; long long len; unsigned long long handle; long long kind; };
+struct BridgeBinary { void* data; long long len; long long kind; };
 */
 import "C"
 
 import (
 	"context"
 	"os"
-	"runtime"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 	"unsafe"
 
@@ -63,6 +66,11 @@ var (
 	// and error messages).
 	resultBuf    *C.char
 	resultBufLen C.size_t
+
+	// binBuf is the same pattern for binary responses (source-file blobs),
+	// kept separate so a binary call can't clobber a pending text result.
+	binBuf    *C.char
+	binBufLen C.size_t
 )
 
 type sessionEntry struct {
@@ -239,18 +247,15 @@ func BridgeCall(session C.int64_t, method *C.char, paramsJson *C.char) C.struct_
 // api.RawBinary which is handed straight through with no base64. For non-binary
 // methods, the JSON-marshaled bytes are returned (caller can JSON.parse).
 //
-// Returns a struct by value: { void* data; int64_t len; uint64_t handle;
-// int64_t kind }. kind 0 = ok: data points INTO the Go slice (no copy); the
-// slice is pinned via runtime.Pinner so Go's (non-moving) GC keeps it valid.
-// Ownership of the pin transfers to the caller (napi_shim.c), which wraps the
-// view in a V8 external buffer and calls BridgeReleaseBinary exactly once,
-// from the buffer's finalizer on GC. len is 0 for nil/empty results (handle
-// is 0 then; nothing to release). kind 4 = error: data/len hold the message
-// in resultBuf and the shim throws it.
+// Returns a struct by value: { void* data; int64_t len; int64_t kind }. kind
+// 0 = ok: data points into the reusable binBuf C buffer, valid until the next
+// bridge call — the NAPI shim copies it into a V8-allocated buffer before
+// returning to JS. len is 0 for nil/empty results. kind 4 = error: data/len
+// hold the message in resultBuf and the shim throws it.
 //
 //export BridgeCallBinary
 func BridgeCallBinary(session C.int64_t, method *C.char, paramsJson *C.char) C.struct_BridgeBinary {
-	empty := C.struct_BridgeBinary{data: nil, len: 0, handle: 0}
+	empty := C.struct_BridgeBinary{data: nil, len: 0}
 
 	mu.Lock()
 	entry, ok := sessions[int64(session)]
@@ -289,7 +294,15 @@ func BridgeCallBinary(session C.int64_t, method *C.char, paramsJson *C.char) C.s
 	if len(bytes) == 0 {
 		return empty
 	}
-	return pinBinary(bytes)
+	if binBuf == nil || C.size_t(len(bytes)) > binBufLen {
+		if binBuf != nil {
+			C.free(unsafe.Pointer(binBuf))
+		}
+		binBuf = (*C.char)(C.malloc(C.size_t(len(bytes))))
+		binBufLen = C.size_t(len(bytes))
+	}
+	C.memcpy(unsafe.Pointer(binBuf), unsafe.Pointer(&bytes[0]), C.size_t(len(bytes)))
+	return C.struct_BridgeBinary{data: unsafe.Pointer(binBuf), len: C.longlong(len(bytes))}
 }
 
 // returnBinaryError reports msg on the binary path: the message rides the
@@ -297,38 +310,6 @@ func BridgeCallBinary(session C.int64_t, method *C.char, paramsJson *C.char) C.s
 func returnBinaryError(msg string) C.struct_BridgeBinary {
 	t := returnText([]byte(msg), textError)
 	return C.struct_BridgeBinary{data: unsafe.Pointer(t.data), len: C.longlong(len(msg)), kind: textError}
-}
-
-// pinBinary pins b via runtime.Pinner (the cgo-legal way to return a Go heap
-// pointer: cgo.Handle would keep the object alive but does NOT mark the
-// pointer pinned, and the runtime's cgoCheckResult panics on it) and returns
-// the view + a registry id for BridgeReleaseBinary.
-var (
-	binPinnerNext uint64
-	binPinners    sync.Map // uint64 -> *runtime.Pinner
-)
-
-func pinBinary(b []byte) C.struct_BridgeBinary {
-	p := &runtime.Pinner{}
-	p.Pin(&b[0])
-	id := atomic.AddUint64(&binPinnerNext, 1)
-	binPinners.Store(id, p)
-	return C.struct_BridgeBinary{
-		data:   unsafe.Pointer(&b[0]),
-		len:    C.longlong(len(b)),
-		handle: C.uint64_t(id),
-	}
-}
-
-// BridgeReleaseBinary releases a pin from pinBinary. Called exactly once per
-// BridgeCallBinary result, from the V8 external buffer's finalizer when the
-// zero-copy view is garbage collected.
-//
-//export BridgeReleaseBinary
-func BridgeReleaseBinary(handle C.uint64_t) {
-	if p, ok := binPinners.LoadAndDelete(uint64(handle)); ok {
-		p.(*runtime.Pinner).Unpin()
-	}
 }
 
 // BridgeDisposeSession closes the session and releases all refs.

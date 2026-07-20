@@ -13,11 +13,14 @@
 //     message — thrown). JSON docs live in a Go-owned reusable buffer
 //     (resultBuf in bridge.go), copied into V8 by napi_create_string_utf8.
 //     Null/bool results ride the tag so JS never parses a wrapper envelope.
-//   - Binary results: Go pins the slice via runtime.Pinner and hands V8 a
-//     view — zero copies. The pin releases from the external buffer's
-//     finalizer on GC. External buffers exist since Node 8 (our engine floor
-//     is Node 20), so no copy fallback exists: a create failure is a bug.
-//     Go's GC is non-moving, so the view stays valid until release.
+//   - Binary results: Go copies the slice into a reusable C buffer (binBuf)
+//     and the shim copies it into a V8-allocated buffer — one memcpy, no
+//     finalizer, no pin. Zero-copy external buffers are off the table: V8's
+//     sandbox (always on in Electron utility processes, e.g. VS Code's
+//     tsserver host) rejects external buffers backed by non-sandbox memory,
+//     and a Go heap pointer is never sandbox memory —
+//     napi_create_external_buffer fails and every binary call silently
+//     returns undefined (session-wide RemoteSourceFile/NodeHandle death).
 //   - Everything synchronous on the JS thread. No async NAPI, no callbacks,
 //     no thread-safe functions.
 
@@ -28,12 +31,11 @@
 
 // cgo-exported Go entry points (bridge.go).
 struct BridgeText { char* data; long long kind; };
-struct BridgeBinary { void* data; long long len; unsigned long long handle; long long kind; };
+struct BridgeBinary { void* data; long long len; long long kind; };
 extern long long BridgeNewSession(char* cwd);
 extern struct BridgeText BridgeCall(int64_t session, char* method, char* paramsJson);
 extern struct BridgeBinary BridgeCallBinary(int64_t session, char* method, char* paramsJson);
 extern void BridgeDisposeSession(int64_t session);
-extern void BridgeReleaseBinary(unsigned long long handle);
 
 // Per-env reusable scratch for params conversion. The bridge call is
 // synchronous and Go copies the params (C.GoString) before returning, so one
@@ -246,17 +248,6 @@ static napi_value fn_call(napi_env env, napi_callback_info info) {
 	}
 }
 
-// Zero-copy release: the external buffer's finalizer runs on the env thread
-// (cgo callbacks are thread-safe) and unpins via BridgeReleaseBinary. The
-// registry in bridge.go is LoadAndDelete-idempotent, so release is exactly
-// once by construction. External buffers exist since Node 8 — every supported
-// runtime has them, so a create failure is a bug, not a case to degrade.
-static void finalize_release(napi_env env, void* data, void* hint) {
-	(void)env;
-	(void)data;
-	BridgeReleaseBinary((unsigned long long)(uintptr_t)hint);
-}
-
 // callBinary(session, method, paramsJson | null): Buffer | null
 static napi_value fn_call_binary(napi_env env, napi_callback_info info) {
 	int64_t session;
@@ -275,10 +266,13 @@ static napi_value fn_call_binary(napi_env env, napi_callback_info info) {
 		napi_get_null(env, &nul);
 		return nul;
 	}
+	// V8-allocated buffer (sandbox-legal on every runtime) + one memcpy from
+	// the Go-owned binBuf. The buffer is uninitialized; res.data stays valid
+	// for the whole synchronous call, so the copy is race-free.
 	napi_value buf = NULL;
-	// On failure buf stays NULL, which propagates the pending napi
-	// exception — no status ceremony needed.
-	napi_create_external_buffer(env, (size_t)res.len, res.data, finalize_release, (void*)(uintptr_t)res.handle, &buf);
+	void* out = NULL;
+	if (napi_create_buffer(env, (size_t)res.len, &out, &buf) != napi_ok) return NULL;
+	memcpy(out, res.data, (size_t)res.len);
 	return buf;
 }
 

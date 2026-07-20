@@ -2,9 +2,9 @@
 /**
  * NAPI bridge fuzz: round-trip pathological payloads through echo (string and
  * binary paths) and verify byte-identical envelopes. The shim's contract:
- * string results are Go-owned buffers V8 copies; binary results are zero-copy
- * napi_create_external_buffer views. Any marshalling bug (truncation, encoding drift,
- * use-after-reuse) shows up as a mismatch here.
+ * string results are Go-owned buffers V8 copies; binary results are copied
+ * out of the Go-owned binBuf into a V8-allocated buffer. Any marshalling bug
+ * (truncation, encoding drift, use-after-reuse) shows up as a mismatch here.
  *
  * Usage: node tools/triage-napi-fuzz.mjs
  */
