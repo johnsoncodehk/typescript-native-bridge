@@ -60,6 +60,15 @@ jobs:
           npm run check:lib
           npm run check:enums
 
+      # V8-sandbox failure class: the bridge's binary path must work under
+      # Electron (VS Code's tsserver host) — invisible to every Node-only gate
+      # (2026-07-20 incident). The probe spawns itself under Electron and
+      # round-trips callBinary payloads.
+      - name: Electron sandbox ABI probe
+        run: |
+          npm i --no-save electron@42
+          node tools/triage-electron-abi.mjs
+
       - name: Clone volar (cache)
         id: volar-cache
         uses: actions/cache@v4
