@@ -2064,8 +2064,56 @@ index 39c77aa78..16fb2c8af 100644
  func (p *Project) setPotentialProjectReference(configFilePath tspath.Path) {
  	if p.potentialProjectReferences == nil {
  		p.potentialProjectReferences = &collections.Set[tspath.Path]{}
+diff --git a/internal/project/projectcollection.go b/internal/project/projectcollection.go
+index e38812bc4..94a931b2d 100644
+--- a/internal/project/projectcollection.go
++++ b/internal/project/projectcollection.go
+@@ -50,17 +50,40 @@ type APIState struct {
+ 	// keyed by file path. Files with no configured project are loaded into the
+ 	// inferred project.
+ 	openFiles map[tspath.Path]apiOpenedFile
++	// additionalFiles is the set of API-supplied extra program roots, keyed by
++	// config file path. Entries persist while the project stays API-open.
++	additionalFiles map[tspath.Path][]string
+ }
+ 
+ func (s APIState) clone() APIState {
++	var additionalFiles map[tspath.Path][]string
++	if s.additionalFiles != nil {
++		additionalFiles = make(map[tspath.Path][]string, len(s.additionalFiles))
++		for k, v := range s.additionalFiles {
++			additionalFiles[k] = slices.Clone(v)
++		}
++	}
+ 	return APIState{
+-		openProjects: maps.Clone(s.openProjects),
+-		openFiles:    maps.Clone(s.openFiles),
++		openProjects:    maps.Clone(s.openProjects),
++		openFiles:       maps.Clone(s.openFiles),
++		additionalFiles: additionalFiles,
+ 	}
+ }
+ 
+ func (s APIState) equals(other APIState) bool {
+-	return maps.Equal(s.openProjects, other.openProjects) && maps.Equal(s.openFiles, other.openFiles)
++	if !maps.Equal(s.openProjects, other.openProjects) || !maps.Equal(s.openFiles, other.openFiles) {
++		return false
++	}
++	if len(s.additionalFiles) != len(other.additionalFiles) {
++		return false
++	}
++	for k, va := range s.additionalFiles {
++		vb, ok := other.additionalFiles[k]
++		if !ok || !slices.Equal(va, vb) {
++			return false
++		}
++	}
++	return true
+ }
+ 
+ // apiOpenedFile tracks a file kept open by API clients along with its ref count.
 diff --git a/internal/project/projectcollectionbuilder.go b/internal/project/projectcollectionbuilder.go
-index 3355b6887..e7a599eab 100644
+index 3355b6887..e47ac0813 100644
 --- a/internal/project/projectcollectionbuilder.go
 +++ b/internal/project/projectcollectionbuilder.go
 @@ -63,6 +63,7 @@ func newProjectCollectionBuilder(
@@ -2085,7 +2133,35 @@ index 3355b6887..e7a599eab 100644
  		newSnapshotID:                      newSnapshotID,
  		configuredProjects:                 dirty.NewSyncMap(oldProjectCollection.configuredProjects),
  		inferredProject:                    dirty.NewBox(oldProjectCollection.inferredProject),
-@@ -213,6 +214,14 @@ func (b *ProjectCollectionBuilder) HandleAPIRequest(apiRequest *APISnapshotReque
+@@ -153,6 +154,7 @@ func (b *ProjectCollectionBuilder) HandleAPIRequest(apiRequest *APISnapshotReque
+ 				b.apiState.openProjects[projectPath] = count - 1
+ 			} else if count == 1 {
+ 				delete(b.apiState.openProjects, projectPath)
++				delete(b.apiState.additionalFiles, projectPath)
+ 				if projectsToClose == nil {
+ 					projectsToClose = make(map[tspath.Path]struct{})
+ 				}
+@@ -177,6 +179,19 @@ func (b *ProjectCollectionBuilder) HandleAPIRequest(apiRequest *APISnapshotReque
+ 		}
+ 	}
+ 
++	// AdditionalFiles: refresh the extra-root mapping for any API-opened
++	// project named by the request (new ref or already held).
++	for configFileName, extra := range apiRequest.AdditionalFiles {
++		configPath := b.toPath(configFileName)
++		if _, isAPIOpen := b.apiState.openProjects[configPath]; !isAPIOpen {
++			continue
++		}
++		if b.apiState.additionalFiles == nil {
++			b.apiState.additionalFiles = make(map[tspath.Path][]string)
++		}
++		b.apiState.additionalFiles[configPath] = extra
++	}
++
+ 	if apiRequest.CloseFiles != nil {
+ 		for path := range apiRequest.CloseFiles.Keys() {
+ 			// Ref-counted close mirroring projects above.
+@@ -213,6 +228,14 @@ func (b *ProjectCollectionBuilder) HandleAPIRequest(apiRequest *APISnapshotReque
  		}
  	}
  
@@ -2100,7 +2176,7 @@ index 3355b6887..e7a599eab 100644
  	for _, overlay := range b.fs.overlays {
  		if entry := b.findDefaultConfiguredProject(overlay.FileName(), b.toPath(overlay.FileName())); entry != nil {
  			delete(projectsToClose, entry.Value().configFilePath)
-@@ -251,8 +260,58 @@ func (b *ProjectCollectionBuilder) HandleAPIRequest(apiRequest *APISnapshotReque
+@@ -251,8 +274,81 @@ func (b *ProjectCollectionBuilder) HandleAPIRequest(apiRequest *APISnapshotReque
  	return nil
  }
  
@@ -2114,6 +2190,29 @@ index 3355b6887..e7a599eab 100644
 +// file removes it.
 +func (b *ProjectCollectionBuilder) updateAPIRootFiles(logger *logging.LogTree) {
 +	desired := make(map[tspath.Path][]string)
++	// API-supplied extra roots (additionalFiles): host-computed root files the
++	// tsconfig expansion misses (e.g. LanguageService getScriptFileNames shim
++	// d.ts). Added regardless of the default-project search's node_modules
++	// boundary — the client asserted them as program roots explicitly.
++	for configPath, files := range b.apiState.additionalFiles {
++		if _, isAPIOpen := b.apiState.openProjects[configPath]; !isAPIOpen {
++			continue
++		}
++		entry, ok := b.configuredProjects.Load(configPath)
++		if !ok || entry.Value() == nil {
++			continue
++		}
++		project := entry.Value()
++		if project.CommandLine == nil || len(project.CommandLine.FileNames()) == 0 {
++			continue
++		}
++		for _, f := range files {
++			if slices.Contains(project.apiRootFiles, f) || project.containsFile(b.toPath(f)) {
++				continue
++			}
++			desired[configPath] = append(desired[configPath], f)
++		}
++	}
 +	if len(b.apiState.openProjects) > 0 {
 +		for path, file := range b.apiState.openFiles {
 +			configFileName := b.configFileRegistryBuilder.getConfigFileNameForFile(file.fileName, path, logger)
@@ -2160,7 +2259,7 @@ index 3355b6887..e7a599eab 100644
  
  	changedFiles := make([]tspath.Path, 0, summary.Changed.Len())
  	for uri := range summary.Changed.Keys() {
-@@ -320,9 +379,17 @@ func (b *ProjectCollectionBuilder) DidChangeFiles(summary FileChangeSummary, log
+@@ -320,9 +416,17 @@ func (b *ProjectCollectionBuilder) DidChangeFiles(summary FileChangeSummary, log
  		return true
  	})
  
@@ -2181,7 +2280,7 @@ index 3355b6887..e7a599eab 100644
  		path := b.toPath(fileName)
  		openFileResult := b.ensureConfiguredProjectAndAncestorsForFile(fileName, path, logger)
  		b.cleanupConfiguredProjects(&openFileResult.retain, logger)
-@@ -1137,7 +1204,11 @@ func (b *ProjectCollectionBuilder) updateProgram(entry dirty.Value[*Project], lo
+@@ -1137,7 +1241,11 @@ func (b *ProjectCollectionBuilder) updateProgram(entry dirty.Value[*Project], lo
  				project.host = newCompilerHost(project.currentDirectory, project, b, logger.Fork("CompilerHost"))
  				result := project.CreateProgram()
  				project.Program = result.Program
@@ -2301,10 +2400,22 @@ index 00f4056e5..bc42163ab 100644
  	s.cancelDiagnosticsRefresh()
  	s.cancelWarmAutoImportCache()
 diff --git a/internal/project/snapshot.go b/internal/project/snapshot.go
-index 61af433d3..76e369d7a 100644
+index 61af433d3..a45d3a81f 100644
 --- a/internal/project/snapshot.go
 +++ b/internal/project/snapshot.go
-@@ -265,7 +265,7 @@ func (s *Snapshot) Clone(ctx context.Context, change SnapshotChange, overlays ma
+@@ -161,6 +161,11 @@ type APISnapshotRequest struct {
+ 	CloseProjects *collections.Set[tspath.Path]
+ 	OpenFiles     *collections.Set[lsproto.DocumentUri]
+ 	CloseFiles    *collections.Set[tspath.Path]
++	// AdditionalFiles maps an opened project's config file name to extra files
++	// to add as program roots (host-computed roots the tsconfig expansion
++	// misses — e.g. LanguageService getScriptFileNames shim d.ts). Applied
++	// regardless of the default-project search's node_modules boundary.
++	AdditionalFiles map[string][]string
+ }
+ 
+ type ProjectTreeRequest struct {
+@@ -265,7 +270,7 @@ func (s *Snapshot) Clone(ctx context.Context, change SnapshotChange, overlays ma
  		}
  		switch change.reason {
  		case UpdateReasonDidOpenFile:
@@ -2313,7 +2424,7 @@ index 61af433d3..76e369d7a 100644
  		case UpdateReasonDidCloseFile:
  			logger.Logf("Reason: DidCloseFile - %v", change.fileChanges.Closed)
  		case UpdateReasonDidChangeCompilerOptionsForInferredProjects:
-@@ -333,6 +333,7 @@ func (s *Snapshot) Clone(ctx context.Context, change SnapshotChange, overlays ma
+@@ -333,6 +338,7 @@ func (s *Snapshot) Clone(ctx context.Context, change SnapshotChange, overlays ma
  		compilerOptionsForInferredProjects,
  		s.sessionOptions,
  		customConfigFileName,
@@ -2321,7 +2432,7 @@ index 61af433d3..76e369d7a 100644
  		session.parseCache,
  		session.extendedConfigCache,
  		session.client,
-@@ -381,8 +382,8 @@ func (s *Snapshot) Clone(ctx context.Context, change SnapshotChange, overlays ma
+@@ -381,8 +387,8 @@ func (s *Snapshot) Clone(ctx context.Context, change SnapshotChange, overlays ma
  	// Clean cached disk files not touched by any open project on file open, close, delete,
  	// or when explicitly requested (e.g. by an idle timer).
  	shouldCleanDiskCache := change.cleanDiskCache ||

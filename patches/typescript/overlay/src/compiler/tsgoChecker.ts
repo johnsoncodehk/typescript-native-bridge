@@ -70,6 +70,8 @@ interface TnbProgramContext {
     overlayHostCtx: { host: any; options: any; configFilePath: string };
     pendingOverlays?: any[];
     pendingExtraFileExtensions?: any[];
+    /** Root files the host computed but the tsconfig expansion may miss (LS getScriptFileNames shims, glint readDirectory extras) — forwarded as updateSnapshot additionalFiles. */
+    pendingAdditionalFiles?: string[];
     pendingReferencedProjects?: string[];
     /** This project's thin program — checker-side host-SF lookups must use it
      * (not the global _hostProgramRef, which tracks the LAST created project). */
@@ -4504,15 +4506,18 @@ export function createTsgoProgram(
         }
         // Compare only files whose host content can actually diverge from
         // disk: extra-extension files (Volar virtualizes them by extension),
-        // files carrying a pushed overlay (re-sync bookkeeping below), and
-        // files the host manages as snapshots (the LS contract — unsaved
-        // buffers); under tsserver only OPEN ScriptInfos count (closed ones
-        // are disk reads). Watch/CLI CompilerHost answers (getSourceFile /
-        // readFile) are disk reads by construction — the compare is always
-        // false.
+        // files the host claims but disk lacks (glint-style virtual CompilerHost
+        // files — e.g. App.gts transformed and served as App.ts, which exists
+        // only in the host's readFile), files carrying a pushed overlay (re-sync
+        // bookkeeping below), and files the host manages as snapshots (the LS
+        // contract — unsaved buffers); under tsserver only OPEN ScriptInfos
+        // count (closed ones are disk reads). Watch/CLI CompilerHost answers
+        // (getSourceFile / readFile) for files that exist on disk are disk
+        // reads by construction — the compare is always false for those.
         const ps = (lsHost as any)?.projectService;
         const contentCanDiverge = (fn: string, resolvedFn: string): boolean => {
             if (isExtraExtensionFileName(fn) || _syncedOverlayContentByFile.has(resolvedFn)) return true;
+            if (!fileExistsOnDisk(resolvedFn)) return true;
             if (ps) {
                 const info = ps.getScriptInfoForPath?.(canonicalSourceFilePath(resolvedFn));
                 return !!info?.isScriptOpen?.();
@@ -4520,8 +4525,8 @@ export function createTsgoProgram(
             return !!(lsHost?.getScriptSnapshot?.(fn) ?? lsHost?.getScriptSnapshot?.(resolvedFn));
         };
         // Skip the whole collect when host content provably cannot diverge
-        // anywhere: no snapshot/LS host, no projectService, no
-        // extra-extension file, no still-synced overlay — contentCanDiverge
+        // anywhere: no snapshot/LS host, no projectService, no extra-extension
+        // or disk-absent file, no still-synced overlay — contentCanDiverge
         // would be false for every name, so running the loop is identical
         // to skipping it. Watch-mode lint otherwise walks the whole corpus
         // per generation (issue #11 perf).
@@ -4530,7 +4535,12 @@ export function createTsgoProgram(
             || !!ps;
         if (!collectNeeded) {
             for (const n of names) {
-                if (isExtraExtensionFileName(n)) { collectNeeded = true; break; }
+                // Raw absolute name for the gate scan (per-name resolution
+                // dominated the walk): glint-style virtual files are absolute
+                // and absent on disk; bundled:// libs are not disk paths and
+                // are never overlay candidates. A relative name can only
+                // false-open the gate, which the per-file compare closes.
+                if (isExtraExtensionFileName(n) || ((n.startsWith("/") || /^[A-Za-z]:[\\/]/.test(n)) && !fileExistsOnDisk(n))) { collectNeeded = true; break; }
             }
         }
         if (collectNeeded) for (const fn of names) {
@@ -4573,6 +4583,10 @@ export function createTsgoProgram(
     const softPMaterializeAllForImportTracker = !!(lsHost as any)?.projectService;
     programCtx.pendingOverlays = overlays.length > 0 ? overlays : undefined;
     programCtx.pendingExtraFileExtensions = collectExtraFileExtensions(names, options);
+    // Host-computed root set (rootNames + LS getScriptFileNames) — tsgo's
+    // config expansion may miss entries (injected shim d.ts, readDirectory
+    // overrides); Go adds them as program roots (deduped by containment).
+    programCtx.pendingAdditionalFiles = [...names].filter(n => !isBundledLibPath(n));
     _lastExtraFileExtensions = programCtx.pendingExtraFileExtensions;
     _hasHostBoundFiles = preferHostSourceFiles;
     if (_tp0) _rpcTraceEvent("thinProgram.t", `afterHostOverlayCollect ms=${Date.now()-_tp0} overlays=${overlays.length} names=${names.size}`);
@@ -6356,6 +6370,13 @@ export function createTsgoChecker(program: any): any {
         if (programCtx) programCtx.pendingExtraFileExtensions = undefined;
         if (extraFileExtensions) _lastExtraFileExtensions = extraFileExtensions;
 
+        // Host-computed root set the tsconfig expansion may miss (LS
+        // getScriptFileNames shims, glint readDirectory extras) — Go adds them
+        // as program roots (deduped by containment); persists per config while
+        // the project stays open.
+        const additionalFiles = programCtx?.pendingAdditionalFiles;
+        if (programCtx) programCtx.pendingAdditionalFiles = undefined;
+
         const syncHost = hostForOverlaySyncLocal();
         const openFiles = syncHost ? collectTsgoOpenFileNames(syncHost) : [];
         // Build mode: close the previous solution-build project in the same
@@ -6381,6 +6402,7 @@ export function createTsgoChecker(program: any): any {
             ...(openFiles.length > 0 ? { openFiles } : {}),
             ...(openFilesWithContent.length > 0 ? { openFilesWithContent } : {}),
             ...(extraFileExtensions ? { extraFileExtensions } : {}),
+            ...(additionalFiles?.length ? { additionalFiles } : {}),
             ...(buildClose.closeParams ?? {}),
             ...(prefetchDiagnostics ? { prefetchDiagnostics: true } : {}),
         };
