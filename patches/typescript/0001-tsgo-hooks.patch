@@ -73,10 +73,53 @@ index 34adf6e49b..4048af803d 100644
          if (!root.length) return root.push(fileId);
          const last = root[root.length - 1];
 diff --git a/src/compiler/builderState.ts b/src/compiler/builderState.ts
-index 625a64e266..998ae64a39 100644
+index 625a64e266..c3e7504f11 100644
 --- a/src/compiler/builderState.ts
 +++ b/src/compiler/builderState.ts
-@@ -302,6 +302,14 @@ export namespace BuilderState {
+@@ -23,6 +23,7 @@ import {
+     mapDefinedIterator,
+     ModuleDeclaration,
+     ModuleKind,
++    Node,
+     OutputFile,
+     Path,
+     Program,
+@@ -190,8 +191,17 @@ export namespace BuilderState {
+         return false;
+     }
+ 
++    // TNB: a tsgo NodeHandle carries its containing file's canonical path in
++    // the handle itself — read it instead of resolving the declaration's whole
++    // source-file blob (~120 ambient .d.ts blob fetches on a Nuxt build).
++    // Host AST declarations have no .path and take the stock walk.
++    function getSourceFilePathOfDeclaration(declaration: Node): Path | undefined {
++        const declarationPath = (declaration as any).path as Path | undefined;
++        return typeof declarationPath === "string" ? declarationPath : getSourceFileOfNode(declaration)?.resolvedPath;
++    }
++
+     function getReferencedFilesFromImportedModuleSymbol(symbol: Symbol): Path[] {
+-        return mapDefined(symbol.declarations, declaration => getSourceFileOfNode(declaration)?.resolvedPath);
++        return mapDefined(symbol.declarations, declaration => getSourceFilePathOfDeclaration(declaration));
+     }
+ 
+     /**
+@@ -274,12 +284,9 @@ export namespace BuilderState {
+             }
+             // Add any file other than our own as reference
+             for (const declaration of symbol.declarations) {
+-                const declarationSourceFile = getSourceFileOfNode(declaration);
+-                if (
+-                    declarationSourceFile &&
+-                    declarationSourceFile !== sourceFile
+-                ) {
+-                    addReferencedFile(declarationSourceFile.resolvedPath);
++                const declarationPath = getSourceFilePathOfDeclaration(declaration);
++                if (declarationPath !== undefined && declarationPath !== sourceFile.resolvedPath) {
++                    addReferencedFile(declarationPath);
+                 }
+             }
+         }
+@@ -302,6 +309,14 @@ export namespace BuilderState {
              undefined;
      }
  
@@ -91,7 +134,7 @@ index 625a64e266..998ae64a39 100644
      /**
       * Creates the state of file references and signature for the new program from oldState if it is safe
       */
-@@ -311,6 +319,36 @@ export namespace BuilderState {
+@@ -311,6 +326,36 @@ export namespace BuilderState {
          const referencedMap = createReferencedMap(options);
          const useOldState = canReuseOldState(referencedMap, oldState);
  
@@ -128,7 +171,7 @@ index 625a64e266..998ae64a39 100644
          // Ensure source files have parent pointers set
          newProgram.getTypeChecker();
  
-@@ -592,7 +630,12 @@ export namespace BuilderState {
+@@ -592,7 +637,12 @@ export namespace BuilderState {
          cancellationToken: CancellationToken | undefined,
          host: HostForComputeHash,
      ) {
