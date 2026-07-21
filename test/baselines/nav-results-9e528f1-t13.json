@@ -1,8 +1,8 @@
 {
-  "summaryLine": "SUMMARY total=19028 match=17757 diff=1232 docdiff=38 diagmsg=1 skip=0",
+  "summaryLine": "SUMMARY total=19028 match=17892 diff=1097 docdiff=38 diagmsg=1 skip=0",
   "total": 19028,
-  "match": 17757,
-  "diff": 1232,
+  "match": 17892,
+  "diff": 1097,
   "docdiff": 38,
   "diagmsg": 1,
   "skip": 0,
@@ -3164,13 +3164,33 @@
       "seqClass": "ALWAYS"
     },
     {
-      "key": "nav:tsc/#2730/main.vue:4:31:references",
+      "key": "nav:tsc/#2730/main.vue:2:1:references",
       "file": "tsc/#2730/main.vue",
-      "line": 4,
-      "offset": 31,
+      "line": 2,
+      "offset": 1,
       "cmd": "references",
-      "detail": "success-mismatch",
-      "seqClass": "SEQ-ONLY"
+      "detail": "loc-set-mismatch",
+      "locClass": "missing",
+      "seqClass": "ALWAYS"
+    },
+    {
+      "key": "nav:tsc/#2730/main.vue:2:15:quickinfo",
+      "file": "tsc/#2730/main.vue",
+      "line": 2,
+      "offset": 15,
+      "cmd": "quickinfo",
+      "detail": "quickinfo-display/kind",
+      "seqClass": "ALWAYS"
+    },
+    {
+      "key": "nav:tsc/#2730/main.vue:2:15:references",
+      "file": "tsc/#2730/main.vue",
+      "line": 2,
+      "offset": 15,
+      "cmd": "references",
+      "detail": "loc-set-mismatch",
+      "locClass": "missing",
+      "seqClass": "ALWAYS"
     },
     {
       "key": "nav:tsc/#3100/main.vue:12:16:quickinfo",
@@ -3200,56 +3220,6 @@
       "seqClass": "ALWAYS"
     },
     {
-      "key": "nav:tsc/#3129/main.vue:2:10:references",
-      "file": "tsc/#3129/main.vue",
-      "line": 2,
-      "offset": 10,
-      "cmd": "references",
-      "detail": "loc-set-mismatch",
-      "locClass": "missing",
-      "seqClass": "SEQ-ONLY"
-    },
-    {
-      "key": "nav:tsc/#3129/main.vue:2:22:references",
-      "file": "tsc/#3129/main.vue",
-      "line": 2,
-      "offset": 22,
-      "cmd": "references",
-      "detail": "loc-set-mismatch",
-      "locClass": "missing",
-      "seqClass": "SEQ-ONLY"
-    },
-    {
-      "key": "nav:tsc/#3258/main2.vue:2:10:references",
-      "file": "tsc/#3258/main2.vue",
-      "line": 2,
-      "offset": 10,
-      "cmd": "references",
-      "detail": "loc-set-mismatch",
-      "locClass": "missing",
-      "seqClass": "SEQ-ONLY"
-    },
-    {
-      "key": "nav:tsc/#3258/main2.vue:2:22:references",
-      "file": "tsc/#3258/main2.vue",
-      "line": 2,
-      "offset": 22,
-      "cmd": "references",
-      "detail": "loc-set-mismatch",
-      "locClass": "missing",
-      "seqClass": "SEQ-ONLY"
-    },
-    {
-      "key": "nav:tsc/#3258/main2.vue:8:3:references",
-      "file": "tsc/#3258/main2.vue",
-      "line": 8,
-      "offset": 3,
-      "cmd": "references",
-      "detail": "loc-set-mismatch",
-      "locClass": "missing",
-      "seqClass": "SEQ-ONLY"
-    },
-    {
       "key": "nav:tsc/#3258/main2.vue:8:11:quickinfo",
       "file": "tsc/#3258/main2.vue",
       "line": 8,
@@ -3257,16 +3227,6 @@
       "cmd": "quickinfo",
       "detail": "quickinfo-display/kind",
       "seqClass": "ALWAYS"
-    },
-    {
-      "key": "nav:tsc/#3258/main2.vue:8:11:references",
-      "file": "tsc/#3258/main2.vue",
-      "line": 8,
-      "offset": 11,
-      "cmd": "references",
-      "detail": "loc-set-mismatch",
-      "locClass": "missing",
-      "seqClass": "SEQ-ONLY"
     },
     {
       "key": "nav:tsc/#3258/main2.vue:12:11:quickinfo",
@@ -3278,46 +3238,6 @@
       "seqClass": "ALWAYS"
     },
     {
-      "key": "nav:tsc/#3258/main2.vue:12:11:references",
-      "file": "tsc/#3258/main2.vue",
-      "line": 12,
-      "offset": 11,
-      "cmd": "references",
-      "detail": "loc-set-mismatch",
-      "locClass": "missing",
-      "seqClass": "SEQ-ONLY"
-    },
-    {
-      "key": "nav:tsc/#3295/main.vue:3:4:references",
-      "file": "tsc/#3295/main.vue",
-      "line": 3,
-      "offset": 4,
-      "cmd": "references",
-      "detail": "loc-set-mismatch",
-      "locClass": "missing",
-      "seqClass": "SEQ-ONLY"
-    },
-    {
-      "key": "nav:tsc/#3295/main.vue:8:10:references",
-      "file": "tsc/#3295/main.vue",
-      "line": 8,
-      "offset": 10,
-      "cmd": "references",
-      "detail": "loc-set-mismatch",
-      "locClass": "missing",
-      "seqClass": "SEQ-ONLY"
-    },
-    {
-      "key": "nav:tsc/#3295/main.vue:8:22:references",
-      "file": "tsc/#3295/main.vue",
-      "line": 8,
-      "offset": 22,
-      "cmd": "references",
-      "detail": "loc-set-mismatch",
-      "locClass": "missing",
-      "seqClass": "SEQ-ONLY"
-    },
-    {
       "key": "nav:tsc/#3295/main.vue:13:8:quickinfo",
       "file": "tsc/#3295/main.vue",
       "line": 13,
@@ -3327,16 +3247,6 @@
       "seqClass": "ALWAYS"
     },
     {
-      "key": "nav:tsc/#3374/component.vue:2:3:references",
-      "file": "tsc/#3374/component.vue",
-      "line": 2,
-      "offset": 3,
-      "cmd": "references",
-      "detail": "loc-set-mismatch",
-      "locClass": "missing",
-      "seqClass": "SEQ-ONLY"
-    },
-    {
       "key": "nav:tsc/#3374/component.vue:6:10:quickinfo",
       "file": "tsc/#3374/component.vue",
       "line": 6,
@@ -3344,16 +3254,6 @@
       "cmd": "quickinfo",
       "detail": "quickinfo-display/kind",
       "seqClass": "ALWAYS"
-    },
-    {
-      "key": "nav:tsc/#3374/component.vue:6:34:references",
-      "file": "tsc/#3374/component.vue",
-      "line": 6,
-      "offset": 34,
-      "cmd": "references",
-      "detail": "loc-set-mismatch",
-      "locClass": "missing",
-      "seqClass": "SEQ-ONLY"
     },
     {
       "key": "nav:tsc/#3374/component.vue:8:16:quickinfo",
@@ -3390,16 +3290,6 @@
       "cmd": "quickinfo",
       "detail": "quickinfo-display/kind",
       "seqClass": "ALWAYS"
-    },
-    {
-      "key": "nav:tsc/#3405/main.vue:4:15:references",
-      "file": "tsc/#3405/main.vue",
-      "line": 4,
-      "offset": 15,
-      "cmd": "references",
-      "detail": "loc-set-mismatch",
-      "locClass": "missing",
-      "seqClass": "SEQ-ONLY"
     },
     {
       "key": "nav:tsc/#3405/main.vue:5:7:quickinfo",
@@ -3477,16 +3367,6 @@
       "seqClass": "ALWAYS"
     },
     {
-      "key": "nav:tsc/#3476/child.vue:2:1:references",
-      "file": "tsc/#3476/child.vue",
-      "line": 2,
-      "offset": 1,
-      "cmd": "references",
-      "detail": "loc-set-mismatch",
-      "locClass": "missing",
-      "seqClass": "SEQ-ONLY"
-    },
-    {
       "key": "nav:tsc/#3476/child.vue:3:23:quickinfo",
       "file": "tsc/#3476/child.vue",
       "line": 3,
@@ -3506,26 +3386,6 @@
       "seqClass": "ALWAYS"
     },
     {
-      "key": "nav:tsc/#3539/main.vue:2:10:references",
-      "file": "tsc/#3539/main.vue",
-      "line": 2,
-      "offset": 10,
-      "cmd": "references",
-      "detail": "loc-set-mismatch",
-      "locClass": "missing",
-      "seqClass": "SEQ-ONLY"
-    },
-    {
-      "key": "nav:tsc/#3539/main.vue:2:22:references",
-      "file": "tsc/#3539/main.vue",
-      "line": 2,
-      "offset": 22,
-      "cmd": "references",
-      "detail": "loc-set-mismatch",
-      "locClass": "missing",
-      "seqClass": "SEQ-ONLY"
-    },
-    {
       "key": "nav:tsc/#3574/main.vue:2:11:quickinfo",
       "file": "tsc/#3574/main.vue",
       "line": 2,
@@ -3533,16 +3393,6 @@
       "cmd": "quickinfo",
       "detail": "quickinfo-display/kind",
       "seqClass": "ALWAYS"
-    },
-    {
-      "key": "nav:tsc/#3615/main.vue:2:10:references",
-      "file": "tsc/#3615/main.vue",
-      "line": 2,
-      "offset": 10,
-      "cmd": "references",
-      "detail": "loc-set-mismatch",
-      "locClass": "missing",
-      "seqClass": "SEQ-ONLY"
     },
     {
       "key": "nav:tsc/#3615/main.vue:7:26:quickinfo",
@@ -3619,26 +3469,6 @@
       "seqClass": "ALWAYS"
     },
     {
-      "key": "nav:tsc/#3672/main.vue:3:10:references",
-      "file": "tsc/#3672/main.vue",
-      "line": 3,
-      "offset": 10,
-      "cmd": "references",
-      "detail": "loc-set-mismatch",
-      "locClass": "missing",
-      "seqClass": "SEQ-ONLY"
-    },
-    {
-      "key": "nav:tsc/#3672/main.vue:4:10:references",
-      "file": "tsc/#3672/main.vue",
-      "line": 4,
-      "offset": 10,
-      "cmd": "references",
-      "detail": "loc-set-mismatch",
-      "locClass": "missing",
-      "seqClass": "SEQ-ONLY"
-    },
-    {
       "key": "nav:tsc/#3672/main.vue:11:80:references",
       "file": "tsc/#3672/main.vue",
       "line": 11,
@@ -3678,26 +3508,6 @@
       "seqClass": "ALWAYS"
     },
     {
-      "key": "nav:tsc/#3748/main.vue:2:10:references",
-      "file": "tsc/#3748/main.vue",
-      "line": 2,
-      "offset": 10,
-      "cmd": "references",
-      "detail": "loc-set-mismatch",
-      "locClass": "missing",
-      "seqClass": "SEQ-ONLY"
-    },
-    {
-      "key": "nav:tsc/#3748/main.vue:2:34:references",
-      "file": "tsc/#3748/main.vue",
-      "line": 2,
-      "offset": 34,
-      "cmd": "references",
-      "detail": "loc-set-mismatch",
-      "locClass": "missing",
-      "seqClass": "SEQ-ONLY"
-    },
-    {
       "key": "nav:tsc/#3748/main.vue:4:19:quickinfo",
       "file": "tsc/#3748/main.vue",
       "line": 4,
@@ -3707,16 +3517,6 @@
       "seqClass": "ALWAYS"
     },
     {
-      "key": "nav:tsc/#3748/main.vue:4:19:references",
-      "file": "tsc/#3748/main.vue",
-      "line": 4,
-      "offset": 19,
-      "cmd": "references",
-      "detail": "loc-set-mismatch",
-      "locClass": "missing",
-      "seqClass": "SEQ-ONLY"
-    },
-    {
       "key": "nav:tsc/#3782/main.vue:2:10:quickinfo",
       "file": "tsc/#3782/main.vue",
       "line": 2,
@@ -3724,26 +3524,6 @@
       "cmd": "quickinfo",
       "detail": "quickinfo-display/kind",
       "seqClass": "ALWAYS"
-    },
-    {
-      "key": "nav:tsc/#3782/main.vue:2:10:references",
-      "file": "tsc/#3782/main.vue",
-      "line": 2,
-      "offset": 10,
-      "cmd": "references",
-      "detail": "loc-set-mismatch",
-      "locClass": "missing",
-      "seqClass": "SEQ-ONLY"
-    },
-    {
-      "key": "nav:tsc/#3782/main.vue:2:34:references",
-      "file": "tsc/#3782/main.vue",
-      "line": 2,
-      "offset": 34,
-      "cmd": "references",
-      "detail": "loc-set-mismatch",
-      "locClass": "missing",
-      "seqClass": "SEQ-ONLY"
     },
     {
       "key": "nav:tsc/#3782/main.vue:4:14:quickinfo",
@@ -3762,16 +3542,6 @@
       "cmd": "quickinfo",
       "detail": "quickinfo-display/kind",
       "seqClass": "ALWAYS"
-    },
-    {
-      "key": "nav:tsc/#3782/main.vue:4:21:references",
-      "file": "tsc/#3782/main.vue",
-      "line": 4,
-      "offset": 21,
-      "cmd": "references",
-      "detail": "loc-set-mismatch",
-      "locClass": "missing",
-      "seqClass": "SEQ-ONLY"
     },
     {
       "key": "nav:tsc/#3782/main.vue:17:3:quickinfo",
@@ -3832,26 +3602,6 @@
       "seqClass": "ALWAYS"
     },
     {
-      "key": "nav:tsc/#3845/main.vue:7:43:references",
-      "file": "tsc/#3845/main.vue",
-      "line": 7,
-      "offset": 43,
-      "cmd": "references",
-      "detail": "loc-set-mismatch",
-      "locClass": "missing",
-      "seqClass": "SEQ-ONLY"
-    },
-    {
-      "key": "nav:tsc/#3845/main.vue:7:63:references",
-      "file": "tsc/#3845/main.vue",
-      "line": 7,
-      "offset": 63,
-      "cmd": "references",
-      "detail": "loc-set-mismatch",
-      "locClass": "missing",
-      "seqClass": "SEQ-ONLY"
-    },
-    {
       "key": "nav:tsc/#3845/main.vue:8:31:references",
       "file": "tsc/#3845/main.vue",
       "line": 8,
@@ -3880,36 +3630,6 @@
       "detail": "loc-set-mismatch",
       "locClass": "mixed",
       "seqClass": "ALWAYS"
-    },
-    {
-      "key": "nav:tsc/#3845/main.vue:13:3:references",
-      "file": "tsc/#3845/main.vue",
-      "line": 13,
-      "offset": 3,
-      "cmd": "references",
-      "detail": "loc-set-mismatch",
-      "locClass": "missing",
-      "seqClass": "SEQ-ONLY"
-    },
-    {
-      "key": "nav:tsc/#3845/main.vue:13:27:references",
-      "file": "tsc/#3845/main.vue",
-      "line": 13,
-      "offset": 27,
-      "cmd": "references",
-      "detail": "loc-set-mismatch",
-      "locClass": "missing",
-      "seqClass": "SEQ-ONLY"
-    },
-    {
-      "key": "nav:tsc/#3845/main.vue:13:38:references",
-      "file": "tsc/#3845/main.vue",
-      "line": 13,
-      "offset": 38,
-      "cmd": "references",
-      "detail": "loc-set-mismatch",
-      "locClass": "missing",
-      "seqClass": "SEQ-ONLY"
     },
     {
       "key": "nav:tsc/#3845/main.vue:13:65:references",
@@ -3991,56 +3711,6 @@
       "seqClass": "ALWAYS"
     },
     {
-      "key": "nav:tsc/#4353/main.vue:3:32:references",
-      "file": "tsc/#4353/main.vue",
-      "line": 3,
-      "offset": 32,
-      "cmd": "references",
-      "detail": "loc-set-mismatch",
-      "locClass": "missing",
-      "seqClass": "SEQ-ONLY"
-    },
-    {
-      "key": "nav:tsc/#4353/main.vue:8:3:references",
-      "file": "tsc/#4353/main.vue",
-      "line": 8,
-      "offset": 3,
-      "cmd": "references",
-      "detail": "loc-set-mismatch",
-      "locClass": "missing",
-      "seqClass": "SEQ-ONLY"
-    },
-    {
-      "key": "nav:tsc/#4386/main.vue:2:10:references",
-      "file": "tsc/#4386/main.vue",
-      "line": 2,
-      "offset": 10,
-      "cmd": "references",
-      "detail": "loc-set-mismatch",
-      "locClass": "missing",
-      "seqClass": "SEQ-ONLY"
-    },
-    {
-      "key": "nav:tsc/#4386/main.vue:2:22:references",
-      "file": "tsc/#4386/main.vue",
-      "line": 2,
-      "offset": 22,
-      "cmd": "references",
-      "detail": "loc-set-mismatch",
-      "locClass": "missing",
-      "seqClass": "SEQ-ONLY"
-    },
-    {
-      "key": "nav:tsc/#4391/comp.vue:2:1:references",
-      "file": "tsc/#4391/comp.vue",
-      "line": 2,
-      "offset": 1,
-      "cmd": "references",
-      "detail": "loc-set-mismatch",
-      "locClass": "missing",
-      "seqClass": "SEQ-ONLY"
-    },
-    {
       "key": "nav:tsc/#4391/comp.vue:3:7:references",
       "file": "tsc/#4391/comp.vue",
       "line": 3,
@@ -4051,16 +3721,6 @@
       "seqClass": "ALWAYS"
     },
     {
-      "key": "nav:tsc/#4512/test3.vue:2:3:references",
-      "file": "tsc/#4512/test3.vue",
-      "line": 2,
-      "offset": 3,
-      "cmd": "references",
-      "detail": "loc-set-mismatch",
-      "locClass": "missing",
-      "seqClass": "SEQ-ONLY"
-    },
-    {
       "key": "nav:tsc/#4512/test3.vue:6:9:quickinfo",
       "file": "tsc/#4512/test3.vue",
       "line": 6,
@@ -4068,26 +3728,6 @@
       "cmd": "quickinfo",
       "detail": "quickinfo-display/kind",
       "seqClass": "ALWAYS"
-    },
-    {
-      "key": "nav:tsc/#4512/test3.vue:6:9:references",
-      "file": "tsc/#4512/test3.vue",
-      "line": 6,
-      "offset": 9,
-      "cmd": "references",
-      "detail": "loc-set-mismatch",
-      "locClass": "missing",
-      "seqClass": "SEQ-ONLY"
-    },
-    {
-      "key": "nav:tsc/#4512/test3.vue:6:25:references",
-      "file": "tsc/#4512/test3.vue",
-      "line": 6,
-      "offset": 25,
-      "cmd": "references",
-      "detail": "loc-set-mismatch",
-      "locClass": "missing",
-      "seqClass": "SEQ-ONLY"
     },
     {
       "key": "nav:tsc/#4512/test3.vue:9:8:references",
@@ -4109,16 +3749,6 @@
       "seqClass": "ALWAYS"
     },
     {
-      "key": "nav:tsc/#4512/test3.vue:12:16:references",
-      "file": "tsc/#4512/test3.vue",
-      "line": 12,
-      "offset": 16,
-      "cmd": "references",
-      "detail": "loc-set-mismatch",
-      "locClass": "missing",
-      "seqClass": "SEQ-ONLY"
-    },
-    {
       "key": "nav:tsc/#4512/test3.vue:13:18:quickinfo",
       "file": "tsc/#4512/test3.vue",
       "line": 13,
@@ -4128,36 +3758,6 @@
       "seqClass": "ALWAYS"
     },
     {
-      "key": "nav:tsc/#4512/test3.vue:13:18:references",
-      "file": "tsc/#4512/test3.vue",
-      "line": 13,
-      "offset": 18,
-      "cmd": "references",
-      "detail": "loc-set-mismatch",
-      "locClass": "missing",
-      "seqClass": "SEQ-ONLY"
-    },
-    {
-      "key": "nav:tsc/#4540/main.vue:2:10:references",
-      "file": "tsc/#4540/main.vue",
-      "line": 2,
-      "offset": 10,
-      "cmd": "references",
-      "detail": "loc-set-mismatch",
-      "locClass": "missing",
-      "seqClass": "SEQ-ONLY"
-    },
-    {
-      "key": "nav:tsc/#4540/main.vue:2:22:references",
-      "file": "tsc/#4540/main.vue",
-      "line": 2,
-      "offset": 22,
-      "cmd": "references",
-      "detail": "loc-set-mismatch",
-      "locClass": "missing",
-      "seqClass": "SEQ-ONLY"
-    },
-    {
       "key": "nav:tsc/#4646/child2.vue:2:15:quickinfo",
       "file": "tsc/#4646/child2.vue",
       "line": 2,
@@ -4165,16 +3765,6 @@
       "cmd": "quickinfo",
       "detail": "quickinfo-display/kind",
       "seqClass": "ALWAYS"
-    },
-    {
-      "key": "nav:tsc/#4646/child2.vue:2:15:references",
-      "file": "tsc/#4646/child2.vue",
-      "line": 2,
-      "offset": 15,
-      "cmd": "references",
-      "detail": "loc-set-mismatch",
-      "locClass": "missing",
-      "seqClass": "SEQ-ONLY"
     },
     {
       "key": "nav:tsc/#4646/child2.vue:2:27:references",
@@ -4195,16 +3785,6 @@
       "detail": "loc-set-mismatch",
       "locClass": "mixed",
       "seqClass": "ALWAYS"
-    },
-    {
-      "key": "nav:tsc/#4668/child.vue:4:1:references",
-      "file": "tsc/#4668/child.vue",
-      "line": 4,
-      "offset": 1,
-      "cmd": "references",
-      "detail": "loc-set-mismatch",
-      "locClass": "missing",
-      "seqClass": "SEQ-ONLY"
     },
     {
       "key": "nav:tsc/#4668/child.vue:5:25:references",
@@ -4245,26 +3825,6 @@
       "detail": "loc-set-mismatch",
       "locClass": "mixed",
       "seqClass": "ALWAYS"
-    },
-    {
-      "key": "nav:tsc/#4812/main.vue:2:10:references",
-      "file": "tsc/#4812/main.vue",
-      "line": 2,
-      "offset": 10,
-      "cmd": "references",
-      "detail": "loc-set-mismatch",
-      "locClass": "missing",
-      "seqClass": "SEQ-ONLY"
-    },
-    {
-      "key": "nav:tsc/#4812/main.vue:2:22:references",
-      "file": "tsc/#4812/main.vue",
-      "line": 2,
-      "offset": 22,
-      "cmd": "references",
-      "detail": "loc-set-mismatch",
-      "locClass": "missing",
-      "seqClass": "SEQ-ONLY"
     },
     {
       "key": "nav:tsc/#4812/main.vue:5:6:references",
@@ -4315,26 +3875,6 @@
       "seqClass": "ALWAYS"
     },
     {
-      "key": "nav:tsc/#4812/main.vue:10:14:references",
-      "file": "tsc/#4812/main.vue",
-      "line": 10,
-      "offset": 14,
-      "cmd": "references",
-      "detail": "loc-set-mismatch",
-      "locClass": "missing",
-      "seqClass": "SEQ-ONLY"
-    },
-    {
-      "key": "nav:tsc/#4812/main.vue:14:3:references",
-      "file": "tsc/#4812/main.vue",
-      "line": 14,
-      "offset": 3,
-      "cmd": "references",
-      "detail": "loc-set-mismatch",
-      "locClass": "missing",
-      "seqClass": "SEQ-ONLY"
-    },
-    {
       "key": "nav:tsc/#4812/main.vue:14:22:quickinfo",
       "file": "tsc/#4812/main.vue",
       "line": 14,
@@ -4342,86 +3882,6 @@
       "cmd": "quickinfo",
       "detail": "quickinfo-display/kind",
       "seqClass": "ALWAYS"
-    },
-    {
-      "key": "nav:tsc/#4826/child.vue:2:33:references",
-      "file": "tsc/#4826/child.vue",
-      "line": 2,
-      "offset": 33,
-      "cmd": "references",
-      "detail": "loc-set-mismatch",
-      "locClass": "missing",
-      "seqClass": "SEQ-ONLY"
-    },
-    {
-      "key": "nav:tsc/#4826/child.vue:5:1:references",
-      "file": "tsc/#4826/child.vue",
-      "line": 5,
-      "offset": 1,
-      "cmd": "references",
-      "detail": "loc-set-mismatch",
-      "locClass": "missing",
-      "seqClass": "SEQ-ONLY"
-    },
-    {
-      "key": "nav:tsc/#4828/main.vue:2:10:references",
-      "file": "tsc/#4828/main.vue",
-      "line": 2,
-      "offset": 10,
-      "cmd": "references",
-      "detail": "loc-set-mismatch",
-      "locClass": "missing",
-      "seqClass": "SEQ-ONLY"
-    },
-    {
-      "key": "nav:tsc/#4828/main.vue:3:10:references",
-      "file": "tsc/#4828/main.vue",
-      "line": 3,
-      "offset": 10,
-      "cmd": "references",
-      "detail": "loc-set-mismatch",
-      "locClass": "missing",
-      "seqClass": "SEQ-ONLY"
-    },
-    {
-      "key": "nav:tsc/#4828/main.vue:3:33:references",
-      "file": "tsc/#4828/main.vue",
-      "line": 3,
-      "offset": 33,
-      "cmd": "references",
-      "detail": "loc-set-mismatch",
-      "locClass": "missing",
-      "seqClass": "SEQ-ONLY"
-    },
-    {
-      "key": "nav:tsc/#4828/main.vue:8:16:references",
-      "file": "tsc/#4828/main.vue",
-      "line": 8,
-      "offset": 16,
-      "cmd": "references",
-      "detail": "loc-set-mismatch",
-      "locClass": "missing",
-      "seqClass": "SEQ-ONLY"
-    },
-    {
-      "key": "nav:tsc/#4828/main.vue:8:30:references",
-      "file": "tsc/#4828/main.vue",
-      "line": 8,
-      "offset": 30,
-      "cmd": "references",
-      "detail": "loc-set-mismatch",
-      "locClass": "missing",
-      "seqClass": "SEQ-ONLY"
-    },
-    {
-      "key": "nav:tsc/#4828/main.vue:13:9:references",
-      "file": "tsc/#4828/main.vue",
-      "line": 13,
-      "offset": 9,
-      "cmd": "references",
-      "detail": "loc-set-mismatch",
-      "locClass": "missing",
-      "seqClass": "SEQ-ONLY"
     },
     {
       "key": "nav:tsc/#4899/main.vue:4:14:quickinfo",
@@ -4433,36 +3893,6 @@
       "seqClass": "ALWAYS"
     },
     {
-      "key": "nav:tsc/#4899/main.vue:4:14:references",
-      "file": "tsc/#4899/main.vue",
-      "line": 4,
-      "offset": 14,
-      "cmd": "references",
-      "detail": "loc-set-mismatch",
-      "locClass": "missing",
-      "seqClass": "SEQ-ONLY"
-    },
-    {
-      "key": "nav:tsc/#4899/main.vue:4:31:references",
-      "file": "tsc/#4899/main.vue",
-      "line": 4,
-      "offset": 31,
-      "cmd": "references",
-      "detail": "loc-set-mismatch",
-      "locClass": "missing",
-      "seqClass": "SEQ-ONLY"
-    },
-    {
-      "key": "nav:tsc/#4899/main.vue:9:1:references",
-      "file": "tsc/#4899/main.vue",
-      "line": 9,
-      "offset": 1,
-      "cmd": "references",
-      "detail": "loc-set-mismatch",
-      "locClass": "missing",
-      "seqClass": "SEQ-ONLY"
-    },
-    {
       "key": "nav:tsc/#4899/main.vue:11:13:quickinfo",
       "file": "tsc/#4899/main.vue",
       "line": 11,
@@ -4470,16 +3900,6 @@
       "cmd": "quickinfo",
       "detail": "quickinfo-display/kind",
       "seqClass": "ALWAYS"
-    },
-    {
-      "key": "nav:tsc/#4899/main.vue:11:13:references",
-      "file": "tsc/#4899/main.vue",
-      "line": 11,
-      "offset": 13,
-      "cmd": "references",
-      "detail": "loc-set-mismatch",
-      "locClass": "missing",
-      "seqClass": "SEQ-ONLY"
     },
     {
       "key": "nav:tsc/#4899/main.vue:11:22:references",
@@ -4490,16 +3910,6 @@
       "detail": "loc-set-mismatch",
       "locClass": "mixed",
       "seqClass": "ALWAYS"
-    },
-    {
-      "key": "nav:tsc/#4899/main.vue:12:9:references",
-      "file": "tsc/#4899/main.vue",
-      "line": 12,
-      "offset": 9,
-      "cmd": "references",
-      "detail": "loc-set-mismatch",
-      "locClass": "missing",
-      "seqClass": "SEQ-ONLY"
     },
     {
       "key": "nav:tsc/#4978/main.vue:6:9:quickinfo",
@@ -4565,16 +3975,6 @@
       "cmd": "quickinfo",
       "detail": "quickinfo-display/kind",
       "seqClass": "ALWAYS"
-    },
-    {
-      "key": "nav:tsc/#5067/main.vue:18:30:references",
-      "file": "tsc/#5067/main.vue",
-      "line": 18,
-      "offset": 30,
-      "cmd": "references",
-      "detail": "loc-set-mismatch",
-      "locClass": "missing",
-      "seqClass": "SEQ-ONLY"
     },
     {
       "key": "nav:tsc/#5067/main.vue:19:19:quickinfo",
@@ -4678,16 +4078,6 @@
       "seqClass": "ALWAYS"
     },
     {
-      "key": "nav:tsc/#5111/main.vue:2:10:references",
-      "file": "tsc/#5111/main.vue",
-      "line": 2,
-      "offset": 10,
-      "cmd": "references",
-      "detail": "loc-set-mismatch",
-      "locClass": "missing",
-      "seqClass": "SEQ-ONLY"
-    },
-    {
       "key": "nav:tsc/#5111/main.vue:7:21:references",
       "file": "tsc/#5111/main.vue",
       "line": 7,
@@ -4708,26 +4098,6 @@
       "seqClass": "ALWAYS"
     },
     {
-      "key": "nav:tsc/#5157/main.vue:2:10:references",
-      "file": "tsc/#5157/main.vue",
-      "line": 2,
-      "offset": 10,
-      "cmd": "references",
-      "detail": "loc-set-mismatch",
-      "locClass": "missing",
-      "seqClass": "SEQ-ONLY"
-    },
-    {
-      "key": "nav:tsc/#5157/main.vue:2:22:references",
-      "file": "tsc/#5157/main.vue",
-      "line": 2,
-      "offset": 22,
-      "cmd": "references",
-      "detail": "loc-set-mismatch",
-      "locClass": "missing",
-      "seqClass": "SEQ-ONLY"
-    },
-    {
       "key": "nav:tsc/#5157/main.vue:4:24:references",
       "file": "tsc/#5157/main.vue",
       "line": 4,
@@ -4736,16 +4106,6 @@
       "detail": "loc-set-mismatch",
       "locClass": "mixed",
       "seqClass": "ALWAYS"
-    },
-    {
-      "key": "nav:tsc/#5157/main.vue:9:3:references",
-      "file": "tsc/#5157/main.vue",
-      "line": 9,
-      "offset": 3,
-      "cmd": "references",
-      "detail": "loc-set-mismatch",
-      "locClass": "missing",
-      "seqClass": "SEQ-ONLY"
     },
     {
       "key": "nav:tsc/#5228/main.vue:1:34:quickinfo",
@@ -4765,16 +4125,6 @@
       "detail": "loc-set-mismatch",
       "locClass": "mixed",
       "seqClass": "ALWAYS"
-    },
-    {
-      "key": "nav:tsc/#5228/main.vue:2:1:references",
-      "file": "tsc/#5228/main.vue",
-      "line": 2,
-      "offset": 1,
-      "cmd": "references",
-      "detail": "loc-set-mismatch",
-      "locClass": "missing",
-      "seqClass": "SEQ-ONLY"
     },
     {
       "key": "nav:tsc/#5228/main.vue:3:16:quickinfo",
@@ -4805,26 +4155,6 @@
       "seqClass": "ALWAYS"
     },
     {
-      "key": "nav:tsc/#5228/main.vue:10:3:references",
-      "file": "tsc/#5228/main.vue",
-      "line": 10,
-      "offset": 3,
-      "cmd": "references",
-      "detail": "loc-set-mismatch",
-      "locClass": "missing",
-      "seqClass": "SEQ-ONLY"
-    },
-    {
-      "key": "nav:tsc/#5338/main.vue:2:10:references",
-      "file": "tsc/#5338/main.vue",
-      "line": 2,
-      "offset": 10,
-      "cmd": "references",
-      "detail": "loc-set-mismatch",
-      "locClass": "missing",
-      "seqClass": "SEQ-ONLY"
-    },
-    {
       "key": "nav:tsc/#5338/main.vue:4:1:quickinfo",
       "file": "tsc/#5338/main.vue",
       "line": 4,
@@ -4832,26 +4162,6 @@
       "cmd": "quickinfo",
       "detail": "quickinfo-display/kind",
       "seqClass": "ALWAYS"
-    },
-    {
-      "key": "nav:tsc/#5338/main.vue:4:1:references",
-      "file": "tsc/#5338/main.vue",
-      "line": 4,
-      "offset": 1,
-      "cmd": "references",
-      "detail": "loc-set-mismatch",
-      "locClass": "missing",
-      "seqClass": "SEQ-ONLY"
-    },
-    {
-      "key": "nav:tsc/#5338/main.vue:4:14:references",
-      "file": "tsc/#5338/main.vue",
-      "line": 4,
-      "offset": 14,
-      "cmd": "references",
-      "detail": "loc-set-mismatch",
-      "locClass": "missing",
-      "seqClass": "SEQ-ONLY"
     },
     {
       "key": "nav:tsc/#5338/main.vue:5:11:references",
@@ -4912,16 +4222,6 @@
       "seqClass": "ALWAYS"
     },
     {
-      "key": "nav:tsc/#5592/child.vue:2:1:references",
-      "file": "tsc/#5592/child.vue",
-      "line": 2,
-      "offset": 1,
-      "cmd": "references",
-      "detail": "loc-set-mismatch",
-      "locClass": "missing",
-      "seqClass": "SEQ-ONLY"
-    },
-    {
       "key": "nav:tsc/#5592/child.vue:2:17:quickinfo",
       "file": "tsc/#5592/child.vue",
       "line": 2,
@@ -4929,26 +4229,6 @@
       "cmd": "quickinfo",
       "detail": "quickinfo-display/kind",
       "seqClass": "ALWAYS"
-    },
-    {
-      "key": "nav:tsc/#5592/child.vue:2:17:references",
-      "file": "tsc/#5592/child.vue",
-      "line": 2,
-      "offset": 17,
-      "cmd": "references",
-      "detail": "loc-set-mismatch",
-      "locClass": "missing",
-      "seqClass": "SEQ-ONLY"
-    },
-    {
-      "key": "nav:tsc/#5592/child.vue:3:1:references",
-      "file": "tsc/#5592/child.vue",
-      "line": 3,
-      "offset": 1,
-      "cmd": "references",
-      "detail": "loc-set-mismatch",
-      "locClass": "missing",
-      "seqClass": "SEQ-ONLY"
     },
     {
       "key": "nav:tsc/#5592/child.vue:3:13:quickinfo",
@@ -4960,16 +4240,6 @@
       "seqClass": "ALWAYS"
     },
     {
-      "key": "nav:tsc/#5592/child.vue:7:16:references",
-      "file": "tsc/#5592/child.vue",
-      "line": 7,
-      "offset": 16,
-      "cmd": "references",
-      "detail": "loc-set-mismatch",
-      "locClass": "missing",
-      "seqClass": "SEQ-ONLY"
-    },
-    {
       "key": "nav:tsc/#5592/child.vue:7:26:quickinfo",
       "file": "tsc/#5592/child.vue",
       "line": 7,
@@ -4979,16 +4249,6 @@
       "seqClass": "ALWAYS"
     },
     {
-      "key": "nav:tsc/#5680/child.vue:4:1:references",
-      "file": "tsc/#5680/child.vue",
-      "line": 4,
-      "offset": 1,
-      "cmd": "references",
-      "detail": "loc-set-mismatch",
-      "locClass": "missing",
-      "seqClass": "SEQ-ONLY"
-    },
-    {
       "key": "nav:tsc/#5680/child.vue:4:15:quickinfo",
       "file": "tsc/#5680/child.vue",
       "line": 4,
@@ -4996,46 +4256,6 @@
       "cmd": "quickinfo",
       "detail": "quickinfo-display/kind",
       "seqClass": "ALWAYS"
-    },
-    {
-      "key": "nav:tsc/#5680/child.vue:8:3:references",
-      "file": "tsc/#5680/child.vue",
-      "line": 8,
-      "offset": 3,
-      "cmd": "references",
-      "detail": "loc-set-mismatch",
-      "locClass": "missing",
-      "seqClass": "SEQ-ONLY"
-    },
-    {
-      "key": "nav:tsc/#5776/main.vue:2:10:references",
-      "file": "tsc/#5776/main.vue",
-      "line": 2,
-      "offset": 10,
-      "cmd": "references",
-      "detail": "loc-set-mismatch",
-      "locClass": "missing",
-      "seqClass": "SEQ-ONLY"
-    },
-    {
-      "key": "nav:tsc/#5776/main.vue:2:22:references",
-      "file": "tsc/#5776/main.vue",
-      "line": 2,
-      "offset": 22,
-      "cmd": "references",
-      "detail": "loc-set-mismatch",
-      "locClass": "missing",
-      "seqClass": "SEQ-ONLY"
-    },
-    {
-      "key": "nav:tsc/#5776/main.vue:4:1:references",
-      "file": "tsc/#5776/main.vue",
-      "line": 4,
-      "offset": 1,
-      "cmd": "references",
-      "detail": "loc-set-mismatch",
-      "locClass": "missing",
-      "seqClass": "SEQ-ONLY"
     },
     {
       "key": "nav:tsc/#5776/main.vue:4:20:references",
@@ -5057,36 +4277,6 @@
       "seqClass": "ALWAYS"
     },
     {
-      "key": "nav:tsc/#5776/main.vue:11:2:references",
-      "file": "tsc/#5776/main.vue",
-      "line": 11,
-      "offset": 2,
-      "cmd": "references",
-      "detail": "loc-set-mismatch",
-      "locClass": "missing",
-      "seqClass": "SEQ-ONLY"
-    },
-    {
-      "key": "nav:tsc/#5776/main.vue:17:3:references",
-      "file": "tsc/#5776/main.vue",
-      "line": 17,
-      "offset": 3,
-      "cmd": "references",
-      "detail": "loc-set-mismatch",
-      "locClass": "missing",
-      "seqClass": "SEQ-ONLY"
-    },
-    {
-      "key": "nav:tsc/#5776/main.vue:17:7:references",
-      "file": "tsc/#5776/main.vue",
-      "line": 17,
-      "offset": 7,
-      "cmd": "references",
-      "detail": "loc-set-mismatch",
-      "locClass": "missing",
-      "seqClass": "SEQ-ONLY"
-    },
-    {
       "key": "nav:tsc/#5840/main.vue:1:34:quickinfo",
       "file": "tsc/#5840/main.vue",
       "line": 1,
@@ -5106,26 +4296,6 @@
       "seqClass": "ALWAYS"
     },
     {
-      "key": "nav:tsc/#5840/main.vue:2:10:references",
-      "file": "tsc/#5840/main.vue",
-      "line": 2,
-      "offset": 10,
-      "cmd": "references",
-      "detail": "loc-set-mismatch",
-      "locClass": "missing",
-      "seqClass": "SEQ-ONLY"
-    },
-    {
-      "key": "nav:tsc/#5840/main.vue:2:33:references",
-      "file": "tsc/#5840/main.vue",
-      "line": 2,
-      "offset": 33,
-      "cmd": "references",
-      "detail": "loc-set-mismatch",
-      "locClass": "missing",
-      "seqClass": "SEQ-ONLY"
-    },
-    {
       "key": "nav:tsc/#5840/main.vue:4:7:quickinfo",
       "file": "tsc/#5840/main.vue",
       "line": 4,
@@ -5135,16 +4305,6 @@
       "seqClass": "ALWAYS"
     },
     {
-      "key": "nav:tsc/#5840/main.vue:4:15:references",
-      "file": "tsc/#5840/main.vue",
-      "line": 4,
-      "offset": 15,
-      "cmd": "references",
-      "detail": "loc-set-mismatch",
-      "locClass": "missing",
-      "seqClass": "SEQ-ONLY"
-    },
-    {
       "key": "nav:tsc/#5840/main.vue:4:39:quickinfo",
       "file": "tsc/#5840/main.vue",
       "line": 4,
@@ -5152,26 +4312,6 @@
       "cmd": "quickinfo",
       "detail": "quickinfo-display/kind",
       "seqClass": "ALWAYS"
-    },
-    {
-      "key": "nav:tsc/#5840/main.vue:7:9:references",
-      "file": "tsc/#5840/main.vue",
-      "line": 7,
-      "offset": 9,
-      "cmd": "references",
-      "detail": "loc-set-mismatch",
-      "locClass": "missing",
-      "seqClass": "SEQ-ONLY"
-    },
-    {
-      "key": "nav:tsc/#5927/main.vue:2:10:references",
-      "file": "tsc/#5927/main.vue",
-      "line": 2,
-      "offset": 10,
-      "cmd": "references",
-      "detail": "loc-set-mismatch",
-      "locClass": "missing",
-      "seqClass": "SEQ-ONLY"
     },
     {
       "key": "nav:tsc/#5927/main.vue:9:7:quickinfo",
@@ -5361,76 +4501,6 @@
       "seqClass": "ALWAYS"
     },
     {
-      "key": "nav:tsc/components/script-setup-default-props.vue:7:1:references",
-      "file": "tsc/components/script-setup-default-props.vue",
-      "line": 7,
-      "offset": 1,
-      "cmd": "references",
-      "detail": "loc-set-mismatch",
-      "locClass": "missing",
-      "seqClass": "SEQ-ONLY"
-    },
-    {
-      "key": "nav:tsc/components/script-setup-default-props.vue:7:14:references",
-      "file": "tsc/components/script-setup-default-props.vue",
-      "line": 7,
-      "offset": 14,
-      "cmd": "references",
-      "detail": "loc-set-mismatch",
-      "locClass": "missing",
-      "seqClass": "SEQ-ONLY"
-    },
-    {
-      "key": "nav:tsc/components/script-setup.vue:2:1:references",
-      "file": "tsc/components/script-setup.vue",
-      "line": 2,
-      "offset": 1,
-      "cmd": "references",
-      "detail": "loc-set-mismatch",
-      "locClass": "missing",
-      "seqClass": "SEQ-ONLY"
-    },
-    {
-      "key": "nav:tsc/components/script-setup.vue:3:7:references",
-      "file": "tsc/components/script-setup.vue",
-      "line": 3,
-      "offset": 7,
-      "cmd": "references",
-      "detail": "loc-set-mismatch",
-      "locClass": "missing",
-      "seqClass": "SEQ-ONLY"
-    },
-    {
-      "key": "nav:tsc/components/script-setup.vue:6:1:references",
-      "file": "tsc/components/script-setup.vue",
-      "line": 6,
-      "offset": 1,
-      "cmd": "references",
-      "detail": "loc-set-mismatch",
-      "locClass": "missing",
-      "seqClass": "SEQ-ONLY"
-    },
-    {
-      "key": "nav:tsc/cssModule/main.vue:2:31:references",
-      "file": "tsc/cssModule/main.vue",
-      "line": 2,
-      "offset": 31,
-      "cmd": "references",
-      "detail": "loc-set-mismatch",
-      "locClass": "missing",
-      "seqClass": "SEQ-ONLY"
-    },
-    {
-      "key": "nav:tsc/cssModule/main.vue:3:10:references",
-      "file": "tsc/cssModule/main.vue",
-      "line": 3,
-      "offset": 10,
-      "cmd": "references",
-      "detail": "loc-set-mismatch",
-      "locClass": "missing",
-      "seqClass": "SEQ-ONLY"
-    },
-    {
       "key": "nav:tsc/cssModule/main.vue:6:24:quickinfo",
       "file": "tsc/cssModule/main.vue",
       "line": 6,
@@ -5438,16 +4508,6 @@
       "cmd": "quickinfo",
       "detail": "quickinfo-display/kind",
       "seqClass": "ALWAYS"
-    },
-    {
-      "key": "nav:tsc/cssModule/main.vue:6:24:references",
-      "file": "tsc/cssModule/main.vue",
-      "line": 6,
-      "offset": 24,
-      "cmd": "references",
-      "detail": "loc-set-mismatch",
-      "locClass": "missing",
-      "seqClass": "SEQ-ONLY"
     },
     {
       "key": "nav:tsc/cssModule/main.vue:6:31:references",
@@ -5489,16 +4549,6 @@
       "seqClass": "ALWAYS"
     },
     {
-      "key": "nav:tsc/cssModule/main.vue:11:22:references",
-      "file": "tsc/cssModule/main.vue",
-      "line": 11,
-      "offset": 22,
-      "cmd": "references",
-      "detail": "loc-set-mismatch",
-      "locClass": "missing",
-      "seqClass": "SEQ-ONLY"
-    },
-    {
       "key": "nav:tsc/cssModule/main.vue:11:29:references",
       "file": "tsc/cssModule/main.vue",
       "line": 11,
@@ -5538,16 +4588,6 @@
       "seqClass": "ALWAYS"
     },
     {
-      "key": "nav:tsc/cssModule/main.vue:16:22:references",
-      "file": "tsc/cssModule/main.vue",
-      "line": 16,
-      "offset": 22,
-      "cmd": "references",
-      "detail": "loc-set-mismatch",
-      "locClass": "missing",
-      "seqClass": "SEQ-ONLY"
-    },
-    {
       "key": "nav:tsc/cssModule/main.vue:16:29:references",
       "file": "tsc/cssModule/main.vue",
       "line": 16,
@@ -5578,16 +4618,6 @@
       "seqClass": "ALWAYS"
     },
     {
-      "key": "nav:tsc/defineEmits/main.vue:2:10:references",
-      "file": "tsc/defineEmits/main.vue",
-      "line": 2,
-      "offset": 10,
-      "cmd": "references",
-      "detail": "loc-set-mismatch",
-      "locClass": "missing",
-      "seqClass": "SEQ-ONLY"
-    },
-    {
       "key": "nav:tsc/defineEmits/main.vue:7:10:quickinfo",
       "file": "tsc/defineEmits/main.vue",
       "line": 7,
@@ -5614,16 +4644,6 @@
       "cmd": "quickinfo",
       "detail": "quickinfo-display/kind",
       "seqClass": "ALWAYS"
-    },
-    {
-      "key": "nav:tsc/defineModel/main.vue:6:26:references",
-      "file": "tsc/defineModel/main.vue",
-      "line": 6,
-      "offset": 26,
-      "cmd": "references",
-      "detail": "loc-set-mismatch",
-      "locClass": "missing",
-      "seqClass": "SEQ-ONLY"
     },
     {
       "key": "nav:tsc/defineModel/main.vue:8:16:references",
@@ -5817,16 +4837,6 @@
       "seqClass": "ALWAYS"
     },
     {
-      "key": "nav:tsc/defineModel/main.vue:30:67:references",
-      "file": "tsc/defineModel/main.vue",
-      "line": 30,
-      "offset": 67,
-      "cmd": "references",
-      "detail": "loc-set-mismatch",
-      "locClass": "missing",
-      "seqClass": "SEQ-ONLY"
-    },
-    {
       "key": "nav:tsc/defineModel/main.vue:31:11:quickinfo",
       "file": "tsc/defineModel/main.vue",
       "line": 31,
@@ -5881,16 +4891,6 @@
       "detail": "loc-set-mismatch",
       "locClass": "mixed",
       "seqClass": "ALWAYS"
-    },
-    {
-      "key": "nav:tsc/directives/main.vue:3:10:references",
-      "file": "tsc/directives/main.vue",
-      "line": 3,
-      "offset": 10,
-      "cmd": "references",
-      "detail": "loc-set-mismatch",
-      "locClass": "missing",
-      "seqClass": "SEQ-ONLY"
     },
     {
       "key": "nav:tsc/directives/main.vue:7:47:references",
@@ -5971,26 +4971,6 @@
       "detail": "loc-set-mismatch",
       "locClass": "mixed",
       "seqClass": "ALWAYS"
-    },
-    {
-      "key": "nav:tsc/events/main.vue:5:3:references",
-      "file": "tsc/events/main.vue",
-      "line": 5,
-      "offset": 3,
-      "cmd": "references",
-      "detail": "loc-set-mismatch",
-      "locClass": "missing",
-      "seqClass": "SEQ-ONLY"
-    },
-    {
-      "key": "nav:tsc/events/main.vue:5:30:references",
-      "file": "tsc/events/main.vue",
-      "line": 5,
-      "offset": 30,
-      "cmd": "references",
-      "detail": "loc-set-mismatch",
-      "locClass": "missing",
-      "seqClass": "SEQ-ONLY"
     },
     {
       "key": "nav:tsc/events/main.vue:7:50:quickinfo",
@@ -6133,16 +5113,6 @@
       "seqClass": "ALWAYS"
     },
     {
-      "key": "nav:tsc/events/main.vue:41:30:references",
-      "file": "tsc/events/main.vue",
-      "line": 41,
-      "offset": 30,
-      "cmd": "references",
-      "detail": "loc-set-mismatch",
-      "locClass": "missing",
-      "seqClass": "SEQ-ONLY"
-    },
-    {
       "key": "nav:tsc/events/main.vue:41:89:references",
       "file": "tsc/events/main.vue",
       "line": 41,
@@ -6162,16 +5132,6 @@
       "seqClass": "ALWAYS"
     },
     {
-      "key": "nav:tsc/events/main.vue:42:12:references",
-      "file": "tsc/events/main.vue",
-      "line": 42,
-      "offset": 12,
-      "cmd": "references",
-      "detail": "loc-set-mismatch",
-      "locClass": "missing",
-      "seqClass": "SEQ-ONLY"
-    },
-    {
       "key": "nav:tsc/events/main.vue:42:55:quickinfo",
       "file": "tsc/events/main.vue",
       "line": 42,
@@ -6179,16 +5139,6 @@
       "cmd": "quickinfo",
       "detail": "quickinfo-display/kind",
       "seqClass": "ALWAYS"
-    },
-    {
-      "key": "nav:tsc/events/main.vue:42:55:references",
-      "file": "tsc/events/main.vue",
-      "line": 42,
-      "offset": 55,
-      "cmd": "references",
-      "detail": "loc-set-mismatch",
-      "locClass": "missing",
-      "seqClass": "SEQ-ONLY"
     },
     {
       "key": "nav:tsc/events/main.vue:44:7:quickinfo",
@@ -6246,16 +5196,6 @@
       "seqClass": "ALWAYS"
     },
     {
-      "key": "nav:tsc/fallthroughAttributes_duplicateNameProp/basic.vue:2:1:references",
-      "file": "tsc/fallthroughAttributes_duplicateNameProp/basic.vue",
-      "line": 2,
-      "offset": 1,
-      "cmd": "references",
-      "detail": "loc-set-mismatch",
-      "locClass": "missing",
-      "seqClass": "SEQ-ONLY"
-    },
-    {
       "key": "nav:tsc/fallthroughAttributes_duplicateNameProp/basic.vue:3:7:references",
       "file": "tsc/fallthroughAttributes_duplicateNameProp/basic.vue",
       "line": 3,
@@ -6275,16 +5215,6 @@
       "seqClass": "ALWAYS"
     },
     {
-      "key": "nav:tsc/fallthroughAttributes_generic/child.vue:4:1:references",
-      "file": "tsc/fallthroughAttributes_generic/child.vue",
-      "line": 4,
-      "offset": 1,
-      "cmd": "references",
-      "detail": "loc-set-mismatch",
-      "locClass": "missing",
-      "seqClass": "SEQ-ONLY"
-    },
-    {
       "key": "nav:tsc/fallthroughAttributes_generic/child.vue:5:8:quickinfo",
       "file": "tsc/fallthroughAttributes_generic/child.vue",
       "line": 5,
@@ -6292,16 +5222,6 @@
       "cmd": "quickinfo",
       "detail": "quickinfo-display/kind",
       "seqClass": "ALWAYS"
-    },
-    {
-      "key": "nav:tsc/fallthroughAttributes/basic.vue:2:1:references",
-      "file": "tsc/fallthroughAttributes/basic.vue",
-      "line": 2,
-      "offset": 1,
-      "cmd": "references",
-      "detail": "loc-set-mismatch",
-      "locClass": "missing",
-      "seqClass": "SEQ-ONLY"
     },
     {
       "key": "nav:tsc/fallthroughAttributes/basic.vue:3:2:quickinfo",
@@ -6323,16 +5243,6 @@
       "seqClass": "ALWAYS"
     },
     {
-      "key": "nav:tsc/fallthroughAttributes/basic.vue:6:1:references",
-      "file": "tsc/fallthroughAttributes/basic.vue",
-      "line": 6,
-      "offset": 1,
-      "cmd": "references",
-      "detail": "loc-set-mismatch",
-      "locClass": "missing",
-      "seqClass": "SEQ-ONLY"
-    },
-    {
       "key": "nav:tsc/fallthroughAttributes/basic.vue:7:8:references",
       "file": "tsc/fallthroughAttributes/basic.vue",
       "line": 7,
@@ -6352,26 +5262,6 @@
       "seqClass": "ALWAYS"
     },
     {
-      "key": "nav:tsc/fallthroughAttributes/inherit-attrs-false.vue:2:10:references",
-      "file": "tsc/fallthroughAttributes/inherit-attrs-false.vue",
-      "line": 2,
-      "offset": 10,
-      "cmd": "references",
-      "detail": "loc-set-mismatch",
-      "locClass": "missing",
-      "seqClass": "SEQ-ONLY"
-    },
-    {
-      "key": "nav:tsc/fallthroughAttributes/inherit-attrs-false.vue:2:34:references",
-      "file": "tsc/fallthroughAttributes/inherit-attrs-false.vue",
-      "line": 2,
-      "offset": 34,
-      "cmd": "references",
-      "detail": "loc-set-mismatch",
-      "locClass": "missing",
-      "seqClass": "SEQ-ONLY"
-    },
-    {
       "key": "nav:tsc/fallthroughAttributes/inherit-attrs-false.vue:4:16:quickinfo",
       "file": "tsc/fallthroughAttributes/inherit-attrs-false.vue",
       "line": 4,
@@ -6379,16 +5269,6 @@
       "cmd": "quickinfo",
       "detail": "quickinfo-display/kind",
       "seqClass": "ALWAYS"
-    },
-    {
-      "key": "nav:tsc/fallthroughAttributes/inherit-attrs-false.vue:4:16:references",
-      "file": "tsc/fallthroughAttributes/inherit-attrs-false.vue",
-      "line": 4,
-      "offset": 16,
-      "cmd": "references",
-      "detail": "loc-set-mismatch",
-      "locClass": "missing",
-      "seqClass": "SEQ-ONLY"
     },
     {
       "key": "nav:tsc/fallthroughAttributes/inherit-attrs-false.vue:5:2:quickinfo",
@@ -6400,16 +5280,6 @@
       "seqClass": "ALWAYS"
     },
     {
-      "key": "nav:tsc/fallthroughAttributes/inherit-attrs-false.vue:5:2:references",
-      "file": "tsc/fallthroughAttributes/inherit-attrs-false.vue",
-      "line": 5,
-      "offset": 2,
-      "cmd": "references",
-      "detail": "loc-set-mismatch",
-      "locClass": "missing",
-      "seqClass": "SEQ-ONLY"
-    },
-    {
       "key": "nav:tsc/namespace-component/main.vue:6:10:quickinfo",
       "file": "tsc/namespace-component/main.vue",
       "line": 6,
@@ -6419,26 +5289,6 @@
       "seqClass": "ALWAYS"
     },
     {
-      "key": "nav:tsc/namespace-component/main.vue:6:10:references",
-      "file": "tsc/namespace-component/main.vue",
-      "line": 6,
-      "offset": 10,
-      "cmd": "references",
-      "detail": "loc-set-mismatch",
-      "locClass": "missing",
-      "seqClass": "SEQ-ONLY"
-    },
-    {
-      "key": "nav:tsc/namespace-component/main.vue:6:34:references",
-      "file": "tsc/namespace-component/main.vue",
-      "line": 6,
-      "offset": 34,
-      "cmd": "references",
-      "detail": "loc-set-mismatch",
-      "locClass": "missing",
-      "seqClass": "SEQ-ONLY"
-    },
-    {
       "key": "nav:tsc/namespace-component/main.vue:8:27:quickinfo",
       "file": "tsc/namespace-component/main.vue",
       "line": 8,
@@ -6446,26 +5296,6 @@
       "cmd": "quickinfo",
       "detail": "quickinfo-display/kind",
       "seqClass": "ALWAYS"
-    },
-    {
-      "key": "nav:tsc/namespace-component/main.vue:8:27:references",
-      "file": "tsc/namespace-component/main.vue",
-      "line": 8,
-      "offset": 27,
-      "cmd": "references",
-      "detail": "loc-set-mismatch",
-      "locClass": "missing",
-      "seqClass": "SEQ-ONLY"
-    },
-    {
-      "key": "nav:tsc/pug/#4774.vue:2:2:references",
-      "file": "tsc/pug/#4774.vue",
-      "line": 2,
-      "offset": 2,
-      "cmd": "references",
-      "detail": "loc-set-mismatch",
-      "locClass": "missing",
-      "seqClass": "SEQ-ONLY"
     },
     {
       "key": "nav:tsc/reference-type-in-template/main.vue:9:12:references",
@@ -6494,46 +5324,6 @@
       "cmd": "quickinfo",
       "detail": "quickinfo-display/kind",
       "seqClass": "ALWAYS"
-    },
-    {
-      "key": "nav:tsc/templateRef/main.vue:4:10:references",
-      "file": "tsc/templateRef/main.vue",
-      "line": 4,
-      "offset": 10,
-      "cmd": "references",
-      "detail": "loc-set-mismatch",
-      "locClass": "missing",
-      "seqClass": "SEQ-ONLY"
-    },
-    {
-      "key": "nav:tsc/templateRef/main.vue:4:33:references",
-      "file": "tsc/templateRef/main.vue",
-      "line": 4,
-      "offset": 33,
-      "cmd": "references",
-      "detail": "loc-set-mismatch",
-      "locClass": "missing",
-      "seqClass": "SEQ-ONLY"
-    },
-    {
-      "key": "nav:tsc/templateRef/main.vue:5:10:references",
-      "file": "tsc/templateRef/main.vue",
-      "line": 5,
-      "offset": 10,
-      "cmd": "references",
-      "detail": "loc-set-mismatch",
-      "locClass": "missing",
-      "seqClass": "SEQ-ONLY"
-    },
-    {
-      "key": "nav:tsc/templateRef/main.vue:10:16:references",
-      "file": "tsc/templateRef/main.vue",
-      "line": 10,
-      "offset": 16,
-      "cmd": "references",
-      "detail": "loc-set-mismatch",
-      "locClass": "missing",
-      "seqClass": "SEQ-ONLY"
     },
     {
       "key": "nav:tsc/templateRef/main.vue:18:21:quickinfo",
@@ -6572,26 +5362,6 @@
       "seqClass": "ALWAYS"
     },
     {
-      "key": "nav:tsc/unknownProp/main.vue:6:10:references",
-      "file": "tsc/unknownProp/main.vue",
-      "line": 6,
-      "offset": 10,
-      "cmd": "references",
-      "detail": "loc-set-mismatch",
-      "locClass": "missing",
-      "seqClass": "SEQ-ONLY"
-    },
-    {
-      "key": "nav:tsc/unknownProp/main.vue:6:34:references",
-      "file": "tsc/unknownProp/main.vue",
-      "line": 6,
-      "offset": 34,
-      "cmd": "references",
-      "detail": "loc-set-mismatch",
-      "locClass": "missing",
-      "seqClass": "SEQ-ONLY"
-    },
-    {
       "key": "nav:tsc/unknownProp/main.vue:8:7:quickinfo",
       "file": "tsc/unknownProp/main.vue",
       "line": 8,
@@ -6608,66 +5378,6 @@
       "cmd": "quickinfo",
       "detail": "quickinfo-display/kind",
       "seqClass": "ALWAYS"
-    },
-    {
-      "key": "nav:tsc/unknownProp/main.vue:8:13:references",
-      "file": "tsc/unknownProp/main.vue",
-      "line": 8,
-      "offset": 13,
-      "cmd": "references",
-      "detail": "loc-set-mismatch",
-      "locClass": "missing",
-      "seqClass": "SEQ-ONLY"
-    },
-    {
-      "key": "nav:tsc/unknownProp/main.vue:9:2:references",
-      "file": "tsc/unknownProp/main.vue",
-      "line": 9,
-      "offset": 2,
-      "cmd": "references",
-      "detail": "loc-set-mismatch",
-      "locClass": "missing",
-      "seqClass": "SEQ-ONLY"
-    },
-    {
-      "key": "nav:tsc/unknownProp/main.vue:10:8:references",
-      "file": "tsc/unknownProp/main.vue",
-      "line": 10,
-      "offset": 8,
-      "cmd": "references",
-      "detail": "loc-set-mismatch",
-      "locClass": "missing",
-      "seqClass": "SEQ-ONLY"
-    },
-    {
-      "key": "nav:tsc/v-bind-require-object/main.vue:7:3:references",
-      "file": "tsc/v-bind-require-object/main.vue",
-      "line": 7,
-      "offset": 3,
-      "cmd": "references",
-      "detail": "loc-set-mismatch",
-      "locClass": "missing",
-      "seqClass": "SEQ-ONLY"
-    },
-    {
-      "key": "nav:tsc/v-for/main.vue:4:8:references",
-      "file": "tsc/v-for/main.vue",
-      "line": 4,
-      "offset": 8,
-      "cmd": "references",
-      "detail": "loc-set-mismatch",
-      "locClass": "missing",
-      "seqClass": "SEQ-ONLY"
-    },
-    {
-      "key": "nav:tsc/v-for/main.vue:6:5:references",
-      "file": "tsc/v-for/main.vue",
-      "line": 6,
-      "offset": 5,
-      "cmd": "references",
-      "detail": "loc-set-mismatch",
-      "locClass": "missing",
-      "seqClass": "SEQ-ONLY"
     },
     {
       "key": "nav:tsc/v-for/main.vue:9:29:references",
@@ -6779,16 +5489,6 @@
       "seqClass": "ALWAYS"
     },
     {
-      "key": "nav:tsc/v-for/main.vue:66:24:references",
-      "file": "tsc/v-for/main.vue",
-      "line": 66,
-      "offset": 24,
-      "cmd": "references",
-      "detail": "loc-set-mismatch",
-      "locClass": "missing",
-      "seqClass": "SEQ-ONLY"
-    },
-    {
       "key": "nav:tsc/v-for/main.vue:67:23:quickinfo",
       "file": "tsc/v-for/main.vue",
       "line": 67,
@@ -6796,26 +5496,6 @@
       "cmd": "quickinfo",
       "detail": "quickinfo-display/kind",
       "seqClass": "ALWAYS"
-    },
-    {
-      "key": "nav:tsc/v-for/main.vue:67:23:references",
-      "file": "tsc/v-for/main.vue",
-      "line": 67,
-      "offset": 23,
-      "cmd": "references",
-      "detail": "loc-set-mismatch",
-      "locClass": "missing",
-      "seqClass": "SEQ-ONLY"
-    },
-    {
-      "key": "nav:tsc/withDefaults/main.vue:2:10:references",
-      "file": "tsc/withDefaults/main.vue",
-      "line": 2,
-      "offset": 10,
-      "cmd": "references",
-      "detail": "loc-set-mismatch",
-      "locClass": "missing",
-      "seqClass": "SEQ-ONLY"
     },
     {
       "key": "nav:tsc/withDefaults/main.vue:5:15:references",
@@ -6835,36 +5515,6 @@
       "cmd": "quickinfo",
       "detail": "quickinfo-display/kind",
       "seqClass": "ALWAYS"
-    },
-    {
-      "key": "nav:tsc/withDefaults/main.vue:8:1:references",
-      "file": "tsc/withDefaults/main.vue",
-      "line": 8,
-      "offset": 1,
-      "cmd": "references",
-      "detail": "loc-set-mismatch",
-      "locClass": "missing",
-      "seqClass": "SEQ-ONLY"
-    },
-    {
-      "key": "nav:tsc/withDefaults/main.vue:8:14:references",
-      "file": "tsc/withDefaults/main.vue",
-      "line": 8,
-      "offset": 14,
-      "cmd": "references",
-      "detail": "loc-set-mismatch",
-      "locClass": "missing",
-      "seqClass": "SEQ-ONLY"
-    },
-    {
-      "key": "nav:tsc/withDefaults/main.vue:14:3:references",
-      "file": "tsc/withDefaults/main.vue",
-      "line": 14,
-      "offset": 3,
-      "cmd": "references",
-      "detail": "loc-set-mismatch",
-      "locClass": "missing",
-      "seqClass": "SEQ-ONLY"
     },
     {
       "key": "nav:tsc/withDefaults/main.vue:15:34:references",
