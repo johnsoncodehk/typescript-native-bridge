@@ -5,9 +5,15 @@
 
 const BUNDLED_LIB_PREFIX = "bundled:///libs/";
 
+// require("path") per call measured hot (resolveHostFileName runs per corpus
+// file per watch generation) — share one lookup.
+let _nodePath: typeof import("path") | undefined;
+function nodePath(): typeof import("path") {
+    return _nodePath ??= require("path");
+}
+
 export function getTnbPackageRoot(): string {
-    const path = require("path") as typeof import("path");
-    return path.resolve(__dirname, "..");
+    return nodePath().resolve(__dirname, "..");
 }
 
 export function isBundledLibPath(fileName: string): boolean {
@@ -15,9 +21,8 @@ export function isBundledLibPath(fileName: string): boolean {
 }
 
 export function bundledLibPathToHostPath(bundledPath: string): string {
-    const path = require("path") as typeof import("path");
     const libFile = bundledPath.slice(BUNDLED_LIB_PREFIX.length);
-    return path.join(getTnbPackageRoot(), "lib", libFile);
+    return nodePath().join(getTnbPackageRoot(), "lib", libFile);
 }
 
 export function toHostFileName(fileName: string): string {
@@ -27,7 +32,7 @@ export function toHostFileName(fileName: string): string {
 /** Normalize host file paths — tsserver may use cwd-relative paths for project files. */
 export function resolveHostFileName(fileName: string, host?: { getCurrentDirectory?: () => string }): string {
     const mapped = toHostFileName(fileName);
-    const path = require("path") as typeof import("path");
+    const path = nodePath();
     const normalized = mapped.replace(/\\/g, "/");
     if (path.isAbsolute(normalized)) {
         return path.normalize(normalized);

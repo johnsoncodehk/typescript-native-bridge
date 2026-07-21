@@ -3940,7 +3940,7 @@ index 6a90030eb..fc58b512a 100644
      const docFiles = {
          "/tsconfig.json": JSON.stringify({ compilerOptions: { strict: true } }),
 diff --git a/internal/api/proto.go b/internal/api/proto.go
-index 0917c385d..73b4a717f 100644
+index 0917c385d..6d0d2e509 100644
 --- a/internal/api/proto.go
 +++ b/internal/api/proto.go
 @@ -67,33 +67,64 @@ const (
@@ -4267,7 +4267,19 @@ index 0917c385d..73b4a717f 100644
  }
  
  // ProjectFileChanges describes what source files changed within a single project.
-@@ -358,33 +501,56 @@ type UpdateSnapshotResponse struct {
+@@ -332,6 +475,11 @@ type ProjectFileChanges struct {
+ 	ChangedFiles []tspath.Path `json:"changedFiles,omitempty"`
+ 	// DeletedFiles lists source file paths removed from the project's program.
+ 	DeletedFiles []tspath.Path `json:"deletedFiles,omitempty"`
++	// AddedFiles lists source file paths newly present in the project's program.
++	// Blob caches need no invalidation for these (no stale entry can exist),
++	// but whole-program answers (builder file graph, source-file names) must
++	// not treat the project as unchanged.
++	AddedFiles []tspath.Path `json:"addedFiles,omitempty"`
+ }
+ 
+ // SnapshotChanges describes what changed between the previous latest snapshot
+@@ -358,33 +506,56 @@ type UpdateSnapshotResponse struct {
  }
  
  var unmarshalers = map[Method]func([]byte) (any, error){
@@ -4346,7 +4358,7 @@ index 0917c385d..73b4a717f 100644
  
  	MethodGetSymbolOfType:               unmarshallerFor[GetTypePropertyParams],
  	MethodGetTargetOfType:               unmarshallerFor[GetTypePropertyParams],
-@@ -410,70 +576,150 @@ var unmarshalers = map[Method]func([]byte) (any, error){
+@@ -410,70 +581,150 @@ var unmarshalers = map[Method]func([]byte) (any, error){
  	MethodGetThisParameterOfSignature:  unmarshallerFor[GetSignaturePropertyParams],
  	MethodGetTargetOfSignature:         unmarshallerFor[GetSignaturePropertyParams],
  
@@ -4561,7 +4573,7 @@ index 0917c385d..73b4a717f 100644
  }
  
  type ParseConfigFileParams struct {
-@@ -529,6 +775,16 @@ type GetSymbolAtPositionParams struct {
+@@ -529,6 +780,16 @@ type GetSymbolAtPositionParams struct {
  	Position uint32             `json:"position"`
  }
  
@@ -4578,7 +4590,7 @@ index 0917c385d..73b4a717f 100644
  type GetSymbolsAtPositionsParams struct {
  	Snapshot  SnapshotID         `json:"snapshot"`
  	Project   ProjectID          `json:"project"`
-@@ -781,6 +1037,47 @@ type SourceFileMetadata struct {
+@@ -781,6 +1042,47 @@ type SourceFileMetadata struct {
  	ImpliedNodeFormat     core.ResolutionMode `json:"impliedNodeFormat"`
  }
  
@@ -4626,7 +4638,7 @@ index 0917c385d..73b4a717f 100644
  type ResolveNameParams struct {
  	Snapshot       SnapshotID          `json:"snapshot"`
  	Project        ProjectID           `json:"project"`
-@@ -806,6 +1103,13 @@ type GetSymbolPropertyParams struct {
+@@ -806,6 +1108,13 @@ type GetSymbolPropertyParams struct {
  	Symbol   SymbolID   `json:"objectId"`
  }
  
@@ -4640,7 +4652,7 @@ index 0917c385d..73b4a717f 100644
  // GetSignaturePropertyParams is used for all signature sub-property endpoints.
  type GetSignaturePropertyParams struct {
  	Snapshot  SnapshotID  `json:"snapshot"`
-@@ -815,9 +1119,10 @@ type GetSignaturePropertyParams struct {
+@@ -815,9 +1124,10 @@ type GetSignaturePropertyParams struct {
  
  // GetContextualTypeParams returns the contextual type for a node.
  type GetContextualTypeParams struct {
@@ -4654,7 +4666,7 @@ index 0917c385d..73b4a717f 100644
  }
  
  // GetTypeOfSymbolAtLocationParams returns the narrowed type of a symbol at a specific location.
-@@ -927,6 +1232,13 @@ type GetNonNullableTypeParams struct {
+@@ -927,6 +1237,13 @@ type GetNonNullableTypeParams struct {
  	Type     TypeID     `json:"type"`
  }
  
@@ -4668,7 +4680,7 @@ index 0917c385d..73b4a717f 100644
  // GetTypeFromTypeNodeParams are the parameters for the getTypeFromTypeNode method.
  type GetTypeFromTypeNodeParams struct {
  	Snapshot SnapshotID `json:"snapshot"`
-@@ -956,6 +1268,74 @@ type IsArrayLikeTypeParams struct {
+@@ -956,6 +1273,74 @@ type IsArrayLikeTypeParams struct {
  	Type     TypeID     `json:"type"`
  }
  
@@ -4743,7 +4755,7 @@ index 0917c385d..73b4a717f 100644
  // IsTypeAssignableToParams checks assignability between two types.
  type IsTypeAssignableToParams struct {
  	Snapshot SnapshotID `json:"snapshot"`
-@@ -977,6 +1357,47 @@ type GetResolvedSignatureParams struct {
+@@ -977,6 +1362,47 @@ type GetResolvedSignatureParams struct {
  	Location NodeHandle `json:"location"`
  }
  
@@ -4791,7 +4803,7 @@ index 0917c385d..73b4a717f 100644
  type GetTypeAtLocationParams struct {
  	Snapshot SnapshotID `json:"snapshot"`
  	Project  ProjectID  `json:"project"`
-@@ -1012,6 +1433,24 @@ type TypeToTypeNodeParams struct {
+@@ -1012,6 +1438,24 @@ type TypeToTypeNodeParams struct {
  	Flags    int32      `json:"flags,omitempty"`
  }
  
@@ -4816,7 +4828,7 @@ index 0917c385d..73b4a717f 100644
  // SignatureToSignatureDeclarationParams are the parameters for the signatureToSignatureDeclaration method.
  type SignatureToSignatureDeclarationParams struct {
  	Snapshot  SnapshotID  `json:"snapshot"`
-@@ -1022,6 +1461,15 @@ type SignatureToSignatureDeclarationParams struct {
+@@ -1022,6 +1466,15 @@ type SignatureToSignatureDeclarationParams struct {
  	Flags     int32       `json:"flags,omitempty"`
  }
  
@@ -4832,7 +4844,7 @@ index 0917c385d..73b4a717f 100644
  // PrintNodeParams are the parameters for the printNode method.
  type PrintNodeParams struct {
  	Data                          string `json:"data"` // base64-encoded binary AST data
-@@ -1060,6 +1508,88 @@ type CheckerNodeParams struct {
+@@ -1060,6 +1513,88 @@ type CheckerNodeParams struct {
  	Location NodeHandle `json:"location"`
  }
  
@@ -4921,7 +4933,7 @@ index 0917c385d..73b4a717f 100644
  // CheckerSymbolParams are parameters for checker methods that operate on a symbol.
  type CheckerSymbolParams struct {
  	Snapshot SnapshotID `json:"snapshot"`
-@@ -1074,6 +1604,216 @@ type JSDocTagInfo struct {
+@@ -1074,6 +1609,216 @@ type JSDocTagInfo struct {
  	Text string `json:"text,omitempty"`
  }
  
@@ -5138,7 +5150,7 @@ index 0917c385d..73b4a717f 100644
  // CheckerSignatureParams are parameters for checker methods that operate on a signature.
  type CheckerSignatureParams struct {
  	Snapshot  SnapshotID  `json:"snapshot"`
-@@ -1095,6 +1835,9 @@ type IndexInfoResponse struct {
+@@ -1095,6 +1840,9 @@ type IndexInfoResponse struct {
  	ValueType   TypeResponse `json:"valueType"`
  	IsReadonly  bool         `json:"isReadonly,omitempty"`
  	Declaration NodeHandle   `json:"declaration,omitempty"`
@@ -5148,7 +5160,7 @@ index 0917c385d..73b4a717f 100644
  }
  
  // SourceFileResponse contains the binary-encoded AST data for a source file.
-@@ -1110,6 +1853,68 @@ type GetDiagnosticsParams struct {
+@@ -1110,6 +1858,68 @@ type GetDiagnosticsParams struct {
  	File     *DocumentIdentifier `json:"file,omitempty"`
  }
  
@@ -5218,7 +5230,7 @@ index 0917c385d..73b4a717f 100644
  type GetProjectDiagnosticsParams struct {
  	Snapshot SnapshotID `json:"snapshot"`
 diff --git a/internal/api/session.go b/internal/api/session.go
-index 7e29c44b6..44adfcb1e 100644
+index 7e29c44b6..55cae2016 100644
 --- a/internal/api/session.go
 +++ b/internal/api/session.go
 @@ -13,12 +13,15 @@ import (
@@ -9361,10 +9373,9 @@ index 7e29c44b6..44adfcb1e 100644
 -	return setup.newTypeResponse(result), nil
 +	return setup.newSymbolResponse(symbol), nil
  }
--
+ 
 -// handleGetParameterType returns the type of a parameter at a given index in a signature.
 -func (s *Session) handleGetParameterType(ctx context.Context, params *GetParameterTypeParams) (*TypeResponse, error) {
-+
 +func (s *Session) handleGetSuggestedSymbolForNonexistentClassMember(ctx context.Context, params *GetSuggestedSymbolForNonexistentClassMemberParams) (*SymbolResponse, error) {
  	setup, err := s.setupChecker(ctx, params.Snapshot, params.Project)
  	if err != nil {
@@ -9846,7 +9857,7 @@ index 7e29c44b6..44adfcb1e 100644
 +	result := setup.checker.CreatePromiseType(t)
 +	if result == nil {
 +		return nil, nil
-+	}
+ 	}
 +	return setup.newTypeResponse(result), nil
 +}
 +
@@ -9855,7 +9866,7 @@ index 7e29c44b6..44adfcb1e 100644
 +	setup, err := s.setupChecker(ctx, params.Snapshot, params.Project)
 +	if err != nil {
 +		return nil, err
- 	}
++	}
 +	defer setup.done()
  
 -	return setup.checker.IsContextSensitive(node), nil
@@ -10016,13 +10027,13 @@ index 7e29c44b6..44adfcb1e 100644
 +	classLike, err := setup.sd.resolveNodeHandle(setup.program, params.ClassLike)
  	if err != nil {
 -		return nil, err
-+		return 0, err
- 	}
+-	}
 -
 -	pred := setup.checker.GetTypePredicateOfSignature(sig)
 -	if pred == nil {
 -		return nil, nil
--	}
++		return 0, err
+ 	}
 -
 -	resp := &TypePredicateResponse{
 -		Kind:           int32(pred.Kind()),
@@ -10235,7 +10246,27 @@ index 7e29c44b6..44adfcb1e 100644
  // handleGetMemberInModuleExports returns an export by name from a module symbol.
  func (s *Session) handleGetMemberInModuleExports(ctx context.Context, params *GetMemberInModuleExportsParams) (*SymbolResponse, error) {
  	setup, err := s.setupChecker(ctx, params.Snapshot, params.Project)
-@@ -2979,7 +6061,6 @@ func (s *Session) handleGetBindDiagnostics(ctx context.Context, params *GetDiagn
+@@ -2830,7 +5912,9 @@ func computeSnapshotChanges(prev *project.Snapshot, next *project.Snapshot) *Sna
+ 			var projectChanges ProjectFileChanges
+ 			core.DiffMaps(
+ 				oldFiles, newFiles,
+-				nil, // onAdded: new file in project, not a change.
++				func(path tspath.Path, _ *ast.SourceFile) {
++					projectChanges.AddedFiles = append(projectChanges.AddedFiles, path)
++				},
+ 				func(path tspath.Path, _ *ast.SourceFile) {
+ 					projectChanges.DeletedFiles = append(projectChanges.DeletedFiles, path)
+ 				},
+@@ -2838,7 +5922,7 @@ func computeSnapshotChanges(prev *project.Snapshot, next *project.Snapshot) *Sna
+ 					projectChanges.ChangedFiles = append(projectChanges.ChangedFiles, path)
+ 				},
+ 			)
+-			if len(projectChanges.ChangedFiles) > 0 || len(projectChanges.DeletedFiles) > 0 {
++			if len(projectChanges.ChangedFiles) > 0 || len(projectChanges.DeletedFiles) > 0 || len(projectChanges.AddedFiles) > 0 {
+ 				if changes.ChangedProjects == nil {
+ 					changes.ChangedProjects = make(map[ProjectID]*ProjectFileChanges)
+ 				}
+@@ -2979,7 +6063,6 @@ func (s *Session) handleGetBindDiagnostics(ctx context.Context, params *GetDiagn
  
  // handleGetSemanticDiagnostics returns semantic diagnostics for a file or all files.
  func (s *Session) handleGetSemanticDiagnostics(ctx context.Context, params *GetDiagnosticsParams) ([]*DiagnosticResponse, error) {
@@ -10243,7 +10274,7 @@ index 7e29c44b6..44adfcb1e 100644
  	sd, err := s.getSnapshotData(params.Snapshot)
  	if err != nil {
  		return nil, err
-@@ -2995,10 +6076,150 @@ func (s *Session) handleGetSemanticDiagnostics(ctx context.Context, params *GetD
+@@ -2995,10 +6078,150 @@ func (s *Session) handleGetSemanticDiagnostics(ctx context.Context, params *GetD
  		return nil, err
  	}
  
@@ -10394,7 +10425,7 @@ index 7e29c44b6..44adfcb1e 100644
  // handleGetSuggestionDiagnostics returns suggestion diagnostics for a file or all files.
  func (s *Session) handleGetSuggestionDiagnostics(ctx context.Context, params *GetDiagnosticsParams) ([]*DiagnosticResponse, error) {
  	ctx = core.WithCheckerLifetime(ctx, core.CheckerLifetimeDiagnostics)
-@@ -3077,7 +6298,6 @@ func (s *Session) handleGetProgramDiagnostics(ctx context.Context, params *GetPr
+@@ -3077,7 +6300,6 @@ func (s *Session) handleGetProgramDiagnostics(ctx context.Context, params *GetPr
  
  // handleGetGlobalDiagnostics returns global (non-file-specific) semantic diagnostics.
  func (s *Session) handleGetGlobalDiagnostics(ctx context.Context, params *GetProjectDiagnosticsParams) ([]*DiagnosticResponse, error) {
@@ -10402,7 +10433,7 @@ index 7e29c44b6..44adfcb1e 100644
  	sd, err := s.getSnapshotData(params.Snapshot)
  	if err != nil {
  		return nil, err
-@@ -3094,11 +6314,27 @@ func (s *Session) handleGetGlobalDiagnostics(ctx context.Context, params *GetPro
+@@ -3094,11 +6316,27 @@ func (s *Session) handleGetGlobalDiagnostics(ctx context.Context, params *GetPro
  	}
  
  	// Global diagnostics are accumulated lazily by the project's checker pool as
@@ -10435,7 +10466,7 @@ index 7e29c44b6..44adfcb1e 100644
  
  	diags := core.Filter(proj.GetProjectDiagnostics(ctx), func(d *ast.Diagnostic) bool {
  		return d.File() == nil
-@@ -3298,3 +6534,24 @@ func (s *Session) handleGetReferencedSymbolsForNode(ctx context.Context, params
+@@ -3298,3 +6536,24 @@ func (s *Session) handleGetReferencedSymbolsForNode(ctx context.Context, params
  	}
  	return result, nil
  }

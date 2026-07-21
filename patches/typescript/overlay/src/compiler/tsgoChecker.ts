@@ -472,8 +472,10 @@ const _nodeIndexBySf = new WeakMap<object, Map<number, any[]>>();
 // wins cannot serve stale data to a current consumer; old programs are
 // never re-queried (estree reads back only its own file's AST).
 type TnbBuilderMeta = { version: string; affectsGlobalScope: true | undefined; impliedFormat: number | undefined; referencedPaths: readonly string[] | undefined };
-/** Per-config builder-graph state — one live generation, replaced per snapshot. */
-const _builderMetaByConfig = new Map<string, { proj: any; byPath: Map<string, TnbBuilderMeta>; byHostFile: Map<string, TnbBuilderMeta> }>();
+/** Per-config builder-graph state — one live generation, replaced when the content epoch advances. */
+const _builderMetaByConfig = new Map<string, { epoch: number | undefined; proj: any; byPath: Map<string, TnbBuilderMeta>; byHostFile: Map<string, TnbBuilderMeta> }>();
+/** Per-config program file-name list + membership set, replaced when the content epoch advances. */
+const _namesByConfig = new Map<string, { epoch: number | undefined; proj: any; names: string[]; nameSet: Set<string> }>();
 /** Latest per-file version/format, merged on every fetch — read by shared stub version getters. */
 const _latestMetaByPath = new Map<string, { version: string; impliedFormat: number | undefined }>();
 /** Shared light-stub SourceFiles, keyed by host file name (see getOrCreateLightSourceFile). */
@@ -483,8 +485,15 @@ const _lightSfSharedByRawPath = new Map<string, any>();
 
 /** Fetch (or return the cached) builder file graph for a config's current tsgo project. */
 function ensureBuilderMetaCurrent(configFilePath: string, proj: any): { proj: any; byPath: Map<string, TnbBuilderMeta>; byHostFile: Map<string, TnbBuilderMeta> } | undefined {
+    // The answer is a pure function of the Go program: reuse it until the
+    // content epoch advances (Go-reported changes), not until the vendored
+    // Project wrapper flips. Falls back to proj-keying when the epoch is
+    // unknown (project never opened through the updateSnapshot wrapper).
+    // A program whose own entry is still live is always served it — an old
+    // generation's program must never refetch through its disposed snapshot.
+    const epoch = projectEpoch(configFilePath);
     const cached = _builderMetaByConfig.get(configFilePath);
-    if (cached?.proj === proj) return cached;
+    if (cached && (cached.proj === proj || (epoch !== undefined && cached.epoch === epoch))) return cached;
     const byPath = new Map<string, TnbBuilderMeta>();
     const byHostFile = new Map<string, TnbBuilderMeta>();
     let entries: readonly any[];
@@ -508,7 +517,7 @@ function ensureBuilderMetaCurrent(configFilePath: string, proj: any): { proj: an
         byHostFile.set(hostFileName, meta);
         _latestMetaByPath.set(canonicalSourceFilePath(hostFileName), { version: meta.version, impliedFormat: meta.impliedFormat });
     }
-    const state = { proj, byPath, byHostFile };
+    const state = { epoch, proj, byPath, byHostFile };
     _builderMetaByConfig.set(configFilePath, state);
     return state;
 }
@@ -609,6 +618,71 @@ function internNameString(s: string): string {
     if (c !== undefined) return c;
     _internedNameStrings.set(s, s);
     return s;
+}
+
+// ── Per-config content epoch (issue #11 perf) ──────────────────────────
+// Whole-program answers (builder file graph, source-file names) are pure
+// functions of the Go program, but the vendored Project wrapper is new on
+// every updateSnapshot, so proj-keyed memos refetch for every one of ~1000
+// watch-lint generations (~9.5s + ~1.2s on the 1000-file corpus). Go remains
+// the change authority: an epoch advances only when updateSnapshot reports
+// the project changed (changed/added/deleted files), when its compiler
+// options fingerprint moves (tsconfig edits that reparse nothing, e.g.
+// module-kind flips that alter impliedNodeFormat without file diffs), or on
+// first open. Same epoch ⇒ same program ⇒ same answer.
+const _projectEpochByConfig = new Map<string, { epoch: number; optionsJson: string | undefined }>();
+let _projectEpochSeq = 0;
+function noteProjectEpochs(data: any): void {
+    const changedProjects = data?.changes?.changedProjects;
+    for (const projData of data?.projects ?? []) {
+        const cfg = projData.id;
+        if (typeof cfg !== "string") continue;
+        const optionsJson = projData.compilerOptions === undefined ? undefined : JSON.stringify(projData.compilerOptions);
+        const prev = _projectEpochByConfig.get(cfg);
+        if (!prev || prev.optionsJson !== optionsJson || (changedProjects && cfg in changedProjects)) {
+            _projectEpochByConfig.set(cfg, { epoch: ++_projectEpochSeq, optionsJson });
+        }
+    }
+    for (const removed of data?.changes?.removedProjects ?? []) {
+        _projectEpochByConfig.delete(removed);
+    }
+}
+/** Current content epoch for a config, or undefined when unknown (never opened via updateSnapshot). */
+function projectEpoch(configFilePath: string): number | undefined {
+    return _projectEpochByConfig.get(configFilePath)?.epoch;
+}
+
+/** Per-program fallback list: old generations keep their own names — their snapshots are disposed. */
+const _namesByProj = new WeakMap<object, { epoch: number | undefined; proj: any; names: string[]; nameSet: Set<string> }>();
+
+/** Program file names for a config's current project — memoized per content epoch (see noteProjectEpochs). */
+function tsgoSourceFileNames(configFilePath: string, proj: any): { epoch: number | undefined; proj: any; names: string[]; nameSet: Set<string> } {
+    const epoch = projectEpoch(configFilePath);
+    const ent = _namesByConfig.get(configFilePath);
+    // Hit on the program's own live entry or on same-epoch content.
+    if (ent && (ent.proj === proj || (epoch !== undefined && ent.epoch === epoch))) return ent;
+    // Not served by the live entry: an old generation's program must keep
+    // its own list — refetching through its disposed snapshot throws
+    // "snapshot N not found" (volar #6110).
+    const own = _namesByProj.get(proj);
+    if (own) return own;
+    const names: string[] = (proj.program.getSourceFileNames?.() ?? []).map(internNameString);
+    const nameSet = new Set<string>();
+    for (const n of names) {
+        // Callers query with host-cased fileNames OR canonical
+        // lowercase Paths (NodeHandle.path, builder byPath walks) —
+        // index both forms so member files never false-negative.
+        nameSet.add(internNameString(toHostFileName(n)));
+        nameSet.add(canonicalSourceFilePath(n));
+    }
+    const fresh = { epoch, proj, names, nameSet };
+    _namesByProj.set(proj, fresh);
+    // The live entry tracks the config's CURRENT project; a stale program's
+    // fetch only fills its own WeakMap slot.
+    if (!ent || proj === (_projectCache.get(configFilePath) ?? proj)) {
+        _namesByConfig.set(configFilePath, fresh);
+    }
+    return fresh;
 }
 
 class BridgeClient {
@@ -863,6 +937,7 @@ function ensureBridgeSession(): void {
             // Changed/deleted files invalidate the cross-snapshot stable
             // caches (see MiniSourceFileCache.getRetained).
             if (data?.changes) _sourceFileCache.invalidateChangedPaths(data.changes);
+            noteProjectEpochs(data);
             const snapshot = new _sync.Snapshot(data, _client, _sourceFileCache, toPath, () => {
                 _sourceFileCache.releaseSnapshot(snapshot.id);
             });
@@ -1269,6 +1344,46 @@ function readDiskText(fileName: string): string | undefined {
     } catch {
         return undefined;
     }
+}
+// fn → resolveHostFileName memo for absolute inputs (host-dependent only for
+// relative paths): the overlay-collect loop and the shared-stub factory
+// resolve the same corpus paths on every generation (issue #11 perf).
+const _resolvedHostNameMemo = new Map<string, string>();
+function resolveHostFileNameMemoized(fn: string, host: any): string {
+    if (fn.charCodeAt(0) !== 47 /* '/' */) return resolveHostFileName(fn, host);
+    let r = _resolvedHostNameMemo.get(fn);
+    if (r === undefined) {
+        r = resolveHostFileName(fn, host);
+        _resolvedHostNameMemo.set(fn, r);
+    }
+    return r;
+}
+// Disk text for overlay same-as-disk compares, cached by (mtime, size): the
+// watch-lint overlay-collect loop otherwise re-reads every tracked file on
+// every generation (~1M reads on the 1000-file corpus — the bulk of sys
+// time). The compare only decides whether to push a host overlay, and Go
+// reads disk independently of this decision — a stale conclusion here can
+// only come from disk content changing at a preserved mtime, in which case
+// Go still parses the new disk text itself (the host's stale snapshot is
+// the host's own concern, unchanged by this cache). Never use for content
+// that is served (host parses, diagnostics).
+const _diskTextByPath = new Map<string, { mtimeMs: number; size: number; text: string }>();
+function readDiskTextForOverlayCompare(fileName: string): string | undefined {
+    let stat;
+    try {
+        stat = nodeFs().statSync(fileName);
+    } catch {
+        return readDiskText(fileName);
+    }
+    const cached = _diskTextByPath.get(fileName);
+    if (cached && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size) return cached.text;
+    const text = readDiskText(fileName);
+    if (text !== undefined) _diskTextByPath.set(fileName, { mtimeMs: stat.mtimeMs, size: stat.size, text });
+    return text;
+}
+let _nodeFsCache: typeof import("fs") | undefined;
+function nodeFs(): typeof import("fs") {
+    return _nodeFsCache ??= require("fs");
 }
 function isOverlayCandidatePath(fileName: string): boolean {
     if (isBundledLibPath(fileName)) return false;
@@ -3427,7 +3542,7 @@ function resolveLanguageServiceScriptKind(
 function shouldSendHostOverlay(fileName: string, hostText: string): boolean {
     if (!isOverlayCandidatePath(fileName)) return false;
     if (!fileExistsOnDisk(fileName)) return true;
-    const disk = readDiskText(fileName);
+    const disk = readDiskTextForOverlayCompare(fileName);
     return disk !== hostText;
 }
 function convertTsgoDiagnostic(d: any, getSourceFile: (fileName: string) => any): any {
@@ -3622,8 +3737,11 @@ function maybeWriteGuardStatsFile(): void {
 }
 
 let _guardStatsFlushScheduled = false;
+// Snapshotted once at module load: noteRpc runs per RPC and process.env
+// lookups are dictionary reads (issue #11 perf).
+const _guardStatsEnabled = !!process.env.TNB_GUARD_STATS_FILE;
 function scheduleGuardStatsFlush(): void {
-    if (!process.env.TNB_GUARD_STATS_FILE || _guardStatsFlushScheduled) return;
+    if (!_guardStatsEnabled || _guardStatsFlushScheduled) return;
     _guardStatsFlushScheduled = true;
     setImmediate(() => {
         _guardStatsFlushScheduled = false;
@@ -3631,7 +3749,7 @@ function scheduleGuardStatsFlush(): void {
     });
 }
 
-if (process.env.TNB_GUARD_STATS_FILE) {
+if (_guardStatsEnabled) {
     process.on("exit", maybeWriteGuardStatsFile);
     process.on("beforeExit", maybeWriteGuardStatsFile);
 }
@@ -4368,7 +4486,6 @@ export function createTsgoProgram(
     // that differs from disk (or is missing on disk); unchanged on-disk .ts is
     // read by tsgo itself.
     const overlays: any[] = [];
-    const trackedHostFiles = new Set<string>();
     const names = new Set<string>();
     const lsHost = _languageServiceHost ?? host;
     const programCtx: TnbProgramContext = {
@@ -4382,10 +4499,28 @@ export function createTsgoProgram(
         for (const resolvedFn of collectTsgoOpenFileNames(lsHost)) {
             names.add(resolvedFn);
         }
+        // Compare only files whose host content can actually diverge from
+        // disk: extra-extension files (Volar virtualizes them by extension),
+        // files carrying a pushed overlay (re-sync bookkeeping below), and
+        // files the host manages as snapshots (the LS contract — unsaved
+        // buffers); under tsserver only OPEN ScriptInfos count (closed ones
+        // are disk reads). Watch/CLI CompilerHost answers (getSourceFile /
+        // readFile) are disk reads by construction — the compare is always
+        // false. Watch-mode lint otherwise stats + reads the whole corpus
+        // on every generation (issue #11 perf).
+        const ps = (lsHost as any)?.projectService;
+        const contentCanDiverge = (fn: string, resolvedFn: string): boolean => {
+            if (isExtraExtensionFileName(fn) || _syncedOverlayContentByFile.has(resolvedFn)) return true;
+            if (ps) {
+                const info = ps.getScriptInfoForPath?.(canonicalSourceFilePath(resolvedFn));
+                return !!info?.isScriptOpen?.();
+            }
+            return !!(lsHost?.getScriptSnapshot?.(fn) ?? lsHost?.getScriptSnapshot?.(resolvedFn));
+        };
         for (const fn of names) {
-            trackedHostFiles.add(fn);
-            const resolvedFn = resolveHostFileName(fn, host);
+            const resolvedFn = resolveHostFileNameMemoized(fn, host);
             if (!isOverlayCandidatePath(fn)) continue;
+            if (!contentCanDiverge(fn, resolvedFn)) continue;
             const content = getHostScriptContentForOverlay(resolvedFn, options, host);
             if (!content) continue;
             // Only parse host AST for true overlays (content differs from disk —
@@ -4466,16 +4601,16 @@ export function createTsgoProgram(
     const project = _projectCache.get(configFilePath);
 
     // Build a thin Program object that delegates to the tsgo project.
-    // File-name list is immutable per tsgo project object — cache the RPC
-    // (the builder walks it several times per project).
-    let tsgoSourceFileNamesCache: { proj: any; names: readonly string[] } | undefined;
+    // File-name list is a pure function of the Go program — memoized per
+    // content epoch (Go-reported changes), not per vendored Project wrapper:
+    // watch-mode lint otherwise refetches the full list on every one of
+    // ~1000 generations (issue #11 perf). Falls back to proj-keying when the
+    // epoch is unknown. The membership set (both host-cased and canonical
+    // forms) rides the same epoch.
     const getTsgoSourceFileNames = () => {
         const proj = project;
-        if (!proj?.program) return [];
-        if (!tsgoSourceFileNamesCache || tsgoSourceFileNamesCache.proj !== proj) {
-            tsgoSourceFileNamesCache = { proj, names: (proj.program.getSourceFileNames?.() ?? []).map(internNameString) };
-        }
-        return tsgoSourceFileNamesCache.names as string[];
+        if (!proj?.program) return [] as string[];
+        return tsgoSourceFileNames(configFilePath, proj).names;
     };
     const getSourceFileNames = () => getTsgoSourceFileNames().map(n => internNameString(toHostFileName(n)));
     const tsgoGetSourceFile = (fileName: string) => project?.program?.getSourceFile?.(toTsgoFileName(fileName));
@@ -4769,7 +4904,7 @@ export function createTsgoProgram(
         // relative / backslash / un-normalized input would give the light stub a
         // different fileName+path than the full/host SF for the same logical
         // file, silently drifting the BuilderState fileInfos key (Axis C).
-        const hostFileName = resolveHostFileName(fileName, host);
+        const hostFileName = resolveHostFileNameMemoized(fileName, host);
         let sf = _lightSfSharedByFile.get(hostFileName);
         if (!sf) {
             // Metadata-only SourceFile stub: no host.readFile, no computeLineStarts,
@@ -4809,33 +4944,22 @@ export function createTsgoProgram(
     // getScriptFileNames when it is missing, e.g. component.tsx that the
     // tsconfig's wildcard extension priority skipped in favor of component.ts).
     // Fabricating a SourceFile here would mask the miss and later checker RPCs
-    // would fail with "source file not found". Names are cached per tsgo
-    // project object (the project is replaced on every snapshot refresh).
-    let programFileNamesCache: { proj: any; names: Set<string> } | undefined;
+    // would fail with "source file not found". Names ride the shared epoch
+    // entry (see getTsgoSourceFileNames).
     const programContainsFile = (fileName: string): boolean => {
         const proj = project;
         if (!proj?.program) return true; // project not ready yet — stay permissive
-        if (!programFileNamesCache || programFileNamesCache.proj !== proj) {
-            const names = new Set<string>();
-            for (const n of proj.program.getSourceFileNames?.() ?? []) {
-                // Callers query with host-cased fileNames OR canonical
-                // lowercase Paths (NodeHandle.path, builder byPath walks) —
-                // index both forms so member files never false-negative.
-                names.add(toHostFileName(n));
-                names.add(canonicalSourceFilePath(n));
-            }
-            programFileNamesCache = { proj, names };
-        }
-        const hit = programFileNamesCache.names.has(toHostFileName(fileName))
-            || programFileNamesCache.names.has(canonicalSourceFilePath(fileName));
+        const nameSet = tsgoSourceFileNames(configFilePath, proj).nameSet;
+        const hit = nameSet.has(toHostFileName(fileName))
+            || nameSet.has(canonicalSourceFilePath(fileName));
         if (!hit) {
-            _navTrace(() => `programContainsFile miss: file=${fileName} cfg=${configFilePath} names=${programFileNamesCache!.names.size}`);
+            _navTrace(() => `programContainsFile miss: file=${fileName} cfg=${configFilePath} names=${nameSet.size}`);
         }
         return hit;
     };
 
     // Whole-program diagnostics memo, keyed on the tsgo project object (same
-    // invalidation rule as programFileNamesCache: a snapshot refresh replaces
+    // invalidation rule as the names set: a snapshot refresh replaces
     // the project object). A tsgo snapshot is immutable, so these results are
     // deterministic per project object — this mirrors stock Program semantics,
     // where diagnostics are stable for the lifetime of a Program instance.
@@ -6261,7 +6385,7 @@ export function createTsgoChecker(program: any): any {
         {
             const sentOverlayFiles = new Set(openFilesWithContent.map(f => f.fileName));
             const lateOverlays: { fileName: string; content: string; scriptKind: number }[] = [];
-            for (const n of project.program.getSourceFileNames?.() ?? []) {
+            for (const n of tsgoSourceFileNames(configFilePath!, project).names) {
                 const hostFileName = toHostFileName(n);
                 if (!isExtraExtensionFileName(hostFileName) || !isOverlayCandidatePath(hostFileName)) continue;
                 if (sentOverlayFiles.has(hostFileName) || _syncedOverlayContentByFile.has(hostFileName)) continue;
