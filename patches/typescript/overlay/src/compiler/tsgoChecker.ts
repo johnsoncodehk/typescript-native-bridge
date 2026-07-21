@@ -475,7 +475,7 @@ type TnbBuilderMeta = { version: string; affectsGlobalScope: true | undefined; i
 /** Per-config builder-graph state — one live generation, replaced when the content epoch advances. */
 const _builderMetaByConfig = new Map<string, { epoch: number | undefined; proj: any; byPath: Map<string, TnbBuilderMeta>; byHostFile: Map<string, TnbBuilderMeta> }>();
 /** Per-config program file-name list + membership set, replaced when the content epoch advances. */
-const _namesByConfig = new Map<string, { epoch: number | undefined; proj: any; names: string[]; nameSet: Set<string> }>();
+const _namesByConfig = new Map<string, { epoch: number | undefined; proj: any; names: string[]; nameSet: Set<string>; sortedNames: string[] }>();
 /** Latest per-file version/format, merged on every fetch — read by shared stub version getters. */
 const _latestMetaByPath = new Map<string, { version: string; impliedFormat: number | undefined }>();
 /** Shared light-stub SourceFiles, keyed by host file name (see getOrCreateLightSourceFile). */
@@ -652,11 +652,14 @@ function projectEpoch(configFilePath: string): number | undefined {
     return _projectEpochByConfig.get(configFilePath)?.epoch;
 }
 
+/** Last updateSnapshot params fingerprint + project per config — identical repeat calls are skipped (watch-lint generations reissue the same params ~1000×). */
+const _lastUpdateParamsByConfig = new Map<string, { paramsJson: string; project: any }>();
+
 /** Per-program fallback list: old generations keep their own names — their snapshots are disposed. */
-const _namesByProj = new WeakMap<object, { epoch: number | undefined; proj: any; names: string[]; nameSet: Set<string> }>();
+const _namesByProj = new WeakMap<object, { epoch: number | undefined; proj: any; names: string[]; nameSet: Set<string>; sortedNames: string[] }>();
 
 /** Program file names for a config's current project — memoized per content epoch (see noteProjectEpochs). */
-function tsgoSourceFileNames(configFilePath: string, proj: any): { epoch: number | undefined; proj: any; names: string[]; nameSet: Set<string> } {
+function tsgoSourceFileNames(configFilePath: string, proj: any): { epoch: number | undefined; proj: any; names: string[]; nameSet: Set<string>; sortedNames: string[] } {
     const epoch = projectEpoch(configFilePath);
     const ent = _namesByConfig.get(configFilePath);
     // Hit on the program's own live entry or on same-epoch content.
@@ -675,7 +678,7 @@ function tsgoSourceFileNames(configFilePath: string, proj: any): { epoch: number
         nameSet.add(internNameString(toHostFileName(n)));
         nameSet.add(canonicalSourceFilePath(n));
     }
-    const fresh = { epoch, proj, names, nameSet };
+    const fresh = { epoch, proj, names, nameSet, sortedNames: [...names].sort() };
     _namesByProj.set(proj, fresh);
     // The live entry tracks the config's CURRENT project; a stale program's
     // fetch only fills its own WeakMap slot.
@@ -4506,8 +4509,7 @@ export function createTsgoProgram(
         // buffers); under tsserver only OPEN ScriptInfos count (closed ones
         // are disk reads). Watch/CLI CompilerHost answers (getSourceFile /
         // readFile) are disk reads by construction — the compare is always
-        // false. Watch-mode lint otherwise stats + reads the whole corpus
-        // on every generation (issue #11 perf).
+        // false.
         const ps = (lsHost as any)?.projectService;
         const contentCanDiverge = (fn: string, resolvedFn: string): boolean => {
             if (isExtraExtensionFileName(fn) || _syncedOverlayContentByFile.has(resolvedFn)) return true;
@@ -4517,7 +4519,21 @@ export function createTsgoProgram(
             }
             return !!(lsHost?.getScriptSnapshot?.(fn) ?? lsHost?.getScriptSnapshot?.(resolvedFn));
         };
-        for (const fn of names) {
+        // Skip the whole collect when host content provably cannot diverge
+        // anywhere: no snapshot/LS host, no projectService, no
+        // extra-extension file, no still-synced overlay — contentCanDiverge
+        // would be false for every name, so running the loop is identical
+        // to skipping it. Watch-mode lint otherwise walks the whole corpus
+        // per generation (issue #11 perf).
+        let collectNeeded = _syncedOverlayContentByFile.size > 0
+            || typeof (lsHost as any)?.getScriptSnapshot === "function"
+            || !!ps;
+        if (!collectNeeded) {
+            for (const n of names) {
+                if (isExtraExtensionFileName(n)) { collectNeeded = true; break; }
+            }
+        }
+        if (collectNeeded) for (const fn of names) {
             const resolvedFn = resolveHostFileNameMemoized(fn, host);
             if (!isOverlayCandidatePath(fn)) continue;
             if (!contentCanDiverge(fn, resolvedFn)) continue;
@@ -4642,7 +4658,7 @@ export function createTsgoProgram(
             _programShapeByHost.set(lsHost, shapes);
         }
         const shapeMap = shapes ?? _programShapeNoHost;
-        const shapeFileNames = [...getTsgoSourceFileNames()].sort();
+        const shapeFileNames = project?.program ? tsgoSourceFileNames(configFilePath, project).sortedNames : ([] as string[]);
         const prevShape = shapeMap.get(configFilePath);
         if (
             prevShape
@@ -6353,23 +6369,39 @@ export function createTsgoChecker(program: any): any {
         // then joins the in-flight pass (Go-side singleflight). Never set for
         // interactive hosts: a full check per keystroke would be pure waste.
         const prefetchDiagnostics = !!(options as any).tscBuild;
-        const snapshot: any = _api.updateSnapshot({
+        // Watch-mode lint rebuilds the thin program per linted file with
+        // byte-identical updateSnapshot params (same open files, no new
+        // overlays): Go's answer is deterministic and already cached here —
+        // skip the round trip. Interactive-only: build mode's beginBuildProject
+        // / prefetch side effects must always fire. The fingerprint covers
+        // every value that can alter the response (open files, overlay
+        // contents, extras, close params, prefetch).
+        const updateParams = {
             openProject: configFilePath!,
             ...(openFiles.length > 0 ? { openFiles } : {}),
             ...(openFilesWithContent.length > 0 ? { openFilesWithContent } : {}),
             ...(extraFileExtensions ? { extraFileExtensions } : {}),
             ...(buildClose.closeParams ?? {}),
             ...(prefetchDiagnostics ? { prefetchDiagnostics: true } : {}),
-        });
+        };
+        const updateParamsJson = (options as any).tscBuild ? undefined : JSON.stringify(updateParams);
+        const prevUpdate = updateParamsJson !== undefined ? _lastUpdateParamsByConfig.get(configFilePath!) : undefined;
+        const deduped = prevUpdate !== undefined && prevUpdate.paramsJson === updateParamsJson;
+        const snapshot: any = deduped ? undefined : _api.updateSnapshot(updateParams);
         if (programCtx) programCtx.pendingReferencedProjects = undefined;
-        project = snapshot.getProject(configFilePath!);
+        project = deduped ? prevUpdate!.project : snapshot.getProject(configFilePath!);
         if (!project) {
             throw new Error(`tsgoChecker: project not found for ${configFilePath}`);
         }
-        trackBuildProjectSnapshot(configFilePath!, snapshot, [
-            ...openFiles,
-            ...openFilesWithContent.map(f => f.fileName),
-        ]);
+        if (!deduped && updateParamsJson !== undefined) {
+            _lastUpdateParamsByConfig.set(configFilePath!, { paramsJson: updateParamsJson, project });
+        }
+        if (snapshot) {
+            trackBuildProjectSnapshot(configFilePath!, snapshot, [
+                ...openFiles,
+                ...openFilesWithContent.map(f => f.fileName),
+            ]);
+        }
         releaseStaleBuildSnapshots(buildClose.staleSnapshots);
         for (const f of openFilesWithContent) {
             _syncedOverlayContentByFile.set(f.fileName, f.content);
@@ -6402,6 +6434,9 @@ export function createTsgoChecker(program: any): any {
                     openFilesWithContent: lateOverlays,
                     ...(extraFileExtensions ? { extraFileExtensions } : {}),
                 });
+                // The push advanced Go state — the params dedupe must not
+                // skip the next ensureProject's refresh for this config.
+                _lastUpdateParamsByConfig.delete(configFilePath!);
                 const refreshed = lateSnapshot.getProject(configFilePath!);
                 if (refreshed) {
                     project = refreshed;
@@ -6749,6 +6784,9 @@ export function createTsgoChecker(program: any): any {
             openFilesWithContent,
             ...(_lastExtraFileExtensions ? { extraFileExtensions: _lastExtraFileExtensions } : {}),
         });
+        // The push advanced Go state — the params dedupe must not skip the
+        // next ensureProject's refresh for this config.
+        _lastUpdateParamsByConfig.delete(ctx.configFilePath);
         trackBuildProjectSnapshot(ctx.configFilePath, snapshot, [
             ...openFiles,
             ...openFilesWithContent.map(f => f.fileName),
@@ -7754,9 +7792,11 @@ export function createTsgoChecker(program: any): any {
                 if (typeof obj.aliasSymbol === "number" && typeof obj.getAliasSymbol === "function") {
                     try { obj.aliasSymbol = obj.getAliasSymbol(); } catch { obj.aliasSymbol = undefined; }
                 }
-                if (typeof obj.getSymbol === "function") {
-                    try { const sym = obj.getSymbol(); if (sym) obj.symbol = sym; } catch { /* best-effort */ }
-                }
+                // Do NOT eagerly resolve obj.symbol: the vendored TypeObject
+                // already has a lazy memoized `symbol` accessor, and resolving
+                // every type's symbol up front costs one getSymbolOfType RPC
+                // per type object — 92K calls on the 1000-file eslint corpus,
+                // 84% of which no consumer ever read (issue #11 perf).
                 resolveRawTypeProps(obj);
                 // tsgo may expose `aliasTypeArguments: []` on reference/array
 
