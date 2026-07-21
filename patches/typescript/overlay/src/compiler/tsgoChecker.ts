@@ -459,6 +459,158 @@ function isStableHostSfPath(p: string): boolean {
 // dominated the getCodeFixes wall.
 const _nodeIndexBySf = new WeakMap<object, Map<number, any[]>>();
 
+// ── Cross-generation program-file metadata (issue #11) ─────────────────
+// Watch-mode lint (typescript-estree) rebuilds the thin program per linted
+// file and pins every generation's program object, so any per-program
+// O(corpus) structure is retained O(corpus × generations) — the quadratic
+// term that survived the RemoteSourceFile sharing above (heap profile:
+// getOrCreateLightSourceFile 458MB, getBuilderMetaState 91MB on a 100-file
+// corpus). The stores below are content-addressed and shared: one object
+// per path, replaced (not accumulated) when a new snapshot reports new
+// content. Go content hashes make versions project-independent, and the
+// builder consumes only the current generation's state, so latest-write-
+// wins cannot serve stale data to a current consumer; old programs are
+// never re-queried (estree reads back only its own file's AST).
+type TnbBuilderMeta = { version: string; affectsGlobalScope: true | undefined; impliedFormat: number | undefined; referencedPaths: readonly string[] | undefined };
+/** Per-config builder-graph state — one live generation, replaced per snapshot. */
+const _builderMetaByConfig = new Map<string, { proj: any; byPath: Map<string, TnbBuilderMeta>; byHostFile: Map<string, TnbBuilderMeta> }>();
+/** Latest per-file version/format, merged on every fetch — read by shared stub version getters. */
+const _latestMetaByPath = new Map<string, { version: string; impliedFormat: number | undefined }>();
+/** Shared light-stub SourceFiles, keyed by host file name (see getOrCreateLightSourceFile). */
+const _lightSfSharedByFile = new Map<string, any>();
+/** Raw absolute path → shared stub (CPU memo; resolveHostFileName is host-dependent for relative paths). */
+const _lightSfSharedByRawPath = new Map<string, any>();
+
+/** Fetch (or return the cached) builder file graph for a config's current tsgo project. */
+function ensureBuilderMetaCurrent(configFilePath: string, proj: any): { proj: any; byPath: Map<string, TnbBuilderMeta>; byHostFile: Map<string, TnbBuilderMeta> } | undefined {
+    const cached = _builderMetaByConfig.get(configFilePath);
+    if (cached?.proj === proj) return cached;
+    const byPath = new Map<string, TnbBuilderMeta>();
+    const byHostFile = new Map<string, TnbBuilderMeta>();
+    let entries: readonly any[];
+    try {
+        entries = proj.program.getBuilderFileGraph() ?? [];
+    } catch {
+        return undefined;
+    }
+    for (const e of entries) {
+        const hostFileName = toHostFileName(e.fileName);
+        // Parity with getSourceFiles(): default libs are excluded from the
+        // JS-side program view, so keep them out of fileInfos too.
+        if (isHostLibFile(hostFileName)) continue;
+        const meta: TnbBuilderMeta = {
+            version: e.version,
+            affectsGlobalScope: e.affectsGlobalScope ? true : undefined,
+            impliedFormat: e.impliedNodeFormat || undefined,
+            referencedPaths: e.refs?.map((r: string) => canonicalSourceFilePath(toHostFileName(r))),
+        };
+        byPath.set(canonicalSourceFilePath(hostFileName), meta);
+        byHostFile.set(hostFileName, meta);
+        _latestMetaByPath.set(canonicalSourceFilePath(hostFileName), { version: meta.version, impliedFormat: meta.impliedFormat });
+    }
+    const state = { proj, byPath, byHostFile };
+    _builderMetaByConfig.set(configFilePath, state);
+    return state;
+}
+
+/**
+ * Version getter for shared light stubs. Ensures the config's builder meta is
+ * current (fetching on first demand of a generation, exactly as the per-program
+ * closure did), then reads the latest content-derived version.
+ */
+function tnbSharedStubVersion(configFilePath: string, hostFileName: string): string {
+    const proj = _projectCache.get(configFilePath);
+    if (proj?.program) ensureBuilderMetaCurrent(configFilePath, proj);
+    const meta = _latestMetaByPath.get(canonicalSourceFilePath(hostFileName));
+    if (meta) return meta.version;
+    const hv = hostForOverlaySync()?.getScriptVersion?.(hostFileName);
+    return typeof hv === "string" && hv.length ? hv : "1";
+}
+
+/**
+ * Metadata-only SourceFile stub shared across program generations. Only
+ * path-derived constants and primitives are captured — the version/text/line
+ * getters read current stores, so the object never pins a generation's
+ * closures. textIsLazyDisk (pure-disk LS lint mode) and metaEnabled (builder
+ * meta consumed) mirror the per-program flags of the creating program; a stub
+ * shared into a differently-flavored program keeps its creator's flags
+ * (single-tool processes make this theoretical).
+ */
+function createSharedLightStub(hostFileName: string, configFilePath: string, textIsLazyDisk: boolean, metaEnabled: boolean, languageVersion: number): any {
+    const tsgoPath = canonicalSourceFilePath(hostFileName);
+    let lazyText: string | undefined;
+    let lazyLineStarts: readonly number[] | undefined;
+    const textOf = (): string => lazyText ??= (textIsLazyDisk ? hostForOverlaySync()?.readFile?.(hostFileName) ?? readDiskText(hostFileName) ?? "" : "");
+    const lineStartsOf = (): readonly number[] => lazyLineStarts ??= ts.computeLineStarts(textOf());
+    return {
+        kind: SyntaxKind.SourceFile,
+        fileName: hostFileName,
+        path: tsgoPath,
+        resolvedPath: tsgoPath,
+        originalFileName: hostFileName,
+        get text() { return textOf(); },
+        // Volar's decorateProgram (vue-tsc) writes .text back onto program
+        // source files (fillSourceFileText) — accept the write and drop the
+        // stale lazily-computed line starts.
+        set text(value: string) {
+            lazyText = value;
+            lazyLineStarts = undefined;
+        },
+        // Content-derived version (Go hash) — BuilderState serializes this
+        // into buildinfo; a constant here would freeze cross-session change
+        // detection (see builder-meta block in createTsgoProgram).
+        get version() {
+            if (metaEnabled) return tnbSharedStubVersion(configFilePath, hostFileName);
+            const hv = hostForOverlaySync()?.getScriptVersion?.(hostFileName);
+            return typeof hv === "string" && hv.length ? hv : "1";
+        },
+        languageVersion,
+        languageVariant: 0,
+        scriptKind: inferScriptKind(hostFileName),
+        isDeclarationFile: hostFileName.endsWith(".d.ts"),
+        hasNoDefaultLib: false,
+        referencedFiles: [],
+        typeReferenceDirectives: [],
+        libReferenceDirectives: [],
+        amdDependencies: [],
+        moduleAugmentations: [],
+        imports: [],
+        ambientModuleNames: [],
+        parseDiagnostics: [],
+        bindDiagnostics: [],
+        commentDirectives: [],
+        statements: [],
+        endOfFileToken: {
+            kind: SyntaxKind.EndOfFileToken,
+            pos: 0,
+            end: 0,
+            getStart: () => 0,
+            getEnd: () => 0,
+            getFullStart: () => 0,
+        },
+        pos: 0,
+        end: 0,
+        get lineMap() { return lineStartsOf(); },
+        getLineStarts: () => lineStartsOf(),
+        getLineAndCharacterOfPosition: (position: number) => ts.computeLineAndCharacterOfPosition(lineStartsOf(), position),
+        getPositionOfLineAndCharacter: (line: number, character: number) => ts.computePositionOfLineAndCharacter(lineStartsOf(), line, character, textOf()),
+        forEachChild: () => undefined,
+        // findAllReferences scans every program file; light stubs must not crash token walks.
+        getChildren: () => [],
+    };
+}
+
+// Canonical string dedup for per-generation RPC name lists: every generation
+// re-fetches the same path strings; interning keeps one string per path
+// instead of one per (path × generation) (issue #11).
+const _internedNameStrings = new Map<string, string>();
+function internNameString(s: string): string {
+    const c = _internedNameStrings.get(s);
+    if (c !== undefined) return c;
+    _internedNameStrings.set(s, s);
+    return s;
+}
+
 class BridgeClient {
     private handle: number;
     private handleBigInt: bigint;
@@ -528,6 +680,22 @@ class MiniSourceFileCache {
     // The hash comes from the just-fetched blob, so a changed file can never
     // hit a stale entry.
     private stableByPath = new Map<string, { key: any; hash: any; file: any }>();
+    // Same reuse rule generalized to non-declaration files, but scoped per
+    // project: projectId is the tsgo API's project handle (the config file
+    // path, stable across a project's snapshot generations), and a source
+    // file's parse options — unlike a .d.ts's constant zero options — depend
+    // on the project's jsx/moduleDetection/module settings (they change the
+    // encoded externalModuleIndicator), so a path-only entry could be served
+    // to a project that would parse it differently. Within one project's
+    // scope the stored key is authoritative: options are fixed for the
+    // project's lifetime, and any mid-session drift (tsconfig edit, overlay
+    // script-kind switch) re-parses the file Go-side, surfacing as a change
+    // event that drops the entry (invalidateChangedPaths). This is the
+    // fork-level analog of stock's tryReuseStructureFromOldProgram: watch-mode
+    // lint rebuilds the thin program per linted file, and without it every
+    // generation re-decodes the whole corpus and retains its own wire blobs
+    // until the V8 heap OOMs (issue #11).
+    private stableSrcByPath = new Map<string, Map<any, { key: any; hash: any; file: any }>>();
 
     private static isStableDeclarationPath(p: string): boolean {
         // noembed: lib paths are real packageRoot/lib/*.d.ts (no bundled://).
@@ -540,16 +708,21 @@ class MiniSourceFileCache {
         let byPath = byProj?.get(projectId);
         const retained = byPath?.get(p);
         if (retained) return retained;
-        // Serve stable declaration files without the getSourceFile RPC.
-        // Safe because (a) stableByPath only holds .d.ts paths, whose parse
-        // options key is constant — GetExternalModuleIndicatorOptions returns
-        // the zero options for declaration file names, so every project
-        // produces the same encoded blob for the same content; (b) content
-        // changes surface as snapshot change events, which drop the entry
-        // (invalidateChangedPaths). Go itself only re-reads a disk file when
-        // such an event arrives, so trusting the entry matches what the RPC
-        // would return byte-for-byte.
-        const stable = this.stableByPath.get(p);
+        // Serve a cross-generation entry without the getSourceFile RPC.
+        // Safe because (a) identical content + identical parse options
+        // produce an identical encoded blob, so the decoded RemoteSourceFile
+        // is valid in any snapshot of the project the entry is scoped to;
+        // (b) content changes surface as snapshot change events, which drop
+        // the entry (invalidateChangedPaths). Go itself only re-reads a disk
+        // file when such an event arrives, so trusting the entry matches what
+        // the RPC would return byte-for-byte. Declaration files come from the
+        // project-global cache (GetExternalModuleIndicatorOptions returns the
+        // zero options for declaration file names, so every project produces
+        // the same blob for the same content); all other files require an
+        // entry recorded under this project (see stableSrcByPath).
+        const stable = MiniSourceFileCache.isStableDeclarationPath(p)
+            ? this.stableByPath.get(p)
+            : this.stableSrcByPath.get(p)?.get(projectId);
         if (!stable) return undefined;
         if (!byProj) { byProj = new Map(); this.bySnap.set(snapshotId, byProj); }
         if (!byPath) { byPath = new Map(); byProj.set(projectId, byPath); }
@@ -569,11 +742,13 @@ class MiniSourceFileCache {
             const c = changedProjects[projKey];
             for (const p of c?.changedFiles ?? []) {
                 this.stableByPath.delete(p);
+                this.stableSrcByPath.delete(p);
                 changedN++;
                 if (sample.length < 6) sample.push(`C:${p}`);
             }
             for (const p of c?.deletedFiles ?? []) {
                 this.stableByPath.delete(p);
+                this.stableSrcByPath.delete(p);
                 deletedN++;
                 if (sample.length < 6) sample.push(`D:${p}`);
             }
@@ -583,12 +758,30 @@ class MiniSourceFileCache {
         }
     }
     set(p: string, file: any, key: any, hash: any, snapshotId: any, projectId: any): any {
-        if (hash != null && MiniSourceFileCache.isStableDeclarationPath(p)) {
-            const stable = this.stableByPath.get(p);
-            if (stable && stable.key === key && stable.hash === hash) {
-                file = stable.file;
+        if (hash != null) {
+            if (MiniSourceFileCache.isStableDeclarationPath(p)) {
+                const stable = this.stableByPath.get(p);
+                if (stable && stable.key === key && stable.hash === hash) {
+                    file = stable.file;
+                } else {
+                    this.stableByPath.set(p, { key, hash, file });
+                }
             } else {
-                this.stableByPath.set(p, { key, hash, file });
+                let byScope = this.stableSrcByPath.get(p);
+                if (!byScope) { byScope = new Map(); this.stableSrcByPath.set(p, byScope); }
+                const scoped = byScope.get(projectId);
+                if (scoped && scoped.key === key && scoped.hash === hash) {
+                    file = scoped.file;
+                } else {
+                    // Cross-project dedup: another project's entry with the
+                    // same content hash + parse-options key decoded the same
+                    // blob — adopt its object so WeakMap-keyed indexes hit
+                    // across projects and memory stays single-copy.
+                    for (const e of byScope.values()) {
+                        if (e.key === key && e.hash === hash) { file = e.file; break; }
+                    }
+                    byScope.set(projectId, { key, hash, file });
+                }
             }
         }
         let byProj = this.bySnap.get(snapshotId);
@@ -611,7 +804,7 @@ class MiniSourceFileCache {
         if (!byProj) return;
         this.bySnap.delete(snapshotId);
         // Purge paths no longer present in any live snapshot so has() only
-        // reports live entries; stable .d.ts re-enters via getRetained.
+        // reports live entries; stable entries re-enter via getRetained.
         if (this.bySnap.size === 0) { this.paths.clear(); return; }
         const live = new Set<string>();
         for (const proj of this.bySnap.values()) {
@@ -621,7 +814,7 @@ class MiniSourceFileCache {
         }
         this.paths = live;
     }
-    clear() { this.bySnap.clear(); this.paths.clear(); this.stableByPath.clear(); }
+    clear() { this.bySnap.clear(); this.paths.clear(); this.stableByPath.clear(); this.stableSrcByPath.clear(); }
     has(p: string) { return this.paths.has(p); }
 }
 
@@ -668,7 +861,7 @@ function ensureBridgeSession(): void {
             const wireParams = { ...rest, ...(merged != null ? { openProjects: merged } : {}) };
             const data = _client.apiRequest("updateSnapshot", wireParams);
             // Changed/deleted files invalidate the cross-snapshot stable
-            // declaration cache (see MiniSourceFileCache.getRetained).
+            // caches (see MiniSourceFileCache.getRetained).
             if (data?.changes) _sourceFileCache.invalidateChangedPaths(data.changes);
             const snapshot = new _sync.Snapshot(data, _client, _sourceFileCache, toPath, () => {
                 _sourceFileCache.releaseSnapshot(snapshot.id);
@@ -4160,6 +4353,11 @@ export function createTsgoProgram(
     // host.getSourceFile here — program does not exist yet; Volar injects
     // virtual TS for .vue via getSourceFile). Reused by getOrCreateSourceFile
     // for skeleton text / diagnostic line maps without re-entering getSourceFile.
+    // Only true overlays (content differing from disk) are retained: keeping
+    // disk-identical reads here made fileHasHostSourceContent true for the
+    // whole corpus, so builder getSourceFiles walks full-materialized every
+    // file on every watch generation instead of serving light stubs
+    // (issue #11).
     const hostContentByFile = new Map<string, { text: string; scriptKind: number; fromHost?: boolean }>();
     /** Parsed host SourceFiles captured during createProgram (Volar virtual .vue TS). */
     const parsedHostSourceFiles = new Map<string, any>();
@@ -4190,7 +4388,6 @@ export function createTsgoProgram(
             if (!isOverlayCandidatePath(fn)) continue;
             const content = getHostScriptContentForOverlay(resolvedFn, options, host);
             if (!content) continue;
-            hostContentByFile.set(resolvedFn, content);
             // Only parse host AST for true overlays (content differs from disk —
             // Volar virtual .vue TS, unsaved edits). Pure disk lint skips this
             // and uses tsgo-backed single-parse instead.
@@ -4211,6 +4408,7 @@ export function createTsgoProgram(
             if (snapSf?.statements?.length) {
                 parsedHostSourceFiles.set(resolvedFn, snapSf);
             }
+            hostContentByFile.set(resolvedFn, content);
             overlays.push({ fileName: resolvedFn, content: content.text, scriptKind: content.scriptKind });
         }
     }
@@ -4275,11 +4473,11 @@ export function createTsgoProgram(
         const proj = project;
         if (!proj?.program) return [];
         if (!tsgoSourceFileNamesCache || tsgoSourceFileNamesCache.proj !== proj) {
-            tsgoSourceFileNamesCache = { proj, names: proj.program.getSourceFileNames?.() ?? [] };
+            tsgoSourceFileNamesCache = { proj, names: (proj.program.getSourceFileNames?.() ?? []).map(internNameString) };
         }
         return tsgoSourceFileNamesCache.names as string[];
     };
-    const getSourceFileNames = () => getTsgoSourceFileNames().map(toHostFileName);
+    const getSourceFileNames = () => getTsgoSourceFileNames().map(n => internNameString(toHostFileName(n)));
     const tsgoGetSourceFile = (fileName: string) => project?.program?.getSourceFile?.(toTsgoFileName(fileName));
 
     // ── structureIsReused (tsserver cache invalidation) ──
@@ -4449,6 +4647,41 @@ export function createTsgoProgram(
             }
         }
 
+        // Pure-disk source files get a real host parse, not a tsgo-backed
+        // shell: typescript-estree converts program.getSourceFile results to
+        // ESTree, walking parseDiagnostics and token-level children
+        // (findNextToken for `>`) that the RemoteSourceFile blob does not
+        // encode (issue #11). Stock parity is a real parse; type queries on
+        // the result still route to tsgo by position (the soft host bind
+        // keeps RPC symbol identity). Only singular getSourceFile calls land
+        // here — whole-program walks (getSourceFiles / getSourceFileByPath)
+        // are served light stubs, so this parses ~the one file a watch
+        // generation lints. Lib files keep the shell below (LS token walks
+        // only, never ESTree conversion).
+        if (!isHostLibFile(hostFileName)) {
+            const ls = hostForLs();
+            const snap = ls?.getScriptSnapshot?.(fileName) ?? ls?.getScriptSnapshot?.(hostFileName);
+            const hostText = snap
+                ? snap.getText(0, snap.getLength())
+                : (hostContentByFile.get(hostFileName)?.text ?? host?.readFile?.(hostFileName) ?? readDiskText(hostFileName));
+            if (typeof hostText === "string" && hostText.length) {
+                const hostSf = attachHostSourceFileMetadata(
+                    createSourceFile(
+                        hostFileName,
+                        hostText,
+                        hostSourceFileOptions(options.target ?? 99),
+                        /*setParentNodes*/ true,
+                        resolveLanguageServiceScriptKind(ls, fileName, hostFileName, /*fromHostSnapshot*/ false),
+                    ),
+                    hostFileName,
+                );
+                ensureHostSourceFileBound(hostSf, options);
+                ensureTnbVersion(hostSf, hostFileName);
+                sfCache.set(cacheKey, hostSf);
+                return rememberStable(hostSf);
+            }
+        }
+
         // Default libs (lib.*.d.ts): stock LS token walks (FAR/highlights/rename)
         // traverse program.getSourceFiles() and surface declaration entries in
         // lib files; the bridge's never-host-parse rule dropped them from the
@@ -4518,7 +4751,9 @@ export function createTsgoProgram(
     // version + referencedFiles (metadata), not the AST. Returning the
     // skeleton avoids 1693 eager getSourceFile RPCs; only the ~700 files
     // the files actually linted pay the RPC via getSourceFile(fileName).
-    const lightSfCache = new Map<string, any>();
+    // Stubs are shared process-wide (createSharedLightStub): watch-mode lint
+    // pins every generation's program, and a per-generation Map here was the
+    // dominant quadratic retention (issue #11).
     // Pure-disk LS lint mode (tsslint CLI): LanguageServiceHost with snapshots
     // but no overlays / parsed host files / tsserver projectService. Fixed at
     // program creation — both inputs are. In this mode metadata-only consumers
@@ -4526,9 +4761,8 @@ export function createTsgoProgram(
     // are served light stubs instead of materializing remote ASTs.
     const preferLightProgramFiles = !preferHostSourceFiles
         && typeof (programCtx.lsHost as any)?.getScriptSnapshot === "function";
-    // Raw-path → light stub memo: skips repeated resolveHostFileName
-    // normalization (path.normalize/resolve) on the builder's hot path.
-    const lightSfByPathMemo = new Map<string, any>();
+    // Mirror of the getBuilderMetaState fetch gate, for shared-stub version getters.
+    const builderMetaEnabled = !((options as any).tscBuild && !options.incremental && !options.composite);
     const getOrCreateLightSourceFile = (fileName: string): any => {
         // Use the SAME host-name normalization as getOrCreateSourceFile
         // (resolveHostFileName), not the weaker toHostFileName. Otherwise a
@@ -4536,81 +4770,33 @@ export function createTsgoProgram(
         // different fileName+path than the full/host SF for the same logical
         // file, silently drifting the BuilderState fileInfos key (Axis C).
         const hostFileName = resolveHostFileName(fileName, host);
-        if (lightSfCache.has(hostFileName)) return lightSfCache.get(hostFileName);
-        // Metadata-only SourceFile stub: no host.readFile, no computeLineStarts,
-        // no AST. BuilderProgram state creation only needs these fields to key
-        // fileInfos and to ask for referenced/imported files (empty here).
-        // tsserver getScriptInfos() requires ScriptInfo for every returned file;
-        // default libs are not opened as ScriptInfo — exclude them here.
-        const tsgoPath = canonicalSourceFilePath(hostFileName);
-        // Text and line map are lazy in pure-disk lint mode: builder-state /
-        // buildinfo traffic never touches them, but a diagnostic whose `file` is
-        // a light stub (buildinfo diagnostics rehydrated via getSourceFileByPath)
-        // must still map offsets to real line/column. Only files actually asked
-        // pay the disk read. Outside lint mode (vue-tsc / tsc -b) stubs keep the
-        // previous cheap constants — those paths format diagnostics against full
-        // host SourceFiles, and a lazy read per stub measurably slows the build.
-        let lazyText: string | undefined;
-        let lazyLineStarts: readonly number[] | undefined;
-        const textOf = (): string => lazyText ??= (preferLightProgramFiles ? host?.readFile?.(hostFileName) ?? "" : "");
-        const lineStartsOf = (): readonly number[] => lazyLineStarts ??= ts.computeLineStarts(textOf());
-        const sf: any = {
-            kind: SyntaxKind.SourceFile,
-            fileName: hostFileName,
-            path: tsgoPath,
-            resolvedPath: tsgoPath,
-            originalFileName: hostFileName,
-            get text() { return textOf(); },
-            // Volar's decorateProgram (vue-tsc) writes .text back onto program
-            // source files (fillSourceFileText) — accept the write and drop the
-            // stale lazily-computed line starts.
-            set text(value: string) {
-                lazyText = value;
-                lazyLineStarts = undefined;
-            },
-            // Content-derived version (Go hash) — BuilderState serializes this
-            // into buildinfo; a constant here would freeze cross-session change
-            // detection (see builder-meta block above).
-            get version() { return versionForFile(hostFileName); },
-            languageVersion: options.target ?? 99,
-            languageVariant: 0,
-            scriptKind: inferScriptKind(hostFileName),
-            isDeclarationFile: hostFileName.endsWith(".d.ts"),
-            hasNoDefaultLib: false,
-            referencedFiles: [],
-            typeReferenceDirectives: [],
-            libReferenceDirectives: [],
-            amdDependencies: [],
-            moduleAugmentations: [],
-            imports: [],
-            ambientModuleNames: [],
-            parseDiagnostics: [],
-            bindDiagnostics: [],
-            commentDirectives: [],
-            statements: [],
-            endOfFileToken: {
-                kind: SyntaxKind.EndOfFileToken,
-                pos: 0,
-                end: 0,
-                getStart: () => 0,
-                getEnd: () => 0,
-                getFullStart: () => 0,
-            },
-            pos: 0,
-            end: 0,
-            get lineMap() { return lineStartsOf(); },
-            getLineStarts: () => lineStartsOf(),
-            getLineAndCharacterOfPosition: (position: number) => ts.computeLineAndCharacterOfPosition(lineStartsOf(), position),
-            getPositionOfLineAndCharacter: (line: number, character: number) => ts.computePositionOfLineAndCharacter(lineStartsOf(), line, character, textOf()),
-            forEachChild: () => undefined,
-            // findAllReferences scans every program file; light stubs must not crash token walks.
-            getChildren: () => [],
-        };
-        ensureFileModuleMeta(sf);
-        lightSfCache.set(hostFileName, sf);
-        _tnbLightStubCreations++;
-        if (process.env.TNB_SF_MATERIALIZE_STATS === "1") {
-            tnbLogSfMaterialize(`[TNB_SF_MATERIALIZE] lightStub+1 total soft=${_tnbLightStubCreations} full=${_tnbFullSfMaterializations} file=${hostFileName}`);
+        let sf = _lightSfSharedByFile.get(hostFileName);
+        if (!sf) {
+            // Metadata-only SourceFile stub: no host.readFile, no computeLineStarts,
+            // no AST. BuilderProgram state creation only needs these fields to key
+            // fileInfos and to ask for referenced/imported files (empty here).
+            // tsserver getScriptInfos() requires ScriptInfo for every returned file;
+            // default libs are not opened as ScriptInfo — exclude them here.
+            sf = createSharedLightStub(hostFileName, configFilePath, preferLightProgramFiles, builderMetaEnabled, options.target ?? 99);
+            ensureFileModuleMeta(sf);
+            _lightSfSharedByFile.set(hostFileName, sf);
+            _tnbLightStubCreations++;
+            if (process.env.TNB_SF_MATERIALIZE_STATS === "1") {
+                tnbLogSfMaterialize(`[TNB_SF_MATERIALIZE] lightStub+1 total soft=${_tnbLightStubCreations} full=${_tnbFullSfMaterializations} file=${hostFileName}`);
+            }
+        }
+        return sf;
+    };
+    // Raw-path → shared-stub memo: skips repeated resolveHostFileName
+    // normalization (path.normalize/resolve) on the builder's hot path. Only
+    // absolute paths are memoized — resolveHostFileName is host-dependent for
+    // relative ones.
+    const getLightSourceFileByRawPath = (pathStr: string): any => {
+        if (pathStr.charCodeAt(0) !== 47 /* '/' */) return getOrCreateLightSourceFile(pathStr);
+        let sf = _lightSfSharedByRawPath.get(pathStr);
+        if (!sf) {
+            sf = getOrCreateLightSourceFile(pathStr);
+            _lightSfSharedByRawPath.set(pathStr, sf);
         }
         return sf;
     };
@@ -4736,10 +4922,10 @@ export function createTsgoProgram(
     // builder serializes into buildinfo are content-derived and stable across
     // sessions (the old constant "1" made every file look unchanged forever —
     // stale type-aware lint results for dependents of an edited file).
-    type TnbBuilderMeta = { version: string; affectsGlobalScope: true | undefined; impliedFormat: number | undefined; referencedPaths: readonly string[] | undefined };
-    let builderMetaCache: { proj: any; byPath: Map<string, TnbBuilderMeta>; byHostFile: Map<string, TnbBuilderMeta> } | undefined;
     const getBuilderMetaState = () => {
-        const proj = project;
+        // Resolve the CURRENT generation's project: shared light stubs created
+        // by earlier generations call this through their version getter.
+        const proj = _projectCache.get(configFilePath) ?? project;
         if (!proj?.program) return undefined;
         // Non-incremental build-mode projects (tsc -b / vue-tsc -b over plain
         // noEmit tsconfigs, e.g. Nuxt-generated ones): the graph has no
@@ -4752,32 +4938,9 @@ export function createTsgoProgram(
         // buildinfo diff and change propagation consume it — and Go serves it
         // from the already-built incremental snapshot at no extra cost.
         if ((options as any).tscBuild && !options.incremental && !options.composite) return undefined;
-        if (!builderMetaCache || builderMetaCache.proj !== proj) {
-            const byPath = new Map<string, TnbBuilderMeta>();
-            const byHostFile = new Map<string, TnbBuilderMeta>();
-            let entries: readonly any[];
-            try {
-                entries = proj.program.getBuilderFileGraph() ?? [];
-            } catch {
-                return undefined;
-            }
-            for (const e of entries) {
-                const hostFileName = toHostFileName(e.fileName);
-                // Parity with getSourceFiles(): default libs are excluded from
-                // the JS-side program view, so keep them out of fileInfos too.
-                if (isHostLibFile(hostFileName)) continue;
-                const meta: TnbBuilderMeta = {
-                    version: e.version,
-                    affectsGlobalScope: e.affectsGlobalScope ? true : undefined,
-                    impliedFormat: e.impliedNodeFormat || undefined,
-                    referencedPaths: e.refs?.map((r: string) => canonicalSourceFilePath(toHostFileName(r))),
-                };
-                byPath.set(canonicalSourceFilePath(hostFileName), meta);
-                byHostFile.set(hostFileName, meta);
-            }
-            builderMetaCache = { proj, byPath, byHostFile };
-        }
-        return builderMetaCache;
+        // Shared per-config store: one live generation, replaced per snapshot
+        // instead of pinned per program (issue #11).
+        return ensureBuilderMetaCurrent(configFilePath, proj);
     };
     /** Attach Go builder-graph implied module format for explainFiles / watch logging. */
     const ensureFileModuleMeta = (sf: any): void => {
@@ -5010,11 +5173,7 @@ export function createTsgoProgram(
             // remote-AST RPC via getOrCreateSourceFile. Builder machinery only
             // needs metadata here — serve the memoized light stub directly.
             if (preferLightProgramFiles) {
-                const memo = lightSfByPathMemo.get(pathStr);
-                if (memo) return memo;
-                const sf = getOrCreateLightSourceFile(pathStr);
-                lightSfByPathMemo.set(pathStr, sf);
-                return sf;
+                return getLightSourceFileByRawPath(pathStr);
             }
             const hostFileName = toHostFileName(pathStr);
             // Soft-P′: tsserver (projectService) must not hand import tracker light

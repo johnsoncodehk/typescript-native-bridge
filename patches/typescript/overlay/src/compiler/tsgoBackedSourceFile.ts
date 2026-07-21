@@ -151,6 +151,18 @@ export function getTsgoBackedSourceFile(realSf: any): any | undefined {
     const shell = tsgoSf;
     patchLineHelpers(shell, realSf);
     installGetChildrenForLanguageService(shell, realSf);
+    // The shell is handed out as a program SourceFile (pure-disk lint —
+    // typescript-estree's astConverter reads ast.parseDiagnostics on every
+    // file). Take the skeleton's metadata defaults for anything the blob does
+    // not carry; the undefined guard preserves the RemoteSourceFile's real
+    // decoded getters (imports, referencedFiles, scriptKind, …).
+    for (const k of [
+        "parseDiagnostics", "bindDiagnostics", "amdDependencies", "pragmas",
+        "commentDirectives", "hasNoDefaultLib", "nodeCount", "identifierCount",
+        "symbolCount", "languageVersion",
+    ] as const) {
+        if (shell[k] === undefined && realSf[k] !== undefined) shell[k] = realSf[k];
+    }
     _backedCache.set(fileName, shell);
     return shell;
 }

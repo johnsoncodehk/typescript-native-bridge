@@ -29,7 +29,7 @@ TNB is a tsgo-backed TypeScript fork: upstream `microsoft/TypeScript` and `micro
 ## Gates (run before committing behavior changes)
 
 - `npm run check:lib` / `check:enums` / `check:sourcefile-guard`
-- Witnesses: `node tools/triage-sim-xfile.mjs`, `triage-sim-edit.mjs`, `triage-quickinfo-emptyparity.mjs`, f2hl/f2r6 series, `triage-refs-exportspec.mjs`, `triage-display-tokens.mjs`, `triage-computed-literal.mjs`, `triage-napi-fuzz.mjs`, `triage-electron-abi.mjs` (wired in CI via `npm i --no-save electron@42`)
+- Witnesses: `node tools/triage-sim-xfile.mjs`, `triage-sim-edit.mjs`, `triage-quickinfo-emptyparity.mjs`, `triage-crossgen-reuse.mjs` (issue #11: cross-generation RemoteSourceFile reuse + edit invalidation), f2hl/f2r6 series, `triage-refs-exportspec.mjs`, `triage-display-tokens.mjs`, `triage-computed-literal.mjs`, `triage-napi-fuzz.mjs`, `triage-electron-abi.mjs` (wired in CI via `npm i --no-save electron@42`)
 - Big net: sim-nav vs `test/baselines/` (`npm run check:sim-nav` — 4 parallel shards from isolated tools copies, merged and baseline-gated by `tools/sim-nav-parallel.mjs`) — no new divergences allowed. Baselines are slim (keys/counters/labels only) with test-workspace-relative keys — machine-local paths in a committed baseline make the nightly gate red by construction. Refresh by running check:sim-nav then `node tools/sim-nav-merge.mjs --slim /tmp/tnb-simnav-merged-4.json test/baselines/nav-results-<sha>-t<N>.json` (refuses absolute keys), re-pin `BASELINE` in `.github/workflows/nightly.yml`, delete the superseded baseline. The local gate cannot catch non-portable keys (same machine, same prefix) — nightly is the clean-machine gate, check its result after a refresh.
 - volar suite: `npm test` in the volar checkout (205 tests)
 
