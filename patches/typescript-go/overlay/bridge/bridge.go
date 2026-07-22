@@ -322,7 +322,7 @@ func pinBinary(b []byte) C.struct_BridgeBinary {
 	return C.struct_BridgeBinary{
 		data:   unsafe.Pointer(&b[0]),
 		len:    C.longlong(len(b)),
-		handle: C.uint64_t(id),
+		handle: C.ulonglong(id),
 	}
 }
 
@@ -331,7 +331,7 @@ func pinBinary(b []byte) C.struct_BridgeBinary {
 // copy, so the pin's lifetime is bounded by the call, not by JS GC.
 //
 //export BridgeReleaseBinary
-func BridgeReleaseBinary(handle C.uint64_t) {
+func BridgeReleaseBinary(handle C.ulonglong) {
 	if p, ok := binPinners.LoadAndDelete(uint64(handle)); ok {
 		p.(*runtime.Pinner).Unpin()
 	}
