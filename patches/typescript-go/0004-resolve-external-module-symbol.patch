@@ -1759,7 +1759,7 @@ index 1c8b5d7f0..f55b06891 100644
  
      get hasRestParameter(): boolean {
 diff --git a/_packages/native-preview/src/api/sync/api.ts b/_packages/native-preview/src/api/sync/api.ts
-index 1a0296ac7..50d5b5e0d 100644
+index 1a0296ac7..f0ad43001 100644
 --- a/_packages/native-preview/src/api/sync/api.ts
 +++ b/_packages/native-preview/src/api/sync/api.ts
 @@ -62,6 +62,8 @@ import type {
@@ -2378,11 +2378,16 @@ index 1a0296ac7..50d5b5e0d 100644
          });
          return data ? this.objectRegistry.getOrCreateType(data) : undefined;
      }
-@@ -1068,180 +1566,951 @@ export class Checker {
-         const data = this.client.apiRequest<TypeResponse | null>("getNonNullableType", {
-             snapshot: this.snapshotId,
-             project: this.project.id,
--            type: type.id,
+@@ -1064,184 +1562,955 @@ export class Checker {
+         return data ? this.objectRegistry.getOrCreateType(data) : undefined;
+     }
+ 
+-    getNonNullableType(type: Type): Type | undefined {
+-        const data = this.client.apiRequest<TypeResponse | null>("getNonNullableType", {
++    getNonNullableType(type: Type): Type | undefined {
++        const data = this.client.apiRequest<TypeResponse | null>("getNonNullableType", {
++            snapshot: this.snapshotId,
++            project: this.project.id,
 +            type: type.id,
 +        });
 +        return data ? this.objectRegistry.getOrCreateType(data) : undefined;
@@ -3038,8 +3043,9 @@ index 1a0296ac7..50d5b5e0d 100644
 +
 +    symbolToExpression(symbol: Symbol, meaning: number, enclosingDeclaration?: Node, flags?: number, internalFlags?: number): Node | undefined {
 +        const binaryData = this.client.apiRequestBinary("symbolToExpression", {
-+            snapshot: this.snapshotId,
-+            project: this.project.id,
+             snapshot: this.snapshotId,
+             project: this.project.id,
+-            type: type.id,
 +            symbol: symbol.id,
 +            meaning,
 +            location: enclosingDeclaration ? getNodeId(enclosingDeclaration) : undefined,
@@ -3599,7 +3605,7 @@ index 1a0296ac7..50d5b5e0d 100644
      constructor(data: SymbolResponse, objectRegistry: SnapshotObjectRegistry) {
          this.objectRegistry = objectRegistry;
  
-@@ -1595,20 +2963,115 @@ export class Symbol {
+@@ -1595,20 +2963,112 @@ export class Symbol {
          this.name = unescapeLeadingUnderscores(data.name);
          this.flags = data.flags;
          this.checkFlags = data.checkFlags;
@@ -3616,7 +3622,7 @@ index 1a0296ac7..50d5b5e0d 100644
 +        // the declarations and skip the lazy fetch. A light response omits both;
 +        // defer until first access.
 +        if (data.declarations !== undefined || data.valueDeclaration !== undefined) {
-+            this._declarations = (data.declarations ?? []).map(d => new NodeHandle(d, this.canonicalProject));
++            this._declarations = data.declarations !== undefined ? data.declarations.map(d => new NodeHandle(d, this.canonicalProject)) : undefined;
 +            this._valueDeclaration = data.valueDeclaration ? new NodeHandle(data.valueDeclaration, this.canonicalProject) : undefined;
 +            this._declarationsResolved = true;
 +        }
@@ -3696,20 +3702,17 @@ index 1a0296ac7..50d5b5e0d 100644
 +    /** @internal Apply full or empty declaration payload from RPC. */
 +    applyDeclarationPayload(data: SymbolResponse | null): void {
 +        this._declarationsResolved = true;
-+        if (data) {
-+            this._declarations = (data.declarations ?? []).map(d => new NodeHandle(d, this.canonicalProject));
-+            this._valueDeclaration = data.valueDeclaration ? new NodeHandle(data.valueDeclaration, this.canonicalProject) : undefined;
-+            this.applyParentHandle(data.parent);
-+        }
-+        else {
-+            this._declarations = [];
-+            this._valueDeclaration = undefined;
-+        }
++        // Stock parity: a symbol with no declarations has `declarations:
++        // undefined` (transient symbols), never an empty array — consumers
++        // like @typescript-eslint/no-deprecated branch on undefined.
++        this._declarations = data?.declarations !== undefined ? data.declarations.map(d => new NodeHandle(d, this.canonicalProject)) : undefined;
++        this._valueDeclaration = data?.valueDeclaration ? new NodeHandle(data.valueDeclaration, this.canonicalProject) : undefined;
++        if (data) this.applyParentHandle(data.parent);
 +    }
 +
-+    get declarations(): readonly NodeHandle[] {
++    get declarations(): readonly NodeHandle[] | undefined {
 +        this.ensureDeclarations();
-+        return this._declarations ?? [];
++        return this._declarations;
 +    }
 +
 +    get valueDeclaration(): NodeHandle | undefined {
@@ -3723,7 +3726,7 @@ index 1a0296ac7..50d5b5e0d 100644
      }
  
      /**
-@@ -1628,7 +3091,7 @@ export class Symbol {
+@@ -1628,7 +3088,7 @@ export class Symbol {
      }
  
      private fetchSymbolTable(method: string): ReadonlyMap<__String, Symbol> {
@@ -3732,7 +3735,7 @@ index 1a0296ac7..50d5b5e0d 100644
          const table = new Map<__String, Symbol>();
          for (const symbol of symbols) {
              table.set(symbol.escapedName, symbol);
-@@ -1638,7 +3101,7 @@ export class Symbol {
+@@ -1638,7 +3098,7 @@ export class Symbol {
  
      getExportSymbol(): Symbol {
          if (!this.exportSymbol) return this;
@@ -3741,7 +3744,7 @@ index 1a0296ac7..50d5b5e0d 100644
      }
  
      getJsDocTags(checker: Checker): readonly JSDocTagInfo[] {
-@@ -1656,7 +3119,8 @@ class TypeObject implements Type {
+@@ -1656,7 +3116,8 @@ class TypeObject implements Type {
      readonly id: number;
      readonly flags: TypeFlags;
      readonly objectFlags!: ObjectFlags;
@@ -3751,7 +3754,7 @@ index 1a0296ac7..50d5b5e0d 100644
      readonly value!: string | number | boolean | bigint;
      readonly intrinsicName!: string;
      readonly isThisType!: boolean;
-@@ -1688,7 +3152,7 @@ class TypeObject implements Type {
+@@ -1688,7 +3149,7 @@ class TypeObject implements Type {
          this.id = data.id;
          this.flags = data.flags;
          if (data.objectFlags !== undefined) this.objectFlags = data.objectFlags;
@@ -3760,7 +3763,7 @@ index 1a0296ac7..50d5b5e0d 100644
          if (data.value != null) {
              // BigInt literal values are serialized as decimal strings (e.g. "-123") because
              // JSON cannot represent bigint. Decode them back into a real bigint here.
-@@ -1719,8 +3183,17 @@ class TypeObject implements Type {
+@@ -1719,8 +3180,17 @@ class TypeObject implements Type {
          this.falseType = false;
      }
  
@@ -3779,7 +3782,7 @@ index 1a0296ac7..50d5b5e0d 100644
      }
  
      getAliasSymbol(): Symbol | undefined {
-@@ -1770,7 +3243,7 @@ class TypeObject implements Type {
+@@ -1770,7 +3240,7 @@ class TypeObject implements Type {
      }
  
      getIndexType(): Type {
@@ -3788,7 +3791,7 @@ index 1a0296ac7..50d5b5e0d 100644
      }
  
      getCheckType(): Type {
-@@ -1985,36 +3458,94 @@ export class Signature {
+@@ -1985,36 +3455,94 @@ export class Signature {
  
      readonly id: number;
      readonly declaration?: NodeHandle | undefined;
