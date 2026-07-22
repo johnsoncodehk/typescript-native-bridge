@@ -162,9 +162,9 @@ Measured on this repo's benchmarks (Apple Silicon; your repo will differ — mea
 | Workload | Stock `typescript` | TNB | |
 |---|---|---|---|
 | `vue-tsc -b` full check (elk.zone, ~2000 files) | 9.7s | **3.1s** | ~3.1× |
-| type-aware ESLint, watch path (1000-file corpus) | 7.1s | 9.8s | 0.7× |
+| type-aware ESLint, watch path (1000-file corpus) | 7.1s | 8.9s | 0.8× |
 | type-aware ESLint, single-run path (plain TS projects) | 7.6s | 7.7s | parity |
-| JS heap peak (same 1000-file ESLint run) | 1.57GB | **0.87GB** | −45% |
+| JS heap peak (same 1000-file ESLint run) | 1.57GB | **0.90GB** | −43% |
 
 ### Where the time goes (checker vs everything else)
 
@@ -187,22 +187,22 @@ contextual-type lookups). Each query crosses JS→Go:
 | | Stock | TNB |
 |---|---|---|
 | Lint without type info (tool overhead only) | 1.8s | 1.7s |
-| Type-aware phase | ~5.3s (JS checker, in-process) | ~8.1s (see breakdown) |
-| **Total** | **7.1s** | **9.8s** |
+| Type-aware phase | ~5.3s (JS checker, in-process) | ~7.2s (see breakdown) |
+| **Total** | **7.1s** | **8.9s** |
 
-TNB's type-aware phase (~8.1s) decomposed:
+TNB's type-aware phase (~7.2s) decomposed:
 
 | Layer | Time | What it is |
 |---|---|---|
-| Bridge round-trips | ~3.4s | 469K JS→Go calls, transport + Go compute measured together at the boundary (~7µs/call; ~1s of that is JSON serialization by CPU profile) |
+| Bridge round-trips | ~2.7s | 469K JS→Go calls on the **V8-arena transport**: Go writes fixed-layout records straight into V8-allocated memory, JS reads them via DataView — no serialization, no per-call result allocation, strings interned to ids |
 | Go checker compute | inside the round-trips, small | bounded by measurement: the same engine does elk's entire whole-program pass in 0.6s — the engine is not the bottleneck |
-| Fork JS query machinery | ~4.2s | adapter/fixup, remote node & symbol wrappers, GC churn (by subtraction) |
+| Fork JS query machinery | ~4.0s | adapter/fixup, remote node & symbol wrappers, GC churn (by subtraction) |
 | Per-generation fixed costs | ~0.5s | 1,002 thin-program rebuilds (stock's structural sharing avoids these) |
 
 Stock pays **zero transport** for the same queries — its checker sits in-process.
 Single-run ESLint (plain TS projects) has exactly one program generation, so there's
 nothing to repeat and it's parity. In short: **whole-program checking favors TNB;
-high-frequency small-query workloads pay the bridge toll plus JS-side adapter costs.**
+high-frequency small-query workloads pay remaining bridge and JS-side adapter costs.**
 
 ---
 
