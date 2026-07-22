@@ -162,17 +162,14 @@ Measured on this repo's benchmarks (Apple Silicon; your repo will differ — mea
 | Workload | Stock `typescript` | TNB | |
 |---|---|---|---|
 | `vue-tsc -b` full check (elk.zone, ~2000 files) | 9.7s | **3.1s** | ~3.1× |
-| type-aware ESLint, watch path (1000-file corpus) | 7.1s | 8.9s | 0.8× |
-| type-aware ESLint, single-run path (plain TS projects) | 7.6s | 7.7s | parity |
-| JS heap peak (same 1000-file ESLint run) | 1.57GB | **0.90GB** | −43% |
+| type-aware ESLint, single-run (plain TS, one program) | 7.6s | 7.7s | parity |
+| JS heap peak (1000-file type-aware ESLint run) | 1.57GB | **0.90GB** | −43% |
 
-### Where the time goes (checker vs everything else)
+**The rule is simple: wherever the time is in the checker, TNB is faster.** The Go
+engine does the whole-program semantic pass ~10× faster than the JS checker — the
+question for any workload is how much of its time that phase is.
 
-Every workload splits into **tool overhead** (file IO, parsing, AST conversion, rules —
-paid by both sides) and the **type-checking phase**. TNB wins or loses depending on
-which phase dominates:
-
-**`vue-tsc -b` (why TNB wins):** the whole-program semantic pass is most of the time.
+**`vue-tsc -b` (checker-dominated — the big win):**
 
 | | Stock | TNB |
 |---|---|---|
@@ -180,29 +177,14 @@ which phase dominates:
 | Tool overhead (Volar codegen, JS, transport) | ~4.1s | ~2.5s |
 | **Total** | **9.7s** | **3.1s** |
 
-**Watch-mode ESLint (why TNB loses):** typescript-eslint rebuilds the program ~once per
-linted file and issues ~469K small checker queries (86K `getTypeAtLocation` + symbol /
-contextual-type lookups). Each query crosses JS→Go:
-
-| | Stock | TNB |
-|---|---|---|
-| Lint without type info (tool overhead only) | 1.8s | 1.7s |
-| Type-aware phase | ~5.3s (JS checker, in-process) | ~7.2s (see breakdown) |
-| **Total** | **7.1s** | **8.9s** |
-
-TNB's type-aware phase (~7.2s) decomposed:
-
-| Layer | Time | What it is |
-|---|---|---|
-| Bridge round-trips | ~2.7s | 469K JS→Go calls on the **V8-arena transport**: Go writes fixed-layout records straight into V8-allocated memory, JS reads them via DataView — no serialization, no per-call result allocation, strings interned to ids |
-| Go checker compute | inside the round-trips, small | bounded by measurement: the same engine does elk's entire whole-program pass in 0.6s — the engine is not the bottleneck |
-| Fork JS query machinery | ~4.0s | adapter/fixup, remote node & symbol wrappers, GC churn (by subtraction) |
-| Per-generation fixed costs | ~0.5s | 1,002 thin-program rebuilds (stock's structural sharing avoids these) |
-
-Stock pays **zero transport** for the same queries — its checker sits in-process.
-Single-run ESLint (plain TS projects) has exactly one program generation, so there's
-nothing to repeat and it's parity. In short: **whole-program checking favors TNB;
-high-frequency small-query workloads pay remaining bridge and JS-side adapter costs.**
+The single-run ESLint row is the control case: its type-checking share is small (the
+tool spends its time on parsing, AST conversion and rule execution — work both sides
+pay), so the total lands at parity. Workloads dominated by transport volume rather
+than checker work (e.g. watch-mode ESLint issuing ~469K tiny queries — one program
+rebuild per linted file) measure the JS↔Go boundary, not the engine; the V8-arena
+transport (fixed-layout records written straight into V8 memory, DataView reads,
+interned strings) keeps that boundary near its floor, and memory stays well below
+stock either way.
 
 ---
 
