@@ -757,6 +757,13 @@ fs.writeFileSync(OUT_LOG, '');
 fs.writeFileSync(THROW_FILE, '');
 
 const allEntries = collectFileSet();
+// An empty corpus means the volar checkout didn't resolve (e.g. VOLAR_ROOT
+// unset from an isolated tools copy) — a zero-unit run merges into a hollow
+// green, so die here instead.
+if (allEntries.length === 0) {
+	console.error(`sim-nav: corpus is empty — volar test-workspace not found at ${testWorkspacePath} (set VOLAR_ROOT)`);
+	process.exit(1);
+}
 // Interleaved sharding: files are sorted by collectFileSet, so index-mod gives each
 // shard a deterministic, size-mixed disjoint subset.
 const entries = allEntries.filter((_, i) => i % SHARD_COUNT === SHARD_INDEX);

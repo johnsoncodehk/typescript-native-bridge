@@ -982,7 +982,10 @@ class ArenaClient {
         if (count === 0) return undefined;
         let p = this.view.getUint32(off, true);
         const out = new Array(count);
-        for (let i = 0; i < count; i++) { out[i] = this.str(this.view.getUint32(p, true)); p += 4; }
+        // Elements of a present array are never "absent": id 0 here is the
+        // empty string (Go's intern maps "" to arenaAbsent) — e.g. the
+        // leading/trailing texts of a `${x}` template literal type.
+        for (let i = 0; i < count; i++) { out[i] = this.str(this.view.getUint32(p, true)) ?? ""; p += 4; }
         return out;
     }
 
@@ -1031,7 +1034,10 @@ class ArenaClient {
         if (f2 & 2) data.fixedLength = v.getInt32(off + 64, true);
         if (f2 & 4) data.readonly = (f2 & 8) !== 0; // present bit + value bit
         const valueKind = v.getUint8(off + 69);
-        if (valueKind === 1) data.value = this.str(v.getUint32(off + 72, true));
+        // valueKind tags the slot as a present string, so the table-wide
+        // "id 0 = absent" convention does not apply: id 0 here is the empty
+        // string (Go's intern maps "" to arenaAbsent).
+        if (valueKind === 1) data.value = this.str(v.getUint32(off + 72, true)) ?? "";
         else if (valueKind === 2) data.value = v.getFloat64(off + 80, true);
         else if (valueKind === 3) data.value = v.getUint8(off + 80) !== 0;
         else data.value = null;
