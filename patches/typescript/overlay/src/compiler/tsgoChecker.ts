@@ -767,7 +767,7 @@ const ARENA_KIND_NULL = 0;
 const ARENA_KIND_RECORD = 1;
 const ARENA_KIND_ERROR = 4;
 
-type ArenaMethodKind = "node" | "type" | "typeKind" | "typeStr" | "symbol" | "symbolNode" | "filePos" | "signature" | "contextual";
+type ArenaMethodKind = "node" | "type" | "typeKind" | "typeStr" | "symbol" | "symbolNode" | "filePos" | "signature" | "contextual" | "contextualArg";
 type ArenaResultKind = "type" | "types" | "symbol" | "symbols" | "signature" | "signatures" | "string" | "bool";
 // Method → [request shape, result shape] (must mirror arena_dispatch.go and
 // the Go handlers' return types exactly).
@@ -776,6 +776,7 @@ const ARENA_METHODS: ReadonlyMap<string, [ArenaMethodKind, ArenaResultKind]> = n
     ["getSymbolAtLocation", ["node", "symbol"]],
     ["getResolvedSignature", ["node", "signature"]],
     ["getContextualType", ["contextual", "type"]],
+    ["getContextualTypeForArgumentAtIndex", ["contextualArg", "type"]],
     ["getApparentType", ["type", "type"]],
     ["getBaseTypeOfLiteralType", ["type", "type"]],
     ["getNonNullableType", ["type", "type"]],
@@ -857,6 +858,10 @@ class ArenaClient {
             case "contextual":
                 putHandle(String(params.location), 16);
                 v.setInt32(32, params.contextFlags ?? 0, true);
+                break;
+            case "contextualArg":
+                putHandle(String(params.location), 16);
+                v.setInt32(32, params.argIndex ?? 0, true);
                 break;
             case "type":
                 v.setUint32(16, typeId >>> 0, true);

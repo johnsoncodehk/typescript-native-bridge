@@ -16,6 +16,7 @@ import (
 func arenaCapable(method string) bool {
 	switch Method(method) {
 	case MethodGetTypeAtLocation, MethodGetContextualType, MethodGetApparentType,
+		MethodGetContextualTypeForArgumentAtIndex,
 		MethodGetTypeOfSymbolAtLocation, MethodGetTypeOfSymbol, MethodGetDeclaredTypeOfSymbol,
 		MethodGetSymbolAtPosition, MethodGetSymbolAtLocation,
 		MethodGetPropertiesOfType, MethodGetSignaturesOfType,
@@ -88,6 +89,8 @@ func (s *Session) handleArenaRequest(method string) (any, error) {
 		return s.handleGetTypeAtLocation(ctx, &GetTypeAtLocationParams{Snapshot: snap, Project: proj, Location: loc(16)})
 	case MethodGetContextualType:
 		return s.handleGetContextualType(ctx, &GetContextualTypeParams{Snapshot: snap, Project: proj, Location: loc(16), ContextFlags: r.i32(32)})
+	case MethodGetContextualTypeForArgumentAtIndex:
+		return s.handleGetContextualTypeForArgumentAtIndex(ctx, &GetContextualTypeForArgumentAtIndexParams{Snapshot: snap, Project: proj, Location: loc(16), ArgIndex: r.i32(32)})
 	case MethodGetApparentType:
 		return s.handleGetApparentType(ctx, &CheckerTypeParams{Snapshot: snap, Project: proj, Type: TypeID(r.u32(16))})
 	case MethodGetTypeOfSymbolAtLocation:

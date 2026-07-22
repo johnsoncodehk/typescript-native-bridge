@@ -277,7 +277,9 @@ query('getSymbolAtLocation', P({ location: symModel.valueDeclaration }));
 query('getContextualType', P({ location: symAdd.valueDeclaration, contextFlags: 0 }));
 // getResolvedSignature needs a call-expression handle (not obtainable from
 // symbol declarations); its signature record decoder is covered via
-// getSignaturesOfType above.
+// getSignaturesOfType above. getContextualTypeForArgumentAtIndex likewise
+// needs a call-expression handle; its "type" result decoder and node-handle
+// request shape are covered via getContextualType / getTypeAtLocation.
 
 if (addType) {
 	const sigs = query('getSignaturesOfType', P({ type: addType.id, kind: 0 }));
