@@ -337,6 +337,41 @@ func BridgeReleaseBinary(handle C.uint64_t) {
 	}
 }
 
+// BridgeSetArena installs the session's V8-allocated arena (part 3): the JS
+// side allocates one 4 MiB buffer per session and hands its pointer here. Go
+// writes hot-path responses into it in place; the buffer is rooted JS-side
+// for the session's lifetime and additionally ref'd by the shim.
+//
+//export BridgeSetArena
+func BridgeSetArena(session C.int64_t, ptr unsafe.Pointer, length C.int) {
+	mu.Lock()
+	entry, ok := sessions[int64(session)]
+	mu.Unlock()
+	if !ok {
+		return
+	}
+	entry.api.SetArena(ptr, int(length))
+}
+
+// BridgeCallArena invokes one arena-capable hot query. The request record is
+// read from the arena at offset 0; the response header is written back at
+// arenaRespOffset for the JS side to decode — no bytes cross either way. An
+// oversize response escapes as the returned JSON doc (freed by the shim).
+//
+//export BridgeCallArena
+func BridgeCallArena(session C.int64_t, method *C.char) *C.char {
+	mu.Lock()
+	entry, ok := sessions[int64(session)]
+	mu.Unlock()
+	if !ok {
+		return nil
+	}
+	if doc := entry.api.HandleArenaRequest(C.GoString(method)); doc != "" {
+		return C.CString(doc)
+	}
+	return nil
+}
+
 // BridgeDisposeSession closes the session and releases all refs.
 //
 //export BridgeDisposeSession

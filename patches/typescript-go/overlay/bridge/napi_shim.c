@@ -39,19 +39,25 @@ extern struct BridgeText BridgeCall(int64_t session, char* method, char* paramsJ
 extern struct BridgeBinary BridgeCallBinary(int64_t session, char* method, char* paramsJson);
 extern void BridgeReleaseBinary(unsigned long long handle);
 extern void BridgeDisposeSession(int64_t session);
+extern void BridgeSetArena(int64_t session, void* ptr, long long length);
+extern char* BridgeCallArena(int64_t session, char* method);
 
 // Per-env reusable scratch for params conversion. The bridge call is
 // synchronous and Go copies the params (C.GoString) before returning, so one
 // grow-on-demand buffer per env replaces a malloc/free pair per call.
+#define SHIM_MAX_ARENAS 8
 struct ShimInstance {
 	char* paramsBuf;
 	size_t paramsBufLen;
+	// Session arenas kept alive while Go holds their pointers (part 3).
+	struct { int64_t session; napi_ref ref; } arenas[SHIM_MAX_ARENAS];
+	int arenaCount;
 };
 
 static void finalize_instance(napi_env env, void* data, void* hint) {
-	(void)env;
 	(void)hint;
 	struct ShimInstance* i = (struct ShimInstance*)data;
+	for (int k = 0; k < i->arenaCount; k++) napi_delete_reference(env, i->arenas[k].ref);
 	free(i->paramsBuf);
 	free(i);
 }
@@ -284,12 +290,89 @@ static napi_value fn_call_binary(napi_env env, napi_callback_info info) {
 	return buf;
 }
 
+// setArena(session, buffer): install the session's V8-allocated arena (part
+// 3). The buffer is created JS-side (V8 memory — sandbox-legal); Go writes
+// hot-path responses into it in place. The shim refs it so the pointer Go
+// holds can never dangle, released with the session/env.
+static napi_value fn_set_arena(napi_env env, napi_callback_info info) {
+	napi_value argv[2];
+	size_t argc = 2;
+	napi_get_cb_info(env, info, &argc, argv, NULL, NULL);
+	bool isBuf = false;
+	if (napi_is_buffer(env, argv[1], &isBuf) != napi_ok || !isBuf) {
+		napi_throw_error(env, NULL, "tnb bridge: setArena expects a Buffer");
+		return NULL;
+	}
+	void* data = NULL;
+	size_t len = 0;
+	if (napi_get_buffer_info(env, argv[1], &data, &len) != napi_ok) return NULL;
+	int64_t session = arg_int64(env, argv[0]);
+	struct ShimInstance* inst = instance(env);
+	for (int k = 0; k < inst->arenaCount; k++) {
+		if (inst->arenas[k].session == session) {
+			napi_delete_reference(env, inst->arenas[k].ref);
+			inst->arenas[k] = inst->arenas[--inst->arenaCount];
+			break;
+		}
+	}
+	if (inst->arenaCount >= SHIM_MAX_ARENAS) {
+		napi_throw_error(env, NULL, "tnb bridge: too many arena sessions");
+		return NULL;
+	}
+	napi_ref ref = NULL;
+	if (napi_create_reference(env, argv[1], 1, &ref) != napi_ok) return NULL;
+	inst->arenas[inst->arenaCount].session = session;
+	inst->arenas[inst->arenaCount].ref = ref;
+	inst->arenaCount++;
+	BridgeSetArena(session, data, (long long)len);
+	napi_value undef;
+	napi_get_undefined(env, &undef);
+	return undef;
+}
+
+// callArena(session, method): one arena-capable hot query. The request record
+// is read from the arena at offset 0; the response header is written back at
+// the arena's response offset — the JS side decodes directly out of its own
+// buffer (no copies either way). An oversize response escapes as the returned
+// JSON string.
+static napi_value fn_call_arena(napi_env env, napi_callback_info info) {
+	napi_value argv[2];
+	size_t argc = 2;
+	napi_get_cb_info(env, info, &argc, argv, NULL, NULL);
+	int64_t session = arg_int64(env, argv[0]);
+	bool ok, methodCached;
+	char* method = arg_method(env, argv[1], &ok, &methodCached);
+	if (!ok) return NULL;
+	char* doc = BridgeCallArena(session, method);
+	if (!methodCached) free(method);
+	if (doc != NULL) {
+		napi_value out = NULL;
+		napi_create_string_utf8(env, doc, NAPI_AUTO_LENGTH, &out);
+		free(doc);
+		return out;
+	}
+	napi_value undef;
+	napi_get_undefined(env, &undef);
+	return undef;
+}
+
 // disposeSession(session): void
 static napi_value fn_dispose_session(napi_env env, napi_callback_info info) {
 	napi_value argv[1];
 	size_t argc = 1;
 	napi_get_cb_info(env, info, &argc, argv, NULL, NULL);
-	BridgeDisposeSession(arg_int64(env, argv[0]));
+	int64_t session = arg_int64(env, argv[0]);
+	// Release the session's arena ref with it — a pinned 4 MiB buffer per
+	// disposed session is a heap leak on session-churning hosts.
+	struct ShimInstance* inst = instance(env);
+	for (int k = 0; k < inst->arenaCount; k++) {
+		if (inst->arenas[k].session == session) {
+			napi_delete_reference(env, inst->arenas[k].ref);
+			inst->arenas[k] = inst->arenas[--inst->arenaCount];
+			break;
+		}
+	}
+	BridgeDisposeSession(session);
 	napi_value undef;
 	napi_get_undefined(env, &undef);
 	return undef;
@@ -310,6 +393,8 @@ napi_value napi_register_module_v1(napi_env env, napi_value exports) {
 	set_fn(env, exports, "newSession", fn_new_session);
 	set_fn(env, exports, "call", fn_call);
 	set_fn(env, exports, "callBinary", fn_call_binary);
+	set_fn(env, exports, "setArena", fn_set_arena);
+	set_fn(env, exports, "callArena", fn_call_arena);
 	set_fn(env, exports, "disposeSession", fn_dispose_session);
 	return exports;
 }

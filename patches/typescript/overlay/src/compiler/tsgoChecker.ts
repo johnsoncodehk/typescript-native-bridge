@@ -372,6 +372,8 @@ function loadBridgeDeps(): void {
         BridgeNewSession: _bridgeAddon.newSession,
         BridgeCall: _bridgeAddon.call,
         BridgeCallBinary: _bridgeAddon.callBinary,
+        BridgeSetArena: _bridgeAddon.setArena,
+        BridgeCallArena: _bridgeAddon.callArena,
         BridgeDisposeSession: _bridgeAddon.disposeSession,
     };
     proc.bridgeAddon = _bridgeAddon;
@@ -693,6 +695,7 @@ function tsgoSourceFileNames(configFilePath: string, proj: any): { epoch: number
 class BridgeClient {
     private handle: number;
     private handleBigInt: bigint;
+    private arena: ArenaClient | undefined;
 
     constructor(cwd: string) {
         this.handle = _bridgeFns.BridgeNewSession(cwd);
@@ -700,6 +703,12 @@ class BridgeClient {
     }
 
     apiRequest(method: string, params: any): any {
+        // Arena-capable hot query classes ride the binary transport (part 3);
+        // everything else keeps the JSON path.
+        if (ARENA_METHODS.has(method)) {
+            this.arena ??= new ArenaClient(this.handle);
+            return this.arena.apiRequest(method, params);
+        }
         const t0 = process.env.TSGO_PROFILE === "1" ? Date.now() : 0;
         noteRpc(method);
         const paramsJson = params == null ? null : JSON.stringify(params);
@@ -743,6 +752,345 @@ class BridgeClient {
 
     close(): void {
         try { _bridgeFns.BridgeDisposeSession(BigInt(this.handle)); } catch { /* best-effort */ }
+    }
+}
+
+// ── V8-arena binary transport (part 3) ─────────────────────────────────
+// One session-scoped, V8-allocated buffer: requests are fixed-shape records
+// at offset 0, responses are header + records + packed strings at
+// arenaRespOffset. Only the measured hot scalar/record query classes ride it
+// (the table below mirrors the Go dispatcher's); document payloads keep the
+// JSON path. Arena memory is V8-owned — sandbox-legal by construction.
+const ARENA_SIZE = 4 * 1024 * 1024;
+const ARENA_RESP_OFFSET = 1 << 20;
+const ARENA_KIND_NULL = 0;
+const ARENA_KIND_RECORD = 1;
+const ARENA_KIND_ERROR = 4;
+
+type ArenaMethodKind = "node" | "type" | "typeKind" | "typeStr" | "symbol" | "symbolNode" | "filePos" | "signature" | "contextual";
+type ArenaResultKind = "type" | "types" | "symbol" | "symbols" | "signature" | "signatures" | "string" | "bool";
+// Method → [request shape, result shape] (must mirror arena_dispatch.go and
+// the Go handlers' return types exactly).
+const ARENA_METHODS: ReadonlyMap<string, [ArenaMethodKind, ArenaResultKind]> = new Map([
+    ["getTypeAtLocation", ["node", "type"]],
+    ["getSymbolAtLocation", ["node", "symbol"]],
+    ["getResolvedSignature", ["node", "signature"]],
+    ["getContextualType", ["contextual", "type"]],
+    ["getApparentType", ["type", "type"]],
+    ["getBaseTypeOfLiteralType", ["type", "type"]],
+    ["getNonNullableType", ["type", "type"]],
+    ["getTypeArguments", ["type", "types"]],
+    ["getBaseTypes", ["type", "types"]],
+    ["getPropertiesOfType", ["type", "symbols"]],
+    ["getSymbolOfType", ["type", "symbol"]],
+    ["getTypesOfType", ["type", "types"]],
+    ["getFreshTypeOfType", ["type", "type"]],
+    ["getRegularTypeOfType", ["type", "type"]],
+    ["getTargetOfType", ["type", "type"]],
+    ["getObjectTypeOfType", ["type", "type"]],
+    ["getCheckTypeOfType", ["type", "type"]],
+    ["getExtendsTypeOfType", ["type", "type"]],
+    ["getBaseTypeOfType", ["type", "type"]],
+    ["getTypeParametersOfType", ["type", "types"]],
+    ["getOuterTypeParametersOfType", ["type", "types"]],
+    ["getLocalTypeParametersOfType", ["type", "types"]],
+    ["getAliasTypeArgumentsOfType", ["type", "types"]],
+    ["isArrayType", ["type", "bool"]],
+    ["typeToString", ["typeStr", "string"]],
+    ["getSignaturesOfType", ["typeKind", "signatures"]],
+    ["getTypeOfSymbolAtLocation", ["symbolNode", "type"]],
+    ["getTypeOfSymbol", ["symbol", "type"]],
+    ["getDeclaredTypeOfSymbol", ["symbol", "type"]],
+    ["getSymbolAtPosition", ["filePos", "symbol"]],
+    ["getReturnTypeOfSignature", ["signature", "type"]],
+    ["getParametersOfSignature", ["signature", "symbols"]],
+]);
+
+class ArenaClient {
+    private readonly buf: Buffer;
+    private readonly view: DataView;
+    private readonly dec = new TextDecoder();
+    private readonly strTab: string[] = [""]; // id 0 = absent
+
+    constructor(private readonly handle: number) {
+        this.buf = Buffer.alloc(ARENA_SIZE);
+        _bridgeFns.BridgeSetArena(handle, this.buf);
+        this.view = new DataView(this.buf.buffer, this.buf.byteOffset, this.buf.byteLength);
+    }
+
+    apiRequest(method: string, params: any): any {
+        const t0 = process.env.TSGO_PROFILE === "1" ? Date.now() : 0;
+        noteRpc(method);
+        const traceId = _rpcTraceEnter(method, true, this.handle);
+        const r = this.request(method, params);
+        _rpcTraceExit(traceId, method);
+        if (process.env.TSGO_PROFILE === "1") _profRpc(method, Date.now() - t0);
+        return r;
+    }
+
+    private request(method: string, params: any): any {
+        const v = this.view;
+        const b = this.buf;
+        let writeOff = 256; // strings live after the fixed head
+        const putStr = (s: string, off: number): void => {
+            const n = b.write(s, writeOff, "utf8");
+            v.setUint32(off, writeOff, true);
+            v.setUint32(off + 4, n, true);
+            writeOff += n;
+        };
+        // head: snapshot u64 @0, project str @8
+        v.setBigUint64(0, BigInt(params.snapshot ?? 0), true);
+        putStr(String(params.project ?? ""), 8);
+        const putHandle = (handle: string, off: number): void => {
+            // "index.kind.path" — split at the first two dots.
+            const d1 = handle.indexOf(".");
+            const d2 = handle.indexOf(".", d1 + 1);
+            v.setUint32(off, Number(handle.slice(0, d1)), true);
+            v.setUint32(off + 4, Number(handle.slice(d1 + 1, d2)), true);
+            putStr(handle.slice(d2 + 1), off + 8);
+        };
+        const typeId = params.type ?? params.objectId ?? 0;
+        switch (ARENA_METHODS.get(method)![0]) {
+            case "node":
+                putHandle(String(params.location), 16);
+                break;
+            case "contextual":
+                putHandle(String(params.location), 16);
+                v.setInt32(32, params.contextFlags ?? 0, true);
+                break;
+            case "type":
+                v.setUint32(16, typeId >>> 0, true);
+                break;
+            case "typeKind":
+                v.setUint32(16, typeId >>> 0, true);
+                v.setInt32(20, params.kind ?? 0, true);
+                break;
+            case "typeStr":
+                v.setUint32(16, typeId >>> 0, true);
+                v.setInt32(20, params.flags ?? 0, true);
+                if (params.location != null) putHandle(String(params.location), 24);
+                else { v.setUint32(24, 0, true); v.setUint32(28, 0, true); v.setUint32(32, 0, true); v.setUint32(36, 0, true); }
+                break;
+            case "symbol":
+                v.setBigUint64(16, BigInt(params.symbol ?? 0), true);
+                break;
+            case "symbolNode":
+                v.setBigUint64(16, BigInt(params.symbol ?? 0), true);
+                putHandle(String(params.location), 24);
+                break;
+            case "filePos":
+                putStr(String(params.file ?? ""), 16);
+                v.setUint32(24, params.position >>> 0, true);
+                break;
+            case "signature":
+                v.setBigUint64(16, BigInt(params.signature ?? params.objectId ?? 0), true);
+                break;
+            default:
+                throw new Error(`arena: method not arena-capable: ${method}`);
+        }
+        const escape = _bridgeFns.BridgeCallArena(this.handle, method);
+        // Oversize responses that don't fit the arena cross out-of-band as the
+        // JSON doc the JSON transport would have produced.
+        if (typeof escape === "string") return JSON.parse(escape);
+        return this.response(method);
+    }
+
+    private response(method: string): any {
+        const v = this.view;
+        const kind = v.getUint8(ARENA_RESP_OFFSET);
+        const newStrOff = v.getUint32(ARENA_RESP_OFFSET + 8, true); // absolute arena offset
+        const newStrLen = v.getUint32(ARENA_RESP_OFFSET + 12, true);
+        // Sync the string table: [count u32][(len u32)(bytes)…], ids implicit.
+        if (newStrLen > 0) {
+            const count = v.getUint32(newStrOff, true);
+            let p = newStrOff + 4;
+            for (let i = 0; i < count; i++) {
+                const n = v.getUint32(p, true);
+                this.strTab.push(this.dec.decode(this.buf.subarray(p + 4, p + 4 + n)));
+                p += 4 + n;
+            }
+        }
+        switch (kind) {
+            case ARENA_KIND_NULL:
+                return null;
+            case ARENA_KIND_ERROR: {
+                const o = v.getUint32(ARENA_RESP_OFFSET + 16, true);
+                const n = v.getUint32(ARENA_RESP_OFFSET + 20, true);
+                throw new Error(this.dec.decode(this.buf.subarray(o, o + n)));
+            }
+            case ARENA_KIND_RECORD:
+                break;
+            default:
+                throw new Error(`arena: bad response kind ${kind} for ${method}`);
+        }
+        const resKind = ARENA_METHODS.get(method)![1];
+        // Scalar payloads have no count slot — they start at +16.
+        if (resKind === "string") {
+            const o = v.getUint32(ARENA_RESP_OFFSET + 16, true);
+            const n = v.getUint32(ARENA_RESP_OFFSET + 20, true);
+            return this.dec.decode(this.buf.subarray(o, o + n));
+        }
+        if (resKind === "bool") return v.getUint8(ARENA_RESP_OFFSET + 16) !== 0;
+        const count = v.getUint32(ARENA_RESP_OFFSET + 16, true);
+        let off = ARENA_RESP_OFFSET + 20;
+        const recKind = resKind === "type" || resKind === "types" ? "type" : resKind === "symbol" || resKind === "symbols" ? "symbol" : "signature";
+        const out: any[] = [];
+        for (let i = 0; i < count; i++) {
+            if (recKind === "type") {
+                out.push(this.readType(off));
+                off += 152;
+            } else if (recKind === "symbol") {
+                out.push(this.readSymbol(off));
+                off += 72;
+            } else {
+                out.push(this.readSignature(off));
+                off += 64;
+            }
+        }
+        return resKind === recKind ? out[0] : out; // singular result kinds unwrap
+    }
+
+    private str(id: number): string | undefined {
+        return id === 0 ? undefined : this.strTab[id];
+    }
+
+    private u32Array(off: number): number[] | undefined {
+        const count = this.view.getUint32(off + 4, true);
+        if (count === 0) return undefined;
+        let p = this.view.getUint32(off, true);
+        const out = new Array(count);
+        for (let i = 0; i < count; i++) { out[i] = this.view.getUint32(p, true); p += 4; }
+        return out;
+    }
+
+    private u64Array(off: number): number[] | undefined {
+        const count = this.view.getUint32(off + 4, true);
+        if (count === 0) return undefined;
+        let p = this.view.getUint32(off, true);
+        const out = new Array(count);
+        for (let i = 0; i < count; i++) { out[i] = Number(this.view.getBigUint64(p, true)); p += 8; }
+        return out;
+    }
+
+    private strArray(off: number): string[] | undefined {
+        const count = this.view.getUint32(off + 4, true);
+        if (count === 0) return undefined;
+        let p = this.view.getUint32(off, true);
+        const out = new Array(count);
+        for (let i = 0; i < count; i++) { out[i] = this.str(this.view.getUint32(p, true)); p += 4; }
+        return out;
+    }
+
+    private u8Array(off: number): number[] | undefined {
+        const count = this.view.getUint32(off + 4, true);
+        if (count === 0) return undefined;
+        const p = this.view.getUint32(off, true);
+        const out = new Array(count);
+        for (let i = 0; i < count; i++) out[i] = this.view.getUint8(p + i);
+        return out;
+    }
+
+    private u32z(off: number): number | undefined {
+        const x = this.view.getUint32(off, true);
+        return x === 0 ? undefined : x;
+    }
+
+    private u64z(off: number): number | undefined {
+        const x = this.view.getBigUint64(off, true);
+        return x === 0n ? undefined : Number(x);
+    }
+
+    private readType(off: number): any {
+        const v = this.view;
+        const data: any = {
+            id: v.getUint32(off, true),
+            flags: v.getUint32(off + 4, true),
+            // go-json-experiment omitempty keeps scalar zero values (only
+            // omitzero drops them), so these two cross unconditionally.
+            objectFlags: v.getUint32(off + 8, true),
+        };
+        const set = (k: string, val: any) => { if (val !== undefined) data[k] = val; };
+        set("target", this.u32z(off + 12));
+        set("freshType", this.u32z(off + 16));
+        set("regularType", this.u32z(off + 20));
+        set("objectType", this.u32z(off + 24));
+        set("indexType", this.u32z(off + 28));
+        set("checkType", this.u32z(off + 32));
+        set("extendsType", this.u32z(off + 36));
+        set("baseType", this.u32z(off + 40));
+        set("substConstraint", this.u32z(off + 44));
+        set("symbol", this.u64z(off + 48));
+        set("aliasSymbol", this.u64z(off + 56));
+        const f2 = v.getUint8(off + 68);
+        data.isThisType = (f2 & 1) !== 0;
+        if (f2 & 2) data.fixedLength = v.getInt32(off + 64, true);
+        if (f2 & 4) data.readonly = (f2 & 8) !== 0; // present bit + value bit
+        const valueKind = v.getUint8(off + 69);
+        if (valueKind === 1) data.value = this.str(v.getUint32(off + 72, true));
+        else if (valueKind === 2) data.value = v.getFloat64(off + 80, true);
+        else if (valueKind === 3) data.value = v.getUint8(off + 80) !== 0;
+        else data.value = null;
+        set("intrinsicName", this.str(v.getUint32(off + 88, true)));
+        set("typeParameters", this.u32Array(off + 92));
+        set("outerTypeParameters", this.u32Array(off + 100));
+        set("localTypeParameters", this.u32Array(off + 108));
+        set("aliasTypeArguments", this.u32Array(off + 116));
+        set("texts", this.strArray(off + 124));
+        set("elementFlags", this.u8Array(off + 132));
+        return data;
+    }
+
+    private readHandle(off: number): string {
+        const v = this.view;
+        const index = v.getUint32(off, true);
+        const kind = v.getUint32(off + 4, true);
+        const path = this.str(v.getUint32(off + 8, true)) ?? "";
+        return `${index}.${kind}.${path}`;
+    }
+
+    private readSymbol(off: number): any {
+        const v = this.view;
+        const data: any = {
+            id: Number(v.getBigUint64(off, true)),
+            name: this.str(v.getUint32(off + 12, true)) ?? "",
+            flags: v.getUint32(off + 16, true),
+            checkFlags: v.getUint32(off + 20, true),
+        };
+        const project = this.str(v.getUint32(off + 8, true));
+        if (project !== undefined) data.project = project;
+        const declCount = v.getUint32(off + 28, true);
+        if (declCount > 0) {
+            let p = v.getUint32(off + 24, true);
+            const decls = new Array(declCount);
+            for (let i = 0; i < declCount; i++) { decls[i] = this.readHandle(p); p += 16; }
+            data.declarations = decls;
+        }
+        const vd = this.readHandle(off + 32);
+        if (vd !== "0.0.") data.valueDeclaration = vd;
+        const parent = this.u64z(off + 48);
+        if (parent !== undefined) data.parent = parent;
+        const exportSymbol = this.u64z(off + 56);
+        if (exportSymbol !== undefined) data.exportSymbol = exportSymbol;
+        return data;
+    }
+
+    private readSignature(off: number): any {
+        const v = this.view;
+        const data: any = {
+            id: Number(v.getBigUint64(off, true)),
+            flags: v.getUint32(off + 8, true),
+        };
+        const decl = this.readHandle(off + 12);
+        if (decl !== "0.0.") data.declaration = decl;
+        const tp = this.u32Array(off + 28);
+        if (tp !== undefined) data.typeParameters = tp;
+        const params = this.u64Array(off + 36);
+        if (params !== undefined) data.parameters = params;
+        const thisP = this.u64z(off + 44);
+        if (thisP !== undefined) data.thisParameter = thisP;
+        const target = this.u64z(off + 52);
+        if (target !== undefined) data.target = target;
+        return data;
     }
 }
 
