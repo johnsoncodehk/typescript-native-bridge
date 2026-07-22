@@ -9203,6 +9203,14 @@ export function createTsgoChecker(program: any): any {
         isTypeAssignableTo(source: any, target: any): boolean {
             ensureProject();
             if (!source || !target) return false;
+            // Local any/never short-circuit (no-unsafe-assignment's dominant
+            // shapes): flags are wire-identical across stock and tsgo, so these
+            // answers are exact and skip a round trip per check.
+            const tf = target.flags ?? 0;
+            const sf = source.flags ?? 0;
+            if (tf & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) return true;
+            if (tf & ts.TypeFlags.Never) return !!(sf & ts.TypeFlags.Never);
+            if (sf & ts.TypeFlags.Never) return true;
             return project.checker.isTypeAssignableTo(source, target);
         },
         getReturnTypeOfSignature(signature: any): any {
