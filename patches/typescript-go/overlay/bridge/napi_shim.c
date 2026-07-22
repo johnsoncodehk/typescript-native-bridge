@@ -384,7 +384,7 @@ static bool set_fn(napi_env env, napi_value exports, const char* name, napi_call
 	return napi_set_named_property(env, exports, name, fn) == napi_ok;
 }
 
-napi_value napi_register_module_v1(napi_env env, napi_value exports) {
+NAPI_MODULE_INIT() {
 	struct ShimInstance* inst = (struct ShimInstance*)calloc(1, sizeof(struct ShimInstance));
 	if (!inst || napi_set_instance_data(env, inst, finalize_instance, NULL) != napi_ok) {
 		napi_throw_error(env, NULL, "tnb bridge: out of memory");

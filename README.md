@@ -249,6 +249,9 @@ the one matching your machine (the main package is pure JS):
 | Windows x64 | `@typescript-native-bridge/win32-x64` |
 | Windows arm64 | `@typescript-native-bridge/win32-arm64` |
 
+Linux packages target glibc 2.31 and are rejected by the release gate if they
+acquire a newer symbol requirement.
+
 On an unsupported platform the loader fails with a clear "unsupported platform or
 missing optional dependency" error — build from source there (clone with submodules,
 then `npm run setup`; requires Go + a C toolchain).

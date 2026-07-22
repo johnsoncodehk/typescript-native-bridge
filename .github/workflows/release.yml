@@ -74,9 +74,6 @@ jobs:
           # queue capacity. Verified locally: Mach-O x86_64 dylib out of an
           # arm64 Mac with CGO_ENABLED=1 GOOS=darwin GOARCH=amd64.
           - { target: darwin-x64, runner: macos-latest, goos: darwin, goarch: amd64, cc: clang, cgo_cflags: "-arch x86_64", cgo_ldflags: "-arch x86_64" }
-          - { target: linux-x64, runner: ubuntu-latest }
-          - { target: linux-arm64, runner: ubuntu-24.04-arm }
-          - { target: linux-arm, runner: ubuntu-latest, goos: linux, goarch: arm, goarm: "7", cc: arm-linux-gnueabihf-gcc, apt: gcc-arm-linux-gnueabihf }
           - { target: win32-x64, runner: ubuntu-latest, goos: windows, goarch: amd64, cc: x86_64-w64-mingw32-gcc, apt: gcc-mingw-w64-x86-64, node_lib: "https://nodejs.org/dist/v24.15.0/win-x64/node.lib" }
           - { target: win32-arm64, runner: ubuntu-latest, goos: windows, goarch: arm64, cc: aarch64-w64-mingw32-gcc, llvm_mingw: "1", node_lib: "https://nodejs.org/dist/v24.15.0/win-arm64/node.lib" }
     runs-on: ${{ matrix.runner }}
@@ -133,8 +130,93 @@ jobs:
           path: native/bridge.*
           retention-days: 1
 
+  build-bridge-linux:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: linux-x64, runner: ubuntu-latest, load: true }
+          - { target: linux-arm64, runner: ubuntu-24.04-arm, load: true }
+          - { target: linux-arm, runner: ubuntu-latest, goos: linux, goarch: arm, goarm: "7", cc: arm-linux-gnueabihf-gcc, apt: gcc-arm-linux-gnueabihf }
+    runs-on: ${{ matrix.runner }}
+    container: debian:bullseye-slim
+    steps:
+      - name: Install build dependencies
+        run: apt-get update && apt-get install -y binutils ca-certificates gcc git ${{ matrix.apt }}
+
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Checkout typescript-go submodule
+        run: git submodule update --init --depth 1 typescript-go
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26" # typescript-go/go.mod
+
+      - name: Apply tsgo patches
+        run: node tools/patch-tsgo.js
+
+      - name: Build bridge against glibc 2.31
+        run: node tools/build-bridge.js
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          GOARM: ${{ matrix.goarm }}
+          CC: ${{ matrix.cc }}
+          CGO_ENABLED: 1
+          TNB_STRIP: 1
+
+      - name: Verify glibc floor
+        run: |
+          max_glibc="$(readelf --version-info native/bridge.node \
+            | grep -oE 'GLIBC_[0-9]+(\.[0-9]+)*' \
+            | sort -Vu \
+            | tail -1)"
+          if [ -z "$max_glibc" ]; then
+            echo "bridge has no readable GLIBC version requirements"
+            exit 1
+          fi
+          echo "maximum required glibc: $max_glibc"
+          if [ "$(printf '%s\n' GLIBC_2.31 "$max_glibc" | sort -V | tail -1)" != GLIBC_2.31 ]; then
+            echo "bridge requires $max_glibc, newer than the GLIBC_2.31 release floor"
+            exit 1
+          fi
+
+      - name: Load bridge on glibc 2.31
+        if: matrix.load
+        run: node -e "const b = require('./native/bridge.node'); if (typeof b.newSession !== 'function') process.exit(1)"
+
+      - name: Upload bridge binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: bridge-${{ matrix.target }}
+          path: native/bridge.*
+          retention-days: 1
+
+  test-bridge-win32-x64:
+    needs: build-bridge
+    runs-on: windows-latest
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: bridge-win32-x64
+          path: native
+
+      - name: Load bridge on Windows
+        run: node -e "const b = require('./native/bridge.node'); if (typeof b.newSession !== 'function') process.exit(1)"
+
   publish:
-    needs: [build-lib, build-bridge]
+    needs: [build-lib, build-bridge, build-bridge-linux, test-bridge-win32-x64]
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
