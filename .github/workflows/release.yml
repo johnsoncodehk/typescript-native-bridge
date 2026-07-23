@@ -218,14 +218,26 @@ jobs:
           path: native
 
       - name: Load bridge on Windows
-        # Staged probe: each line narrows where death happens. The final
-        # errorlevel distinguishes a hard crash (0xC0000005) from a
-        # deliberate exit(1) — WER logs nothing on the runner image.
+        # Quoting-proof: the probe is a file (no pwsh argument mangling) and
+        # every marker is a synchronous write (a hard LoadLibrary crash can
+        # lose piped stdout). EXIT= carries the real exit code — 0xC0000005
+        # shows as -1073741819, distinguishing crash from exit(1).
         run: |
-          node -v
-          node -e "console.log('node ok')"
-          cmd /c "node -e \"console.log('pre-load'); try { const b = require('./native/bridge.node'); console.log('loaded, exports:', Object.keys(b).join(',')); if (typeof b.newSession !== 'function') { console.error('FAIL: newSession missing'); process.exit(1); } } catch (e) { console.error('FAIL: require threw:', e && e.stack || e); process.exit(1); }\" & echo EXIT=%errorlevel%"
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          @'
+          const fs = require('fs');
+          fs.writeSync(1, 'node ' + process.version + '\n');
+          fs.writeSync(1, 'pre-load\n');
+          try {
+            const b = require('./native/bridge.node');
+            fs.writeSync(1, 'loaded, exports: ' + Object.keys(b).join(',') + '\n');
+            if (typeof b.newSession !== 'function') { fs.writeSync(2, 'FAIL: newSession missing\n'); process.exit(1); }
+          } catch (e) {
+            fs.writeSync(2, 'FAIL: require threw: ' + (e && e.stack || e) + '\n');
+            process.exit(1);
+          }
+          '@ | Set-Content -Encoding ascii probe.js
+          node probe.js
+          echo "EXIT=$LASTEXITCODE"
 
       - name: Collect crash evidence
         # A silent load failure is a hard crash before V8 can report; Windows
