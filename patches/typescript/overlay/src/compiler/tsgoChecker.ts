@@ -1770,13 +1770,10 @@ function isOverlayCandidatePath(fileName: string): boolean {
 }
 /** Resolve tsconfig path for tsgo — relative paths from tsserver use the host cwd. */
 function resolveTsconfigPath(configFilePath: string, host?: { getCurrentDirectory?: () => string }): string {
-    const path = require("path") as typeof import("path");
-    const normalized = configFilePath.replace(/\\/g, "/");
-    if (path.isAbsolute(normalized)) {
-        return path.normalize(normalized);
-    }
-    const cwd = host?.getCurrentDirectory?.() ?? process.cwd();
-    return path.normalize(path.resolve(cwd, normalized));
+    // Same forward-slash contract as resolveHostFileName: config paths key the
+    // per-config maps (project/epoch/builder-meta) and must compare equal to
+    // Go's forward-slash project ids on Windows.
+    return resolveHostFileName(configFilePath, host);
 }
 /** Host script text — prefers getScriptSnapshot (host SSOT) over readFile. */
 function getHostScriptContent(host: any, fileName: string, options: any): { text: string; scriptKind: number; fromHost: boolean } | undefined {

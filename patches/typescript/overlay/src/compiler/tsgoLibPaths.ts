@@ -22,7 +22,9 @@ export function isBundledLibPath(fileName: string): boolean {
 
 export function bundledLibPathToHostPath(bundledPath: string): string {
     const libFile = bundledPath.slice(BUNDLED_LIB_PREFIX.length);
-    return nodePath().join(getTnbPackageRoot(), "lib", libFile);
+    // Forward-slash host form (see resolveHostFileName) — path.join would
+    // emit backslashes on Windows.
+    return nodePath().join(getTnbPackageRoot(), "lib", libFile).replace(/\\/g, "/");
 }
 
 export function toHostFileName(fileName: string): string {
@@ -33,12 +35,18 @@ export function toHostFileName(fileName: string): string {
 export function resolveHostFileName(fileName: string, host?: { getCurrentDirectory?: () => string }): string {
     const mapped = toHostFileName(fileName);
     const path = nodePath();
+    // Stock toPath form: absolute, forward-slash (stock normalizePath never
+    // emits backslashes; case folding lives in getCanonicalFileName /
+    // canonicalSourceFilePath). path.normalize would emit backslashes on
+    // Windows, breaking canonicalSourceFilePath's forward-slash key contract
+    // (BuilderState fileInfos keyed from Go's forward-slash names then misses
+    // every resolvedPath — win32 tsc -b updateShapeSignature crash).
     const normalized = mapped.replace(/\\/g, "/");
-    if (path.isAbsolute(normalized)) {
-        return path.normalize(normalized);
+    if (path.isAbsolute(normalized) || /^[A-Za-z]:\//.test(normalized)) {
+        return path.posix.normalize(normalized);
     }
-    const cwd = host?.getCurrentDirectory?.() ?? process.cwd();
-    return path.normalize(path.resolve(cwd, normalized));
+    const cwd = (host?.getCurrentDirectory?.() ?? process.cwd()).replace(/\\/g, "/");
+    return path.posix.normalize(path.posix.resolve(cwd, normalized));
 }
 
 /** Identity under noembed — tsgo reads packageRoot/lib (or TNB_LIB_PATH) from disk. */
@@ -55,7 +63,9 @@ let _libDirPrefixLower: string | undefined;
 function getLibDirPrefixLower(): string {
     if (_libDirPrefixLower === undefined) {
         const path = require("path") as typeof import("path");
-        _libDirPrefixLower = (path.join(getTnbPackageRoot(), "lib") + path.sep).toLowerCase();
+        // Forward-slash form — candidates arrive in stock/Go forward-slash
+        // form; path.join + sep would emit backslashes on Windows.
+        _libDirPrefixLower = (path.join(getTnbPackageRoot(), "lib") + "/").replace(/\\/g, "/").toLowerCase();
     }
     return _libDirPrefixLower;
 }
@@ -63,11 +73,7 @@ function getLibDirPrefixLower(): string {
 export function isHostLibFile(fileName: string): boolean {
     if (isBundledLibPath(fileName)) return true;
     if (!/lib\.[^/\\]+\.d\.ts$/i.test(fileName)) return false;
-    let candidate = fileName;
-    if (candidate.includes("\\") || candidate.includes("./")) {
-        const path = require("path") as typeof import("path");
-        candidate = path.normalize(candidate);
-    }
+    const candidate = fileName.replace(/\\/g, "/");
     const prefix = getLibDirPrefixLower();
     return candidate.length > prefix.length && candidate.slice(0, prefix.length).toLowerCase() === prefix;
 }

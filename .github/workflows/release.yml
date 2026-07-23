@@ -258,6 +258,27 @@ jobs:
           echo "TSC-P-EXIT=$LASTEXITCODE"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+      - name: Solution-build a composite project graph (tsc -b)
+        # The BuilderState fileInfos/resolvedPath canonicalization mismatch
+        # only fires in the builder drain: updateShapeSignature read
+        # fileInfos.get(resolvedPath) — keyed forward-slash from Go names,
+        # looked up backslash from win32 path.normalize — and crashed
+        # (undefined.signature). tsc -p above never exercises it. The second
+        # -b run reads the written tsbuildinfo back (oldState path).
+        run: |
+          mkdir sol/a/src, sol/b/src
+          '{ "files": [], "references": [{ "path": "./a" }, { "path": "./b" }] }' | Set-Content sol/tsconfig.json
+          '{ "compilerOptions": { "composite": true, "strict": true, "outDir": "dist", "declaration": true }, "include": ["src/**/*.ts"] }' | Set-Content sol/a/tsconfig.json
+          '{ "compilerOptions": { "composite": true, "strict": true, "outDir": "dist", "declaration": true }, "references": [{ "path": "../a" }], "include": ["src/**/*.ts"] }' | Set-Content sol/b/tsconfig.json
+          'export const a: number = 1;' | Set-Content sol/a/src/index.ts
+          'import { a } from "../../a/src/index"; export const b: number = a;' | Set-Content sol/b/src/index.ts
+          node staging/lib/_tsc.js -b sol/tsconfig.json
+          echo "TSC-B-EXIT=$LASTEXITCODE"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node staging/lib/_tsc.js -b sol/tsconfig.json
+          echo "TSC-B-RERUN-EXIT=$LASTEXITCODE"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
       - name: Collect crash evidence
         # A silent load failure is a hard crash before V8 can report; Windows
         # Error Reporting still records the exception code and faulting module.
