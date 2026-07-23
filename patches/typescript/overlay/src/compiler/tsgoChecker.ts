@@ -5357,8 +5357,12 @@ export function createTsgoProgram(
         const proj = project;
         if (!proj?.program) return true; // project not ready yet — stay permissive
         const nameSet = tsgoSourceFileNames(configFilePath, proj).nameSet;
-        const hit = nameSet.has(toHostFileName(fileName))
-            || nameSet.has(canonicalSourceFilePath(fileName));
+        // Callers pass raw user paths (stock program.getSourceFile normalizes
+        // via toPath): a Windows backslash path must resolve to the same
+        // member — the nameSet only carries forward-slash forms.
+        const resolvedFn = resolveHostFileNameMemoized(fileName, host);
+        const hit = nameSet.has(toHostFileName(resolvedFn))
+            || nameSet.has(canonicalSourceFilePath(resolvedFn));
         if (!hit) {
             _navTrace(() => `programContainsFile miss: file=${fileName} cfg=${configFilePath} names=${nameSet.size}`);
         }

@@ -334,6 +334,10 @@ jobs:
           }
           const callSigs = t.getCallSignatures();
           if (callSigs.length !== 1) { console.error('FAIL: node mapping broken — expected 1 call signature, got ' + callSigs.length); process.exit(1); }
+          // win32: hosts hand backslash paths (path.resolve) to getSourceFile —
+          // the membership gate must normalize them (ts-named-exports crash).
+          const bsSf = program.getSourceFile(require('path').join(process.cwd(), 'cq', 'src', 'index.ts'));
+          if (!bsSf) { console.error('FAIL: getSourceFile(backslash path) returned undefined'); process.exit(1); }
           console.log('CHECKER-QUERY-OK');
           '@ | Set-Content -Encoding ascii checker-query.js
           node checker-query.js
