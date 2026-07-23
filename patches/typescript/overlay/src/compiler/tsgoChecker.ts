@@ -5906,7 +5906,10 @@ export function createTsgoProgram(
             const emittedFiles: string[] | undefined = options.listEmittedFiles ? [] : undefined;
             const sourceFiles = targetSourceFile ? [targetSourceFile] : undefined;
             for (const o of outputs) {
-                if (write) write(o.fileName, o.text, !!o.writeByteOrderMark, undefined, sourceFiles);
+                // Builder wrappers mutate data (data.skippedDtsWrite on the
+                // dts-unchanged skip path in builder.ts), so a data object
+                // must always ride along — stock emitter threads one too.
+                if (write) write(o.fileName, o.text, !!o.writeByteOrderMark, undefined, sourceFiles, {});
                 emittedFiles?.push(o.fileName);
             }
             return {
