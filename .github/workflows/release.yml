@@ -74,7 +74,7 @@ jobs:
           # queue capacity. Verified locally: Mach-O x86_64 dylib out of an
           # arm64 Mac with CGO_ENABLED=1 GOOS=darwin GOARCH=amd64.
           - { target: darwin-x64, runner: macos-latest, goos: darwin, goarch: amd64, cc: clang, cgo_cflags: "-arch x86_64", cgo_ldflags: "-arch x86_64" }
-          - { target: win32-x64, runner: ubuntu-latest, goos: windows, goarch: amd64, cc: x86_64-w64-mingw32-gcc, apt: gcc-mingw-w64-x86-64, node_lib: "https://nodejs.org/dist/v24.15.0/win-x64/node.lib" }
+          - { target: win32-x64, runner: ubuntu-latest, goos: windows, goarch: amd64, cc: x86_64-w64-mingw32-gcc, llvm_mingw: "1", node_lib: "https://nodejs.org/dist/v24.15.0/win-x64/node.lib" }
           - { target: win32-arm64, runner: ubuntu-latest, goos: windows, goarch: arm64, cc: aarch64-w64-mingw32-gcc, llvm_mingw: "1", node_lib: "https://nodejs.org/dist/v24.15.0/win-arm64/node.lib" }
     runs-on: ${{ matrix.runner }}
     steps:
@@ -218,11 +218,14 @@ jobs:
           path: native
 
       - name: Load bridge on Windows
-        # Distinguishes the three failure modes: hard crash in LoadLibrary
-        # (no output at all), require() threw (stack printed), wrong export
-        # shape (key list printed).
-        run: >
-          node -e "try { const b = require('./native/bridge.node'); const keys = Object.keys(b); console.log('loaded, exports:', keys.join(',')); if (typeof b.newSession !== 'function') { console.error('FAIL: newSession missing'); process.exit(1); } } catch (e) { console.error('FAIL: require threw:', e && e.stack || e); process.exit(1); }"
+        # Staged probe: each line narrows where death happens. The final
+        # errorlevel distinguishes a hard crash (0xC0000005) from a
+        # deliberate exit(1) — WER logs nothing on the runner image.
+        run: |
+          node -v
+          node -e "console.log('node ok')"
+          cmd /c "node -e \"console.log('pre-load'); try { const b = require('./native/bridge.node'); console.log('loaded, exports:', Object.keys(b).join(',')); if (typeof b.newSession !== 'function') { console.error('FAIL: newSession missing'); process.exit(1); } } catch (e) { console.error('FAIL: require threw:', e && e.stack || e); process.exit(1); }\" & echo EXIT=%errorlevel%"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Collect crash evidence
         # A silent load failure is a hard crash before V8 can report; Windows
