@@ -7,6 +7,11 @@
  * program path, which is where parserOptions.project consumers (typescript-estree)
  * hit the arena decoder.
  *
+ * Boolean literal payload (issue #19): the arena bool encoder skipped the value
+ * byte for `false`, leaving whatever a previous call wrote at that offset —
+ * querying `true` first plants a 1 that a later `false` then reads back. The
+ * tLit-then-fLit order below is what makes the stale byte deterministic.
+ *
  * Usage: node tools/triage-empty-literal.mjs
  */
 import { createRequire } from 'node:module';
@@ -26,6 +31,8 @@ const srcText = `declare const foo: Record<string, () => void>;
 export const handler = foo[''];
 export declare const lead: \`\${string}b\`;
 export declare const trail: \`a\${string}\`;
+export declare const tLit: true;
+export declare const fLit: false;
 `;
 fs.writeFileSync(path.join(dir, 'src.ts'), srcText);
 
@@ -55,6 +62,14 @@ const visit = node => {
 			failures.push(`${node.name.text} template texts: got ${JSON.stringify(t.texts)}, want ${JSON.stringify(want)}`);
 		}
 	}
+	// tLit precedes fLit in source (and thus visit) order: the true query plants
+	// value byte 1 in the reused arena record, which a broken decoder then reads
+	// back for false.
+	if (ts.isVariableDeclaration(node) && (node.name.text === 'tLit' || node.name.text === 'fLit')) {
+		const t = checker.getTypeAtLocation(node.name);
+		const want = node.name.text === 'tLit';
+		if (t.value !== want) failures.push(`${node.name.text} bool literal: got value=${JSON.stringify(t.value)}, want ${want}`);
+	}
 	ts.forEachChild(node, visit);
 };
 visit(sf);
@@ -65,4 +80,4 @@ if (failures.length) {
 	for (const f of failures) console.error('  ' + f);
 	process.exit(1);
 }
-console.log('ok empty literal value + template texts (watch/builder arena path)');
+console.log('ok literal values + template texts (watch/builder arena path)');

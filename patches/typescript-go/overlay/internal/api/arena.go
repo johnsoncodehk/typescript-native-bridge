@@ -363,6 +363,9 @@ func (a *arena) encodeTypeResponse(r *TypeResponse) {
 		a.f64(off+80, v)
 	case bool:
 		a.b(off+69, 3)
+		// The arena buffer is reused across calls without zeroing: write the
+		// value byte unconditionally or a `false` reads back a stale 1.
+		a.b(off+80, 0)
 		if v {
 			a.b(off+80, 1)
 		}
