@@ -833,7 +833,7 @@ index 613ed0a0c..8b11b26ed 100644
  
  export function isBindingPattern(node: Node): node is BindingPattern {
 diff --git a/internal/checker/checker.go b/internal/checker/checker.go
-index b639d488e..8aae87ca6 100644
+index b639d488e..acadad893 100644
 --- a/internal/checker/checker.go
 +++ b/internal/checker/checker.go
 @@ -786,6 +786,7 @@ type Checker struct {
@@ -844,7 +844,20 @@ index b639d488e..8aae87ca6 100644
  	inVarianceComputation                       bool
  	apparentArgumentCount                       *int
  	lastGetCombinedNodeFlagsNode                *ast.Node
-@@ -7259,7 +7260,9 @@ func importClauseFromImported(node *ast.Node) *ast.Node {
+@@ -2144,7 +2145,11 @@ func (c *Checker) getImmediateAliasedSymbol(symbol *ast.Symbol) *ast.Symbol {
+ 	if links.immediateTarget == nil {
+ 		node := c.getDeclarationOfAliasSymbol(symbol)
+ 		if node == nil {
+-			panic("Unexpected nil in getImmediateAliasedSymbol")
++			// Synthetic aliases (e.g. the esModuleInterop default of a
++			// CommonJS module) have no declaration: stock TS returns
++			// undefined here, and bridge consumers arrive without the
++			// declarations guard upstream callers rely on.
++			return nil
+ 		}
+ 		links.immediateTarget = c.getTargetOfAliasDeclaration(node)
+ 	}
+@@ -7259,7 +7264,9 @@ func importClauseFromImported(node *ast.Node) *ast.Node {
  func (c *Checker) checkUnusedInferTypeParameter(node *ast.Node) {
  	typeParameter := node.AsInferTypeNode().TypeParameter
  	if c.isUnreferencedTypeParameter(typeParameter) {
@@ -855,7 +868,7 @@ index b639d488e..8aae87ca6 100644
  	}
  }
  
-@@ -7271,14 +7274,25 @@ func (c *Checker) checkUnusedTypeParameters(node *ast.Node) {
+@@ -7271,14 +7278,25 @@ func (c *Checker) checkUnusedTypeParameters(node *ast.Node) {
  	if typeParameterList == nil {
  		return
  	}
@@ -884,7 +897,7 @@ index b639d488e..8aae87ca6 100644
  			}
  		}
  	}
-@@ -16372,7 +16386,7 @@ func (c *Checker) GetTypeOfSymbolAtLocation(symbol *ast.Symbol, location *ast.No
+@@ -16372,7 +16390,7 @@ func (c *Checker) GetTypeOfSymbolAtLocation(symbol *ast.Symbol, location *ast.No
  		// of the expression (which will reflect control flow analysis). If the expression indeed
  		// resolved to the given symbol, return the narrowed type.
  		if (ast.IsIdentifier(location) || ast.IsPrivateIdentifier(location)) &&
@@ -893,7 +906,7 @@ index b639d488e..8aae87ca6 100644
  			if ast.IsRightSideOfQualifiedNameOrPropertyAccess(location) {
  				location = location.Parent
  			}
-@@ -16388,7 +16402,7 @@ func (c *Checker) GetTypeOfSymbolAtLocation(symbol *ast.Symbol, location *ast.No
+@@ -16388,7 +16406,7 @@ func (c *Checker) GetTypeOfSymbolAtLocation(symbol *ast.Symbol, location *ast.No
  				}
  			}
  		}
@@ -902,7 +915,7 @@ index b639d488e..8aae87ca6 100644
  			return c.getWriteTypeOfAccessors(location.Parent.Symbol())
  		}
  		// The location isn't a reference to the given symbol, meaning we're being asked
-@@ -16403,13 +16417,13 @@ func (c *Checker) GetTypeOfSymbolAtLocation(symbol *ast.Symbol, location *ast.No
+@@ -16403,13 +16421,13 @@ func (c *Checker) GetTypeOfSymbolAtLocation(symbol *ast.Symbol, location *ast.No
  	return c.getNonMissingTypeOfSymbol(symbol)
  }
  
@@ -920,7 +933,7 @@ index b639d488e..8aae87ca6 100644
  	if symbol.CheckFlags&ast.CheckFlagsMapped != 0 {
  		return c.getTypeOfMappedSymbol(symbol)
  	}
-@@ -16434,6 +16448,20 @@ func (c *Checker) getTypeOfSymbol(symbol *ast.Symbol) *Type {
+@@ -16434,6 +16452,20 @@ func (c *Checker) getTypeOfSymbol(symbol *ast.Symbol) *Type {
  	return c.errorType
  }
  
@@ -941,7 +954,7 @@ index b639d488e..8aae87ca6 100644
  func (c *Checker) getNonMissingTypeOfSymbol(symbol *ast.Symbol) *Type {
  	return c.removeMissingType(c.getTypeOfSymbol(symbol), symbol.Flags&ast.SymbolFlagsOptional != 0)
  }
-@@ -16441,7 +16469,22 @@ func (c *Checker) getNonMissingTypeOfSymbol(symbol *ast.Symbol) *Type {
+@@ -16441,7 +16473,22 @@ func (c *Checker) getNonMissingTypeOfSymbol(symbol *ast.Symbol) *Type {
  func (c *Checker) getTypeOfInstantiatedSymbol(symbol *ast.Symbol) *Type {
  	links := c.valueSymbolLinks.Get(symbol)
  	if links.resolvedType == nil {
@@ -965,7 +978,7 @@ index b639d488e..8aae87ca6 100644
  	}
  	return links.resolvedType
  }
-@@ -16449,7 +16492,16 @@ func (c *Checker) getTypeOfInstantiatedSymbol(symbol *ast.Symbol) *Type {
+@@ -16449,7 +16496,16 @@ func (c *Checker) getTypeOfInstantiatedSymbol(symbol *ast.Symbol) *Type {
  func (c *Checker) getWriteTypeOfInstantiatedSymbol(symbol *ast.Symbol) *Type {
  	links := c.valueSymbolLinks.Get(symbol)
  	if links.writeType == nil {
@@ -983,7 +996,7 @@ index b639d488e..8aae87ca6 100644
  	}
  	return links.writeType
  }
-@@ -29109,6 +29161,9 @@ func (c *Checker) getContextualType(node *ast.Node, contextFlags ContextFlags) *
+@@ -29109,6 +29165,9 @@ func (c *Checker) getContextualType(node *ast.Node, contextFlags ContextFlags) *
  		return c.contextualInfos[index].t
  	}
  	parent := node.Parent
