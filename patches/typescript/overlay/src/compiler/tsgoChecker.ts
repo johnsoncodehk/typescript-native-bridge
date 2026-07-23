@@ -659,6 +659,13 @@ function projectEpoch(configFilePath: string): number | undefined {
 /** Last updateSnapshot params fingerprint + project per config — identical repeat calls are skipped (watch-lint generations reissue the same params ~1000×). */
 const _lastUpdateParamsByConfig = new Map<string, { paramsJson: string; project: any }>();
 
+/** Open client tabs mirrored to the per-process tsgo session. tsgo OpenFiles
+ * is additive-only (ref-counted, session.go): a tab closed in the editor
+ * stays API-open — an extra program root with its overlay content — until
+ * released via closeFiles, so its exports keep surfacing in auto-import
+ * completions (volar ghost "Foo" after the tab closed). */
+const _sessionSentOpenTabs = new Set<string>();
+
 /** Per-program fallback list: old generations keep their own names — their snapshots are disposed. */
 const _namesByProj = new WeakMap<object, { epoch: number | undefined; proj: any; names: string[]; nameSet: Set<string>; sortedNames: string[] }>();
 
@@ -6746,6 +6753,25 @@ export function createTsgoChecker(program: any): any {
 
         const syncHost = hostForOverlaySyncLocal();
         const openFiles = syncHost ? collectTsgoOpenFileNames(syncHost) : [];
+        // Release tabs the client closed since the last updateSnapshot: the
+        // session's OpenFiles handling only adds refs, so without closeFiles
+        // a closed tab keeps its overlay content and its program-root slot
+        // (updateAPIRootFiles) indefinitely. The tracker is session-wide (the
+        // bridge session is per process), so any project's refresh releases
+        // the close for every project in one snapshot.
+        let closedTabs: string[] | undefined;
+        const tabRegistry = (syncHost as any)?.projectService;
+        if (tabRegistry?.openFiles?.forEach) {
+            const openTabs = new Set<string>();
+            tabRegistry.openFiles.forEach((_root: string, p: string) => {
+                const info = tabRegistry.getScriptInfoForPath(p);
+                if (info?.isScriptOpen?.() && info.fileName) openTabs.add(resolveHostFileName(info.fileName, syncHost));
+            });
+            const closed = [..._sessionSentOpenTabs].filter(f => !openTabs.has(f));
+            if (closed.length) closedTabs = closed;
+            _sessionSentOpenTabs.clear();
+            for (const f of openTabs) _sessionSentOpenTabs.add(f);
+        }
         // Build mode: close the previous solution-build project in the same
         // updateSnapshot call that opens this one (see beginBuildProject).
         const buildClose = (options as any).tscBuild
@@ -6767,6 +6793,7 @@ export function createTsgoChecker(program: any): any {
         const updateParams = {
             openProject: configFilePath!,
             ...(openFiles.length > 0 ? { openFiles } : {}),
+            ...(closedTabs?.length ? { closeFiles: closedTabs } : {}),
             ...(openFilesWithContent.length > 0 ? { openFilesWithContent } : {}),
             ...(extraFileExtensions ? { extraFileExtensions } : {}),
             ...(additionalFiles?.length ? { additionalFiles } : {}),
