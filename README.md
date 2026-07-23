@@ -197,8 +197,8 @@ own TypeScript and only uses yours when you opt in.
 
 ```jsonc
 {
-  "typescript.tsdk": "node_modules/typescript/lib",
-  "typescript.enablePromptUseWorkspaceTsdk": true
+  "js/ts.tsdk.path": "node_modules/typescript/lib",
+  "js/ts.tsdk.promptToUseWorkspaceVersion": true
 }
 ```
 
@@ -216,7 +216,7 @@ as a tsserver LS Plugin on this fork.
 | | CLI | Editor |
 |---|---|---|
 | Override needed | Yes | Yes (same `node_modules/typescript`) |
-| Extra config | No | `typescript.tsdk` + Use Workspace Version |
+| Extra config | No | `js/ts.tsdk.path` + Use Workspace Version |
 
 ---
 
