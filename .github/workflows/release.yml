@@ -279,6 +279,50 @@ jobs:
           echo "TSC-B-RERUN-EXIT=$LASTEXITCODE"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+      - name: Checker type query keeps proto methods (component-meta class)
+        # win32 node-mapping regression: a getTypeAtLocation that misses its
+        # tsgo node falls back to errorType — which must still be a full Type
+        # (patchTypeProto), and a hit must return real signatures. The volar
+        # component-meta suite crashed here with
+        # "componentType.getConstructSignatures is not a function".
+        env:
+          GODEBUG: asyncpreemptoff=1
+        run: |
+          @'
+          const ts = require('./staging/lib/typescript.js');
+          const fs = require('fs');
+          fs.mkdirSync('cq/src', { recursive: true });
+          fs.writeFileSync('cq/tsconfig.json', JSON.stringify({ compilerOptions: { strict: true, noEmit: true }, include: ['src/**/*.ts'] }));
+          fs.writeFileSync('cq/src/index.ts', 'export function Foo(x: string): number { return 1; }\n');
+          const host = {
+            getScriptFileNames: () => [process.cwd() + '/cq/src/index.ts'],
+            getScriptVersion: () => '1',
+            getScriptSnapshot: f => fs.existsSync(f) ? ts.ScriptSnapshot.fromString(fs.readFileSync(f, 'utf8')) : undefined,
+            getCurrentDirectory: () => process.cwd() + '/cq',
+            getCompilationSettings: () => ({ strict: true, noEmit: true, configFilePath: process.cwd() + '/cq/tsconfig.json' }),
+            getDefaultLibFileName: o => ts.getDefaultLibFilePath(o),
+            fileExists: ts.sys.fileExists, readFile: ts.sys.readFile, readDirectory: ts.sys.readDirectory,
+            directoryExists: ts.sys.directoryExists, getDirectories: ts.sys.getDirectories,
+            useCaseSensitiveFileNames: () => ts.sys.useCaseSensitiveFileNames,
+            getNewLine: () => '\n',
+          };
+          const ls = ts.createLanguageService(host);
+          const program = ls.getProgram();
+          const checker = program.getTypeChecker();
+          const sf = program.getSourceFile(process.cwd() + '/cq/src/index.ts');
+          if (!sf || !sf.statements || !sf.statements.length) { console.error('FAIL: no source file statements'); process.exit(1); }
+          const t = checker.getTypeAtLocation(sf.statements[0].name);
+          if (typeof t.getConstructSignatures !== 'function' || typeof t.getCallSignatures !== 'function') {
+            console.error('FAIL: type lacks proto methods (fallback not fixed up)'); process.exit(1);
+          }
+          const callSigs = t.getCallSignatures();
+          if (callSigs.length !== 1) { console.error('FAIL: node mapping broken — expected 1 call signature, got ' + callSigs.length); process.exit(1); }
+          console.log('CHECKER-QUERY-OK');
+          '@ | Set-Content -Encoding ascii checker-query.js
+          node checker-query.js
+          echo "CHECKER-QUERY-EXIT=$LASTEXITCODE"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
       - name: Collect crash evidence
         # A silent load failure is a hard crash before V8 can report; Windows
         # Error Reporting still records the exception code and faulting module.

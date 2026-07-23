@@ -8731,9 +8731,13 @@ export function createTsgoChecker(program: any): any {
                 if (!tsgoNode) {
                     // Stock returns errorType (TypeFlags.Any intrinsic "error").
                     // Prefer getErrorType when wired; else getAnyType (same flags).
+                    // fixupType so the returned type is a full stock-shaped Type
+                    // (proto methods like getConstructSignatures) even when this
+                    // is the first type query in the checker.
                     const fallback = typeof project.checker.getErrorType === "function"
                         ? project.checker.getErrorType()
                         : project.checker.getAnyType?.();
+                    if (fallback) fixupType(fallback);
                     if (process.env.TSGO_PROFILE === "1") { const d = Date.now() - t0; _stats.queryCount++; _stats.queryMs += d; _stats.getTypeCount++; _stats.getTypeMs += d; }
                     return fallback;
                 }
