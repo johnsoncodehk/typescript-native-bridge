@@ -641,19 +641,25 @@ function noteProjectEpochs(data: any): void {
     for (const projData of data?.projects ?? []) {
         const cfg = projData.id;
         if (typeof cfg !== "string") continue;
+        // Go reports the canonical (case-folded) project id; callers look the
+        // epoch up by host-cased configFilePath. Key both sides by the shared
+        // canonical rule or every lookup misses on case-insensitive hosts
+        // (Windows drive letters always mismatch), silently disabling the
+        // epoch memos.
+        const key = canonicalSourceFilePath(cfg);
         const optionsJson = projData.compilerOptions === undefined ? undefined : JSON.stringify(projData.compilerOptions);
-        const prev = _projectEpochByConfig.get(cfg);
+        const prev = _projectEpochByConfig.get(key);
         if (!prev || prev.optionsJson !== optionsJson || (changedProjects && cfg in changedProjects)) {
-            _projectEpochByConfig.set(cfg, { epoch: ++_projectEpochSeq, optionsJson });
+            _projectEpochByConfig.set(key, { epoch: ++_projectEpochSeq, optionsJson });
         }
     }
     for (const removed of data?.changes?.removedProjects ?? []) {
-        _projectEpochByConfig.delete(removed);
+        _projectEpochByConfig.delete(canonicalSourceFilePath(removed));
     }
 }
 /** Current content epoch for a config, or undefined when unknown (never opened via updateSnapshot). */
 function projectEpoch(configFilePath: string): number | undefined {
-    return _projectEpochByConfig.get(configFilePath)?.epoch;
+    return _projectEpochByConfig.get(canonicalSourceFilePath(configFilePath))?.epoch;
 }
 
 /** Last updateSnapshot params fingerprint + project per config — identical repeat calls are skipped (watch-lint generations reissue the same params ~1000×). */

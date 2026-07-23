@@ -258,6 +258,23 @@ jobs:
           echo "TSC-P-EXIT=$LASTEXITCODE"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+      - name: Incremental single-project build (tsc --noEmit --incremental)
+        # Same BuilderState fileInfos/resolvedPath key-form invariant as the
+        # tsc -b step, but via performIncrementalCompilation — the win32
+        # updateShapeSignature crash (undefined.signature) surfaced here with
+        # a fresh .tsbuildinfo too. Fresh run + rerun (oldState path).
+        run: |
+          mkdir inc/src
+          '{ "compilerOptions": { "incremental": true, "tsBuildInfoFile": "./.tsbuildinfo", "strict": true, "noEmit": true }, "include": ["src/**/*.ts"] }' | Set-Content inc/tsconfig.json
+          'export const x: number = 1;' | Set-Content inc/src/index.ts
+          'import { x } from "./index"; export const y: number = x;' | Set-Content inc/src/dep.ts
+          node staging/lib/_tsc.js --noEmit -p inc/tsconfig.json
+          echo "TSC-INC-EXIT=$LASTEXITCODE"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node staging/lib/_tsc.js --noEmit -p inc/tsconfig.json
+          echo "TSC-INC-RERUN-EXIT=$LASTEXITCODE"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
       - name: Solution-build a composite project graph (tsc -b)
         # The BuilderState fileInfos/resolvedPath canonicalization mismatch
         # only fires in the builder drain: updateShapeSignature read
