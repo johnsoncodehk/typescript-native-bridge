@@ -1290,7 +1290,15 @@ function ensureBridgeSession(): void {
     const useCaseSensitive = !!init.useCaseSensitiveFileNames;
     _tsgoUseCaseSensitive = useCaseSensitive;
     _tsgoVersion = typeof init.version === "string" && init.version ? init.version : undefined;
-    const toPath = (f: string) => useCaseSensitive ? f : f.toLowerCase();
+    // Match TS's toPath semantics: paths are compared in forward-slash form,
+    // lowercased only on case-insensitive hosts. Go echoes configFileName with
+    // forward slashes while tsc on Windows hands us backslash paths — without
+    // slash normalization the snapshot projectMap lookup misses on every
+    // Windows project open ("tsgoChecker: project not found").
+    const toPath = (f: string) => {
+        const normalized = f.replace(/\\/g, "/");
+        return useCaseSensitive ? normalized : normalized.toLowerCase();
+    };
     _sourceFileCache = new MiniSourceFileCache();
     _api = {
         updateSnapshot(params: any) {

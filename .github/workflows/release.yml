@@ -239,6 +239,25 @@ jobs:
           node probe.js
           echo "EXIT=$LASTEXITCODE"
 
+      - uses: actions/download-artifact@v4
+        with:
+          name: lib-dist
+          path: staging
+
+      - name: Typecheck a tsconfig project (full tsc path)
+        # require() alone misses adapter-level Windows bugs: tsc hands the
+        # bridge backslash paths, and only the full lib + project open
+        # exercises that (the win32 "project not found" class).
+        run: |
+          mkdir staging/native
+          cp native/bridge.* staging/native/
+          mkdir proj/src
+          '{ "compilerOptions": { "strict": true }, "include": ["src/**/*.ts"] }' | Set-Content proj/tsconfig.json
+          'export const x: number = 1;' | Set-Content proj/src/index.ts
+          node staging/lib/_tsc.js --noEmit -p proj/tsconfig.json
+          echo "TSC-P-EXIT=$LASTEXITCODE"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
       - name: Collect crash evidence
         # A silent load failure is a hard crash before V8 can report; Windows
         # Error Reporting still records the exception code and faulting module.
