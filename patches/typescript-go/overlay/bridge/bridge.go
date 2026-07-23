@@ -14,9 +14,13 @@
 //   - BridgeCallBinary  -> raw bytes (for getSourceFile etc.), copied into a
 //     V8-allocated Node Buffer with one memcpy
 //
-// Memory model: text results reuse a process-lifetime C buffer (the NAPI
-// shim copies to V8 synchronously before the next call). Binary results pin
-// the Go slice for the duration of the call; the shim copies it into a
+// Memory model: text results reuse a per-session C buffer (the NAPI shim
+// copies to V8 synchronously before the session's next call). Per-session,
+// not process-global: worker_threads hosts (ESLint --concurrency) run one
+// session per thread in the same process, and a shared buffer is a data
+// race — one thread's realloc/free lands mid-copy of another thread's
+// response (heap corruption, interleaved JSON). Binary results pin the Go
+// slice for the duration of the call; the shim copies it into a
 // V8-allocated buffer and releases the pin synchronously — one memcpy, the
 // irreducible sandbox crossing. Zero-copy external buffers are off the
 // table: V8's sandbox (always on in Electron utility processes, e.g. VS
@@ -65,14 +69,22 @@ var (
 	nextID   int64
 	sessions = make(map[int64]*sessionEntry, 4)
 
-	// resultBuf is a single reusable C buffer for text responses (JSON docs
-	// and error messages).
-	resultBuf    *C.char
-	resultBufLen C.size_t
+	// errInvalidSession backs the one text response that has no session to
+	// own a buffer. Allocated once, never written again — safe from any
+	// thread.
+	errInvalidSession = C.CString(invalidSessionMsg)
 )
+
+const invalidSessionMsg = "invalid session handle"
 
 type sessionEntry struct {
 	api *api.Session
+
+	// resultBuf is the session's reusable C buffer for text responses (JSON
+	// docs and error messages). Sessions are single-threaded by contract
+	// (each JS thread owns its own session), so no lock guards it.
+	resultBuf    *C.char
+	resultBufLen C.size_t
 }
 
 // Wire kinds shared with napi_shim.c: null/bool results ride the tag so JS
@@ -86,23 +98,23 @@ const (
 	textError
 )
 
-// returnText writes b into the reusable result buffer, returning a pointer to
-// that buffer with the given kind. The pointer remains valid until the next
-// bridge call.
-func returnText(b []byte, kind C.longlong) C.struct_BridgeText {
+// returnText writes b into the session's reusable result buffer, returning a
+// pointer to that buffer with the given kind. The pointer remains valid until
+// the session's next bridge call.
+func (e *sessionEntry) returnText(b []byte, kind C.longlong) C.struct_BridgeText {
 	need := C.size_t(len(b) + 1)
-	if resultBuf == nil || resultBufLen < need {
-		if resultBuf != nil {
-			C.free(unsafe.Pointer(resultBuf))
+	if e.resultBuf == nil || e.resultBufLen < need {
+		if e.resultBuf != nil {
+			C.free(unsafe.Pointer(e.resultBuf))
 		}
-		resultBuf = (*C.char)(C.malloc(need))
-		resultBufLen = need
+		e.resultBuf = (*C.char)(C.malloc(need))
+		e.resultBufLen = need
 	}
 	if len(b) > 0 {
-		C.memcpy(unsafe.Pointer(resultBuf), unsafe.Pointer(&b[0]), C.size_t(len(b)))
+		C.memcpy(unsafe.Pointer(e.resultBuf), unsafe.Pointer(&b[0]), C.size_t(len(b)))
 	}
-	(*[1 << 30]byte)(unsafe.Pointer(resultBuf))[len(b)] = 0
-	return C.struct_BridgeText{data: resultBuf, kind: kind}
+	(*[1 << 30]byte)(unsafe.Pointer(e.resultBuf))[len(b)] = 0
+	return C.struct_BridgeText{data: e.resultBuf, kind: kind}
 }
 
 // bridgeCheckerPoolOptions returns checker pool sizing for the in-process bridge.
@@ -205,7 +217,7 @@ func BridgeCall(session C.int64_t, method *C.char, paramsJson *C.char) C.struct_
 	entry, ok := sessions[int64(session)]
 	mu.Unlock()
 	if !ok {
-		return returnText([]byte("invalid session handle"), textError)
+		return C.struct_BridgeText{data: errInvalidSession, kind: textError}
 	}
 
 	methodStr := C.GoString(method)
@@ -219,7 +231,7 @@ func BridgeCall(session C.int64_t, method *C.char, paramsJson *C.char) C.struct_
 
 	res, err := entry.api.HandleRequest(context.Background(), methodStr, params)
 	if err != nil {
-		return returnText([]byte(err.Error()), textError)
+		return entry.returnText([]byte(err.Error()), textError)
 	}
 	if res == nil {
 		return C.struct_BridgeText{kind: textNull}
@@ -227,7 +239,7 @@ func BridgeCall(session C.int64_t, method *C.char, paramsJson *C.char) C.struct_
 
 	dataBytes, err := json.Marshal(res)
 	if err != nil {
-		return returnText([]byte("marshal result: "+err.Error()), textError)
+		return entry.returnText([]byte("marshal result: "+err.Error()), textError)
 	}
 	switch string(dataBytes) {
 	case "null":
@@ -237,7 +249,7 @@ func BridgeCall(session C.int64_t, method *C.char, paramsJson *C.char) C.struct_
 	case "false":
 		return C.struct_BridgeText{kind: textFalse}
 	}
-	return returnText(dataBytes, textDoc)
+	return entry.returnText(dataBytes, textDoc)
 }
 
 // BridgeCallBinary invokes HandleRequest and returns the result as raw bytes.
@@ -251,8 +263,8 @@ func BridgeCall(session C.int64_t, method *C.char, paramsJson *C.char) C.struct_
 // The NAPI shim copies it into a V8-allocated buffer and calls
 // BridgeReleaseBinary synchronously right after — the pin never escapes to a
 // finalizer. len is 0 for nil/empty results (handle is 0 then; nothing to
-// release). kind 4 = error: data/len hold the message in resultBuf and the
-// shim throws it.
+// release). kind 4 = error: data/len hold the message in the session's
+// result buffer and the shim throws it.
 //
 //export BridgeCallBinary
 func BridgeCallBinary(session C.int64_t, method *C.char, paramsJson *C.char) C.struct_BridgeBinary {
@@ -262,7 +274,11 @@ func BridgeCallBinary(session C.int64_t, method *C.char, paramsJson *C.char) C.s
 	entry, ok := sessions[int64(session)]
 	mu.Unlock()
 	if !ok {
-		return returnBinaryError("invalid session handle")
+		return C.struct_BridgeBinary{
+			data: unsafe.Pointer(errInvalidSession),
+			len:  C.longlong(len(invalidSessionMsg)),
+			kind: textError,
+		}
 	}
 
 	methodStr := C.GoString(method)
@@ -276,7 +292,7 @@ func BridgeCallBinary(session C.int64_t, method *C.char, paramsJson *C.char) C.s
 
 	res, err := entry.api.HandleRequest(context.Background(), methodStr, params)
 	if err != nil {
-		return returnBinaryError(err.Error())
+		return entry.returnBinaryError(err.Error())
 	}
 
 	var bytes []byte
@@ -288,7 +304,7 @@ func BridgeCallBinary(session C.int64_t, method *C.char, paramsJson *C.char) C.s
 	default:
 		bytes, err = json.Marshal(res)
 		if err != nil {
-			return returnBinaryError("marshal result: " + err.Error())
+			return entry.returnBinaryError("marshal result: " + err.Error())
 		}
 	}
 
@@ -299,9 +315,9 @@ func BridgeCallBinary(session C.int64_t, method *C.char, paramsJson *C.char) C.s
 }
 
 // returnBinaryError reports msg on the binary path: the message rides the
-// reusable text buffer and kind 4 tells the shim to throw it.
-func returnBinaryError(msg string) C.struct_BridgeBinary {
-	t := returnText([]byte(msg), textError)
+// session's text buffer and kind 4 tells the shim to throw it.
+func (e *sessionEntry) returnBinaryError(msg string) C.struct_BridgeBinary {
+	t := e.returnText([]byte(msg), textError)
 	return C.struct_BridgeBinary{data: unsafe.Pointer(t.data), len: C.longlong(len(msg)), kind: textError}
 }
 
@@ -386,6 +402,10 @@ func BridgeDisposeSession(session C.int64_t) {
 		return
 	}
 	entry.api.Close()
+	if entry.resultBuf != nil {
+		C.free(unsafe.Pointer(entry.resultBuf))
+		entry.resultBuf = nil
+	}
 }
 
 func main() {}

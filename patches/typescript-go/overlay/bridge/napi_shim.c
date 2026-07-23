@@ -5,13 +5,16 @@
 // Marshalling contract (deliberately tiny — see the design discussion):
 //   - Shapes: strings in, string-or-Buffer-or-bool-or-null out, int64 session
 //     handle. Nothing else ever crosses the boundary.
-//   - Inputs: method names are converted once and cached for the process
-//     lifetime (lever 4); params strings convert into a per-env grow-once
-//     scratch buffer (the call is synchronous and Go copies before return).
-//     Neither path allocates per call.
+//   - Inputs: method names are converted once and cached per env for the
+//     env's lifetime (lever 4); params strings convert into a per-env
+//     grow-once scratch buffer (the call is synchronous and Go copies before
+//     return). Neither path allocates per call. Per-env, not process-static:
+//     worker_threads hosts run several envs in one process, and unsynchronized
+//     process globals are data races across threads.
 //   - Text results: kind-tagged (0=JSON doc string, 1=null, 2/3=bool, 4=error
-//     message — thrown). JSON docs live in a Go-owned reusable buffer
-//     (resultBuf in bridge.go), copied into V8 by napi_create_string_utf8.
+//     message — thrown). JSON docs live in a Go-owned per-session buffer
+//     (sessionEntry.resultBuf in bridge.go), copied into V8 by
+//     napi_create_string_utf8.
 //     Null/bool results ride the tag so JS never parses a wrapper envelope.
 //   - Binary results: Go pins the slice (runtime.Pinner — the cgo-legal way
 //     to hand a Go pointer across) and the shim copies it into a V8-allocated
@@ -31,6 +34,34 @@
 #include <stdlib.h>
 #include <string.h>
 
+#ifdef _WIN32
+#include <windows.h>
+#else
+#include <dlfcn.h>
+#endif
+
+// A Go c-shared library can never be unloaded: the Go runtime keeps OS
+// threads and a process-wide vectored exception handler registered for the
+// life of the process, so FreeLibrary/dlclose leaves both pointing into
+// unmapped pages — the next fault dispatches into the unloaded handler and
+// recurses to death (0xC0000005 at teardown). Node unloads an addon when its
+// last owning env dies, which happens whenever the addon was only ever
+// required from worker threads (ESLint --concurrency). Pin the module so
+// that unload is a no-op.
+static void pin_module_in_process(void) {
+#ifdef _WIN32
+	HMODULE self = NULL;
+	GetModuleHandleExW(
+		GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,
+		(LPCWSTR)(void*)&pin_module_in_process, &self);
+#else
+	Dl_info info;
+	if (dladdr((void*)&pin_module_in_process, &info) && info.dli_fname) {
+		dlopen(info.dli_fname, RTLD_NOW | RTLD_NODELETE);
+	}
+#endif
+}
+
 // cgo-exported Go entry points (bridge.go).
 struct BridgeText { char* data; long long kind; };
 struct BridgeBinary { void* data; long long len; unsigned long long handle; long long kind; };
@@ -46,9 +77,16 @@ extern char* BridgeCallArena(int64_t session, char* method);
 // synchronous and Go copies the params (C.GoString) before returning, so one
 // grow-on-demand buffer per env replaces a malloc/free pair per call.
 #define SHIM_MAX_ARENAS 8
+#define METHOD_CACHE_SIZE 256
 struct ShimInstance {
 	char* paramsBuf;
 	size_t paramsBufLen;
+	// Method-name C-string cache (issue #10 lever 4): RPC method names are a
+	// small, slowly-changing set, so each distinct name is converted once and
+	// kept for the env lifetime — repeat calls cost one utf8 read + a probe,
+	// skipping the per-call malloc/free. Entries are never evicted, which
+	// also keeps their pointers stable for the lifetime of the env.
+	char* methodCache[METHOD_CACHE_SIZE];
 	// Session arenas kept alive while Go holds their pointers (part 3).
 	struct { int64_t session; napi_ref ref; } arenas[SHIM_MAX_ARENAS];
 	int arenaCount;
@@ -58,6 +96,7 @@ static void finalize_instance(napi_env env, void* data, void* hint) {
 	(void)hint;
 	struct ShimInstance* i = (struct ShimInstance*)data;
 	for (int k = 0; k < i->arenaCount; k++) napi_delete_reference(env, i->arenas[k].ref);
+	for (int k = 0; k < METHOD_CACHE_SIZE; k++) free(i->methodCache[k]);
 	free(i->paramsBuf);
 	free(i);
 }
@@ -87,14 +126,7 @@ static char* arg_string(napi_env env, napi_value v, bool* ok) {
 	return buf;
 }
 
-// Method-name C-string cache (issue #10 lever 4): RPC method names are a
-// small, slowly-changing set, so each distinct name is converted once and
-// kept for the process lifetime — repeat calls cost one utf8 read + a probe,
-// skipping the per-call malloc/free. Entries are never freed, which also
-// keeps their pointers stable for the lifetime of the process.
-#define METHOD_CACHE_SIZE 256
 #define METHOD_NAME_MAX 128
-static char* methodCache[METHOD_CACHE_SIZE];
 
 static unsigned method_hash(const char* s, size_t len) {
 	unsigned h = 2166136261u;
@@ -117,6 +149,7 @@ static char* arg_method(napi_env env, napi_value v, bool* ok, bool* cached) {
 		// Longer than the cache read buffer: plain per-call conversion.
 		return arg_string(env, v, ok);
 	}
+	char** methodCache = instance(env)->methodCache;
 	unsigned h = method_hash(buf, written) % METHOD_CACHE_SIZE;
 	for (unsigned i = 0; i < METHOD_CACHE_SIZE; i++) {
 		unsigned slot = (h + i) % METHOD_CACHE_SIZE;
@@ -385,6 +418,7 @@ static bool set_fn(napi_env env, napi_value exports, const char* name, napi_call
 }
 
 NAPI_MODULE_INIT() {
+	pin_module_in_process();
 	struct ShimInstance* inst = (struct ShimInstance*)calloc(1, sizeof(struct ShimInstance));
 	if (!inst || napi_set_instance_data(env, inst, finalize_instance, NULL) != napi_ok) {
 		napi_throw_error(env, NULL, "tnb bridge: out of memory");
