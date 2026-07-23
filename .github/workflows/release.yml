@@ -224,6 +224,14 @@ jobs:
         run: >
           node -e "try { const b = require('./native/bridge.node'); const keys = Object.keys(b); console.log('loaded, exports:', keys.join(',')); if (typeof b.newSession !== 'function') { console.error('FAIL: newSession missing'); process.exit(1); } } catch (e) { console.error('FAIL: require threw:', e && e.stack || e); process.exit(1); }"
 
+      - name: Collect crash evidence
+        # A silent load failure is a hard crash before V8 can report; Windows
+        # Error Reporting still records the exception code and faulting module.
+        if: failure()
+        run: |
+          Get-WinEvent -FilterHashtable @{LogName='Application'; ProviderName='Application Error'} -MaxEvents 3 -ErrorAction SilentlyContinue | Format-List TimeCreated, Message
+          Get-WinEvent -FilterHashtable @{LogName='Application'; ProviderName='Windows Error Reporting'} -MaxEvents 3 -ErrorAction SilentlyContinue | Format-List TimeCreated, Message
+
   publish:
     needs: [build-lib, build-bridge, build-bridge-linux, test-bridge-win32-x64]
     runs-on: macos-latest
