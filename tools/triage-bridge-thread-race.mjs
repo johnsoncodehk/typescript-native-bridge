@@ -19,6 +19,7 @@ import { Worker, isMainThread, threadId, workerData, parentPort } from "node:wor
 
 const require = createRequire(import.meta.url);
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+process.env.TNB_LIB_PATH ??= path.join(repoRoot, "lib");
 
 const WORKERS = 6;
 const ITERS = 5000;

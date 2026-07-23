@@ -15,14 +15,12 @@
 //     V8-allocated Node Buffer with one memcpy
 //
 // Memory model: text results reuse a per-session C buffer (the NAPI shim
-// copies to V8 synchronously before the next call). Per-session, not
-// process-global: worker_threads hosts (ESLint --concurrency) run one
+// copies to V8 synchronously before the session's next call). Per-session,
+// not process-global: worker_threads hosts (ESLint --concurrency) run one
 // session per thread in the same process, and a shared buffer is a data
 // race — one thread's realloc/free lands mid-copy of another thread's
-// response (heap corruption, interleaved JSON). A session is only ever
-// called from its owning JS thread, so the per-session buffer needs no
-// lock. Binary results pin
-// the Go slice for the duration of the call; the shim copies it into a
+// response (heap corruption, interleaved JSON). Binary results pin the Go
+// slice for the duration of the call; the shim copies it into a
 // V8-allocated buffer and releases the pin synchronously — one memcpy, the
 // irreducible sandbox crossing. Zero-copy external buffers are off the
 // table: V8's sandbox (always on in Electron utility processes, e.g. VS
@@ -74,8 +72,10 @@ var (
 	// errInvalidSession backs the one text response that has no session to
 	// own a buffer. Allocated once, never written again — safe from any
 	// thread.
-	errInvalidSession = C.CString("invalid session handle")
+	errInvalidSession = C.CString(invalidSessionMsg)
 )
+
+const invalidSessionMsg = "invalid session handle"
 
 type sessionEntry struct {
 	api *api.Session
@@ -264,8 +264,7 @@ func BridgeCall(session C.int64_t, method *C.char, paramsJson *C.char) C.struct_
 // BridgeReleaseBinary synchronously right after — the pin never escapes to a
 // finalizer. len is 0 for nil/empty results (handle is 0 then; nothing to
 // release). kind 4 = error: data/len hold the message in the session's
-// result buffer and the
-// shim throws it.
+// result buffer and the shim throws it.
 //
 //export BridgeCallBinary
 func BridgeCallBinary(session C.int64_t, method *C.char, paramsJson *C.char) C.struct_BridgeBinary {
@@ -277,7 +276,7 @@ func BridgeCallBinary(session C.int64_t, method *C.char, paramsJson *C.char) C.s
 	if !ok {
 		return C.struct_BridgeBinary{
 			data: unsafe.Pointer(errInvalidSession),
-			len:  C.longlong(len("invalid session handle")),
+			len:  C.longlong(len(invalidSessionMsg)),
 			kind: textError,
 		}
 	}
