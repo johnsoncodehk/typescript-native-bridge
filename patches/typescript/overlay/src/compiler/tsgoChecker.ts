@@ -4920,8 +4920,17 @@ export function createTsgoProgram(
                 if (isExtraExtensionFileName(n) || ((n.startsWith("/") || /^[A-Za-z]:[\\/]/.test(n)) && !fileExistsOnDisk(n))) { collectNeeded = true; break; }
             }
         }
-        if (collectNeeded) for (const fn of names) {
+        if (collectNeeded) {
+            // `names` mixes raw host names with their resolved forms (Windows:
+            // backslash rootNames + forward collectTsgoOpenFileNames) — both
+            // resolve to the same file. Dedup by resolvedFn or the same file
+            // goes out twice in openFilesWithContent and Go's processChanges
+            // panics ("should see no changes after open", win32 release gate).
+            const seenResolved = new Set<string>();
+            for (const fn of names) {
             const resolvedFn = resolveHostFileNameMemoized(fn, host);
+            if (seenResolved.has(resolvedFn)) continue;
+            seenResolved.add(resolvedFn);
             if (!isOverlayCandidatePath(fn)) continue;
             if (!contentCanDiverge(fn, resolvedFn)) continue;
             const content = getHostScriptContentForOverlay(resolvedFn, options, host);
@@ -4948,6 +4957,7 @@ export function createTsgoProgram(
             }
             hostContentByFile.set(resolvedFn, content);
             overlays.push({ fileName: resolvedFn, content: content.text, scriptKind: content.scriptKind });
+            }
         }
     }
     const preferHostSourceFiles = overlays.length > 0
@@ -7786,20 +7796,20 @@ export function createTsgoChecker(program: any): any {
                 return t ?? this;
             };
         }
-        // getConstraint — delegate to checker.getConstraintOfTypeParameter for
-        // type parameters; returns undefined for non-type-parameter types.
-        if (!proto.getConstraint) {
-            proto.getConstraint = function () {
-                const proj = projectForBridgeObject(this) ?? _currentProjectRef.project;
-                if (!proj) return undefined;
-                if (typeof this.flags === "number" && (this.flags & TF.TypeParameter) !== 0) {
-                    const t = proj.checker.getConstraintOfTypeParameter(this);
-                    if (t) fixupType(t);
-                    return t;
-                }
-                return undefined;
-            };
-        }
+        // getConstraint — stock Type.getConstraint is
+        // checker.getBaseConstraintOfType(type) for every type (type parameter
+        // → declared constraint, substitution → its constraint, otherwise the
+        // type itself). The vendored TypeObject ships its own getConstraint
+        // that only fetches SubstitutionType.substConstraint — wrong for type
+        // parameters (issue #23: T.getConstraint() → undefined on the tsgo
+        // path). Overwrite unconditionally.
+        proto.getConstraint = function () {
+            const proj = projectForBridgeObject(this) ?? _currentProjectRef.project;
+            if (!proj) return undefined;
+            const t = proj.checker.getBaseConstraintOfType(this);
+            if (t) fixupType(t);
+            return t;
+        };
         // getNumberIndexType / getStringIndexType — stock Type path:
         // checker.getIndexTypeOfType(this, IndexKind.String|Number).
         if (!proto.getNumberIndexType) {
@@ -9646,13 +9656,14 @@ export function createTsgoChecker(program: any): any {
         },
         getBaseConstraintOfType(type: any): any {
             ensureProject();
-            const TF = sync.TypeFlags;
-            if (type && (type.flags & TF.TypeParameter) !== 0) {
-                const t = project.checker.getConstraintOfTypeParameter(type);
-                if (t) fixupType(t);
-                return t;
-            }
-            return undefined;
+            if (!type) return undefined;
+            // Stock reduces constraint-dependent types (type parameters,
+            // substitutions, indexed accesses derived from them) through
+            // checker.getBaseConstraintOfType — route every type through the
+            // Go RPC, not just type parameters (issue #23).
+            const t = project.checker.getBaseConstraintOfType(type);
+            if (t) fixupType(t);
+            return t;
         },
         getIndexInfosOfType(type: any): readonly any[] {
             ensureProject();

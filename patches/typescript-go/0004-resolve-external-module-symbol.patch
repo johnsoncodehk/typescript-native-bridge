@@ -3943,7 +3943,7 @@ index 6a90030eb..fc58b512a 100644
      const docFiles = {
          "/tsconfig.json": JSON.stringify({ compilerOptions: { strict: true } }),
 diff --git a/internal/api/proto.go b/internal/api/proto.go
-index 0917c385d..07c596ccb 100644
+index 0917c385d..cc94d75be 100644
 --- a/internal/api/proto.go
 +++ b/internal/api/proto.go
 @@ -67,33 +67,64 @@ const (
@@ -4602,7 +4602,25 @@ index 0917c385d..07c596ccb 100644
  type GetSymbolsAtPositionsParams struct {
  	Snapshot  SnapshotID         `json:"snapshot"`
  	Project   ProjectID          `json:"project"`
-@@ -670,20 +940,22 @@ func newTypeResponse(t *checker.Type, id TypeID) *TypeResponse {
+@@ -660,6 +930,17 @@ func newTypeResponse(t *checker.Type, id TypeID) *TypeResponse {
+ 		if flags&checker.TypeFlagsLiteral != 0 {
+ 			resp.Value = literalValueToJSON(lit.Value())
+ 		}
++		if flags&checker.TypeFlagsBooleanLiteral != 0 {
++			// Stock models boolean literals as IntrinsicType with intrinsicName
++			// 'true'/'false' — fill it so bridge consumers (issue #22) see the
++			// stock form. Arena reads the same field (arena.go off+88), so both
++			// transports stay aligned.
++			if lit.Value() == true {
++				resp.IntrinsicName = "true"
++			} else {
++				resp.IntrinsicName = "false"
++			}
++		}
+ 		if lit.FreshType() != nil {
+ 			resp.FreshType = TypeHandle(lit.FreshType())
+ 		}
+@@ -670,20 +951,22 @@ func newTypeResponse(t *checker.Type, id TypeID) *TypeResponse {
  		resp.ObjectFlags = uint32(t.ObjectFlags())
  		objectFlags := t.ObjectFlags()
  		if objectFlags&checker.ObjectFlagsReference != 0 {
@@ -4639,7 +4657,7 @@ index 0917c385d..07c596ccb 100644
  			}
  		}
  		if objectFlags&checker.ObjectFlagsClassOrInterface != 0 {
-@@ -781,6 +1053,47 @@ type SourceFileMetadata struct {
+@@ -781,6 +1064,47 @@ type SourceFileMetadata struct {
  	ImpliedNodeFormat     core.ResolutionMode `json:"impliedNodeFormat"`
  }
  
@@ -4687,7 +4705,7 @@ index 0917c385d..07c596ccb 100644
  type ResolveNameParams struct {
  	Snapshot       SnapshotID          `json:"snapshot"`
  	Project        ProjectID           `json:"project"`
-@@ -806,6 +1119,13 @@ type GetSymbolPropertyParams struct {
+@@ -806,6 +1130,13 @@ type GetSymbolPropertyParams struct {
  	Symbol   SymbolID   `json:"objectId"`
  }
  
@@ -4701,7 +4719,7 @@ index 0917c385d..07c596ccb 100644
  // GetSignaturePropertyParams is used for all signature sub-property endpoints.
  type GetSignaturePropertyParams struct {
  	Snapshot  SnapshotID  `json:"snapshot"`
-@@ -815,9 +1135,10 @@ type GetSignaturePropertyParams struct {
+@@ -815,9 +1146,10 @@ type GetSignaturePropertyParams struct {
  
  // GetContextualTypeParams returns the contextual type for a node.
  type GetContextualTypeParams struct {
@@ -4715,7 +4733,7 @@ index 0917c385d..07c596ccb 100644
  }
  
  // GetTypeOfSymbolAtLocationParams returns the narrowed type of a symbol at a specific location.
-@@ -927,6 +1248,13 @@ type GetNonNullableTypeParams struct {
+@@ -927,6 +1259,13 @@ type GetNonNullableTypeParams struct {
  	Type     TypeID     `json:"type"`
  }
  
@@ -4729,7 +4747,7 @@ index 0917c385d..07c596ccb 100644
  // GetTypeFromTypeNodeParams are the parameters for the getTypeFromTypeNode method.
  type GetTypeFromTypeNodeParams struct {
  	Snapshot SnapshotID `json:"snapshot"`
-@@ -956,6 +1284,74 @@ type IsArrayLikeTypeParams struct {
+@@ -956,6 +1295,74 @@ type IsArrayLikeTypeParams struct {
  	Type     TypeID     `json:"type"`
  }
  
@@ -4804,7 +4822,7 @@ index 0917c385d..07c596ccb 100644
  // IsTypeAssignableToParams checks assignability between two types.
  type IsTypeAssignableToParams struct {
  	Snapshot SnapshotID `json:"snapshot"`
-@@ -977,6 +1373,47 @@ type GetResolvedSignatureParams struct {
+@@ -977,6 +1384,47 @@ type GetResolvedSignatureParams struct {
  	Location NodeHandle `json:"location"`
  }
  
@@ -4852,7 +4870,7 @@ index 0917c385d..07c596ccb 100644
  type GetTypeAtLocationParams struct {
  	Snapshot SnapshotID `json:"snapshot"`
  	Project  ProjectID  `json:"project"`
-@@ -1012,6 +1449,24 @@ type TypeToTypeNodeParams struct {
+@@ -1012,6 +1460,24 @@ type TypeToTypeNodeParams struct {
  	Flags    int32      `json:"flags,omitempty"`
  }
  
@@ -4877,7 +4895,7 @@ index 0917c385d..07c596ccb 100644
  // SignatureToSignatureDeclarationParams are the parameters for the signatureToSignatureDeclaration method.
  type SignatureToSignatureDeclarationParams struct {
  	Snapshot  SnapshotID  `json:"snapshot"`
-@@ -1022,6 +1477,15 @@ type SignatureToSignatureDeclarationParams struct {
+@@ -1022,6 +1488,15 @@ type SignatureToSignatureDeclarationParams struct {
  	Flags     int32       `json:"flags,omitempty"`
  }
  
@@ -4893,7 +4911,7 @@ index 0917c385d..07c596ccb 100644
  // PrintNodeParams are the parameters for the printNode method.
  type PrintNodeParams struct {
  	Data                          string `json:"data"` // base64-encoded binary AST data
-@@ -1060,6 +1524,88 @@ type CheckerNodeParams struct {
+@@ -1060,6 +1535,88 @@ type CheckerNodeParams struct {
  	Location NodeHandle `json:"location"`
  }
  
@@ -4982,7 +5000,7 @@ index 0917c385d..07c596ccb 100644
  // CheckerSymbolParams are parameters for checker methods that operate on a symbol.
  type CheckerSymbolParams struct {
  	Snapshot SnapshotID `json:"snapshot"`
-@@ -1074,6 +1620,216 @@ type JSDocTagInfo struct {
+@@ -1074,6 +1631,216 @@ type JSDocTagInfo struct {
  	Text string `json:"text,omitempty"`
  }
  
@@ -5199,7 +5217,7 @@ index 0917c385d..07c596ccb 100644
  // CheckerSignatureParams are parameters for checker methods that operate on a signature.
  type CheckerSignatureParams struct {
  	Snapshot  SnapshotID  `json:"snapshot"`
-@@ -1095,6 +1851,9 @@ type IndexInfoResponse struct {
+@@ -1095,6 +1862,9 @@ type IndexInfoResponse struct {
  	ValueType   TypeResponse `json:"valueType"`
  	IsReadonly  bool         `json:"isReadonly,omitempty"`
  	Declaration NodeHandle   `json:"declaration,omitempty"`
@@ -5209,7 +5227,7 @@ index 0917c385d..07c596ccb 100644
  }
  
  // SourceFileResponse contains the binary-encoded AST data for a source file.
-@@ -1110,6 +1869,68 @@ type GetDiagnosticsParams struct {
+@@ -1110,6 +1880,68 @@ type GetDiagnosticsParams struct {
  	File     *DocumentIdentifier `json:"file,omitempty"`
  }
  
