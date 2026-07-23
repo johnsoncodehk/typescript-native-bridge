@@ -5279,7 +5279,7 @@ index 0917c385d..07c596ccb 100644
  type GetProjectDiagnosticsParams struct {
  	Snapshot SnapshotID `json:"snapshot"`
 diff --git a/internal/api/session.go b/internal/api/session.go
-index 7e29c44b6..8a9cf8933 100644
+index 7e29c44b6..6b005d5f8 100644
 --- a/internal/api/session.go
 +++ b/internal/api/session.go
 @@ -13,12 +13,15 @@ import (
@@ -5942,7 +5942,7 @@ index 7e29c44b6..8a9cf8933 100644
  	for _, f := range params.CloseFiles {
  		path := s.toPath(f.ToURI(s.projectSession.GetCurrentDirectory()).FileName())
  		if !s.openFiles.Has(path) {
-@@ -893,6 +1376,68 @@ func (s *Session) handleUpdateSnapshot(ctx context.Context, params *UpdateSnapsh
+@@ -893,6 +1376,72 @@ func (s *Session) handleUpdateSnapshot(ctx context.Context, params *UpdateSnapsh
  		}
  		apiRequest.CloseFiles.Add(path)
  		closedFiles = append(closedFiles, path)
@@ -5969,7 +5969,11 @@ index 7e29c44b6..8a9cf8933 100644
 +	var openFileChanges []project.FileChange
 +	for _, f := range params.OpenFilesWithContent {
 +		fileName := f.FileName
-+		if !strings.HasPrefix(fileName, "/") {
++		// Windows-absolute paths (D:/...) don't start with "/" — the POSIX-only
++		// prefix check prepended the cwd to every overlay on Windows, filing
++		// the virtual content under a garbage path while the real .vue kept its
++		// raw disk text ("not a module", empty auto-import signatures).
++		if !tspath.IsRootedDiskPath(fileName) {
 +			fileName = cwd + "/" + fileName
 +		}
 +		// Escape properly (e.g. '#' in path segments) — raw "file://"+fileName
@@ -6011,7 +6015,7 @@ index 7e29c44b6..8a9cf8933 100644
  	}
  
  	// Even when nothing is opened or closed, APIUpdate ensures all projects and
-@@ -938,6 +1483,7 @@ func (s *Session) handleUpdateSnapshot(ctx context.Context, params *UpdateSnapsh
+@@ -938,6 +1487,7 @@ func (s *Session) handleUpdateSnapshot(ctx context.Context, params *UpdateSnapsh
  			refCount:                1,
  			symbolRegistry:          make(map[SymbolID]*ast.Symbol),
  			symbolCanonicalProjects: make(map[SymbolID]ProjectID),
@@ -6019,7 +6023,7 @@ index 7e29c44b6..8a9cf8933 100644
  			projectRegistries:       make(map[ProjectID]*projectRegistryData),
  		}
  		s.snapshots[handle] = sd
-@@ -962,6 +1508,32 @@ func (s *Session) handleUpdateSnapshot(ctx context.Context, params *UpdateSnapsh
+@@ -962,6 +1512,32 @@ func (s *Session) handleUpdateSnapshot(ctx context.Context, params *UpdateSnapsh
  		changes = computeSnapshotChanges(prevSD.snapshot, snapshot)
  	}
  
@@ -6052,7 +6056,7 @@ index 7e29c44b6..8a9cf8933 100644
  	return &UpdateSnapshotResponse{
  		Snapshot: handle,
  		Projects: projectResponses,
-@@ -1061,8 +1633,8 @@ func (s *Session) handleGetSourceFile(ctx context.Context, params *GetSourceFile
+@@ -1061,8 +1637,8 @@ func (s *Session) handleGetSourceFile(ctx context.Context, params *GetSourceFile
  		return nil, nil
  	}
  
@@ -6063,7 +6067,7 @@ index 7e29c44b6..8a9cf8933 100644
  	if err != nil {
  		return nil, fmt.Errorf("failed to encode source file: %w", err)
  	}
-@@ -1076,6 +1648,42 @@ func (s *Session) handleGetSourceFile(ctx context.Context, params *GetSourceFile
+@@ -1076,6 +1652,42 @@ func (s *Session) handleGetSourceFile(ctx context.Context, params *GetSourceFile
  	}, nil
  }
  
@@ -6106,7 +6110,7 @@ index 7e29c44b6..8a9cf8933 100644
  // handleGetSourceFileNames returns file names of all source files in a project.
  func (s *Session) handleGetSourceFileNames(ctx context.Context, params *GetSourceFileNamesParams) ([]string, error) {
  	sd, err := s.getSnapshotData(params.Snapshot)
-@@ -1124,261 +1732,313 @@ func (s *Session) handleGetSourceFileMetadata(ctx context.Context, params *GetSo
+@@ -1124,261 +1736,313 @@ func (s *Session) handleGetSourceFileMetadata(ctx context.Context, params *GetSo
  	}, nil
  }
  
@@ -6577,7 +6581,7 @@ index 7e29c44b6..8a9cf8933 100644
  	setup, err := s.setupChecker(ctx, params.Snapshot, params.Project)
  	if err != nil {
  		return nil, err
-@@ -1393,23 +2053,23 @@ func (s *Session) handleGetTypeAtLocation(ctx context.Context, params *GetTypeAt
+@@ -1393,23 +2057,23 @@ func (s *Session) handleGetTypeAtLocation(ctx context.Context, params *GetTypeAt
  		return nil, nil
  	}
  
@@ -6607,7 +6611,7 @@ index 7e29c44b6..8a9cf8933 100644
  	for i, loc := range params.Locations {
  		node, err := setup.sd.resolveNodeHandle(setup.program, loc)
  		if err != nil {
-@@ -1418,35 +2078,32 @@ func (s *Session) handleGetTypeAtLocations(ctx context.Context, params *GetTypeA
+@@ -1418,35 +2082,32 @@ func (s *Session) handleGetTypeAtLocations(ctx context.Context, params *GetTypeA
  		if node == nil {
  			continue
  		}
@@ -6653,7 +6657,7 @@ index 7e29c44b6..8a9cf8933 100644
  	if t == nil {
  		return nil, nil
  	}
-@@ -1454,27 +2111,24 @@ func (s *Session) handleGetTypeAtPosition(ctx context.Context, params *GetTypeAt
+@@ -1454,27 +2115,24 @@ func (s *Session) handleGetTypeAtPosition(ctx context.Context, params *GetTypeAt
  	return setup.newTypeResponse(t), nil
  }
  
@@ -6691,7 +6695,7 @@ index 7e29c44b6..8a9cf8933 100644
  		if t != nil {
  			results[i] = setup.newTypeResponse(t)
  		}
-@@ -1483,328 +2137,2438 @@ func (s *Session) handleGetTypesAtPositions(ctx context.Context, params *GetType
+@@ -1483,328 +2141,2438 @@ func (s *Session) handleGetTypesAtPositions(ctx context.Context, params *GetType
  	return results, nil
  }
  
@@ -9292,7 +9296,7 @@ index 7e29c44b6..8a9cf8933 100644
  	setup, err := s.setupChecker(ctx, params.Snapshot, params.Project)
  	if err != nil {
  		return nil, err
-@@ -1819,164 +4583,210 @@ func (s *Session) handleGetContextualType(ctx context.Context, params *GetContex
+@@ -1819,164 +4587,210 @@ func (s *Session) handleGetContextualType(ctx context.Context, params *GetContex
  		return nil, nil
  	}
  
@@ -9566,7 +9570,7 @@ index 7e29c44b6..8a9cf8933 100644
  	setup, err := s.setupChecker(ctx, params.Snapshot, params.Project)
  	if err != nil {
  		return nil, err
-@@ -1990,17 +4800,30 @@ func (s *Session) handleGetShorthandAssignmentValueSymbol(ctx context.Context, p
+@@ -1990,17 +4804,30 @@ func (s *Session) handleGetShorthandAssignmentValueSymbol(ctx context.Context, p
  	if node == nil {
  		return nil, nil
  	}
@@ -9602,7 +9606,7 @@ index 7e29c44b6..8a9cf8933 100644
  	setup, err := s.setupChecker(ctx, params.Snapshot, params.Project)
  	if err != nil {
  		return nil, err
-@@ -2011,105 +4834,145 @@ func (s *Session) handleGetTypeOfSymbolAtLocation(ctx context.Context, params *G
+@@ -2011,105 +4838,145 @@ func (s *Session) handleGetTypeOfSymbolAtLocation(ctx context.Context, params *G
  	if err != nil {
  		return nil, err
  	}
@@ -9796,7 +9800,7 @@ index 7e29c44b6..8a9cf8933 100644
  	setup, err := s.setupChecker(ctx, params.Snapshot, params.Project)
  	if err != nil {
  		return nil, err
-@@ -2121,196 +4984,322 @@ func (s *Session) handleTypeToString(ctx context.Context, params *TypeToTypeNode
+@@ -2121,196 +4988,322 @@ func (s *Session) handleTypeToString(ctx context.Context, params *TypeToTypeNode
  		return nil, err
  	}
  
@@ -10215,7 +10219,7 @@ index 7e29c44b6..8a9cf8933 100644
  }
  
  // handleGetBaseTypes returns the base types of an interface/class type.
-@@ -2413,6 +5402,51 @@ func (s *Session) handleGetIndexInfosOfType(ctx context.Context, params *Checker
+@@ -2413,6 +5406,51 @@ func (s *Session) handleGetIndexInfosOfType(ctx context.Context, params *Checker
  		}
  		if info.Declaration() != nil {
  			results[i].Declaration = setup.sd.nodeHandleFrom(info.Declaration())
@@ -10267,7 +10271,7 @@ index 7e29c44b6..8a9cf8933 100644
  		}
  	}
  
-@@ -2628,6 +5662,73 @@ func (s *Session) handleGetExportsOfModule(ctx context.Context, params *CheckerS
+@@ -2628,6 +5666,73 @@ func (s *Session) handleGetExportsOfModule(ctx context.Context, params *CheckerS
  	return results, nil
  }
  
@@ -10341,7 +10345,7 @@ index 7e29c44b6..8a9cf8933 100644
  // handleGetMemberInModuleExports returns an export by name from a module symbol.
  func (s *Session) handleGetMemberInModuleExports(ctx context.Context, params *GetMemberInModuleExportsParams) (*SymbolResponse, error) {
  	setup, err := s.setupChecker(ctx, params.Snapshot, params.Project)
-@@ -2830,7 +5931,9 @@ func computeSnapshotChanges(prev *project.Snapshot, next *project.Snapshot) *Sna
+@@ -2830,7 +5935,9 @@ func computeSnapshotChanges(prev *project.Snapshot, next *project.Snapshot) *Sna
  			var projectChanges ProjectFileChanges
  			core.DiffMaps(
  				oldFiles, newFiles,
@@ -10352,7 +10356,7 @@ index 7e29c44b6..8a9cf8933 100644
  				func(path tspath.Path, _ *ast.SourceFile) {
  					projectChanges.DeletedFiles = append(projectChanges.DeletedFiles, path)
  				},
-@@ -2838,7 +5941,7 @@ func computeSnapshotChanges(prev *project.Snapshot, next *project.Snapshot) *Sna
+@@ -2838,7 +5945,7 @@ func computeSnapshotChanges(prev *project.Snapshot, next *project.Snapshot) *Sna
  					projectChanges.ChangedFiles = append(projectChanges.ChangedFiles, path)
  				},
  			)
@@ -10361,7 +10365,7 @@ index 7e29c44b6..8a9cf8933 100644
  				if changes.ChangedProjects == nil {
  					changes.ChangedProjects = make(map[ProjectID]*ProjectFileChanges)
  				}
-@@ -2979,7 +6082,6 @@ func (s *Session) handleGetBindDiagnostics(ctx context.Context, params *GetDiagn
+@@ -2979,7 +6086,6 @@ func (s *Session) handleGetBindDiagnostics(ctx context.Context, params *GetDiagn
  
  // handleGetSemanticDiagnostics returns semantic diagnostics for a file or all files.
  func (s *Session) handleGetSemanticDiagnostics(ctx context.Context, params *GetDiagnosticsParams) ([]*DiagnosticResponse, error) {
@@ -10369,7 +10373,7 @@ index 7e29c44b6..8a9cf8933 100644
  	sd, err := s.getSnapshotData(params.Snapshot)
  	if err != nil {
  		return nil, err
-@@ -2995,10 +6097,150 @@ func (s *Session) handleGetSemanticDiagnostics(ctx context.Context, params *GetD
+@@ -2995,10 +6101,150 @@ func (s *Session) handleGetSemanticDiagnostics(ctx context.Context, params *GetD
  		return nil, err
  	}
  
@@ -10520,7 +10524,7 @@ index 7e29c44b6..8a9cf8933 100644
  // handleGetSuggestionDiagnostics returns suggestion diagnostics for a file or all files.
  func (s *Session) handleGetSuggestionDiagnostics(ctx context.Context, params *GetDiagnosticsParams) ([]*DiagnosticResponse, error) {
  	ctx = core.WithCheckerLifetime(ctx, core.CheckerLifetimeDiagnostics)
-@@ -3077,7 +6319,6 @@ func (s *Session) handleGetProgramDiagnostics(ctx context.Context, params *GetPr
+@@ -3077,7 +6323,6 @@ func (s *Session) handleGetProgramDiagnostics(ctx context.Context, params *GetPr
  
  // handleGetGlobalDiagnostics returns global (non-file-specific) semantic diagnostics.
  func (s *Session) handleGetGlobalDiagnostics(ctx context.Context, params *GetProjectDiagnosticsParams) ([]*DiagnosticResponse, error) {
@@ -10528,7 +10532,7 @@ index 7e29c44b6..8a9cf8933 100644
  	sd, err := s.getSnapshotData(params.Snapshot)
  	if err != nil {
  		return nil, err
-@@ -3094,11 +6335,27 @@ func (s *Session) handleGetGlobalDiagnostics(ctx context.Context, params *GetPro
+@@ -3094,11 +6339,27 @@ func (s *Session) handleGetGlobalDiagnostics(ctx context.Context, params *GetPro
  	}
  
  	// Global diagnostics are accumulated lazily by the project's checker pool as
@@ -10561,7 +10565,7 @@ index 7e29c44b6..8a9cf8933 100644
  
  	diags := core.Filter(proj.GetProjectDiagnostics(ctx), func(d *ast.Diagnostic) bool {
  		return d.File() == nil
-@@ -3298,3 +6555,24 @@ func (s *Session) handleGetReferencedSymbolsForNode(ctx context.Context, params
+@@ -3298,3 +6559,24 @@ func (s *Session) handleGetReferencedSymbolsForNode(ctx context.Context, params
  	}
  	return result, nil
  }

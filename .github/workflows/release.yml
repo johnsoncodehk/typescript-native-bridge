@@ -340,6 +340,48 @@ jobs:
           echo "CHECKER-QUERY-EXIT=$LASTEXITCODE"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+      - name: Host-overlay module resolves (Volar .vue shape)
+        # win32 overlay-path regression: handleUpdateSnapshot made overlay
+        # paths absolute with a POSIX-only check (HasPrefix "/"), prepending
+        # the cwd to every drive-letter overlay — the .vue virtual content
+        # landed on a garbage path and the real file answered "not a module"
+        # (component-meta getCallSignatures → 0). Probe: a .ts importing a
+        # .vue whose TS content arrives only via host overlay.
+        env:
+          GODEBUG: asyncpreemptoff=1
+        run: |
+          @'
+          const ts = require('./staging/lib/typescript.js');
+          const fs = require('fs');
+          fs.mkdirSync('ov', { recursive: true });
+          fs.writeFileSync('ov/tsconfig.json', JSON.stringify({ compilerOptions: { strict: true, noEmit: true, allowArbitraryExtensions: true }, include: ['**/*'] }));
+          fs.writeFileSync('ov/main.ts', 'import C from "./component.vue";\nexport const n: number = C;\n');
+          const vueTs = 'const C: number = 1;\nexport default C;\n';
+          const host = {
+            getScriptFileNames: () => [process.cwd() + '/ov/main.ts', process.cwd() + '/ov/component.vue'],
+            getScriptVersion: () => '1',
+            getScriptSnapshot: f => f.endsWith('component.vue') ? ts.ScriptSnapshot.fromString(vueTs) : (fs.existsSync(f) ? ts.ScriptSnapshot.fromString(fs.readFileSync(f, 'utf8')) : undefined),
+            getCurrentDirectory: () => process.cwd() + '/ov',
+            getCompilationSettings: () => ({ strict: true, noEmit: true, allowArbitraryExtensions: true, configFilePath: process.cwd() + '/ov/tsconfig.json' }),
+            getDefaultLibFileName: o => ts.getDefaultLibFilePath(o),
+            fileExists: f => f.endsWith('component.vue') || ts.sys.fileExists(f),
+            readFile: f => f.endsWith('component.vue') ? vueTs : ts.sys.readFile(f),
+            readDirectory: ts.sys.readDirectory, directoryExists: ts.sys.directoryExists, getDirectories: ts.sys.getDirectories,
+            useCaseSensitiveFileNames: () => ts.sys.useCaseSensitiveFileNames,
+            getNewLine: () => '\n',
+          };
+          const ls = ts.createLanguageService(host);
+          const program = ls.getProgram();
+          const sf = program.getSourceFile(process.cwd() + '/ov/main.ts');
+          const diags = program.getSemanticDiagnostics(sf);
+          if (diags.some(d => d.code === 2306)) { console.error('FAIL: .vue overlay not applied (TS2306 not a module)'); process.exit(1); }
+          if (diags.length) { console.error('FAIL: unexpected diagnostics ' + JSON.stringify(diags.map(d => d.code))); process.exit(1); }
+          console.log('OVERLAY-MODULE-OK');
+          '@ | Set-Content -Encoding ascii overlay-module.js
+          node overlay-module.js
+          echo "OVERLAY-MODULE-EXIT=$LASTEXITCODE"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
       - name: Collect crash evidence
         # A silent load failure is a hard crash before V8 can report; Windows
         # Error Reporting still records the exception code and faulting module.
