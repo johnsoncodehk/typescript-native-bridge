@@ -1,0 +1,85 @@
+name: diag-musl-static
+
+# Disposable experiment (#28): can one statically-linked bridge.node run on
+# both musl (Alpine) and glibc (Bullseye)? Builds linux-x64 with musl-gcc
+# + -extldflags=-static inside an Alpine container, then load-tests the
+# artifact in an Alpine container (musl proof) and a Bullseye container
+# (glibc proof). Delete when the question is answered.
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-musl:
+    runs-on: ubuntu-latest
+    container: alpine:3.21
+    steps:
+      - name: Install toolchain
+        # Go's official builds are statically linked and run fine on musl;
+        # node comes from apk (musl build) for the JS build scripts.
+        run: |
+          apk add --no-cache gcc musl-dev binutils git nodejs npm curl
+          curl -fsSL https://go.dev/dl/go1.26.5.linux-amd64.tar.gz | tar -xz -C /usr/local
+          ln -sf /usr/local/go/bin/go /usr/local/bin/go
+          go version
+
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Checkout typescript-go submodule
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          git submodule update --init --depth 1 typescript-go
+
+      - name: Apply tsgo patches
+        run: node tools/patch-tsgo.js
+
+      - name: Download node headers
+        run: curl -fsSL https://nodejs.org/dist/v24.18.0/node-v24.18.0-headers.tar.gz | tar -xz -C /tmp
+
+      - name: Build bridge (static musl)
+        run: node tools/build-bridge.js
+        env:
+          GOOS: linux
+          GOARCH: amd64
+          CC: gcc
+          CGO_ENABLED: 1
+          CGO_LDFLAGS_ALLOW: "-static"
+          GOFLAGS: "-ldflags=-extldflags=-static"
+          NODE_INCLUDE: /tmp/node-v24.18.0/include/node
+          TNB_STRIP: 1
+
+      - name: Inspect linkage
+        run: |
+          file native/bridge.node
+          readelf -d native/bridge.node | grep -i "needed\|shared" || echo "no NEEDED entries (fully static)"
+
+      - name: Load bridge on musl (this container)
+        run: node -e "const b = require('./native/bridge.node'); if (typeof b.newSession !== 'function') process.exit(1); console.log('musl load ok')"
+
+      - name: Upload static bridge
+        uses: actions/upload-artifact@v4
+        with:
+          name: bridge-musl-static-x64
+          path: native/bridge.*
+          retention-days: 1
+
+  load-glibc:
+    needs: build-musl
+    runs-on: ubuntu-latest
+    container: debian:bullseye-slim
+    steps:
+      - name: Install node
+        run: |
+          apt-get update && apt-get install -y ca-certificates curl xz-utils
+          curl -fsSL https://nodejs.org/dist/v24.18.0/node-v24.18.0-linux-x64.tar.xz | tar -xJ -C /opt
+          ln -sf /opt/node-v24.18.0-linux-x64/bin/node /usr/local/bin/node
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: bridge-musl-static-x64
+          path: native
+
+      - name: Load static-musl bridge on glibc
+        run: node -e "const b = require('./native/bridge.node'); if (typeof b.newSession !== 'function') process.exit(1); console.log('glibc load ok')"
