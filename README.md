@@ -250,7 +250,11 @@ the one matching your machine (the main package is pure JS):
 | Windows arm64 | `@typescript-native-bridge/win32-arm64` |
 
 Linux packages target glibc 2.31 and are rejected by the release gate if they
-acquire a newer symbol requirement.
+acquire a newer symbol requirement. **Alpine/musl is not supported**: Go's
+`-buildmode=c-shared` runtime crashes at load on musl libc (even a trivial
+c-shared library segfaults — an upstream Go limitation, not something the
+bridge can work around; tsgo's own CLI works on Alpine only because it ships
+CGO-free static binaries, and a NAPI bridge cannot be CGO-free).
 
 On an unsupported platform the loader fails with a clear "unsupported platform or
 missing optional dependency" error — build from source there (clone with submodules,
