@@ -5659,6 +5659,8 @@ export function createTsgoProgram(
     // nonstandard layouts (typesVersions/exports-only packages) fall back to
     // undefined — the pre-fix behavior — never a wrong answer.
     const typeRefDirectiveResolutionCache = new Map<string, any>();
+    /** Stock program diagnostics container, created lazily per program instance (see getProgramDiagnosticsContainer). */
+    let diagnosticsContainer: any;
     const resolveTypeReferenceDirectiveInProgram = (name: string, referencingFileName: string): string | undefined => {
         const matches = new Map<string, string>(); // canonical → host file name
         const add = (hostFileName: string) => {
@@ -6129,7 +6131,12 @@ export function createTsgoProgram(
         getLibFileFromReference: () => undefined,
         forEachResolvedProjectReference: () => undefined,
         getResolvedProjectReferenceByPath: () => undefined,
-        getProgramDiagnosticsContainer: () => { throw new Error("tsgoChecker: Program.getProgramDiagnosticsContainer is not available on tsgo-backed programs"); },
+        // Stock container (config/file-processing diagnostics + common source
+        // directory + builder reuseStateFromOldProgram). tsgo owns semantic
+        // diagnostics, but builder consumers need a working container for
+        // reuseStateFromOldProgram — give them the stock one per program
+        // instance instead of throwing.
+        getProgramDiagnosticsContainer: () => (diagnosticsContainer ??= ts.createProgramDiagnostics(() => undefined)),
         getCurrentPackagesMap: () => undefined,
         structureIsReused,
         sourceFileToPackageName: new Map(),
@@ -7838,6 +7845,18 @@ export function createTsgoChecker(program: any): any {
                 const t = proj.checker.getNonOptionalType(this);
                 if (t) fixupType(t);
                 return t ?? this;
+            };
+        }
+        // getDefault — stock Type.getDefault is
+        // checker.getDefaultFromTypeParameter(type). The vendored TypeObject
+        // has no own getDefault; install it like getConstraint.
+        if (!proto.getDefault) {
+            proto.getDefault = function () {
+                const proj = projectForBridgeObject(this) ?? _currentProjectRef.project;
+                if (!proj) return undefined;
+                const t = proj.checker.getDefaultFromTypeParameter(this);
+                if (t) fixupType(t);
+                return t;
             };
         }
         // getConstraint — stock Type.getConstraint is
@@ -9709,6 +9728,133 @@ export function createTsgoChecker(program: any): any {
             if (t) fixupType(t);
             return t;
         },
+        getOptionalType(): any {
+            ensureProject();
+            const t = project.checker.getOptionalType();
+            if (t) fixupType(t);
+            return t;
+        },
+        getNonPrimitiveType(): any {
+            ensureProject();
+            const t = project.checker.getNonPrimitiveType();
+            if (t) fixupType(t);
+            return t;
+        },
+        getStringLiteralType(value: string): any {
+            ensureProject();
+            const t = project.checker.getStringLiteralType(value);
+            if (t) fixupType(t);
+            return t;
+        },
+        getNumberLiteralType(value: number): any {
+            ensureProject();
+            const t = project.checker.getNumberLiteralType(value);
+            if (t) fixupType(t);
+            return t;
+        },
+        getBigIntLiteralType(value: any): any {
+            ensureProject();
+            const t = project.checker.getBigIntLiteralType(value);
+            if (t) fixupType(t);
+            return t;
+        },
+        getDefaultFromTypeParameter(type: any): any {
+            ensureProject();
+            if (!type) return undefined;
+            const t = project.checker.getDefaultFromTypeParameter(type);
+            if (t) fixupType(t);
+            return t;
+        },
+        getTypeOfAssignmentPattern(pattern: any): any {
+            ensureProject();
+            if (!pattern) return undefined;
+            const tsgoNode = resolveHostNodeToTsgo(pattern);
+            if (!tsgoNode) return undefined;
+            const t = project.checker.getTypeOfAssignmentPattern(tsgoNode);
+            if (t) fixupType(t);
+            return t;
+        },
+        getPrivateIdentifierPropertyOfType(leftType: any, name: string, location: any): any {
+            ensureProject();
+            if (!leftType || !location) return undefined;
+            // Stock resolves the lexically scoped private identifier at
+            // location first, then reads it as a property — one RPC does both.
+            const tsgoLocation = resolveHostNodeToTsgo(location);
+            if (!tsgoLocation) return undefined;
+            const sym = project.checker.getPrivateIdentifierPropertyOfType(leftType, name, tsgoLocation);
+            return refineNavSymbol(sym);
+        },
+        getRecursionIdentity(type: any): any {
+            ensureProject();
+            if (!type) return undefined;
+            // Consumers only use the identity as a Set/Map key — a stable
+            // string from Go's RecursionId is equivalent (stock returns the
+            // node/symbol/type object itself for the same purpose).
+            return project.checker.getRecursionIdentity(type);
+        },
+        getTypeArgumentsForResolvedSignature(signature: any): any {
+            ensureProject();
+            if (!signature) return undefined;
+            const types = project.checker.getTypeArgumentsForResolvedSignature(signature);
+            if (!types) return undefined;
+            for (const t of types) fixupType(t);
+            return types;
+        },
+        isTypeParameterPossiblyReferenced(tp: any, node: any): any {
+            ensureProject();
+            if (!tp || !node) return true;
+            // Stock checker.ts port (isTypeParameterPossiblyReferenced): only a
+            // single-declaration type parameter can be proven unreferenced; the
+            // walk resolves identifiers to the same type parameter via
+            // getTypeFromTypeNode (registry identity makes === meaningful).
+            const tpDecls = tp.symbol?.declarations ?? tp.declarations;
+            if (!tpDecls || tpDecls.length !== 1) return true;
+            const container = tpDecls[0].parent;
+            const containsReference = (n: any): boolean => {
+                switch (n.kind) {
+                    case SyntaxKind.ThisType:
+                        return !!tp.isThisType;
+                    case SyntaxKind.Identifier: {
+                        if (tp.isThisType) return false;
+                        if (!ts.isPartOfTypeNode(n)) return false;
+                        const parent = n.parent;
+                        if ((parent?.kind === SyntaxKind.TypeReference && parent.typeArguments && n === parent.typeName)
+                            || (parent?.kind === SyntaxKind.ImportType && parent.typeArguments && n === parent.qualifier)) return false;
+                        const tsgoNode = resolveHostNodeToTsgo(n);
+                        if (!tsgoNode) return false;
+                        let t: any;
+                        try { t = project.checker.getTypeFromTypeNode(tsgoNode); } catch { return false; }
+                        return t === tp;
+                    }
+                    case SyntaxKind.TypeQuery: {
+                        const firstIdentifier = ts.getFirstIdentifier(n.exprName);
+                        if (firstIdentifier && ts.isThisIdentifier(firstIdentifier)) return true;
+                        const firstIdentifierSymbol = firstIdentifier && adapter.getSymbolAtLocation(firstIdentifier);
+                        const tpScope = tpDecls[0].kind === SyntaxKind.TypeParameter ? tpDecls[0].parent : (tp.isThisType ? tpDecls[0] : undefined);
+                        if (firstIdentifierSymbol?.declarations?.length && tpScope) {
+                            const isDescendantOf = (d: any, anc: any) => d.pos >= anc.pos && d.end <= anc.end;
+                            return firstIdentifierSymbol.declarations.some((d: any) => isDescendantOf(d, tpScope))
+                                || (n.typeArguments ?? []).some(containsReference);
+                        }
+                        return true;
+                    }
+                    case SyntaxKind.MethodDeclaration:
+                    case SyntaxKind.MethodSignature:
+                        return (!n.type && !!n.body)
+                            || (n.typeParameters ?? []).some(containsReference)
+                            || (n.parameters ?? []).some(containsReference)
+                            || (!!n.type && containsReference(n.type));
+                }
+                return !!ts.forEachChild(n, containsReference);
+            };
+            for (let n = node; n !== container; n = n.parent) {
+                if (!n || n.kind === SyntaxKind.Block
+                    || (n.kind === SyntaxKind.ConditionalType && !!ts.forEachChild(n.extendsType, containsReference))) {
+                    return true;
+                }
+            }
+            return containsReference(node);
+        },
         getIndexInfosOfType(type: any): readonly any[] {
             ensureProject();
             if (!type) return [];
@@ -11290,7 +11436,7 @@ const _tnbCheckerCoverage = {
     getDeclaredTypeOfSymbol: "adapter",
     getPropertiesOfType: "adapter",
     getPropertyOfType: "adapter",
-    getPrivateIdentifierPropertyOfType: "throw",
+    getPrivateIdentifierPropertyOfType: "adapter",
     getTypeOfPropertyOfType: "adapter",
     getIndexInfoOfType: "adapter",
     getIndexInfosOfType: "adapter",
@@ -11331,7 +11477,7 @@ const _tnbCheckerCoverage = {
     getExportSpecifierLocalTargetSymbol: "adapter",
     getExportSymbolOfSymbol: "adapter",
     getPropertySymbolOfDestructuringAssignment: "adapter",
-    getTypeOfAssignmentPattern: "throw",
+    getTypeOfAssignmentPattern: "adapter",
     getTypeAtLocation: "adapter",
     getTypeFromTypeNode: "adapter",
     signatureToString: "adapter",
@@ -11385,14 +11531,14 @@ const _tnbCheckerCoverage = {
     getSuggestedSymbolForNonexistentModule: "adapter",
     getSuggestedSymbolForNonexistentClassMember: "adapter",
     getBaseConstraintOfType: "adapter",
-    getDefaultFromTypeParameter: "throw",
+    getDefaultFromTypeParameter: "adapter",
     getAnyType: "tsgo",
     getStringType: "tsgo",
-    getStringLiteralType: "throw",
+    getStringLiteralType: "adapter",
     getNumberType: "tsgo",
-    getNumberLiteralType: "throw",
+    getNumberLiteralType: "adapter",
     getBigIntType: "tsgo",
-    getBigIntLiteralType: "throw",
+    getBigIntLiteralType: "adapter",
     getBooleanType: "tsgo",
     getUnknownType: "tsgo",
     getFalseType: "tsgo",
@@ -11402,8 +11548,8 @@ const _tnbCheckerCoverage = {
     getNullType: "tsgo",
     getESSymbolType: "tsgo",
     getNeverType: "tsgo",
-    getNonPrimitiveType: "throw",
-    getOptionalType: "throw",
+    getNonPrimitiveType: "adapter",
+    getOptionalType: "adapter",
     getUnionType: "adapter",
     createArrayType: "adapter",
     getElementTypeOfArrayType: "adapter",
@@ -11429,7 +11575,7 @@ const _tnbCheckerCoverage = {
     getTypeCount: "adapter",
     getInstantiationCount: "adapter",
     getRelationCacheSizes: "adapter",
-    getRecursionIdentity: "throw",
+    getRecursionIdentity: "adapter",
     getUnmatchedProperties: "adapter",
     isArrayType: "tsgo",
     isTupleType: "tsgo",
@@ -11453,11 +11599,11 @@ const _tnbCheckerCoverage = {
     isPropertyAccessible: "adapter",
     getTypeOnlyAliasDeclaration: "adapter",
     getMemberOverrideModifierStatus: "adapter",
-    isTypeParameterPossiblyReferenced: "throw",
+    isTypeParameterPossiblyReferenced: "adapter",
     typeHasCallOrConstructSignatures: "adapter",
     getSymbolFlags: "adapter",
     fillMissingTypeArguments: "adapter",
-    getTypeArgumentsForResolvedSignature: "throw",
+    getTypeArgumentsForResolvedSignature: "adapter",
     isLibType: "adapter",
 } as const satisfies Record<keyof TypeChecker, TnbCheckerCoverage>;
 
@@ -11523,7 +11669,7 @@ const _tnbProgramCoverage = {
     redirectTargetsMap: "stub",
     usesUriStyleNodeCoreModules: "stub",
     resolvedLibReferences: "stub",
-    getProgramDiagnosticsContainer: "throw",
+    getProgramDiagnosticsContainer: "adapter",
     getCurrentPackagesMap: "stub",
     isEmittedFile: "stub",
     getFileIncludeReasons: "stub",

@@ -1026,33 +1026,104 @@ index b639d488e..01f696e21 100644
  	case ast.KindVariableDeclaration, ast.KindParameter, ast.KindPropertyDeclaration, ast.KindPropertySignature, ast.KindBindingElement:
  		return c.getContextualTypeForInitializerExpression(node, contextFlags)
 diff --git a/internal/checker/exports.go b/internal/checker/exports.go
-index 90162bdae..c1e3a4e8d 100644
+index 90162bdae..95ef7f04e 100644
 --- a/internal/checker/exports.go
 +++ b/internal/checker/exports.go
-@@ -3,6 +3,7 @@ package checker
+@@ -3,7 +3,9 @@ package checker
  import (
  	"github.com/microsoft/typescript-go/internal/ast"
  	"github.com/microsoft/typescript-go/internal/core"
 +	"github.com/microsoft/typescript-go/internal/debug"
  	"github.com/microsoft/typescript-go/internal/diagnostics"
++	"github.com/microsoft/typescript-go/internal/jsnum"
  )
  
-@@ -62,14 +63,6 @@ func (c *Checker) GetUnknownSymbol() *ast.Symbol {
- 	return c.unknownSymbol
+ func (c *Checker) GetStringType() *Type {
+@@ -54,20 +56,64 @@ func (c *Checker) GetESSymbolType() *Type {
+ 	return c.esSymbolType
+ }
+ 
+-func (c *Checker) GetBaseTypeOfLiteralType(t *Type) *Type {
+-	return c.getBaseTypeOfLiteralType(t)
++func (c *Checker) GetOptionalType() *Type {
++	return c.optionalType
+ }
+ 
+-func (c *Checker) GetUnknownSymbol() *ast.Symbol {
+-	return c.unknownSymbol
++func (c *Checker) GetNonPrimitiveType() *Type {
++	return c.nonPrimitiveType
++}
++
++func (c *Checker) GetStringLiteralType(value string) *Type {
++	return c.getStringLiteralType(value)
++}
++
++func (c *Checker) GetNumberLiteralType(value jsnum.Number) *Type {
++	return c.getNumberLiteralType(value)
++}
++
++func (c *Checker) GetBigIntLiteralType(value jsnum.PseudoBigInt) *Type {
++	return c.getBigIntLiteralType(value)
++}
++
++func (c *Checker) GetTypeOfAssignmentPattern(node *ast.Node) *Type {
++	// Stock asserts the node is an object/array literal expression; a wrong-kind
++	// node would walk parents to the file root and panic there — guard instead
++	// (a JS Debug.assert is catchable, a Go panic is not).
++	if !ast.IsObjectLiteralExpression(node) && !ast.IsArrayLiteralExpression(node) {
++		return nil
++	}
++	return c.getTypeOfAssignmentPattern(node)
  }
  
 -func (c *Checker) GetUndefinedSymbol() *ast.Symbol {
 -	return c.undefinedSymbol
--}
--
++func (c *Checker) GetPrivateIdentifierPropertyOfType(leftType *Type, lexicallyScopedIdentifier *ast.Symbol) *ast.Symbol {
++	return c.getPrivateIdentifierPropertyOfType(leftType, lexicallyScopedIdentifier)
+ }
+ 
 -func (c *Checker) GetArgumentsSymbol() *ast.Symbol {
 -	return c.argumentsSymbol
--}
--
- func (c *Checker) GetUnionType(types []*Type) *Type {
- 	return c.getUnionType(types)
++func (c *Checker) LookupSymbolForPrivateIdentifierDeclaration(propName string, location *ast.Node) *ast.Symbol {
++	return c.lookupSymbolForPrivateIdentifierDeclaration(propName, location)
++}
++
++// GetTypeArgumentsForResolvedSignature mirrors stock: undefined when the
++// signature has no mapper, else the (target ?? signature)'s type parameters
++// instantiated by the mapper.
++func (c *Checker) GetTypeArgumentsForResolvedSignature(sig *Signature) []*Type {
++	if sig.mapper == nil {
++		return nil
++	}
++	source := sig
++	if sig.target != nil {
++		source = sig.target
++	}
++	return c.instantiateTypes(source.typeParameters, sig.mapper)
++}
++
++func (c *Checker) GetBaseTypeOfLiteralType(t *Type) *Type {
++	return c.getBaseTypeOfLiteralType(t)
++}
++
++func (c *Checker) GetUnknownSymbol() *ast.Symbol {
++	return c.unknownSymbol
  }
-@@ -306,6 +299,43 @@ func (c *Checker) GetIndexInfosOfType(t *Type) []*IndexInfo {
+ 
+ func (c *Checker) GetUnionType(types []*Type) *Type {
+@@ -201,6 +247,10 @@ func (c *Checker) GetBaseConstraintOfType(t *Type) *Type {
+ 	return c.getBaseConstraintOfType(t)
+ }
+ 
++func (c *Checker) GetRecursionIdentity(t *Type) RecursionId {
++	return getRecursionIdentity(t)
++}
++
+ func (c *Checker) GetTypePredicateOfSignature(sig *Signature) *TypePredicate {
+ 	return c.getTypePredicateOfSignature(sig)
+ }
+@@ -306,6 +356,43 @@ func (c *Checker) GetIndexInfosOfType(t *Type) []*IndexInfo {
  	return c.getIndexInfosOfType(t)
  }
  
@@ -1096,7 +1167,7 @@ index 90162bdae..c1e3a4e8d 100644
  func (c *Checker) IsContextSensitive(node *ast.Node) bool {
  	return c.isContextSensitive(node)
  }
-@@ -353,3 +383,256 @@ func (c *Checker) GetWidenedType(t *Type) *Type {
+@@ -353,3 +440,256 @@ func (c *Checker) GetWidenedType(t *Type) *Type {
  func (c *Checker) CompareSymbols(s1, s2 *ast.Symbol) int {
  	return c.compareSymbols(s1, s2)
  }
