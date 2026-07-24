@@ -32,10 +32,11 @@ jobs:
       - name: Go version matrix for musl c-shared
         run: |
           cd /tmp/hello
+          printf 'go 1.22\n' >> go.mod
           for v in 1.22.12 1.23.10 1.24.5 1.25.1; do
             curl -fsSL "https://go.dev/dl/go$v.linux-amd64.tar.gz" | tar -xz -C /tmp
             mv /tmp/go /tmp/go$v
             echo "=== go$v ==="
-            /tmp/go$v/bin/go build -buildmode=c-shared -o hello-$v.node . || { echo "build failed for $v"; continue; }
+            GOTOOLCHAIN=local /tmp/go$v/bin/go build -buildmode=c-shared -o hello-$v.node . || { echo "build failed for $v"; continue; }
             node -e "const b=require('/tmp/hello/hello-$v.node'); console.log('go$v: loads, Hello()='+b.Hello())" || echo "go$v: LOAD CRASH"
           done
