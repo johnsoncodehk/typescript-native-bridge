@@ -57,6 +57,7 @@ jobs:
           GOARCH: amd64
           CC: gcc
           CGO_ENABLED: 1
+          GOFLAGS: -ldflags=-linkmode=internal
           NODE_INCLUDE: /tmp/node-v24.18.0/include/node
           TNB_STRIP: 1
 
