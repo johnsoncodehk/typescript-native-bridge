@@ -32,6 +32,9 @@ jobs:
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           git submodule update --init --depth 1 typescript-go
 
+      - name: Disable the module pin for this diag (musl suspect)
+        run: sed -i 's/^\tpin_module_in_process();/\t(void)0; \/\/ pin disabled for musl diag/' patches/typescript-go/overlay/bridge/napi_shim.c && grep -c "pin disabled" patches/typescript-go/overlay/bridge/napi_shim.c
+
       - name: Apply tsgo patches
         run: node tools/patch-tsgo.js
 
