@@ -7557,8 +7557,21 @@ export function createTsgoChecker(program: any): any {
             const tsgoSf = getTsgoSourceFile(sf.fileName);
             if (!tsgoSf || tsgoSf.kind !== SyntaxKind.SourceFile) return undefined;
             try {
-                const moduleSym = project.checker.getSymbolAtLocation(tsgoSf);
                 const memberName = decl.kind === SyntaxKind.ExportAssignment && decl.isExportEquals ? "export=" : "default";
+                // Ambient-module export assignments (`declare module '*.foo' {
+                // export default … }`) live in the ambient module's exports
+                // table, not the file's — resolve the enclosing module
+                // declaration first (issue #27).
+                for (let p = decl.parent; p; p = p.parent) {
+                    if (p.kind !== SyntaxKind.ModuleDeclaration) continue;
+                    const modName = p.name;
+                    if (modName?.kind !== SyntaxKind.StringLiteral) break;
+                    const modStart = modName.getStart(sf);
+                    const tsgoModName = findTsgoNodeAtPosition(sf.fileName, modStart, modName.kind, modName.getEnd(sf));
+                    const ambientSym = tsgoModName && project.checker.getSymbolAtLocation(tsgoModName);
+                    return ambientSym?.exports?.get?.(memberName) ?? undefined;
+                }
+                const moduleSym = project.checker.getSymbolAtLocation(tsgoSf);
                 return moduleSym?.exports?.get?.(memberName) ?? undefined;
             } catch {
                 return undefined;
@@ -10768,7 +10781,10 @@ export function createTsgoChecker(program: any): any {
                 if (target) return refineNavSymbol(target);
             } catch { /* fall through to host binder target */ }
             const target = symbol.target;
-            return refineNavSymbol(target && target !== symbol ? target : symbol);
+            // Stock never echoes the input alias back: an unresolvable alias
+            // yields undefined (issue #18 shape). Returning `symbol` here
+            // makes alias-chain walks non-terminating (issue #27).
+            return target && target !== symbol ? refineNavSymbol(target) : undefined;
         },
         tryGetMemberInModuleExports(memberName: any, moduleSymbol: any): any {
             return tryGetMemberInModuleExportsImpl(memberName, moduleSymbol);
