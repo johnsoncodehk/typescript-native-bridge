@@ -73,12 +73,21 @@ var (
 	// own a buffer. Allocated once, never written again — safe from any
 	// thread.
 	errInvalidSession = C.CString(invalidSessionMsg)
+	// errForeignThread backs the affinity-guard error; same static treatment.
+	errForeignThread = C.CString(foreignThreadMsg)
 )
 
 const invalidSessionMsg = "invalid session handle"
+const foreignThreadMsg = "session belongs to a different thread"
 
 type sessionEntry struct {
 	api *api.Session
+	// owner is the OS thread that created the session. Every session call
+	// must come from it — the per-session result buffer is unguarded by
+	// design, so a cross-thread call is the exact race the buffer split was
+	// meant to kill. Checked on entry: misuse gets a loud error instead of
+	// silently torn JSON or heap corruption.
+	owner uint64
 
 	// resultBuf is the session's reusable C buffer for text responses (JSON
 	// docs and error messages). Sessions are single-threaded by contract
@@ -86,6 +95,9 @@ type sessionEntry struct {
 	resultBuf    *C.char
 	resultBufLen C.size_t
 }
+
+// foreignThread reports whether the calling thread is not the session's owner.
+func (e *sessionEntry) foreignThread() bool { return currentTid() != e.owner }
 
 // Wire kinds shared with napi_shim.c: null/bool results ride the tag so JS
 // never parses a wrapper; textDoc carries the raw result JSON; textError
@@ -200,7 +212,7 @@ func BridgeNewSession(cwd *C.char) C.int64_t {
 	mu.Lock()
 	nextID++
 	id := nextID
-	sessions[id] = &sessionEntry{api: as}
+	sessions[id] = &sessionEntry{api: as, owner: currentTid()}
 	mu.Unlock()
 
 	return C.int64_t(id)
@@ -218,6 +230,9 @@ func BridgeCall(session C.int64_t, method *C.char, paramsJson *C.char) C.struct_
 	mu.Unlock()
 	if !ok {
 		return C.struct_BridgeText{data: errInvalidSession, kind: textError}
+	}
+	if entry.foreignThread() {
+		return C.struct_BridgeText{data: errForeignThread, kind: textError}
 	}
 
 	methodStr := C.GoString(method)
@@ -277,6 +292,13 @@ func BridgeCallBinary(session C.int64_t, method *C.char, paramsJson *C.char) C.s
 		return C.struct_BridgeBinary{
 			data: unsafe.Pointer(errInvalidSession),
 			len:  C.longlong(len(invalidSessionMsg)),
+			kind: textError,
+		}
+	}
+	if entry.foreignThread() {
+		return C.struct_BridgeBinary{
+			data: unsafe.Pointer(errForeignThread),
+			len:  C.longlong(len(foreignThreadMsg)),
 			kind: textError,
 		}
 	}
@@ -363,7 +385,7 @@ func BridgeSetArena(session C.int64_t, ptr unsafe.Pointer, length C.int) {
 	mu.Lock()
 	entry, ok := sessions[int64(session)]
 	mu.Unlock()
-	if !ok {
+	if !ok || entry.foreignThread() {
 		return
 	}
 	entry.api.SetArena(ptr, int(length))
@@ -379,7 +401,7 @@ func BridgeCallArena(session C.int64_t, method *C.char) *C.char {
 	mu.Lock()
 	entry, ok := sessions[int64(session)]
 	mu.Unlock()
-	if !ok {
+	if !ok || entry.foreignThread() {
 		return nil
 	}
 	if doc := entry.api.HandleArenaRequest(C.GoString(method)); doc != "" {
@@ -394,11 +416,12 @@ func BridgeCallArena(session C.int64_t, method *C.char) *C.char {
 func BridgeDisposeSession(session C.int64_t) {
 	mu.Lock()
 	entry, ok := sessions[int64(session)]
-	if ok {
+	foreign := ok && entry.foreignThread()
+	if ok && !foreign {
 		delete(sessions, int64(session))
 	}
 	mu.Unlock()
-	if !ok {
+	if !ok || foreign {
 		return
 	}
 	entry.api.Close()

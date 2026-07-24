@@ -31,7 +31,7 @@ if (isMainThread) {
 	const results = await Promise.all(
 		Array.from({ length: WORKERS }, () =>
 			new Promise((resolve, reject) => {
-				const w = new Worker(fileURLToPath(import.meta.url), { workerData: { bridgePath } });
+				const w = new Worker(fileURLToPath(import.meta.url), { workerData: { bridgePath, mode: "race" } });
 				w.on("message", resolve);
 				w.on("error", reject);
 				w.on("exit", (code) => code !== 0 && reject(new Error(`worker exit ${code}`)));
@@ -42,7 +42,31 @@ if (isMainThread) {
 	const total = WORKERS * ITERS;
 	console.log(`bridge-thread-race: ${total} calls across ${WORKERS} workers, ${bad} corrupted`);
 	for (const r of results.filter((r) => r.sample)) console.log(`  worker sample: ${r.sample}`);
-	process.exit(bad === 0 ? 0 : 1);
+
+	// Affinity guard: a session created here must not be callable from a
+	// worker — the answer must be the loud guard error, never torn data.
+	const addon = require(bridgePath);
+	const foreignSession = addon.newSession(process.cwd());
+	const misuse = await new Promise((resolve, reject) => {
+		const w = new Worker(fileURLToPath(import.meta.url), { workerData: { bridgePath, mode: "misuse", foreignSession } });
+		w.on("message", resolve);
+		w.on("error", reject);
+		w.on("exit", (code) => code !== 0 && reject(new Error(`misuse worker exit ${code}`)));
+	});
+	addon.disposeSession(BigInt(foreignSession));
+	console.log(`bridge-thread-race: cross-thread session call -> ${misuse.message}`);
+	const misuseOk = misuse.message.includes("different thread");
+	if (!misuseOk) console.log("  expected the affinity guard error ('session belongs to a different thread')");
+	process.exit(bad === 0 && misuseOk ? 0 : 1);
+} else if (workerData.mode === "misuse") {
+	const addon = require(workerData.bridgePath);
+	let message = "";
+	try {
+		addon.call(BigInt(workerData.foreignSession), "ping", null);
+	} catch (err) {
+		message = String(err.message ?? err);
+	}
+	parentPort.postMessage({ message });
 } else {
 	const addon = require(workerData.bridgePath);
 	const session = addon.newSession(process.cwd());
