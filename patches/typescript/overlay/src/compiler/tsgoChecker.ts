@@ -2872,9 +2872,18 @@ function exportMemberKey(symbol: any): string | undefined {
     return key && !isReservedExportMemberName(key) ? key : undefined;
 }
 function collectNamedExportsFromModuleSymbol(moduleSymbol: any): any[] {
-    if (!moduleSymbol?.exports) return [];
+    const exports = moduleSymbol?.exports;
+    if (!exports) return [];
+    // The raw binder table is the complete getExportsOfModule answer only for
+    // plain modules: stock's getExportsOfModuleWorker (checker.ts) resolves an
+    // "export=" module to its target's exports and merges `export *` members
+    // via the reserved "__export" entry — neither is materialized here. Return
+    // empty for those so every caller falls through to the RPC merge, which
+    // mirrors the stock worker (same fall-through contract as
+    // tryGetMemberInModuleExportsImpl's host-table miss).
+    if (exports.get("export=") || exports.get("__export")) return [];
     const result: any[] = [];
-    moduleSymbol.exports.forEach((exported: any, key: string) => {
+    exports.forEach((exported: any, key: string) => {
         if (!key || isReservedExportMemberName(key)) return;
         result.push(exported);
     });

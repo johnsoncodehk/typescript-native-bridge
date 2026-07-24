@@ -64,16 +64,6 @@
  *       the 6.0.3 release: padStart/padEnd parameter names
  *       (targetLength/padString vs maxLength/fillString) in String member
  *       type strings. Content-identical otherwise (check-lib-sync scope).
- *   B1  TNB adapter bug (tracked, NOT upstream): getExportsOfModule's host
- *       export-table short-circuit skips stock's getExportsOfModuleWorker
- *       semantics — `export *` members dropped, `export =` unresolved. The Go
- *       bridge handler itself returns stock-equal results (verified directly:
- *       reexport → add/Shape/plus, export= module → prototype); the loss is in
- *       patches/typescript/overlay tsgoChecker.ts collectNamedExportsFromModuleSymbol.
- *   B2  TNB divergence (tracked, NOT upstream): getTypeAtLocation on a
- *       type-parameter identifier referenced inside a tuple-type or
- *       indexed-access-type node yields errorType "any" (node→tsgo mapping
- *       gap); plain type annotations (`x: T`) resolve fine.
  * A key whose sides converged FAILS as stale so the list cannot rot — when a
  * B-class entry gets fixed, the gate demands its removal.
  *
@@ -105,8 +95,6 @@ const REASON = {
 	U2T: 'U2: member-order-dependent typeToString truncation tail (upstream #20 class)',
 	U3: 'U3: tsgo keeps export= as an alias hop; stock immediateTarget resolves it (upstream alias model)',
 	LU2: 'L+U2: bundled-lib padStart/padEnd parameter rename + tsgo member order',
-	B1: 'B1: TNB adapter host export-table skips export* merge / export= resolution (tracked adapter bug — Go handler verified stock-equal)',
-	B2: 'B2: TNB getTypeAtLocation on type-param identifier in tuple/indexed-access type node → any (tracked node-mapping gap)',
 };
 const KNOWN_DIVERGENCES = new Map((() => {
 	const keys = [];
@@ -139,18 +127,16 @@ const KNOWN_DIVERGENCES = new Map((() => {
 	add(REASON.LU2, ['getPropertiesOfType', 'getApparentProperties'], [
 		'util.ts:key-param', 'types.ts:Tpl-decl', 'types.ts:Cond-decl', 'types.ts:litVal-decl',
 		'types.ts:tplVal-decl', 'types.ts:condVal-decl', 'types.ts:Dir-decl', 'types.ts:first-x',
+		// withDerived-P's constraint is a string-literal union → apparent String
+		// members; was masked by the #30 any-result (B2), the fix surfaced LU2.
+		'types.ts:withDerived-P',
 	]);
 	// U3 — import-require alias chain shape
 	add(REASON.U3, ['getImmediateAliasedSymbol.chain'], ['cjs/use.ts:Equal-import', 'cjs/use.ts:EqualAlias-export']);
-	// B1 — adapter export-table bug (export* / export=)
-	add(REASON.B1, ['getExportsOfModule'], [
-		'consumer.ts:spec-reexport', 'reexport.ts:module', 'cjs/equal.ts:module', 'cjs/use.ts:spec-equal',
-	]);
-	// B2 — type-position type-param identifier → any
-	add(REASON.B2, [
-		'getTypeAtLocation', 'typeToString', 'typeToString[NoTrunc]', 'getApparentType',
-		'getPropertiesOfType', 'getApparentProperties', 'getBaseConstraintOfType', 'Type.getConstraint',
-	], ['types.ts:withDerived-P']);
+	// U2 — post-B1-fix residual: getExportsOfModule membership is byte-equal
+	// (export* merged, export= resolved via the RPC fall-through); only tsgo's
+	// symbol-table order differs.
+	add(REASON.U2, ['getExportsOfModule'], ['consumer.ts:spec-reexport', 'reexport.ts:module']);
 	return keys;
 })());
 
