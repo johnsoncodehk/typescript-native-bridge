@@ -29,11 +29,6 @@ jobs:
           ls -la hello.node
           readelf -d hello.node | grep -i needed || true
 
-      - name: Backtrace the crash
+      - name: Go-native crash trace
         run: |
-          ulimit -c unlimited
-          gdb -batch \
-            -ex "run" \
-            -ex "bt" \
-            -ex "info registers rip rsp rbp" \
-            --args node -e "require('/tmp/hello/hello.node')" 2>&1 | tail -60
+          GOTRACEBACK=crash node -e "require('/tmp/hello/hello.node')" 2>&1 | head -80 || true
