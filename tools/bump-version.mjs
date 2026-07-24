@@ -64,5 +64,6 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
 		const updated = raw.replace(/("version"\s*:\s*")[^"]*(")/, `$1${next}$2`);
 		if (updated === raw) throw new Error('failed to locate version field in package.json');
 		fs.writeFileSync(PKG, updated);
+		execFileSync('npm', ['i'], { cwd: REPO, stdio: 'inherit' });
 	}
 }
