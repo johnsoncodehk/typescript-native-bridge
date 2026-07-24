@@ -2085,7 +2085,7 @@ index 0a45cc3e3e..d296a01666 100644
      const classElement = findAncestor(node, isClassElement);
      if (!(classElement && classElement.name)) return;
 diff --git a/src/services/services.ts b/src/services/services.ts
-index 9885093ed6..0cbb4021a3 100644
+index 9885093ed6..9eefac5fa4 100644
 --- a/src/services/services.ts
 +++ b/src/services/services.ts
 @@ -330,6 +330,9 @@ import {
@@ -2144,6 +2144,36 @@ index 9885093ed6..0cbb4021a3 100644
 +            }
              program = undefined!; // TODO: GH#18217
          }
+     }
+@@ -2275,6 +2298,9 @@ export function createLanguageService(
+     }
+ 
+     function getQuickInfoAtPosition(fileName: string, position: number, maximumLength?: number, verbosityLevel?: number): QuickInfo | undefined {
++        if ((program as any).isTsgoBackedProgram === true) {
++            return (program as any).getQuickInfoAtPositionTsgo(fileName, position, maximumLength, verbosityLevel);
++        }
+         synchronizeHostData();
+ 
+         const sourceFile = getValidSourceFile(fileName);
+@@ -2402,6 +2428,9 @@ export function createLanguageService(
+     }
+ 
+     function getDefinitionAndBoundSpan(fileName: string, position: number): DefinitionInfoAndBoundSpan | undefined {
++        if ((program as any).isTsgoBackedProgram === true) {
++            return (program as any).getDefinitionAndBoundSpanTsgo(fileName, position);
++        }
+         synchronizeHostData();
+         return GoToDefinition.getDefinitionAndBoundSpan(program, getValidSourceFile(fileName), position);
+     }
+@@ -2469,6 +2498,9 @@ export function createLanguageService(
+     }
+ 
+     function findReferences(fileName: string, position: number): ReferencedSymbol[] | undefined {
++        if ((program as any).isTsgoBackedProgram === true) {
++            return (program as any).findReferencesTsgo(fileName, position);
++        }
+         synchronizeHostData();
+         return FindAllReferences.findReferencedSymbols(program, cancellationToken, program.getSourceFiles(), getValidSourceFile(fileName), position);
      }
 diff --git a/src/services/utilities.ts b/src/services/utilities.ts
 index bec7d4b266..927d0cff0e 100644

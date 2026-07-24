@@ -105,6 +105,11 @@ function arenaCall(method, params) {
 			view.setBigUint64(16, BigInt(params.symbol ?? 0), true); putHandle(String(params.location), 24, w); break;
 		case 'getSymbolAtPosition':
 			putStr(String(params.file ?? ''), 16, w); view.setUint32(24, params.position >>> 0, true); break;
+		case 'quickinfo':
+			putStr(String(params.file ?? ''), 16, w); view.setUint32(24, params.position >>> 0, true);
+			view.setInt32(28, params.maximumHoverLength ?? 0, true); view.setInt32(32, params.verbosityLevel ?? -1, true); break;
+		case 'references': case 'definitionAndBoundSpan':
+			putStr(String(params.file ?? ''), 16, w); view.setUint32(24, params.position >>> 0, true); break;
 		case 'getReturnTypeOfSignature': case 'getParametersOfSignature':
 			view.setBigUint64(16, BigInt(params.signature ?? params.objectId ?? 0), true); break;
 		default: // type / objectId shapes
@@ -186,6 +191,86 @@ function arenaCall(method, params) {
 		const tg = u64z(off + 52); if (tg !== undefined) d.target = tg;
 		return d;
 	};
+	// ── LS nav payload readers (issue #12 batch 1; strides mirror arena.go) ──
+	const strz = id => str(id) ?? '';
+	const readParts = off => {
+		const c = view.getUint32(off + 4, true); if (!c) return undefined;
+		let p = view.getUint32(off, true);
+		const out = new Array(c);
+		for (let i = 0; i < c; i++) { out[i] = { text: strz(view.getUint32(p, true)), kind: strz(view.getUint32(p + 4, true)) }; p += 8; }
+		return out;
+	};
+	const readQuickinfo = off => {
+		const d = {
+			kind: strz(view.getUint32(off, true)),
+			kindModifiers: strz(view.getUint32(off + 4, true)),
+			start: view.getUint32(off + 8, true),
+			length: view.getUint32(off + 12, true),
+			displayString: strz(view.getUint32(off + 16, true)),
+		};
+		const doc = readParts(off + 20); if (doc) d.documentation = doc;
+		const tc = view.getUint32(off + 32, true);
+		if (tc) {
+			let p = view.getUint32(off + 28, true);
+			d.tags = new Array(tc);
+			for (let i = 0; i < tc; i++) {
+				const tag = { name: strz(view.getUint32(p, true)) };
+				const text = readParts(p + 4);
+				if (text) tag.text = text;
+				d.tags[i] = tag; p += 12;
+			}
+		}
+		const flags = view.getUint8(off + 36);
+		if (flags & 1) d.canIncreaseVerbosityLevel = (flags & 2) !== 0;
+		return d;
+	};
+	const readDefinitionInfo = off => {
+		const d = {
+			fileName: strz(view.getUint32(off, true)),
+			start: view.getUint32(off + 4, true),
+			length: view.getUint32(off + 8, true),
+		};
+		const f1 = view.getUint8(off + 44), f2 = view.getUint8(off + 45);
+		if (f1 & 1) { d.contextStart = view.getUint32(off + 12, true); d.contextLength = view.getUint32(off + 16, true); }
+		d.kind = strz(view.getUint32(off + 20, true));
+		d.name = strz(view.getUint32(off + 24, true));
+		if (f1 & 2) d.containerKind = strz(view.getUint32(off + 28, true));
+		if (f1 & 4) d.containerName = strz(view.getUint32(off + 32, true));
+		const parts = readParts(off + 36); if (parts) d.displayParts = parts;
+		if (f1 & 8) d.unverified = (f2 & 1) !== 0;
+		if (f1 & 16) d.isLocal = (f2 & 2) !== 0;
+		if (f1 & 32) d.isAmbient = (f2 & 4) !== 0;
+		if (f1 & 64) d.failedAliasResolution = (f2 & 8) !== 0;
+		return d;
+	};
+	const readReferenceEntry = off => {
+		const flags = view.getUint8(off + 20);
+		const d = {
+			fileName: strz(view.getUint32(off, true)),
+			start: view.getUint32(off + 4, true),
+			length: view.getUint32(off + 8, true),
+		};
+		if (flags & 1) { d.contextStart = view.getUint32(off + 12, true); d.contextLength = view.getUint32(off + 16, true); }
+		d.isWriteAccess = (flags & 2) !== 0;
+		if (flags & 4) d.isDefinition = (flags & 8) !== 0;
+		if (flags & 16) d.isInString = true;
+		return d;
+	};
+	const readReferencedSymbol = off => {
+		const definition = readDefinitionInfo(off);
+		const count = view.getUint32(off + 52, true);
+		let p = view.getUint32(off + 48, true);
+		const references = new Array(count);
+		for (let i = 0; i < count; i++) { references[i] = readReferenceEntry(p); p += 24; }
+		return { definition, references };
+	};
+	const readDabs = off => {
+		const count = view.getUint32(off + 12, true);
+		let p = view.getUint32(off + 8, true);
+		const definitions = new Array(count);
+		for (let i = 0; i < count; i++) { definitions[i] = readDefinitionInfo(p); p += 48; }
+		return { definitions, start: view.getUint32(off, true), length: view.getUint32(off + 4, true) };
+	};
 	const RESULT = {
 		getTypeAtLocation: 'type', getContextualType: 'type', getApparentType: 'type',
 		getTypeOfSymbolAtLocation: 'type', getTypeOfSymbol: 'type', getDeclaredTypeOfSymbol: 'type',
@@ -199,16 +284,18 @@ function arenaCall(method, params) {
 		getSymbolAtPosition: 'symbol', getSymbolAtLocation: 'symbol', getSymbolOfType: 'symbol',
 		getPropertiesOfType: 'symbols', getParametersOfSignature: 'symbols',
 		getResolvedSignature: 'signature', getSignaturesOfType: 'signatures',
+		quickinfo: 'quickinfo', references: 'referencedSymbols', definitionAndBoundSpan: 'definitionAndBoundSpan',
 	};
 	const resKind = RESULT[method];
 	const count = view.getUint32(ARENA_RESP_OFFSET + 16, true);
 	let off = ARENA_RESP_OFFSET + 20;
-	const recKind = resKind === 'type' || resKind === 'types' ? 'type' : resKind === 'symbol' || resKind === 'symbols' ? 'symbol' : 'signature';
-	const read = recKind === 'type' ? readType : recKind === 'symbol' ? readSymbol : readSignature;
-	const stride = recKind === 'type' ? 152 : recKind === 'symbol' ? 72 : 64;
+	const recKind = resKind === 'type' || resKind === 'types' ? 'type' : resKind === 'symbol' || resKind === 'symbols' ? 'symbol' : resKind === 'quickinfo' || resKind === 'referencedSymbols' || resKind === 'definitionAndBoundSpan' ? resKind : 'signature';
+	const read = recKind === 'type' ? readType : recKind === 'symbol' ? readSymbol : recKind === 'quickinfo' ? readQuickinfo : recKind === 'referencedSymbols' ? readReferencedSymbol : recKind === 'definitionAndBoundSpan' ? readDabs : readSignature;
+	const stride = recKind === 'type' ? 152 : recKind === 'symbol' ? 72 : recKind === 'quickinfo' ? 40 : recKind === 'referencedSymbols' ? 56 : recKind === 'definitionAndBoundSpan' ? 16 : 64;
 	const out = [];
 	for (let i = 0; i < count; i++) { out.push(read(off)); off += stride; }
-	return resKind === recKind ? out[0] : out;
+	const singular = resKind === 'type' || resKind === 'symbol' || resKind === 'signature' || resKind === 'quickinfo' || resKind === 'definitionAndBoundSpan';
+	return singular ? out[0] : out;
 }
 
 // ── Compare ──────────────────────────────────────────────────────────────
@@ -255,6 +342,22 @@ const symGen = query('getSymbolAtPosition', P({ file: aTs, position: pos('generi
 const symEntity = query('getSymbolAtPosition', P({ file: aTs, position: pos('Entity<K') }), '(interface)');
 const symCond = query('getSymbolAtPosition', P({ file: aTs, position: pos('Cond<T>') }), '(conditional alias)');
 const symMm = query('getSymbolAtPosition', P({ file: aTs, position: pos('mm: M<Model>') }), '(alias args)');
+
+// LS nav payloads (issue #12 batch 1): quickinfo / references / definitionAndBoundSpan
+query('quickinfo', P({ file: aTs, position: pos('add(a: number') }), '(fn decl)');
+query('quickinfo', P({ file: aTs, position: pos('model: Model') }), '(const decl)');
+query('quickinfo', P({ file: aTs, position: pos('model)') }), '(usage)');
+query('quickinfo', P({ file: aTs, position: pos('lit: Lit') }), '(union literal)');
+query('quickinfo', P({ file: aTs, position: pos('export interface Entity') }), '(keyword: null-ish)');
+query('quickinfo', P({ file: aTs, position: pos('Derived extends') }), '(class)');
+query('references', P({ file: aTs, position: pos('add(a: number') }), '(fn: decl+call)');
+query('references', P({ file: aTs, position: pos('model: Model') }), '(const: several uses)');
+query('references', P({ file: aTs, position: pos('Model extends') }), '(interface decl)');
+query('references', P({ file: aTs, position: pos('model)') }), '(usage)');
+query('definitionAndBoundSpan', P({ file: aTs, position: pos('model)') }), '(usage→decl)');
+query('definitionAndBoundSpan', P({ file: aTs, position: pos('add(1') }), '(call→fn)');
+query('definitionAndBoundSpan', P({ file: aTs, position: pos('Model extends') }), '(on decl)');
+query('definitionAndBoundSpan', P({ file: aTs, position: pos('Derived extends') }), '(class decl)');
 
 if (!symAdd || !symModel) { console.error('seed queries failed'); process.exit(1); }
 

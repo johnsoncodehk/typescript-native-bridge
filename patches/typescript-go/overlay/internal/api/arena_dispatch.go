@@ -29,7 +29,8 @@ func arenaCapable(method string) bool {
 		MethodGetTypeParametersOfType, MethodGetOuterTypeParametersOfType,
 		MethodGetLocalTypeParametersOfType, MethodGetAliasTypeArgumentsOfType,
 		MethodGetParametersOfSignature, MethodGetResolvedSignature,
-		MethodTypeToString, MethodIsArrayType:
+		MethodTypeToString, MethodIsArrayType,
+		MethodQuickinfo, MethodReferences, MethodDefinitionAndBoundSpan:
 		return true
 	}
 	return false
@@ -155,6 +156,16 @@ func (s *Session) handleArenaRequest(method string) (any, error) {
 		return s.handleTypeToString(ctx, &TypeToTypeNodeParams{Snapshot: snap, Project: proj, Type: TypeID(r.u32(16)), Location: NodeHandle(loc), Flags: r.i32(20)})
 	case MethodIsArrayType:
 		return s.handleIsArrayType(ctx, &CheckerTypeParams{Snapshot: snap, Project: proj, Type: TypeID(r.u32(16))})
+	case MethodQuickinfo:
+		var verbosity *int32
+		if v := r.i32(32); v >= 0 {
+			verbosity = &v
+		}
+		return s.handleQuickinfo(ctx, &QuickinfoParams{Snapshot: snap, Project: proj, File: DocumentIdentifier{FileName: r.str(16)}, Position: r.u32(24), MaximumHoverLength: r.i32(28), VerbosityLevel: verbosity})
+	case MethodReferences:
+		return s.handleReferences(ctx, &ReferencesParams{Snapshot: snap, Project: proj, File: DocumentIdentifier{FileName: r.str(16)}, Position: r.u32(24)})
+	case MethodDefinitionAndBoundSpan:
+		return s.handleDefinitionAndBoundSpan(ctx, &DefinitionAndBoundSpanParams{Snapshot: snap, Project: proj, File: DocumentIdentifier{FileName: r.str(16)}, Position: r.u32(24)})
 	}
 	return nil, fmt.Errorf("arena: unhandled capable method %q", method)
 }
@@ -202,6 +213,24 @@ func (a *arena) encodeResult(res any) {
 			a.b(off, 1)
 		}
 		a.finish(arenaKindRecord)
+	case *QuickinfoResponse:
+		if v == nil {
+			a.finish(arenaKindNull)
+			return
+		}
+		a.records(1, quickinfoRecordSize, func(int) { a.encodeQuickinfoResponse(v) })
+	case []*ReferencedSymbolResponse:
+		if v == nil {
+			a.finish(arenaKindNull)
+			return
+		}
+		a.records(len(v), referencedSymbolRecordSize, func(i int) { a.encodeReferencedSymbolResponse(v[i]) })
+	case *DefinitionAndBoundSpanResponse:
+		if v == nil {
+			a.finish(arenaKindNull)
+			return
+		}
+		a.records(1, dabsRecordSize, func(int) { a.encodeDefinitionAndBoundSpanResponse(v) })
 	default:
 		a.finishError(fmt.Sprintf("arena: cannot encode result of type %T", res))
 	}

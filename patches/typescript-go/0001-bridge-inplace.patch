@@ -833,7 +833,7 @@ index 613ed0a0c..8b11b26ed 100644
  
  export function isBindingPattern(node: Node): node is BindingPattern {
 diff --git a/internal/checker/checker.go b/internal/checker/checker.go
-index b639d488e..01f696e21 100644
+index b639d488e..a9252e75a 100644
 --- a/internal/checker/checker.go
 +++ b/internal/checker/checker.go
 @@ -786,6 +786,7 @@ type Checker struct {
@@ -996,7 +996,21 @@ index b639d488e..01f696e21 100644
  	}
  	return links.writeType
  }
-@@ -22798,6 +22854,18 @@ func (c *Checker) getTypeFromTypeNodeWorker(node *ast.Node) *Type {
+@@ -20890,6 +20946,13 @@ func (c *Checker) getTypeOfMappedSymbol(symbol *ast.Symbol) *Type {
+ 	links := c.valueSymbolLinks.Get(symbol)
+ 	if links.resolvedType == nil {
+ 		mappedType := links.containingType
++		if mappedType == nil {
++			// Synthetic mapped symbol whose containing type never materialized
++			// (volar component-meta corpus via FAR/hover): degrade to the error
++			// type instead of dereferencing nil.
++			links.resolvedType = c.errorType
++			return links.resolvedType
++		}
+ 		if !c.pushTypeResolution(symbol, TypeSystemPropertyNameType) {
+ 			mappedType.AsMappedType().containsError = true
+ 			return c.errorType
+@@ -22798,6 +22861,18 @@ func (c *Checker) getTypeFromTypeNodeWorker(node *ast.Node) *Type {
  		return c.getTypeFromInferTypeNode(node)
  	case ast.KindImportType:
  		return c.getTypeFromImportTypeNode(node)
@@ -1015,7 +1029,7 @@ index b639d488e..01f696e21 100644
  	default:
  		return c.errorType
  	}
-@@ -29109,6 +29177,9 @@ func (c *Checker) getContextualType(node *ast.Node, contextFlags ContextFlags) *
+@@ -29109,6 +29184,9 @@ func (c *Checker) getContextualType(node *ast.Node, contextFlags ContextFlags) *
  		return c.contextualInfos[index].t
  	}
  	parent := node.Parent
@@ -1509,7 +1523,7 @@ index 21704cc7d..2c1c23145 100644
 +	return nodeBuilder.IndexInfoToIndexSignatureDeclaration(info, enclosingDeclaration, flags, nodebuilder.InternalFlagsNone, nil)
 +}
 diff --git a/internal/checker/services.go b/internal/checker/services.go
-index 12b9d4079..db9750b1a 100644
+index 12b9d4079..a8ec576ae 100644
 --- a/internal/checker/services.go
 +++ b/internal/checker/services.go
 @@ -222,6 +222,14 @@ func (c *Checker) IsUnknownSymbol(symbol *ast.Symbol) bool {
@@ -1527,6 +1541,30 @@ index 12b9d4079..db9750b1a 100644
  func (c *Checker) IsUndefinedSymbol(symbol *ast.Symbol) bool {
  	return symbol == c.undefinedSymbol
  }
+@@ -410,12 +418,17 @@ func (c *Checker) GetMappedTypeSymbolOfProperty(symbol *ast.Symbol) *ast.Symbol
+ 
+ func (c *Checker) getImmediateRootSymbols(symbol *ast.Symbol) []*ast.Symbol {
+ 	if symbol.CheckFlags&ast.CheckFlagsSynthetic != 0 {
+-		return core.MapNonNil(
+-			c.valueSymbolLinks.Get(symbol).containingType.Types(),
+-			func(t *Type) *ast.Symbol {
+-				return c.getPropertyOfType(t, symbol.Name)
+-			},
+-		)
++		// Synthetic union property whose containing type never materialized
++		// (observed on the volar component-meta corpus via FAR): fall through
++		// to the transient/spread cases instead of dereferencing a nil type.
++		if links := c.valueSymbolLinks.Get(symbol); links != nil && links.containingType != nil {
++			return core.MapNonNil(
++				links.containingType.Types(),
++				func(t *Type) *ast.Symbol {
++					return c.getPropertyOfType(t, symbol.Name)
++				},
++			)
++		}
+ 	}
+ 	if symbol.Flags&ast.SymbolFlagsTransient != 0 {
+ 		if c.spreadLinks.Has(symbol) {
 diff --git a/internal/compiler/fileloader.go b/internal/compiler/fileloader.go
 index f8d006e92..8f90cd03b 100644
 --- a/internal/compiler/fileloader.go
@@ -1709,6 +1747,198 @@ index 44b9b4cbc..0a8aafd0d 100644
  	}
  	to := &toProgramSnapshot{
  		program:    program,
+diff --git a/internal/ls/findallreferences.go b/internal/ls/findallreferences.go
+index 28043f859..beb9638d4 100644
+--- a/internal/ls/findallreferences.go
++++ b/internal/ls/findallreferences.go
+@@ -237,8 +237,8 @@ func getContextNodeForNodeEntry(node *ast.Node) *ast.Node {
+ 			return node.Parent
+ 		case ast.KindStringLiteral, ast.KindNoSubstitutionTemplateLiteral:
+ 			if validImport := ast.TryGetImportFromModuleSpecifier(node); validImport != nil {
+-				declOrStatement := ast.FindAncestor(validImport, func(*ast.Node) bool {
+-					return ast.IsDeclaration(node) || ast.IsStatement(node) || ast.IsJSDocTag(node)
++				declOrStatement := ast.FindAncestor(validImport, func(n *ast.Node) bool {
++					return ast.IsDeclaration(n) || ast.IsStatement(n) || ast.IsJSDocTag(n)
+ 				})
+ 				if ast.IsDeclaration(declOrStatement) {
+ 					return getContextNode(declOrStatement)
+diff --git a/internal/ls/hover.go b/internal/ls/hover.go
+index da4f11883..71a8dbcee 100644
+--- a/internal/ls/hover.go
++++ b/internal/ls/hover.go
+@@ -15,6 +15,7 @@ import (
+ 	"github.com/microsoft/typescript-go/internal/nodebuilder"
+ 	"github.com/microsoft/typescript-go/internal/printer"
+ 	"github.com/microsoft/typescript-go/internal/scanner"
++	"strconv"
+ )
+ 
+ const (
+@@ -390,13 +391,24 @@ func getQuickInfoAndDeclarationAtLocation(c *checker.Checker, symbol *ast.Symbol
+ 			dpw.WritePunctuation(") ")
+ 		}
+ 	}
++	// writeOverloadSuffix appends Strada's " (+N overload(s))" suffix.
++	writeOverloadSuffix := func(total int) {
++		dpw.WritePunctuation(" (+")
++		dpw.Write(strconv.Itoa(total - 1))
++		if total == 2 {
++			dpw.Write(" overload)")
++		} else {
++			dpw.Write(" overloads)")
++		}
++	}
+ 	writeSignatures := func(signatures []*checker.Signature, prefix string, parenthesized bool, symbol *ast.Symbol) {
+-		for i, sig := range signatures {
++		// Strada writes a single signature plus the " (+N overloads)" suffix.
++		total := len(signatures)
++		if total > 1 {
++			signatures = signatures[:1]
++		}
++		for _, sig := range signatures {
+ 			writeNewLine()
+-			if i == 3 && len(signatures) >= 5 {
+-				dpw.WriteComment(fmt.Sprintf("// +%v more overloads", len(signatures)-3))
+-				break
+-			}
+ 			if parenthesized {
+ 				dpw.WritePunctuation("(")
+ 				dpw.Write(prefix)
+@@ -410,6 +422,9 @@ func getQuickInfoAndDeclarationAtLocation(c *checker.Checker, symbol *ast.Symbol
+ 			}
+ 			writeSignatureClassified(sig, container, typeFormatFlags|checker.TypeFormatFlagsWriteCallStyleSignature|checker.TypeFormatFlagsWriteTypeArgumentsOfSignature)
+ 		}
++		if total > 1 {
++			writeOverloadSuffix(total)
++		}
+ 	}
+ 	writeTypeParams := func(params []*checker.Type) {
+ 		if len(params) > 0 {
+@@ -481,14 +496,47 @@ func getQuickInfoAndDeclarationAtLocation(c *checker.Checker, symbol *ast.Symbol
+ 		}
+ 		return false
+ 	}
++	// writeImportLine appends the "import X" line Strada shows after an alias
++	// display (including import-equals suffixes).
++	writeImportLine := func(symbol *ast.Symbol) {
++		if dpw.String() != "" {
++			dpw.Write("\n")
++		}
++		dpw.WriteKeyword("import")
++		dpw.WritePunctuation(" ")
++		writeSymbolClassified(symbol, container, ast.SymbolFlagsNone, symbolFormatFlags)
++		for _, declaration := range symbol.Declarations {
++			if !ast.IsImportEqualsDeclaration(declaration) {
++				continue
++			}
++			if ast.IsExternalModuleImportEqualsDeclaration(declaration) {
++				dpw.WritePunctuation(" = ")
++				dpw.WriteKeyword("require")
++				dpw.WritePunctuation("(")
++				dpw.WriteLiteral(scanner.GetTextOfNode(ast.GetExternalModuleImportEqualsDeclarationExpression(declaration)))
++				dpw.WritePunctuation(")")
++			} else if internalAlias := c.GetSymbolAtLocation(declaration.AsImportEqualsDeclaration().ModuleReference); internalAlias != nil {
++				dpw.WritePunctuation(" = ")
++				writeSymbolClassified(internalAlias, container, ast.SymbolFlagsNone, symbolFormatFlags)
++			}
++		}
++	}
+ 	var writeSymbol func(*ast.Symbol)
+ 	writeSymbol = func(symbol *ast.Symbol) {
+ 		// Recursively write all meanings of alias
+ 		if symbol.Flags&ast.SymbolFlagsAlias != 0 && visitedAliases.AddIfAbsent(symbol) {
+ 			if aliasedSymbol := c.GetAliasedSymbol(symbol); aliasedSymbol != c.GetUnknownSymbol() {
+ 				aliasLevel++
+-				writeSymbol(aliasedSymbol)
++				// Strada: when the resolved symbol's first declaration has no
++				// name (e.g. `export default 42`), only the import line shows.
++				if resolvedNode := core.FirstOrNil(aliasedSymbol.Declarations); resolvedNode == nil || ast.GetNameOfDeclaration(resolvedNode) != nil {
++					writeSymbol(aliasedSymbol)
++				}
+ 				aliasLevel--
++				if aliasLevel == 0 {
++					writeImportLine(symbol)
++				}
++				return
+ 			}
+ 		}
+ 		var flags ast.SymbolFlags
+@@ -565,6 +613,13 @@ func getQuickInfoAndDeclarationAtLocation(c *checker.Checker, symbol *ast.Symbol
+ 					flags |= checker.TypeFormatFlagsWriteCallStyleSignature
+ 				}
+ 				writeSignatureClassified(c.GetResolvedSignature(callNode), container, flags)
++				// Strada: resolved signature plus " (+N overloads)" when the
++				// symbol's type has further call signatures.
++				if t := c.GetTypeOfSymbolAtLocation(symbol, node); t != nil {
++					if sigs := c.GetCallSignatures(c.GetNonNullableType(t)); len(sigs) > 1 {
++						writeOverloadSuffix(len(sigs))
++					}
++				}
+ 			} else {
+ 				t := c.GetTypeOfSymbolAtLocation(symbol, node)
+ 				// If the type is a constrained type parameter, support expansion:
+@@ -605,18 +660,37 @@ func getQuickInfoAndDeclarationAtLocation(c *checker.Checker, symbol *ast.Symbol
+ 		if flags&(ast.SymbolFlagsFunction|ast.SymbolFlagsMethod) != 0 {
+ 			isMethod := flags&ast.SymbolFlagsMethod != 0
+ 			prefix := core.IfElse(isMethod, "method", "function ")
+-			if ast.IsIdentifier(node) && (ast.IsFunctionLikeDeclaration(node.Parent) || ast.IsMethodSignatureDeclaration(node.Parent)) && node.Parent.Name() == node && slices.Contains(symbol.Declarations, node.Parent) {
+-				setDeclaration(node.Parent)
+-				signatures := []*checker.Signature{c.GetSignatureFromDeclaration(node.Parent)}
+-				writeSignatures(signatures, prefix, isMethod, symbol)
+-			} else {
+-				signatures := getSignaturesAtLocation(c, symbol, checker.SignatureKindCall, node)
+-				if len(signatures) == 1 {
+-					if d := signatures[0].Declaration(); d != nil && d.Flags&ast.NodeFlagsJSDoc == 0 {
+-						setDeclaration(d)
++			parenthesized := isMethod
++			// Strada: in the alias recursion, a call that resolves to a single
++			// signature displays the bare resolved signature (no kind keyword).
++			handled := false
++			if aliasLevel != 0 {
++				if callNode := getCallOrNewExpression(node); callNode != nil {
++					if sig := c.GetResolvedSignature(callNode); sig != nil {
++						writeNewLine()
++						writeSymbolClassified(symbol, container, ast.SymbolFlagsNone, symbolFormatFlags)
++						writeSignatureClassified(sig, container, typeFormatFlags|checker.TypeFormatFlagsWriteCallStyleSignature|checker.TypeFormatFlagsWriteTypeArgumentsOfSignature)
++						if sigs := getSignaturesAtLocation(c, symbol, checker.SignatureKindCall, node); len(sigs) > 1 {
++							writeOverloadSuffix(len(sigs))
++						}
++						handled = true
++					}
++				}
++			}
++			if !handled {
++				if ast.IsIdentifier(node) && (ast.IsFunctionLikeDeclaration(node.Parent) || ast.IsMethodSignatureDeclaration(node.Parent)) && node.Parent.Name() == node && slices.Contains(symbol.Declarations, node.Parent) {
++					setDeclaration(node.Parent)
++					signatures := []*checker.Signature{c.GetSignatureFromDeclaration(node.Parent)}
++					writeSignatures(signatures, prefix, parenthesized, symbol)
++				} else {
++					signatures := getSignaturesAtLocation(c, symbol, checker.SignatureKindCall, node)
++					if len(signatures) == 1 {
++						if d := signatures[0].Declaration(); d != nil && d.Flags&ast.NodeFlagsJSDoc == 0 {
++							setDeclaration(d)
++						}
+ 					}
++					writeSignatures(signatures, prefix, parenthesized, symbol)
+ 				}
+-				writeSignatures(signatures, prefix, isMethod, symbol)
+ 			}
+ 			setDeclaration(symbol.ValueDeclaration)
+ 		}
+@@ -637,7 +711,12 @@ func getQuickInfoAndDeclarationAtLocation(c *checker.Checker, symbol *ast.Symbol
+ 					if d := signatures[0].Declaration(); d != nil && d.Flags&ast.NodeFlagsJSDoc == 0 {
+ 						setDeclaration(d)
+ 					}
+-					writeSignatures(signatures, "constructor ", false, symbol)
++					ctorPrefix := "constructor "
++					if aliasLevel != 0 {
++						// Strada writes alias construct signatures with "new ".
++						ctorPrefix = "new "
++					}
++					writeSignatures(signatures, ctorPrefix, false, symbol)
+ 				} else {
+ 					writeNewLine()
+ 					if flags&ast.SymbolFlagsClass != 0 {
 diff --git a/internal/ls/inlay_hints.go b/internal/ls/inlay_hints.go
 index a1923826c..aa562b80d 100644
 --- a/internal/ls/inlay_hints.go
@@ -1818,6 +2048,31 @@ index a1923826c..aa562b80d 100644
  func identifierOrAccessExpressionPostfixMatchesParameterName(expr *ast.Expression, parameterName string) bool {
  	if ast.IsIdentifier(expr) {
  		return expr.Text() == parameterName
+diff --git a/internal/ls/jsdoc.go b/internal/ls/jsdoc.go
+index a5992fa73..ddc807e95 100644
+--- a/internal/ls/jsdoc.go
++++ b/internal/ls/jsdoc.go
+@@ -82,6 +82,20 @@ func (l *LanguageService) GetSymbolJSDocTags(symbol *ast.Symbol) []JSDocTagInfo
+ // declarationJSDocTags returns the JSDoc tags associated with a declaration, walking the
+ // JSDoc comment location chain like the checker's getAllJSDocTags.
+ func declarationJSDocTags(node *ast.Node) []*ast.Node {
++	if ast.IsParameterDeclaration(node) {
++		// getJSDocCommentsAndTags: a parameter owns the matching @param tags of
++		// its declaring function's JSDoc (not the function's whole tag list).
++		if fn := node.Parent; fn != nil && ast.IsFunctionLikeDeclaration(fn) && node.Name() != nil {
++			name := node.Name().Text()
++			var out []*ast.Node
++			for _, tag := range declarationJSDocTags(fn) {
++				if tag.Kind == ast.KindJSDocParameterTag && tag.Name() != nil && tag.Name().Text() == name {
++					out = append(out, tag)
++				}
++			}
++			return out
++		}
++	}
+ 	if node.Flags&ast.NodeFlagsJSDoc == 0 {
+ 		for current := node; current != nil; current = ast.GetNextJSDocCommentLocation(current) {
+ 			jsdocs := current.JSDoc(nil)
 diff --git a/internal/module/resolver.go b/internal/module/resolver.go
 index 52400dc2b..abb2ad858 100644
 --- a/internal/module/resolver.go

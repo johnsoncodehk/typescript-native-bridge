@@ -430,3 +430,222 @@ func (a *arena) encodeSignatureResponse(r *SignatureResponse) {
 	a.u64(off+44, uint64(r.ThisParameter))
 	a.u64(off+52, uint64(r.Target))
 }
+
+// ── LS navigation payloads (issue #12) ─────────────────────────────────────
+// The arena buffer is reused without zeroing: every defined field is written
+// unconditionally (stale bytes must never read back as data).
+
+const (
+	quickinfoRecordSize        = 40
+	displayPartRecordSize      = 8
+	tagRecordSize              = 12
+	definitionRecordSize       = 48
+	referenceEntryRecordSize   = 24
+	referencedSymbolRecordSize = 56
+	dabsRecordSize             = 16
+)
+
+// displayParts writes a (ptr,count) pair of {text strId, kind strId} records.
+func (a *arena) displayParts(off int, parts []DisplayPartResponse) {
+	a.u32(off, 0)
+	a.u32(off+4, uint32(len(parts)))
+	if len(parts) == 0 {
+		return
+	}
+	p := a.pack(displayPartRecordSize * len(parts))
+	a.u32(off, uint32(p))
+	for i, part := range parts {
+		a.u32(p+displayPartRecordSize*i, a.str(part.Text))
+		a.u32(p+displayPartRecordSize*i+4, a.str(part.Kind))
+	}
+}
+
+// encodeQuickinfoResponse writes a QuickinfoResponse record (40 bytes fixed).
+func (a *arena) encodeQuickinfoResponse(r *QuickinfoResponse) {
+	off := a.rec(quickinfoRecordSize)
+	a.u32(off+0, a.str(r.Kind))
+	a.u32(off+4, a.str(r.KindModifiers))
+	a.u32(off+8, r.Start)
+	a.u32(off+12, r.Length)
+	a.u32(off+16, a.str(r.DisplayString))
+	a.displayParts(off+20, r.Documentation)
+	a.u32(off+28, 0)
+	a.u32(off+32, uint32(len(r.Tags)))
+	if len(r.Tags) > 0 {
+		p := a.pack(tagRecordSize * len(r.Tags))
+		a.u32(off+28, uint32(p))
+		for i, t := range r.Tags {
+			a.u32(p+tagRecordSize*i, a.str(t.Name))
+			a.displayParts(p+tagRecordSize*i+4, t.Text)
+		}
+	}
+	var flags byte
+	if r.CanIncreaseVerbosityLevel != nil {
+		flags |= 1
+		if *r.CanIncreaseVerbosityLevel {
+			flags |= 2
+		}
+	}
+	a.b(off+36, flags)
+	a.b(off+37, 0)
+	a.b(off+38, 0)
+	a.b(off+39, 0)
+	// offset map (u32 unless noted):
+	//   0 kind / 4 kindModifiers / 8 start / 12 length / 16 displayString
+	//   20 documentation (ptr,count) / 28 tags (ptr,count) / 36 flags u8 / 37-39 pad
+}
+
+// encodeDefinitionInfoResponse writes a DefinitionInfoResponse record (48 bytes)
+// at off (inline in a parent record or in a pack-region run).
+func (a *arena) encodeDefinitionInfoResponse(off int, r *DefinitionInfoResponse) {
+	a.u32(off+0, a.str(r.FileName))
+	a.u32(off+4, r.Start)
+	a.u32(off+8, r.Length)
+	var contextStart, contextLength uint32
+	if r.ContextStart != nil {
+		contextStart = *r.ContextStart
+	}
+	if r.ContextLength != nil {
+		contextLength = *r.ContextLength
+	}
+	a.u32(off+12, contextStart)
+	a.u32(off+16, contextLength)
+	a.u32(off+20, a.str(r.Kind))
+	a.u32(off+24, a.str(r.Name))
+	var containerKind, containerName string
+	if r.ContainerKind != nil {
+		containerKind = *r.ContainerKind
+	}
+	if r.ContainerName != nil {
+		containerName = *r.ContainerName
+	}
+	a.u32(off+28, a.str(containerKind))
+	a.u32(off+32, a.str(containerName))
+	a.displayParts(off+36, r.DisplayParts)
+	var f1, f2 byte
+	if r.ContextStart != nil {
+		f1 |= 1
+	}
+	if r.ContainerKind != nil {
+		f1 |= 2
+	}
+	if r.ContainerName != nil {
+		f1 |= 4
+	}
+	if r.Unverified != nil {
+		f1 |= 8
+		if *r.Unverified {
+			f2 |= 1
+		}
+	}
+	if r.IsLocal != nil {
+		f1 |= 16
+		if *r.IsLocal {
+			f2 |= 2
+		}
+	}
+	if r.IsAmbient != nil {
+		f1 |= 32
+		if *r.IsAmbient {
+			f2 |= 4
+		}
+	}
+	if r.FailedAliasResolution != nil {
+		f1 |= 64
+		if *r.FailedAliasResolution {
+			f2 |= 8
+		}
+	}
+	a.b(off+44, f1)
+	a.b(off+45, f2)
+	a.b(off+46, 0)
+	a.b(off+47, 0)
+	// offset map (u32 unless noted):
+	//   0 file / 4 start / 8 length / 12 contextStart / 16 contextLength
+	//   20 kind / 24 name / 28 containerKind / 32 containerName
+	//   36 displayParts (ptr,count) / 44 presenceFlags u8 / 45 valueFlags u8 / 46-47 pad
+}
+
+// zeroDefinitionInfo zeroes an inline definition slot (nil definition in a
+// referenced-symbol record) so stale buffer contents never read back as data.
+func (a *arena) zeroDefinitionInfo(off int) {
+	for i := 0; i < definitionRecordSize; i += 4 {
+		a.u32(off+i, 0)
+	}
+}
+
+// encodeReferenceEntryResponse writes a ReferenceEntryResponse record (24 bytes).
+func (a *arena) encodeReferenceEntryResponse(off int, r *ReferenceEntryResponse) {
+	a.u32(off+0, a.str(r.FileName))
+	a.u32(off+4, r.Start)
+	a.u32(off+8, r.Length)
+	var contextStart, contextLength uint32
+	if r.ContextStart != nil {
+		contextStart = *r.ContextStart
+	}
+	if r.ContextLength != nil {
+		contextLength = *r.ContextLength
+	}
+	a.u32(off+12, contextStart)
+	a.u32(off+16, contextLength)
+	var flags byte
+	if r.ContextStart != nil {
+		flags |= 1
+	}
+	if r.IsWriteAccess {
+		flags |= 2
+	}
+	if r.IsDefinition != nil {
+		flags |= 4
+		if *r.IsDefinition {
+			flags |= 8
+		}
+	}
+	if r.IsInString != nil && *r.IsInString {
+		flags |= 16
+	}
+	a.b(off+20, flags)
+	a.b(off+21, 0)
+	a.b(off+22, 0)
+	a.b(off+23, 0)
+	// offset map: 0 file / 4 start / 8 length / 12 contextStart / 16 contextLength
+	//   20 flags u8 (bit0 hasContext, bit1 isWriteAccess, bit2 hasIsDefinition,
+	//   bit3 isDefinition, bit4 isInString) / 21-23 pad
+}
+
+// encodeReferencedSymbolResponse writes a ReferencedSymbolResponse record
+// (56 bytes: inline definition at +0..47, references (ptr,count) at +48).
+func (a *arena) encodeReferencedSymbolResponse(r *ReferencedSymbolResponse) {
+	off := a.rec(referencedSymbolRecordSize)
+	if r.Definition != nil {
+		a.encodeDefinitionInfoResponse(off, r.Definition)
+	} else {
+		a.zeroDefinitionInfo(off)
+	}
+	a.u32(off+48, 0)
+	a.u32(off+52, uint32(len(r.References)))
+	if len(r.References) > 0 {
+		p := a.pack(referenceEntryRecordSize * len(r.References))
+		a.u32(off+48, uint32(p))
+		for i, e := range r.References {
+			a.encodeReferenceEntryResponse(p+referenceEntryRecordSize*i, e)
+		}
+	}
+}
+
+// encodeDefinitionAndBoundSpanResponse writes a DefinitionAndBoundSpanResponse
+// record (16 bytes: span start/length, definitions (ptr,count)).
+func (a *arena) encodeDefinitionAndBoundSpanResponse(r *DefinitionAndBoundSpanResponse) {
+	off := a.rec(dabsRecordSize)
+	a.u32(off+0, r.Start)
+	a.u32(off+4, r.Length)
+	a.u32(off+8, 0)
+	a.u32(off+12, uint32(len(r.Definitions)))
+	if len(r.Definitions) > 0 {
+		p := a.pack(definitionRecordSize * len(r.Definitions))
+		a.u32(off+8, uint32(p))
+		for i, d := range r.Definitions {
+			a.encodeDefinitionInfoResponse(p+definitionRecordSize*i, d)
+		}
+	}
+}

@@ -780,8 +780,8 @@ const ARENA_KIND_NULL = 0;
 const ARENA_KIND_RECORD = 1;
 const ARENA_KIND_ERROR = 4;
 
-type ArenaMethodKind = "node" | "type" | "typeKind" | "typeStr" | "symbol" | "symbolNode" | "filePos" | "signature" | "contextual" | "contextualArg";
-type ArenaResultKind = "type" | "types" | "symbol" | "symbols" | "signature" | "signatures" | "string" | "bool";
+type ArenaMethodKind = "node" | "type" | "typeKind" | "typeStr" | "symbol" | "symbolNode" | "filePos" | "filePosHover" | "signature" | "contextual" | "contextualArg";
+type ArenaResultKind = "type" | "types" | "symbol" | "symbols" | "signature" | "signatures" | "string" | "bool" | "quickinfo" | "referencedSymbols" | "definitionAndBoundSpan";
 // Method → [request shape, result shape] (must mirror arena_dispatch.go and
 // the Go handlers' return types exactly).
 const ARENA_METHODS: ReadonlyMap<string, [ArenaMethodKind, ArenaResultKind]> = new Map([
@@ -818,6 +818,9 @@ const ARENA_METHODS: ReadonlyMap<string, [ArenaMethodKind, ArenaResultKind]> = n
     ["getSymbolAtPosition", ["filePos", "symbol"]],
     ["getReturnTypeOfSignature", ["signature", "type"]],
     ["getParametersOfSignature", ["signature", "symbols"]],
+    ["quickinfo", ["filePosHover", "quickinfo"]],
+    ["references", ["filePos", "referencedSymbols"]],
+    ["definitionAndBoundSpan", ["filePos", "definitionAndBoundSpan"]],
 ]);
 
 class ArenaClient {
@@ -900,6 +903,12 @@ class ArenaClient {
                 putStr(String(params.file ?? ""), 16);
                 v.setUint32(24, params.position >>> 0, true);
                 break;
+            case "filePosHover":
+                putStr(String(params.file ?? ""), 16);
+                v.setUint32(24, params.position >>> 0, true);
+                v.setInt32(28, params.maximumHoverLength ?? 0, true);
+                v.setInt32(32, params.verbosityLevel ?? -1, true);
+                break;
             case "signature":
                 v.setBigUint64(16, BigInt(params.signature ?? params.objectId ?? 0), true);
                 break;
@@ -949,23 +958,143 @@ class ArenaClient {
             return this.dec.decode(this.buf.subarray(o, o + n));
         }
         if (resKind === "bool") return v.getUint8(ARENA_RESP_OFFSET + 16) !== 0;
+        const reader = this.arenaReaders[resKind];
+        if (!reader) throw new Error(`arena: no reader for result kind ${resKind} (${method})`);
         const count = v.getUint32(ARENA_RESP_OFFSET + 16, true);
         let off = ARENA_RESP_OFFSET + 20;
-        const recKind = resKind === "type" || resKind === "types" ? "type" : resKind === "symbol" || resKind === "symbols" ? "symbol" : "signature";
         const out: any[] = [];
         for (let i = 0; i < count; i++) {
-            if (recKind === "type") {
-                out.push(this.readType(off));
-                off += 152;
-            } else if (recKind === "symbol") {
-                out.push(this.readSymbol(off));
-                off += 72;
-            } else {
-                out.push(this.readSignature(off));
-                off += 64;
-            }
+            out.push(reader.read(off));
+            off += reader.stride;
         }
-        return resKind === recKind ? out[0] : out; // singular result kinds unwrap
+        return reader.singular ? out[0] : out;
+    }
+
+    // Record readers per result kind (strides must mirror arena.go). Bound once
+    // per session so the hot decode loop allocates nothing per call.
+    private readonly arenaReaders: Record<string, { read: (off: number) => any; stride: number; singular: boolean }> = {
+        type: { read: o => this.readType(o), stride: 152, singular: true },
+        types: { read: o => this.readType(o), stride: 152, singular: false },
+        symbol: { read: o => this.readSymbol(o), stride: 72, singular: true },
+        symbols: { read: o => this.readSymbol(o), stride: 72, singular: false },
+        signature: { read: o => this.readSignature(o), stride: 64, singular: true },
+        signatures: { read: o => this.readSignature(o), stride: 64, singular: false },
+        quickinfo: { read: o => this.readQuickinfo(o), stride: 40, singular: true },
+        referencedSymbols: { read: o => this.readReferencedSymbol(o), stride: 56, singular: false },
+        definitionAndBoundSpan: { read: o => this.readDefinitionAndBoundSpan(o), stride: 16, singular: true },
+    };
+
+    // (ptr,count) pair of {text strId, kind strId} records; count 0 = absent.
+    private readDisplayParts(off: number): any[] | undefined {
+        const count = this.view.getUint32(off + 4, true);
+        if (count === 0) return undefined;
+        let p = this.view.getUint32(off, true);
+        const out = new Array(count);
+        for (let i = 0; i < count; i++) {
+            out[i] = { text: this.str(this.view.getUint32(p, true)) ?? "", kind: this.str(this.view.getUint32(p + 4, true)) ?? "" };
+            p += 8;
+        }
+        return out;
+    }
+
+    private readQuickinfo(off: number): any {
+        const v = this.view;
+        const str = (id: number) => this.str(id) ?? "";
+        const d: any = {
+            kind: str(v.getUint32(off, true)),
+            kindModifiers: str(v.getUint32(off + 4, true)),
+            start: v.getUint32(off + 8, true),
+            length: v.getUint32(off + 12, true),
+            displayString: str(v.getUint32(off + 16, true)),
+        };
+        const documentation = this.readDisplayParts(off + 20);
+        if (documentation) d.documentation = documentation;
+        const tagCount = v.getUint32(off + 32, true);
+        if (tagCount) {
+            let p = v.getUint32(off + 28, true);
+            const tags = new Array(tagCount);
+            for (let i = 0; i < tagCount; i++) {
+                const tag: any = { name: str(v.getUint32(p, true)) };
+                const text = this.readDisplayParts(p + 4);
+                if (text) tag.text = text;
+                tags[i] = tag;
+                p += 12;
+            }
+            d.tags = tags;
+        }
+        const flags = v.getUint8(off + 36);
+        if (flags & 1) d.canIncreaseVerbosityLevel = (flags & 2) !== 0;
+        return d;
+    }
+
+    private readDefinitionInfo(off: number): any {
+        const v = this.view;
+        const str = (id: number) => this.str(id) ?? "";
+        const d: any = {
+            fileName: str(v.getUint32(off, true)),
+            start: v.getUint32(off + 4, true),
+            length: v.getUint32(off + 8, true),
+        };
+        const f1 = v.getUint8(off + 44);
+        const f2 = v.getUint8(off + 45);
+        if (f1 & 1) {
+            d.contextStart = v.getUint32(off + 12, true);
+            d.contextLength = v.getUint32(off + 16, true);
+        }
+        d.kind = str(v.getUint32(off + 20, true));
+        d.name = str(v.getUint32(off + 24, true));
+        if (f1 & 2) d.containerKind = str(v.getUint32(off + 28, true));
+        if (f1 & 4) d.containerName = str(v.getUint32(off + 32, true));
+        const parts = this.readDisplayParts(off + 36);
+        if (parts) d.displayParts = parts;
+        if (f1 & 8) d.unverified = (f2 & 1) !== 0;
+        if (f1 & 16) d.isLocal = (f2 & 2) !== 0;
+        if (f1 & 32) d.isAmbient = (f2 & 4) !== 0;
+        if (f1 & 64) d.failedAliasResolution = (f2 & 8) !== 0;
+        return d;
+    }
+
+    private readReferenceEntry(off: number): any {
+        const v = this.view;
+        const flags = v.getUint8(off + 20);
+        const d: any = {
+            fileName: this.str(v.getUint32(off, true)) ?? "",
+            start: v.getUint32(off + 4, true),
+            length: v.getUint32(off + 8, true),
+        };
+        if (flags & 1) {
+            d.contextStart = v.getUint32(off + 12, true);
+            d.contextLength = v.getUint32(off + 16, true);
+        }
+        d.isWriteAccess = (flags & 2) !== 0;
+        if (flags & 4) d.isDefinition = (flags & 8) !== 0;
+        if (flags & 16) d.isInString = true;
+        return d;
+    }
+
+    private readReferencedSymbol(off: number): any {
+        const definition = this.readDefinitionInfo(off);
+        const v = this.view;
+        const count = v.getUint32(off + 52, true);
+        const references = new Array(count);
+        let p = v.getUint32(off + 48, true);
+        for (let i = 0; i < count; i++) {
+            references[i] = this.readReferenceEntry(p);
+            p += 24;
+        }
+        return { definition, references };
+    }
+
+    private readDefinitionAndBoundSpan(off: number): any {
+        const v = this.view;
+        const count = v.getUint32(off + 12, true);
+        const definitions = new Array(count);
+        let p = v.getUint32(off + 8, true);
+        for (let i = 0; i < count; i++) {
+            definitions[i] = this.readDefinitionInfo(p);
+            p += 48;
+        }
+        return { definitions, start: v.getUint32(off, true), length: v.getUint32(off + 4, true) };
     }
 
     private str(id: number): string | undefined {
@@ -4856,6 +4985,31 @@ function tnbComputeNamedDeclarations(sourceFile: any): Map<string, any[]> {
 // self-lint). tsgo resolves files from the tsconfig; host content is fed via
 // overlay RPC so tsgo doesn't double-read from disk.
 
+// Wire (flat) → stock (nested) span mapping for the LS nav bridge results.
+function lsNavDocumentSpanToStock(s: any): any {
+    return {
+        fileName: s.fileName,
+        textSpan: { start: s.start, length: s.length },
+        ...(s.contextStart !== undefined ? { contextSpan: { start: s.contextStart, length: s.contextLength } } : {}),
+    };
+}
+
+function lsNavDefinitionToStock(d: any): any {
+    if (d == null) return d;
+    return {
+        ...lsNavDocumentSpanToStock(d),
+        kind: d.kind,
+        name: d.name,
+        containerKind: d.containerKind,
+        containerName: d.containerName,
+        ...(d.displayParts !== undefined ? { displayParts: d.displayParts } : {}),
+        ...(d.unverified !== undefined ? { unverified: d.unverified } : {}),
+        ...(d.isLocal !== undefined ? { isLocal: d.isLocal } : {}),
+        ...(d.isAmbient !== undefined ? { isAmbient: d.isAmbient } : {}),
+        ...(d.failedAliasResolution !== undefined ? { failedAliasResolution: d.failedAliasResolution } : {}),
+    };
+}
+
 /** @internal */
 export function createTsgoProgram(
     rootNames: readonly string[],
@@ -5912,6 +6066,69 @@ export function createTsgoProgram(
             } catch {
                 return undefined;
             }
+        },
+        // LS nav bridge (issue #12 batch 1): Go-computed, stock-services-shaped
+        // quickinfo / references / definitionAndBoundSpan — one arena call instead
+        // of dozens of inner checker RPCs. Services reroute here for tsgo-backed
+        // programs; bridge errors propagate (no silent stock fallback).
+        getQuickInfoAtPositionTsgo: (fileName: string, position: number, maximumHoverLength?: number, verbosityLevel?: number) => {
+            const proj = project;
+            if (!proj?.checker) return undefined;
+            const r = proj.checker.client.apiRequest("quickinfo", {
+                snapshot: proj.checker.snapshotId,
+                project: proj.checker.project.id,
+                file: tsgoFileArg(fileName),
+                position,
+                maximumHoverLength: maximumHoverLength ?? 0,
+                ...(verbosityLevel != null ? { verbosityLevel } : {}),
+            });
+            if (r == null) return undefined;
+            return {
+                kind: r.kind,
+                kindModifiers: r.kindModifiers,
+                textSpan: { start: r.start, length: r.length },
+                // The session flattens displayParts unconditionally, so a single
+                // text part round-trips the same displayString.
+                displayParts: r.displayString === "" ? [] : [{ text: r.displayString, kind: "text" }],
+                documentation: r.documentation,
+                tags: r.tags?.map((t: any) => ({ name: t.name, text: t.text })),
+                canIncreaseVerbosityLevel: r.canIncreaseVerbosityLevel,
+            };
+        },
+        findReferencesTsgo: (fileName: string, position: number) => {
+            const proj = project;
+            if (!proj?.checker) return undefined;
+            const symbols = proj.checker.client.apiRequest("references", {
+                snapshot: proj.checker.snapshotId,
+                project: proj.checker.project.id,
+                file: tsgoFileArg(fileName),
+                position,
+            });
+            if (symbols == null) return undefined;
+            return symbols.map((s: any) => ({
+                definition: lsNavDefinitionToStock(s.definition),
+                references: s.references.map((e: any) => ({
+                    ...lsNavDocumentSpanToStock(e),
+                    isWriteAccess: e.isWriteAccess,
+                    ...(e.isDefinition !== undefined ? { isDefinition: e.isDefinition } : {}),
+                    ...(e.isInString !== undefined ? { isInString: e.isInString } : {}),
+                })),
+            }));
+        },
+        getDefinitionAndBoundSpanTsgo: (fileName: string, position: number) => {
+            const proj = project;
+            if (!proj?.checker) return undefined;
+            const r = proj.checker.client.apiRequest("definitionAndBoundSpan", {
+                snapshot: proj.checker.snapshotId,
+                project: proj.checker.project.id,
+                file: tsgoFileArg(fileName),
+                position,
+            });
+            if (r == null) return undefined;
+            return {
+                definitions: r.definitions.map(lsNavDefinitionToStock),
+                textSpan: { start: r.start, length: r.length },
+            };
         },
         // builder.ts getBuildInfo root serialization hook (no per-file
         // SourceFile materialization / fileIncludeReasons bookkeeping needed).
