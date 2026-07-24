@@ -251,10 +251,15 @@ the one matching your machine (the main package is pure JS):
 
 Linux packages target glibc 2.31 and are rejected by the release gate if they
 acquire a newer symbol requirement. **Alpine/musl is not supported**: Go's
-`-buildmode=c-shared` runtime crashes at load on musl libc (even a trivial
-c-shared library segfaults — an upstream Go limitation, not something the
-bridge can work around; tsgo's own CLI works on Alpine only because it ships
-CGO-free static binaries, and a NAPI bridge cannot be CGO-free).
+`-buildmode=c-shared` runtime crashes at load on musl libc — even a trivial
+hello-world c-shared library segfaults, on Go 1.22 through 1.26 alike
+([golang/go#13492](https://github.com/golang/go/issues/13492), a 10-year-open
+upstream issue with an active fix in
+[golang/go#75048](https://github.com/golang/go/issues/75048); tsgo's own CLI
+works on Alpine only because it ships CGO-free static binaries, and a NAPI
+bridge cannot be CGO-free). Workaround: run the typecheck/lint step in a
+glibc-based image (`node:24` or `node:24-bookworm-slim`) and deploy into the
+Alpine stage of your multi-stage build; `apk add gcompat` does not help.
 
 On an unsupported platform the loader fails with a clear "unsupported platform or
 missing optional dependency" error — build from source there (clone with submodules,
