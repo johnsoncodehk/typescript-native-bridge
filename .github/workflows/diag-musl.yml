@@ -1,0 +1,39 @@
+name: diag-musl
+
+# Diagnostic (#28): identify the exact Go c-shared crash site on musl.
+# Earlier runs proved even a trivial Go c-shared hello-world segfaults at
+# load on Alpine (static/dynamic/internal link, gcompat, no-pin — all same).
+# This run gets a gdb backtrace to name the mechanism.
+
+on:
+  workflow_dispatch:
+
+jobs:
+  backtrace:
+    runs-on: ubuntu-latest
+    container: alpine:3.21
+    steps:
+      - name: Install toolchain
+        run: |
+          apk add --no-cache gcc musl-dev binutils file git nodejs npm curl gdb
+          curl -fsSL https://go.dev/dl/go1.26.5.linux-amd64.tar.gz | tar -xz -C /usr/local
+          ln -sf /usr/local/go/bin/go /usr/local/bin/go
+          go version
+
+      - name: Build trivial Go c-shared (no TNB code)
+        run: |
+          mkdir -p /tmp/hello && cd /tmp/hello
+          go mod init hello >/dev/null
+          printf '%s\n' 'package main' '/*' '#include <stdlib.h>' '*/' 'import "C"' '' '//export Hello' 'func Hello() C.int { return 42 }' 'func main() {}' > hello.go
+          go build -buildmode=c-shared -o hello.node .
+          ls -la hello.node
+          readelf -d hello.node | grep -i needed || true
+
+      - name: Backtrace the crash
+        run: |
+          ulimit -c unlimited
+          gdb -batch \
+            -ex "run" \
+            -ex "bt" \
+            -ex "info registers rip rsp rbp" \
+            --args node -e "require('/tmp/hello/hello.node')" 2>&1 | tail -60
