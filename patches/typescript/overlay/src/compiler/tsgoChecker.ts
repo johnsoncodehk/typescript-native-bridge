@@ -4143,12 +4143,23 @@ function extensionFromPathOrTs(fileName: string): any {
     }
     return ts.Extension.Ts;
 }
-/** Extra extensions for tsgo when the project contains non-TS root files (.vue, …). */
+/**
+ * Builds the `extraFileExtensions` field sent with tsgo snapshots.
+ *
+ * `runTsc` advertises language-plugin extensions through
+ * `supportedTSExtensionsFlat`, including extensions used only by imported
+ * files. Scanning `fileNames` registers nonstandard root extensions for hosts
+ * that do not modify that table.
+ */
 function collectExtraFileExtensions(fileNames: Iterable<string>, options: any): any[] | undefined {
     // Explicit opt-out in tsconfig must be respected (tsgo mirrors this).
     if (options?.allowArbitraryExtensions === false) return undefined;
     const builtin = BUILTIN_SCRIPT_EXTENSIONS;
     const exts = new Set<string>();
+    for (const extension of ts.supportedTSExtensionsFlat) {
+        const ext = extension.toLowerCase();
+        if (!builtin.has(ext)) exts.add(ext);
+    }
     for (const fn of fileNames) {
         if (typeof fn !== "string") continue;
         const dot = fn.lastIndexOf(".");

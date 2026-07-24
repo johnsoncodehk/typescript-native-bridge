@@ -1566,7 +1566,7 @@ index 12b9d4079..a8ec576ae 100644
  	if symbol.Flags&ast.SymbolFlagsTransient != 0 {
  		if c.spreadLinks.Has(symbol) {
 diff --git a/internal/compiler/fileloader.go b/internal/compiler/fileloader.go
-index f8d006e92..8f90cd03b 100644
+index f8d006e92..f955c8f53 100644
 --- a/internal/compiler/fileloader.go
 +++ b/internal/compiler/fileloader.go
 @@ -125,7 +125,7 @@ func processAllProgramFiles(
@@ -1596,6 +1596,22 @@ index f8d006e92..8f90cd03b 100644
  	if opts.Tracing != nil {
  		defer opts.Tracing.Push(tracing.PhaseProgram, "processRootFiles", map[string]any{"count": len(rootFiles)}, false)()
  	}
+@@ -590,8 +601,13 @@ func (p *fileLoader) resolveImportsAndModuleAugmentations(t *parseTask) {
+ 
+ 			resolvedFileName := resolvedModule.ResolvedFileName
+ 			isFromNodeModulesSearch := resolvedModule.IsExternalLibraryImport
+-			// Don't treat redirected files as JS files.
+-			isJsFile := !tspath.FileExtensionIsOneOf(resolvedFileName, tspath.SupportedTSExtensionsWithJsonFlat) && p.projectReferenceFileMapper.getRedirectParsedCommandLineForResolution(ast.NewHasFileName(resolvedFileName, p.toPath(resolvedFileName))) == nil
++			// Extra-extension files get their script kind from host registration,
++			// not from the resolved path's suffix. Project-reference redirects
++			// also bypass suffix classification. Exclude both from the JavaScript
++			// file gate.
++			isJsFile := !p.resolver.IsExtraExtensionFile(resolvedFileName) &&
++				!tspath.FileExtensionIsOneOf(resolvedFileName, tspath.SupportedTSExtensionsWithJsonFlat) &&
++				p.projectReferenceFileMapper.getRedirectParsedCommandLineForResolution(ast.NewHasFileName(resolvedFileName, p.toPath(resolvedFileName))) == nil
+ 			isJsFileFromNodeModules := isFromNodeModulesSearch && isJsFile && strings.Contains(resolvedFileName, "/node_modules/")
+ 
+ 			// add file to program only if:
 diff --git a/internal/compiler/program.go b/internal/compiler/program.go
 index 74b2504d9..b3b598571 100644
 --- a/internal/compiler/program.go
@@ -2074,15 +2090,16 @@ index a5992fa73..ddc807e95 100644
  		for current := node; current != nil; current = ast.GetNextJSDocCommentLocation(current) {
  			jsdocs := current.JSDoc(nil)
 diff --git a/internal/module/resolver.go b/internal/module/resolver.go
-index 52400dc2b..abb2ad858 100644
+index 52400dc2b..5dde0f5a1 100644
 --- a/internal/module/resolver.go
 +++ b/internal/module/resolver.go
-@@ -158,9 +158,18 @@ type Resolver struct {
+@@ -158,9 +158,30 @@ type Resolver struct {
  	compilerOptions *core.CompilerOptions
  	typingsLocation string
  	projectName     string
-+	// extraExtensions are host-registered file extensions (e.g. ".vue") that
-+	// should resolve to the file itself, not just to a ".d.<ext>.ts" declaration.
++	// extraExtensions are normalized suffixes registered through
++	// ExtraFileExtensions. They allow literal host files to resolve after the
++	// declaration probe.
 +	extraExtensions []string
  	// reportDiagnostic: DiagnosticReporter
  }
@@ -2093,26 +2110,42 @@ index 52400dc2b..abb2ad858 100644
 +	r.extraExtensions = extensions
 +}
 +
++// IsExtraExtensionFile reports whether fileName uses an extension registered by
++// SetExtraExtensions.
++func (r *Resolver) IsExtraExtensionFile(fileName string) bool {
++	for _, extension := range r.extraExtensions {
++		if tspath.FileExtensionIs(fileName, extension) {
++			return true
++		}
++	}
++	return false
++}
++
  type ResolverOptions struct {
  	PackageJsonCache *packagejson.InfoCache
  }
-@@ -1558,11 +1567,22 @@ func (r *resolutionState) tryAddingExtensions(extensionless string, extensions e
+@@ -1558,11 +1579,27 @@ func (r *resolutionState) tryAddingExtensions(extensionless string, extensions e
  		}
  		return continueSearching()
  	default:
-+		// An on-disk ".d.<ext>.ts" declaration wins over the extra-extension
-+		// file itself, matching stock TS: the ".d.<ext>.ts" probe is also where
-+		// a Volar host substitutes the SFC when no declaration exists, so trying
-+		// the literal file here lands exactly on stock's fallback order.
++		// Match TypeScript's declaration-first order for an explicit
++		// nonstandard extension: "./Component.vue" probes
++		// "Component.d.vue.ts" before the registered ".vue" file.
  		if extensions&extensionsDeclaration != 0 && !tspath.IsDeclarationFileName(extensionless+originalExtension) {
  			if resolved := r.tryExtension(".d"+originalExtension+".ts", extensionless, false); !resolved.shouldContinueSearching() {
  				return resolved
  			}
  		}
-+		// Host-registered extra extensions (e.g. ".vue") resolve to the file
-+		// itself, standing in for the Volar host's phantom declaration remap.
++		// tsgo cannot invoke the language plugin's module-resolution host, so a
++		// registered extension authorizes the literal host file after the
++		// declaration probe misses.
 +		if originalExtension != "" && slices.Contains(r.resolver.extraExtensions, originalExtension) {
 +			if resolved := r.tryExtension(originalExtension, extensionless, false); !resolved.shouldContinueSearching() {
++				// Keep the host path so the loader applies its registered script
++				// kind. The extension is separate resolution metadata used by
++				// the checker to decide whether the import is typed; classify it
++				// as TypeScript so the host suffix does not trigger TS7016.
++				resolved.extension = tspath.ExtensionTs
 +				return resolved
 +			}
 +		}
