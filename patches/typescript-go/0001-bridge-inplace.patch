@@ -1729,7 +1729,7 @@ index a1923826c..aa562b80d 100644
  	if ast.IsIdentifier(expr) {
  		return expr.Text() == parameterName
 diff --git a/internal/module/resolver.go b/internal/module/resolver.go
-index 52400dc2b..dbf47164c 100644
+index 52400dc2b..abb2ad858 100644
 --- a/internal/module/resolver.go
 +++ b/internal/module/resolver.go
 @@ -158,9 +158,18 @@ type Resolver struct {
@@ -1751,27 +1751,29 @@ index 52400dc2b..dbf47164c 100644
  type ResolverOptions struct {
  	PackageJsonCache *packagejson.InfoCache
  }
-@@ -1558,6 +1567,20 @@ func (r *resolutionState) tryAddingExtensions(extensionless string, extensions e
+@@ -1558,11 +1567,22 @@ func (r *resolutionState) tryAddingExtensions(extensionless string, extensions e
  		}
  		return continueSearching()
  	default:
-+		// Host-registered extra extensions (e.g. ".vue") resolve to the file
-+		// itself, matching how a TS host with extraFileExtensions + a custom
-+		// resolver (Volar) resolves them. Preferred over the ".d.<ext>.ts"
-+		// declaration fallback below.
-+		if originalExtension != "" && len(r.resolver.extraExtensions) > 0 {
-+			for _, extraExt := range r.resolver.extraExtensions {
-+				if extraExt == originalExtension {
-+					if resolved := r.tryExtension(originalExtension, extensionless, false); !resolved.shouldContinueSearching() {
-+						return resolved
-+					}
-+					break
-+				}
-+			}
-+		}
++		// An on-disk ".d.<ext>.ts" declaration wins over the extra-extension
++		// file itself, matching stock TS: the ".d.<ext>.ts" probe is also where
++		// a Volar host substitutes the SFC when no declaration exists, so trying
++		// the literal file here lands exactly on stock's fallback order.
  		if extensions&extensionsDeclaration != 0 && !tspath.IsDeclarationFileName(extensionless+originalExtension) {
  			if resolved := r.tryExtension(".d"+originalExtension+".ts", extensionless, false); !resolved.shouldContinueSearching() {
  				return resolved
+ 			}
+ 		}
++		// Host-registered extra extensions (e.g. ".vue") resolve to the file
++		// itself, standing in for the Volar host's phantom declaration remap.
++		if originalExtension != "" && slices.Contains(r.resolver.extraExtensions, originalExtension) {
++			if resolved := r.tryExtension(originalExtension, extensionless, false); !resolved.shouldContinueSearching() {
++				return resolved
++			}
++		}
+ 		return continueSearching()
+ 	}
+ }
 diff --git a/internal/project/compilerhost.go b/internal/project/compilerhost.go
 index 212601d4b..a34452b36 100644
 --- a/internal/project/compilerhost.go
