@@ -31,6 +31,23 @@ export function toHostFileName(fileName: string): string {
     return isBundledLibPath(fileName) ? bundledLibPathToHostPath(fileName) : fileName;
 }
 
+/**
+ * THE Go→JS wire file-name boundary. Every file name decoded from a bridge
+ * payload — JSON transport results, RemoteSourceFile blob strings, arena
+ * records — must pass through here before entering the TS object graph, and
+ * call sites never re-normalize: a decode path that forgets this call is how
+ * the Windows path family bugs (drive-letter case, backslashes, bundled
+ * specifiers) keep recurring. Wire contract: absolute forward-slash tsgo
+ * paths (plus bundled:/// lib specifiers), so an already-normalized name
+ * returns as-is — the hot decode loops allocate nothing per name.
+ * Case folding for keys is a separate step (canonicalSourceFilePath);
+ * JS→Go input resolution is resolveHostFileName.
+ */
+export function wireFileNameToHost(fileName: string): string {
+    const mapped = toHostFileName(fileName);
+    return mapped.indexOf("\\") === -1 ? mapped : mapped.replace(/\\/g, "/");
+}
+
 /** Normalize host file paths — tsserver may use cwd-relative paths for project files. */
 export function resolveHostFileName(fileName: string, host?: { getCurrentDirectory?: () => string }): string {
     const mapped = toHostFileName(fileName);

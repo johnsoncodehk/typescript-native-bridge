@@ -20,6 +20,7 @@ Reference implementation of the style: `patches/typescript-go/overlay/bridge/nap
 - **One harness, parameterized** — never fork a script to vary it.
 - **Mechanism changes sweep their vocabulary** — grep the old name across patches/, tools/, comments in the same change.
 - **Deletions are verified by the gates, not switches.**
+- **One Go→JS file-name boundary** — `wireFileNameToHost` (tsgoLibPaths.ts) is the only normalization point for wire-decoded file names; every new transport/payload must funnel through it at its decode point, call sites never re-normalize. (Key folding is `canonicalSourceFilePath`; JS→Go input is `resolveHostFileName`.)
 - **Review the landed diff for elegance before committing** — top smells: duplicated truth (call the source instead), caches that hide the problem, hidden contracts. Don't defend the first draft.
 
 ## Repo in one paragraph

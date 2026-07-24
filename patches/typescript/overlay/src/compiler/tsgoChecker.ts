@@ -24,7 +24,7 @@ import { getParseTreeNode, isFunctionLike } from "./utilitiesPublic.js";
 import { setEmitFlags, addEmitFlags } from "./factory/emitNode.js";
 import { getModeForResolutionAtIndex } from "./program.js";
 import { installTsgoBackedSourceFileLoader, inferScriptKind, createSkeletonSourceFile, getTsgoBackedSourceFile } from "./tsgoBackedSourceFile.js";
-import { getTnbPackageRoot, isBundledLibPath, isHostLibFile, resolveHostFileName, toHostFileName, toTsgoFileName } from "./tsgoLibPaths.js";
+import { getTnbPackageRoot, isBundledLibPath, isHostLibFile, resolveHostFileName, toHostFileName, toTsgoFileName, wireFileNameToHost } from "./tsgoLibPaths.js";
 
 // ── JSDoc provider injection ──
 // getDocumentationComment / getJsDocTags need the stock JSDoc parsers in
@@ -507,7 +507,7 @@ function ensureBuilderMetaCurrent(configFilePath: string, proj: any): { proj: an
         return undefined;
     }
     for (const e of entries) {
-        const hostFileName = toHostFileName(e.fileName);
+        const hostFileName = wireFileNameToHost(e.fileName);
         // Parity with getSourceFiles(): default libs are excluded from the
         // JS-side program view, so keep them out of fileInfos too.
         if (isHostLibFile(hostFileName)) continue;
@@ -515,7 +515,7 @@ function ensureBuilderMetaCurrent(configFilePath: string, proj: any): { proj: an
             version: e.version,
             affectsGlobalScope: e.affectsGlobalScope ? true : undefined,
             impliedFormat: e.impliedNodeFormat || undefined,
-            referencedPaths: e.refs?.map((r: string) => canonicalSourceFilePath(toHostFileName(r))),
+            referencedPaths: e.refs?.map((r: string) => canonicalSourceFilePath(wireFileNameToHost(r))),
         };
         byPath.set(canonicalSourceFilePath(hostFileName), meta);
         byHostFile.set(hostFileName, meta);
@@ -686,13 +686,16 @@ function tsgoSourceFileNames(configFilePath: string, proj: any): { epoch: number
     // "snapshot N not found" (volar #6110).
     const own = _namesByProj.get(proj);
     if (own) return own;
-    const names: string[] = (proj.program.getSourceFileNames?.() ?? []).map(internNameString);
+    // Decode-boundary normalization (wireFileNameToHost) at fetch: names,
+    // nameSet and sortedNames all carry host form, so consumers below (shape
+    // compares, membership probes, getSourceFileNames) never re-normalize.
+    const names: string[] = (proj.program.getSourceFileNames?.() ?? []).map((n: string) => internNameString(wireFileNameToHost(n)));
     const nameSet = new Set<string>();
     for (const n of names) {
         // Callers query with host-cased fileNames OR canonical
         // lowercase Paths (NodeHandle.path, builder byPath walks) —
         // index both forms so member files never false-negative.
-        nameSet.add(internNameString(toHostFileName(n)));
+        nameSet.add(n);
         nameSet.add(canonicalSourceFilePath(n));
     }
     const fresh = { epoch, proj, names, nameSet, sortedNames: [...names].sort() };
@@ -2763,7 +2766,7 @@ function bridgeSymbolNeedsHostDeclRemap(
         const path = d?.path ?? d?.fileName;
         if (!path || typeof path !== "string") continue;
         try {
-            const host = getHostSf(toHostFileName(path)) ?? getHostSf(path);
+            const host = getHostSf(wireFileNameToHost(path)) ?? getHostSf(path);
             if (host?.__tnbHostBound) return true;
         }
         catch { /* continue */ }
@@ -2806,7 +2809,7 @@ function bridgeSymbolConfirmedLibOnlyNoHostRemap(
     for (const d of decls) {
         const path = d?.path ?? d?.fileName;
         if (!path || typeof path !== "string") return false;
-        if (!bridgeDeclPathIsLibOnly(path) && !bridgeDeclPathIsLibOnly(toHostFileName(path))) {
+        if (!bridgeDeclPathIsLibOnly(path) && !bridgeDeclPathIsLibOnly(wireFileNameToHost(path))) {
             return false;
         }
     }
@@ -3636,7 +3639,7 @@ function resolveHostExternalModuleSymbol(
                 // completion keystroke.
                 const wireRaw = d?.kind !== SyntaxKind.SourceFile ? (d?.path ?? d?.fileName) : undefined;
                 if (typeof wireRaw === "string" && wireRaw.length) {
-                    const wirePath = toHostFileName(wireRaw);
+                    const wirePath = wireFileNameToHost(wireRaw);
                     if (isHostLibFile(wirePath) || isBundledLibPath(wirePath) || wireRaw.includes("bundled://")) {
                         // Default-lib declaration: default libs contain no
                         // string ambient modules and are never host-parsed.
@@ -4067,7 +4070,7 @@ function shouldSendHostOverlay(fileName: string, hostText: string): boolean {
 }
 function convertTsgoDiagnostic(d: any, getSourceFile: (fileName: string) => any): any {
     return {
-        file: d.fileName ? getSourceFile(toHostFileName(d.fileName)) : undefined,
+        file: d.fileName ? getSourceFile(wireFileNameToHost(d.fileName)) : undefined,
         start: d.pos,
         length: (d.end ?? d.pos) - d.pos,
         messageText: d.text,
@@ -4742,8 +4745,9 @@ function installRemoteNodeTraversalHooks(): void {
     // paths. RemoteSourceFile.fileName reads the wire string, which is
     // bundled:///libs/lib.*.d.ts for tsgo's embedded libs — leaking that
     // into e.g. DefinitionInfo.fileName crashes tsserver span mapping
-    // (goto definition on lib members). NodeHandle.getSourceFile() already
-    // resolves to host names; align the decoded-node path. RPC identity is
+    // (goto definition on lib members). This getter is the blob transport's
+    // wireFileNameToHost decode point (see tsgoLibPaths); the JSON and arena
+    // transports normalize at their own payload boundaries. RPC identity is
     // unaffected: node ids embed sourceFile.path (raw wire path), and
     // tsgo-facing lookups renormalize via toTsgoFileName.
     const RemoteSourceFile = nodeModule.RemoteSourceFile;
@@ -4753,7 +4757,7 @@ function installRemoteNodeTraversalHooks(): void {
         const rawGet = fileNameDesc.get;
         Object.defineProperty(RemoteSourceFile.prototype, "fileName", {
             configurable: true,
-            get(this: any) { return toHostFileName(rawGet.call(this)); },
+            get(this: any) { return wireFileNameToHost(rawGet.call(this)); },
         });
     }
     // services SourceFileObject.getNamedDeclarations — navto (and FAR's
@@ -4988,7 +4992,12 @@ function tnbComputeNamedDeclarations(sourceFile: any): Map<string, any[]> {
 // Wire (flat) → stock (nested) span mapping for the LS nav bridge results.
 function lsNavDocumentSpanToStock(s: any): any {
     return {
-        fileName: s.fileName,
+        // THE normalization point for every LS-nav wire payload: arena
+        // records (readDefinitionInfo/readReferenceEntry stay mechanical) and
+        // the oversize JSON escape doc both funnel through here, so their
+        // fileName fields cross wireFileNameToHost exactly once. New LS-nav
+        // methods must reuse this converter rather than re-decoding spans.
+        fileName: wireFileNameToHost(s.fileName),
         textSpan: { start: s.start, length: s.length },
         ...(s.contextStart !== undefined ? { contextSpan: { start: s.contextStart, length: s.contextLength } } : {}),
     };
@@ -5008,6 +5017,27 @@ function lsNavDefinitionToStock(d: any): any {
         ...(d.isAmbient !== undefined ? { isAmbient: d.isAmbient } : {}),
         ...(d.failedAliasResolution !== undefined ? { failedAliasResolution: d.failedAliasResolution } : {}),
     };
+}
+
+/**
+ * moduleFileName is the one file-name field on the module-export-map wire
+ * payload (module specifiers are not paths). Stock consumers ===-compare it
+ * against SourceFile.fileName (exportInfoMap), so it crosses
+ * wireFileNameToHost at the fetch boundary; entries already in host form
+ * keep their objects (no per-call copies on the auto-import hot path).
+ */
+function normalizeExportMapWireNames(batch: any): any {
+    const modules = batch?.modules;
+    if (!modules?.length) return batch;
+    let out: any[] | undefined;
+    for (let i = 0; i < modules.length; i++) {
+        const m = modules[i];
+        if (typeof m?.moduleFileName !== "string") continue;
+        const n = wireFileNameToHost(m.moduleFileName);
+        if (n === m.moduleFileName) continue;
+        (out ??= modules.slice())[i] = { ...m, moduleFileName: n };
+    }
+    return out ? { ...batch, modules: out } : batch;
 }
 
 /** @internal */
@@ -5211,7 +5241,9 @@ export function createTsgoProgram(
         if (!proj?.program) return [] as string[];
         return tsgoSourceFileNames(configFilePath, proj).names;
     };
-    const getSourceFileNames = () => getTsgoSourceFileNames().map(n => internNameString(toHostFileName(n)));
+    // Fresh array per call (stock semantics); elements are already interned,
+    // host-form names (see tsgoSourceFileNames).
+    const getSourceFileNames = () => getTsgoSourceFileNames().slice();
     const tsgoGetSourceFile = (fileName: string) => project?.program?.getSourceFile?.(toTsgoFileName(fileName));
 
     // ── structureIsReused (tsserver cache invalidation) ──
@@ -5604,7 +5636,7 @@ export function createTsgoProgram(
             if ((options as any).tscBuild) {
                 const entries = proj.program.getDiagnosticsBatch() ?? [];
                 for (const entry of entries) {
-                    const hostFileName = toHostFileName(entry.fileName);
+                    const hostFileName = wireFileNameToHost(entry.fileName);
                     const syntactic = mapTsgoDiagnostics(entry.syntactic, getDiagnosticSourceFile);
                     const semantic = mapTsgoDiagnostics(entry.semantic, getDiagnosticSourceFile);
                     // Builder callers pass sourceFile.fileName, which may be
@@ -5933,12 +5965,12 @@ export function createTsgoProgram(
                 // declaration entries (stock parity); other modes keep the
                 // exclusion — no token walks there, just wasted AST cost.
                 if (isHostLibFile(name) && !softPMaterializeAllForImportTracker) continue;
-                const hostFileName = toHostFileName(name);
                 let sf: any;
                 if (preferLightProgramFiles) {
                     sf = getOrCreateLightSourceFile(name);
                 }
-                else if (softPMaterializeAllForImportTracker || fileHasHostSourceContent(name, hostFileName)) {
+                // name is host-form already (getSourceFileNames decode boundary).
+                else if (softPMaterializeAllForImportTracker || fileHasHostSourceContent(name, name)) {
                     sf = getOrCreateSourceFile(name);
                 }
                 else {
@@ -6044,7 +6076,7 @@ export function createTsgoProgram(
             const proj = project;
             if (!proj?.checker) return undefined;
             try {
-                return proj.checker.getModuleExportMap(importingFileName ? tsgoFileArg(importingFileName) : undefined);
+                return normalizeExportMapWireNames(proj.checker.getModuleExportMap(importingFileName ? tsgoFileArg(importingFileName) : undefined));
             } catch {
                 return undefined;
             }
@@ -6153,11 +6185,14 @@ export function createTsgoProgram(
             const emittedFiles: string[] | undefined = options.listEmittedFiles ? [] : undefined;
             const sourceFiles = targetSourceFile ? [targetSourceFile] : undefined;
             for (const o of outputs) {
+                // Go-computed output path — crosses the wire boundary before
+                // reaching writeFile/emittedFiles consumers.
+                const outFileName = wireFileNameToHost(o.fileName);
                 // Builder wrappers mutate data (data.skippedDtsWrite on the
                 // dts-unchanged skip path in builder.ts), so a data object
                 // must always ride along — stock emitter threads one too.
-                if (write) write(o.fileName, o.text, !!o.writeByteOrderMark, undefined, sourceFiles, {});
-                emittedFiles?.push(o.fileName);
+                if (write) write(outFileName, o.text, !!o.writeByteOrderMark, undefined, sourceFiles, {});
+                emittedFiles?.push(outFileName);
             }
             return {
                 emitSkipped: res?.emitSkipped ?? false,
@@ -6219,10 +6254,11 @@ export function createTsgoProgram(
             const res = project?.program?.emitBuildInfo?.({ build: !!(options as any).tscBuild });
             const outputs = res?.outputFiles ?? [];
             for (const o of outputs) {
+                const outFileName = wireFileNameToHost(o.fileName);
                 let buildInfo: any;
                 try { buildInfo = JSON.parse(o.text); } catch { /* write text regardless */ }
-                if (write) write(o.fileName, o.text, !!o.writeByteOrderMark, undefined, undefined, buildInfo !== undefined ? { buildInfo } : undefined);
-                emittedFiles?.push(o.fileName);
+                if (write) write(outFileName, o.text, !!o.writeByteOrderMark, undefined, undefined, buildInfo !== undefined ? { buildInfo } : undefined);
+                emittedFiles?.push(outFileName);
             }
             return {
                 emitSkipped: res?.emitSkipped ?? true,
@@ -6777,7 +6813,7 @@ function installNodeHandleHooks(s: any): void {
             configurable: true,
             get() {
                 if (this.kind !== SyntaxKind.SourceFile) return undefined;
-                return this.getSourceFile()?.fileName ?? this.path;
+                return this.getSourceFile()?.fileName ?? wireFileNameToHost(this.path);
             },
         });
     }
@@ -6791,7 +6827,7 @@ function installNodeHandleHooks(s: any): void {
             configurable: true,
             get() {
                 if (this.kind !== SyntaxKind.SourceFile) return undefined;
-                return this.getSourceFile()?.originalFileName ?? this.getSourceFile()?.fileName ?? this.path;
+                return this.getSourceFile()?.originalFileName ?? this.getSourceFile()?.fileName ?? wireFileNameToHost(this.path);
             },
         });
     }
@@ -7105,8 +7141,9 @@ export function createTsgoChecker(program: any): any {
         {
             const sentOverlayFiles = new Set(openFilesWithContent.map(f => f.fileName));
             const lateOverlays: { fileName: string; content: string; scriptKind: number }[] = [];
-            for (const n of tsgoSourceFileNames(configFilePath!, project).names) {
-                const hostFileName = toHostFileName(n);
+            // names are host-form already (decode-boundary normalized in
+            // tsgoSourceFileNames) — no per-entry re-normalization here.
+            for (const hostFileName of tsgoSourceFileNames(configFilePath!, project).names) {
                 if (!isExtraExtensionFileName(hostFileName) || !isOverlayCandidatePath(hostFileName)) continue;
                 if (sentOverlayFiles.has(hostFileName) || _syncedOverlayContentByFile.has(hostFileName)) continue;
                 const content = getHostScriptContent(syncHost ?? programCtx?.overlayHostCtx?.host, hostFileName, options);
@@ -7536,7 +7573,7 @@ export function createTsgoChecker(program: any): any {
     function getAmbientModuleExportBatch(): any {
         if (ambientModuleExportBatchCache !== undefined) return ambientModuleExportBatchCache ?? undefined;
         try {
-            ambientModuleExportBatchCache = project.checker.getModuleExportMap?.() ?? null;
+            ambientModuleExportBatchCache = normalizeExportMapWireNames(project.checker.getModuleExportMap?.()) ?? null;
         }
         catch {
             ambientModuleExportBatchCache = null;
@@ -10975,18 +11012,14 @@ export function createTsgoChecker(program: any): any {
             if (!project?.program) return [];
             const fileArg = toTsgoFileName(sourceFile.fileName);
             const getSf = (fn: string) => {
-                const host = toHostFileName(fn);
-                if (
-                    host === sourceFile.fileName
-                    || fn === sourceFile.fileName
-                    || fn === fileArg
-                    || host === toHostFileName(sourceFile.fileName)
-                ) {
+                // fn is host-form (convertTsgoDiagnostic normalizes at the
+                // wire boundary); fileArg is the same name under noembed.
+                if (fn === sourceFile.fileName || fn === fileArg) {
                     return sourceFile;
                 }
                 // Related info may point at other files; return a minimal
                 // skeleton so convertTsgoDiagnostic doesn't NPE on .file.
-                return createSkeletonSourceFile(host, "", options.target ?? 99, inferScriptKind(host));
+                return createSkeletonSourceFile(fn, "", options.target ?? 99, inferScriptKind(fn));
             };
             return [
                 ...mapTsgoDiagnostics(project.program.getSyntacticDiagnostics?.(fileArg), getSf),
