@@ -4441,6 +4441,25 @@ function installRemoteNodeTraversalHooks(): void {
     const nodeModule = require(pathMod.join(getNativePreviewDir(), "dist", "api", "node", "node.js"));
     const RemoteNode = nodeModule.RemoteNode;
     if (!RemoteNode?.prototype || typeof RemoteNode.prototype.forEachChild !== "function") return;
+    // Stock nodes are plain objects: jsDoc is a writable field that stock
+    // code lazy-initializes with `node.jsDoc ??= []` (services/jsDoc, e.g.
+    // tsdown's d.ts emit). The vendored RemoteNode getter recomputes per read
+    // and has no setter, so the assignment crashes with "only a getter".
+    // Cache the assigned value like stock's field would, and keep the
+    // tnbJsDocOf memo in sync.
+    const jsDocDesc = Object.getOwnPropertyDescriptor(RemoteNode.prototype, "jsDoc");
+    if (jsDocDesc?.get && !jsDocDesc.set) {
+        Object.defineProperty(RemoteNode.prototype, "jsDoc", {
+            configurable: true,
+            get(this: any) {
+                return "__tnbJsDocAssigned" in this ? this.__tnbJsDocAssigned : jsDocDesc.get!.call(this);
+            },
+            set(this: any, v: any) {
+                this.__tnbJsDocAssigned = v;
+                this.__tnbJsDocMemo = v;
+            },
+        });
+    }
     if (typeof RemoteNode.prototype.getChildren !== "function") {
         RemoteNode.prototype.getChildren = function (this: any, _sourceFile?: any) {
             // Token walks (getTokenAtPosition ← FAR keyword references) descend
