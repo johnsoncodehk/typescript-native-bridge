@@ -18,7 +18,7 @@ jobs:
         # Go's official builds are statically linked and run fine on musl;
         # node comes from apk (musl build) for the JS build scripts.
         run: |
-          apk add --no-cache gcc musl-dev binutils git nodejs npm curl
+          apk add --no-cache gcc musl-dev binutils file git nodejs npm curl
           curl -fsSL https://go.dev/dl/go1.26.5.linux-amd64.tar.gz | tar -xz -C /usr/local
           ln -sf /usr/local/go/bin/go /usr/local/bin/go
           go version
