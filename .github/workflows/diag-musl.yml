@@ -29,6 +29,13 @@ jobs:
           ls -la hello.node
           readelf -d hello.node | grep -i needed || true
 
-      - name: Go-native crash trace
+      - name: Go version matrix for musl c-shared
         run: |
-          GOTRACEBACK=crash node -e "require('/tmp/hello/hello.node')" 2>&1 | head -80 || true
+          cd /tmp/hello
+          for v in 1.22.12 1.23.10 1.24.5 1.25.1; do
+            curl -fsSL "https://go.dev/dl/go$v.linux-amd64.tar.gz" | tar -xz -C /tmp
+            mv /tmp/go /tmp/go$v
+            echo "=== go$v ==="
+            /tmp/go$v/bin/go build -buildmode=c-shared -o hello-$v.node . || { echo "build failed for $v"; continue; }
+            node -e "const b=require('/tmp/hello/hello-$v.node'); console.log('go$v: loads, Hello()='+b.Hello())" || echo "go$v: LOAD CRASH"
+          done
