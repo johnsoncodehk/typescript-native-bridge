@@ -100,6 +100,12 @@ jobs:
       # typescript -> $GITHUB_WORKSPACE, i.e. the commit under test.
       - name: Test volar
         run: |
+          # Volar's tsserver harness resolves typescript/lib/tsserver via a
+          # fresh module lookup from dirname(realpath(typescript/package.json)).
+          # With the link: override that realpath is this repo, so `typescript`
+          # must resolve from here too — self-link it (TNB has no typescript
+          # dependency of its own; node_modules is CI-local state).
+          ln -sfn "$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE/node_modules/typescript"
           cd "$RUNNER_TEMP/volar"
           npm test
 
@@ -136,7 +142,7 @@ jobs:
           # Starts are staggered to spread the tsserver boot spike.
           group1="triage-f2qi-names triage-xrefs-diag-variants triage-tostring-gtd-vue triage-adv6b-generic-sig triage-sim-edit triage-f2hl-jsdoc triage-completion-details-array triage-refs-exportspec"
           group2="triage-f2r5-defcases triage-f2r6-samevue triage-f2r6-libref triage-f2r6-xvue triage-sim-xfile triage-f2hl-typesref triage-geterr-5823 triage-quickinfo-emptyparity triage-completion-parity"
-          group3="triage-qi-delete-min triage-defineprops-refs triage-impl-kind triage-rpcsym-nameless triage-rpcsym-adversarial triage-f2hl-augment triage-orphan-leak triage-parent-watch-acceptance triage-f2hl-defaultkw triage-adv6a-jsx-spelling triage-empty-literal triage-alias-nil triage-ghost-close triage-prefetch-inferred triage-builder-keyform triage-win-drive-overlay triage-backslash-getsourcefile triage-bool-literal-intrinsic triage-tp-constraint triage-incremental-emit triage-bridge-thread-race triage-jsdoc-assignment triage-alias-self-loop triage-type-field-audit triage-checker-differential"
+          group3="triage-qi-delete-min triage-defineprops-refs triage-impl-kind triage-rpcsym-nameless triage-rpcsym-adversarial triage-f2hl-augment triage-orphan-leak triage-parent-watch-acceptance triage-f2hl-defaultkw triage-adv6a-jsx-spelling triage-empty-literal triage-alias-nil triage-ghost-close triage-prefetch-inferred triage-builder-keyform triage-win-drive-overlay triage-backslash-getsourcefile triage-bool-literal-intrinsic triage-tp-constraint triage-incremental-emit triage-bridge-thread-race triage-jsdoc-assignment triage-alias-self-loop triage-type-field-audit triage-checker-differential triage-imported-extra-extension"
           pids=()
           i=0
           for group in "$group1" "$group2" "$group3"; do
