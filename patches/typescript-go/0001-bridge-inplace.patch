@@ -833,7 +833,7 @@ index 613ed0a0c..8b11b26ed 100644
  
  export function isBindingPattern(node: Node): node is BindingPattern {
 diff --git a/internal/checker/checker.go b/internal/checker/checker.go
-index b639d488e..acadad893 100644
+index b639d488e..01f696e21 100644
 --- a/internal/checker/checker.go
 +++ b/internal/checker/checker.go
 @@ -786,6 +786,7 @@ type Checker struct {
@@ -996,7 +996,26 @@ index b639d488e..acadad893 100644
  	}
  	return links.writeType
  }
-@@ -29109,6 +29165,9 @@ func (c *Checker) getContextualType(node *ast.Node, contextFlags ContextFlags) *
+@@ -22798,6 +22854,18 @@ func (c *Checker) getTypeFromTypeNodeWorker(node *ast.Node) *Type {
+ 		return c.getTypeFromInferTypeNode(node)
+ 	case ast.KindImportType:
+ 		return c.getTypeFromImportTypeNode(node)
++	// Fork parity: stock also resolves an identifier, qualified name, or
++	// property access as a type expression here — callers gate on
++	// isPartOfTypeNode, which admits entity names (checker.ts
++	// getTypeFromTypeNodeWorker). Upstream's default arm answered errorType,
++	// so GetTypeAtLocation on a type-name identifier (`P` in `[P, …]`,
++	// `Ns.Inner` in `x: Ns.Inner`) reported any (issue #30).
++	case ast.KindIdentifier, ast.KindQualifiedName, ast.KindPropertyAccessExpression:
++		symbol := c.getSymbolAtLocation(node, false /*ignoreErrors*/)
++		if symbol != nil {
++			return c.getDeclaredTypeOfSymbol(symbol)
++		}
++		return c.errorType
+ 	default:
+ 		return c.errorType
+ 	}
+@@ -29109,6 +29177,9 @@ func (c *Checker) getContextualType(node *ast.Node, contextFlags ContextFlags) *
  		return c.contextualInfos[index].t
  	}
  	parent := node.Parent
