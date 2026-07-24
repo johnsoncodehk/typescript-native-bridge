@@ -9,8 +9,8 @@ permissions:
   contents: read
 
 env:
-  VOLAR_BRANCH: feat/tnb-migration
-  VOLAR_SHA: 398ac0a71 # vuejs/language-tools@feat/tnb-migration, pinned for reproducibility
+  VOLAR_BRANCH: master
+  VOLAR_SHA: e51956947 # vuejs/language-tools@master, pinned for reproducibility
 
 jobs:
   regression:
@@ -76,24 +76,32 @@ jobs:
           path: |
             ${{ runner.temp }}/volar
             ${{ runner.temp }}/volar-stock
-          key: volar-${{ env.VOLAR_SHA }}-v1
+          key: volar-${{ env.VOLAR_SHA }}-v2
 
       - name: Clone volar
         if: steps.volar-cache.outputs.cache-hit != 'true'
         run: |
           git clone --depth 50 --branch "$VOLAR_BRANCH" https://github.com/vuejs/language-tools.git "$RUNNER_TEMP/volar"
           git -C "$RUNNER_TEMP/volar" checkout "$VOLAR_SHA"
-          # pnpm's `typescript: link:./typescript-native-bridge` override must
-          # resolve at install time — create the symlink BEFORE pnpm install.
-          ln -sfn "$GITHUB_WORKSPACE" "$RUNNER_TEMP/volar/typescript-native-bridge"
+          # Point volar's typescript override at the CI-built TNB — volar
+          # master's override is `npm:typescript-native-bridge@<release>`, which
+          # would fetch the released package instead of the commit under test.
+          cd "$RUNNER_TEMP/volar"
+          node -e "const fs=require('fs');const p='pnpm-workspace.yaml';let s=fs.readFileSync(p,'utf8');s=s.replace(/typescript: npm:typescript-native-bridge@.*/,'typescript: link:'+process.env.GITHUB_WORKSPACE);fs.writeFileSync(p,s);console.log(s.match(/overrides:[\s\S]*/)[0])"
 
-      - name: Install + build volar
+      - name: Install volar
         if: steps.volar-cache.outputs.cache-hit != 'true'
         run: |
           cd "$RUNNER_TEMP/volar"
           corepack enable
-          pnpm install --frozen-lockfile
-          pnpm run build
+          pnpm install --no-frozen-lockfile
+
+      # Runs on every CI run (cache hit or miss): the cached node_modules links
+      # typescript -> $GITHUB_WORKSPACE, i.e. the commit under test.
+      - name: Test volar
+        run: |
+          cd "$RUNNER_TEMP/volar"
+          npm test
 
       - name: Pack stock typescript
         if: steps.volar-cache.outputs.cache-hit != 'true'
@@ -102,9 +110,6 @@ jobs:
           cd "$RUNNER_TEMP/volar-stock"
           npm pack typescript@6.0.3 --silent
           tar -xzf typescript-6.0.3.tgz
-
-      - name: Link TNB into volar
-        run: ln -sfn "$GITHUB_WORKSPACE" "$RUNNER_TEMP/volar/typescript-native-bridge"
 
       - name: sweep-ls-throws
         env:
@@ -161,6 +166,13 @@ jobs:
           for j in 1 2 3; do
             echo "=== witness group $j (tail) ==="
             tail -5 "/tmp/tnb-wg$j.log" || true
+            if ((rc)); then
+              # tail -5 can land on a KNOWN-exemption pair and hide the real
+              # failure keys (run 30062511367 misread this way): on failure,
+              # surface diff lines with their stock/tnb context.
+              echo "=== witness group $j (failure lines) ==="
+              grep -E -A2 "^DIFF |^FAIL |VERDICT: FAIL|FAILURES \(" "/tmp/tnb-wg$j.log" || true
+            fi
           done
           exit $rc
 
