@@ -75,6 +75,22 @@ jobs:
           path: native/bridge.*
           retention-days: 1
 
+  gcompat:
+    runs-on: ubuntu-latest
+    container: alpine:3.21
+    steps:
+      - name: Install node + gcompat
+        run: apk add --no-cache nodejs npm gcompat
+
+      - name: Download the published glibc bridge (bridge.6)
+        run: |
+          apk add --no-cache curl
+          curl -fsSL https://registry.npmjs.org/@typescript-native-bridge/linux-x64/-/linux-x64-6.0.3-bridge.6.tsgo.7.0.2.tgz | tar -xz
+          ls package/native/
+
+      - name: Load glibc bridge on musl via gcompat
+        run: node -e "const b = require('./package/native/bridge.node'); if (typeof b.newSession !== 'function') process.exit(1); console.log('glibc bridge loads on musl via gcompat')"
+
   load-glibc:
     needs: build-musl
     runs-on: ubuntu-latest
