@@ -6914,7 +6914,10 @@ export function createTsgoProgram(
             }
             // DocumentIdentifier wire format is plain path string or { uri }, not { fileName }.
             const file = targetSourceFile?.fileName ? tsgoFileArg(targetSourceFile.fileName) : undefined;
-            const emitOnly = forceDtsEmit ? 3 : (emitOnlyDtsFiles ? 2 : undefined);
+            // emitDeclarationOnly is an emit-time-only option (like noEmit above): the
+            // CLI flag never reaches Go, so map it to EmitOnly=Dts here — same gate
+            // stock applies inside the emitter (program.ts:4235).
+            const emitOnly = forceDtsEmit ? 3 : (emitOnlyDtsFiles || options.emitDeclarationOnly ? 2 : undefined);
             const res = project?.program?.emit?.({ file, emitOnly, forceDtsEmit: !!forceDtsEmit });
             const outputs = res?.outputFiles ?? [];
             const write = typeof writeFile === "function" ? writeFile : host?.writeFile?.bind(host);
