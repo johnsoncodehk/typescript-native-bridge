@@ -24,7 +24,7 @@ import { getParseTreeNode, isFunctionLike } from "./utilitiesPublic.js";
 import { setEmitFlags, addEmitFlags } from "./factory/emitNode.js";
 import { getModeForResolutionAtIndex } from "./program.js";
 import { installTsgoBackedSourceFileLoader, inferScriptKind, createSkeletonSourceFile, getTsgoBackedSourceFile } from "./tsgoBackedSourceFile.js";
-import { getTnbPackageRoot, isBundledLibPath, isHostLibFile, resolveHostFileName, toHostFileName, toTsgoFileName, wireFileNameToHost } from "./tsgoLibPaths.js";
+import { getTnbPackageRoot, bundledLibPathToHostPath, isBundledLibPath, isHostLibFile, resolveHostFileName, toHostFileName, toTsgoFileName, wireFileNameToHost } from "./tsgoLibPaths.js";
 
 // ── JSDoc provider injection ──
 // getDocumentationComment / getJsDocTags need the stock JSDoc parsers in
@@ -479,7 +479,7 @@ type TnbBuilderMeta = { version: string; affectsGlobalScope: true | undefined; i
 /** Per-config builder-graph state — one live generation, replaced when the content epoch advances. */
 const _builderMetaByConfig = new Map<string, { epoch: number | undefined; proj: any; byPath: Map<string, TnbBuilderMeta>; byHostFile: Map<string, TnbBuilderMeta> }>();
 /** Per-config program file-name list + membership set, replaced when the content epoch advances. */
-const _namesByConfig = new Map<string, { epoch: number | undefined; proj: any; names: string[]; nameSet: Set<string>; sortedNames: string[] }>();
+const _namesByConfig = new Map<string, { epoch: number | undefined; proj: any; names: string[]; nameSet: Set<string>; canonicalToHost: Map<string, string>; sortedNames: string[] }>();
 /** Latest per-file version/format, merged on every fetch — read by shared stub version getters. */
 const _latestMetaByPath = new Map<string, { version: string; impliedFormat: number | undefined }>();
 /** Shared light-stub SourceFiles, keyed by host file name (see getOrCreateLightSourceFile). */
@@ -673,10 +673,10 @@ const _lastUpdateParamsByConfig = new Map<string, { paramsJson: string; project:
 const _sessionSentOpenTabs = new Set<string>();
 
 /** Per-program fallback list: old generations keep their own names — their snapshots are disposed. */
-const _namesByProj = new WeakMap<object, { epoch: number | undefined; proj: any; names: string[]; nameSet: Set<string>; sortedNames: string[] }>();
+const _namesByProj = new WeakMap<object, { epoch: number | undefined; proj: any; names: string[]; nameSet: Set<string>; canonicalToHost: Map<string, string>; sortedNames: string[] }>();
 
 /** Program file names for a config's current project — memoized per content epoch (see noteProjectEpochs). */
-function tsgoSourceFileNames(configFilePath: string, proj: any): { epoch: number | undefined; proj: any; names: string[]; nameSet: Set<string>; sortedNames: string[] } {
+function tsgoSourceFileNames(configFilePath: string, proj: any): { epoch: number | undefined; proj: any; names: string[]; nameSet: Set<string>; canonicalToHost: Map<string, string>; sortedNames: string[] } {
     const epoch = projectEpoch(configFilePath);
     const ent = _namesByConfig.get(configFilePath);
     // Hit on the program's own live entry or on same-epoch content.
@@ -691,19 +691,67 @@ function tsgoSourceFileNames(configFilePath: string, proj: any): { epoch: number
     // compares, membership probes, getSourceFileNames) never re-normalize.
     const names: string[] = (proj.program.getSourceFileNames?.() ?? []).map((n: string) => internNameString(wireFileNameToHost(n)));
     const nameSet = new Set<string>();
+    const canonicalToHost = new Map<string, string>();
     for (const n of names) {
         // Callers query with host-cased fileNames OR canonical
         // lowercase Paths (NodeHandle.path, builder byPath walks) —
         // index both forms so member files never false-negative.
         nameSet.add(n);
-        nameSet.add(canonicalSourceFilePath(n));
+        const canon = canonicalSourceFilePath(n);
+        nameSet.add(canon);
+        // Folded-path → host-cased recovery (Go's wire Paths arrive folded
+        // on case-insensitive file systems).
+        if (!canonicalToHost.has(canon)) canonicalToHost.set(canon, n);
     }
-    const fresh = { epoch, proj, names, nameSet, sortedNames: [...names].sort() };
+    const fresh = { epoch, proj, names, nameSet, canonicalToHost, sortedNames: [...names].sort() };
     _namesByProj.set(proj, fresh);
     // The live entry tracks the config's CURRENT project; a stale program's
     // fetch only fills its own WeakMap slot.
     if (!ent || proj === (_projectCache.get(configFilePath) ?? proj)) {
         _namesByConfig.set(configFilePath, fresh);
+    }
+    return fresh;
+}
+
+// ── Per-config program-info payloads ──
+// Stock-shaped Program state whose data lives in Go: missing file paths,
+// include reasons, module/type-reference resolution caches, automatic type
+// directive resolutions, classifiable names, the node:-prefix style flag.
+// Same memo discipline as tsgoSourceFileNames (config+epoch live entry,
+// per-proj WeakMap slot for stale generations), but lazily filled per field —
+// these are cold APIs (watch bookkeeping, --explainFiles, v1 classification,
+// eslint-style resolution probes), so nothing is fetched at program creation
+// and one field's RPC never pays for another's.
+type TnbProgramInfo = {
+    epoch: number | undefined;
+    proj: any;
+    /** Stock shape: Map<toPath(missingFileName), missingFileName>. */
+    missingFilePaths?: Map<string, string>;
+    /** Wrapper because the fetched value itself can be undefined (tristate). */
+    usesUriStyle?: { value: boolean | undefined };
+    includeReasons?: { map: any; referencingFiles: Set<string> };
+    resolutions?: {
+        modules: Map<string, any>;
+        typeRefs: Map<string, any>;
+        automaticTypeDirectiveNames: string[];
+        automaticTypeDirectiveResolutions: any;
+    };
+    classifiableNames?: Set<string>;
+};
+const _programInfoByConfig = new Map<string, TnbProgramInfo>();
+const _programInfoByProj = new WeakMap<object, TnbProgramInfo>();
+
+function tnbProgramInfo(configFilePath: string, proj: any): TnbProgramInfo {
+    const epoch = projectEpoch(configFilePath);
+    const ent = _programInfoByConfig.get(configFilePath);
+    // Hit on the program's own live entry or on same-epoch content.
+    if (ent && (ent.proj === proj || (epoch !== undefined && ent.epoch === epoch))) return ent;
+    const own = _programInfoByProj.get(proj);
+    if (own) return own;
+    const fresh: TnbProgramInfo = { epoch, proj };
+    _programInfoByProj.set(proj, fresh);
+    if (!ent || proj === (_projectCache.get(configFilePath) ?? proj)) {
+        _programInfoByConfig.set(configFilePath, fresh);
     }
     return fresh;
 }
@@ -5257,6 +5305,169 @@ export function createTsgoProgram(
     const getSourceFileNames = () => getTsgoSourceFileNames().slice();
     const tsgoGetSourceFile = (fileName: string) => project?.program?.getSourceFile?.(toTsgoFileName(fileName));
 
+    // ── Program-info payloads (module-level TnbProgramInfo store) ──
+    // Stock-shaped Program state materialized from Go on first consultation.
+    // Every wire file name decodes through wireFileNameToHost here, at the
+    // fetch boundary; map keys are canonicalSourceFilePath'd so stock
+    // consumers probing with file.path (canonical) hit.
+    const programInfo = () => tnbProgramInfo(configFilePath, project);
+
+    const getMissingFilePaths = (): Map<string, string> => {
+        const proj = project;
+        if (!proj?.program) return new Map();
+        const info = programInfo();
+        if (!info.missingFilePaths) {
+            const map = new Map<string, string>();
+            // Stock: Map<toPath(missingFileName), missingFileName>.
+            for (const raw of proj.program.getMissingFilePaths() as string[]) {
+                const hostFileName = wireFileNameToHost(raw);
+                map.set(canonicalSourceFilePath(hostFileName), hostFileName);
+            }
+            info.missingFilePaths = map;
+        }
+        return info.missingFilePaths;
+    };
+
+    const getUsesUriStyleNodeCoreModules = (): boolean | undefined => {
+        const proj = project;
+        if (!proj?.program) return undefined;
+        const info = programInfo();
+        if (info.usesUriStyle === undefined) {
+            const v = proj.program.getUsesUriStyleNodeCoreModules();
+            info.usesUriStyle = { value: v === null ? undefined : v };
+        }
+        return info.usesUriStyle.value;
+    };
+
+    const getFileIncludeReasonsState = (): { map: any; referencingFiles: Set<string> } => {
+        const proj = project;
+        if (!proj?.program) return { map: ts.createMultiMap(), referencingFiles: new Set() };
+        const info = programInfo();
+        if (!info.includeReasons) {
+            const map = ts.createMultiMap();
+            const referencingFiles = new Set<string>();
+            for (const entry of proj.program.getFileIncludeReasons()) {
+                const key = canonicalSourceFilePath(wireFileNameToHost(entry.file));
+                for (const r of entry.reasons) {
+                    const reason: any = { kind: r.kind };
+                    if (r.file !== undefined) {
+                        const refHost = wireFileNameToHost(r.file);
+                        reason.file = canonicalSourceFilePath(refHost);
+                        // Both host-cased and canonical forms — the
+                        // getSourceFileByPath gate probes with raw paths.
+                        referencingFiles.add(refHost);
+                        referencingFiles.add(reason.file);
+                    }
+                    if (r.index !== undefined) reason.index = r.index;
+                    if (r.typeReference !== undefined) reason.typeReference = r.typeReference;
+                    if (r.packageId !== undefined) reason.packageId = r.packageId;
+                    map.add(key, reason);
+                }
+            }
+            info.includeReasons = { map, referencingFiles };
+        }
+        return info.includeReasons;
+    };
+    // Stock include-reason consumers (explainFiles' getReferencedFileLocation,
+    // FAR getReferencesForNonModule) read imports / referencedFiles /
+    // typeReferenceDirectives / libReferenceDirectives and text off the
+    // REFERENCING file's SourceFile through getSourceFileByPath — light stubs
+    // carry empty arrays and would crash those walks, so once include reasons
+    // are fetched, referencing files are served full SourceFiles on that path.
+    // Returns the host-cased name: Go's reason data carries folded Paths, and
+    // materializing from the folded form would hand out a SourceFile whose
+    // fileName case matches no other view of the file.
+    const includeReasonReferencingHostName = (pathStr: string): string | undefined => {
+        if (!programInfo().includeReasons?.referencingFiles.has(pathStr)) return undefined;
+        return tsgoSourceFileNames(configFilePath, project).canonicalToHost.get(canonicalSourceFilePath(pathStr)) ?? pathStr;
+    };
+
+    // One stock-shaped type-reference-directive resolution entry (also the
+    // automatic-type-directive shape — same wire DTO).
+    const typeRefResolutionEntry = (r: any): any => ({
+        resolvedTypeReferenceDirective: r.resolvedFileName
+            ? {
+                resolvedFileName: wireFileNameToHost(r.resolvedFileName),
+                primary: !!r.primary,
+                ...(r.originalPath ? { originalPath: wireFileNameToHost(r.originalPath) } : {}),
+                ...(r.isExternalLibraryImport ? { isExternalLibraryImport: true } : {}),
+                ...(r.packageId ? { packageId: r.packageId } : {}),
+            }
+            : undefined,
+        // tsgo's resolver does not retain failed lookup locations (its
+        // invalidation is by content epoch); the field keeps the stock shape
+        // and is always empty.
+        failedLookupLocations: [],
+    });
+
+    const getProgramResolutions = (): {
+        modules: Map<string, any>;
+        typeRefs: Map<string, any>;
+        automaticTypeDirectiveNames: string[];
+        automaticTypeDirectiveResolutions: any;
+    } => {
+        const proj = project;
+        if (!proj?.program) {
+            return { modules: new Map(), typeRefs: new Map(), automaticTypeDirectiveNames: [], automaticTypeDirectiveResolutions: ts.createModeAwareCache() };
+        }
+        const info = programInfo();
+        if (!info.resolutions) {
+            const raw = proj.program.getProgramResolutionInfo();
+            const modules = new Map<string, any>();
+            for (const f of raw.modules) {
+                const cache = ts.createModeAwareCache();
+                for (const r of f.resolutions) {
+                    // Mode 0 (ResolutionModeNone) keys as undefined, matching
+                    // stock's createModeAwareCacheKey.
+                    cache.set(r.moduleName, r.mode === 0 ? undefined : r.mode, {
+                        resolvedModule: r.resolvedFileName
+                            ? {
+                                resolvedFileName: wireFileNameToHost(r.resolvedFileName),
+                                ...(r.originalPath ? { originalPath: wireFileNameToHost(r.originalPath) } : {}),
+                                extension: r.extension,
+                                isExternalLibraryImport: !!r.isExternalLibraryImport,
+                                ...(r.packageId ? { packageId: r.packageId } : {}),
+                                ...(r.resolvedUsingTsExtension ? { resolvedUsingTsExtension: true } : {}),
+                                ...(r.alternateResult ? { alternateResult: r.alternateResult } : {}),
+                            }
+                            : undefined,
+                        failedLookupLocations: [],
+                    });
+                }
+                modules.set(canonicalSourceFilePath(wireFileNameToHost(f.file)), cache);
+            }
+            const typeRefs = new Map<string, any>();
+            for (const f of raw.typeReferenceDirectives) {
+                const cache = ts.createModeAwareCache();
+                for (const r of f.resolutions) {
+                    cache.set(r.name, r.mode === 0 ? undefined : r.mode, typeRefResolutionEntry(r));
+                }
+                typeRefs.set(canonicalSourceFilePath(wireFileNameToHost(f.file)), cache);
+            }
+            const automaticTypeDirectiveResolutions = ts.createModeAwareCache();
+            for (const r of raw.automaticTypeDirectiveResolutions) {
+                automaticTypeDirectiveResolutions.set(r.name, r.mode === 0 ? undefined : r.mode, typeRefResolutionEntry(r));
+            }
+            info.resolutions = {
+                modules,
+                typeRefs,
+                automaticTypeDirectiveNames: raw.automaticTypeDirectiveNames.slice(),
+                automaticTypeDirectiveResolutions,
+            };
+        }
+        return info.resolutions;
+    };
+
+    const getClassifiableNames = (): Set<string> => {
+        const proj = project;
+        if (!proj?.program) return new Set();
+        const info = programInfo();
+        if (!info.classifiableNames) {
+            info.classifiableNames = new Set(proj.program.getClassifiableNames() as string[]);
+        }
+        return info.classifiableNames;
+    };
+
     // ── structureIsReused (tsserver cache invalidation) ──
     // updateGraphWorker (server/project.ts) clears the export-map cache whenever
     // a new program reports StructureIsReused.Not, and the thin program is
@@ -5268,12 +5479,15 @@ export function createTsgoProgram(
     // options are unchanged (content-only overlay refresh — the same edits that
     // stock reports Completely for), Not on the first program or when files
     // were added/removed or options changed. Completely rather than SafeModules
-    // because it also skips updateGraphWorker's hasNewProgram bookkeeping —
-    // the rootFilesMap walk there materializes a full host-parsed SourceFile
-    // per root file (~430ms per keystroke on a 371-file project), while with
-    // an unchanged file set nothing it maintains can move (resolvedPaths are
-    // fixed by the set, thin programs have no missing file paths, and
-    // exportMapCache.onFileChanged below it still sees content changes).
+    // because Completely skips updateGraphWorker's hasNewProgram bookkeeping
+    // (the rootFilesMap walk materializes a full host-parsed SourceFile per
+    // root file, ~430ms per keystroke on a 371-file project).
+    // With an unchanged file set nothing that walk maintains can move:
+    // resolvedPaths are fixed by the set, missing-file watching in stock
+    // refreshes only on hasNewProgram anyway (same gating — getMissingFilePaths
+    // below reports the Go-side list, so the watches installed on structure
+    // changes are truthful), and exportMapCache.onFileChanged still sees
+    // content changes.
     // Skipped in build mode: `tsc -b` programs are one-shot and the shape
     // memo would pin every project's file list for the whole build.
     let structureIsReused = StructureIsReused.Not;
@@ -5845,57 +6059,10 @@ export function createTsgoProgram(
         return originalPkgDir === "" ? undefined : originalPkgDir + m[3];
     };
 
-    // Stock Program records type-reference-directive resolutions at build time
-    // and findModuleReferences replays them (FAR on a module symbol highlights
-    // each `/// <reference types="…" />` site whose resolution matches). Our
-    // resolutions live on the Go side with no per-directive RPC, so re-derive
-    // the answer from program membership: whatever tsgo resolved is in the
-    // file list, and the file list contains exactly one match for the standard
-    // shapes (`node_modules/<name>.d.ts`, `…/<name>/index.d.ts`, @types, or a
-    // relative directive resolved against the referencing file). Ambiguous or
-    // nonstandard layouts (typesVersions/exports-only packages) fall back to
-    // undefined — the pre-fix behavior — never a wrong answer.
-    const typeRefDirectiveResolutionCache = new Map<string, any>();
     /** Stock program diagnostics container, created lazily per program instance (see getProgramDiagnosticsContainer). */
     let diagnosticsContainer: any;
-    const resolveTypeReferenceDirectiveInProgram = (name: string, referencingFileName: string): string | undefined => {
-        const matches = new Map<string, string>(); // canonical → host file name
-        const add = (hostFileName: string) => {
-            const canon = canonicalSourceFilePath(hostFileName);
-            if (!matches.has(canon)) matches.set(canon, hostFileName);
-        };
-        if (name.startsWith("./") || name.startsWith("../")) {
-            const dir = referencingFileName.slice(0, referencingFileName.lastIndexOf("/"));
-            const base = `${dir}/${name}`;
-            for (const candidate of [base, `${base}.d.ts`]) {
-                const parts = candidate.split("/");
-                const out: string[] = [];
-                for (const p of parts) {
-                    if (p === ".") continue;
-                    if (p === "..") out.pop();
-                    else out.push(p);
-                }
-                const normalized = out.join("/");
-                for (const fileName of getSourceFileNames()) {
-                    if (canonicalSourceFilePath(fileName) === canonicalSourceFilePath(normalized)) add(fileName);
-                }
-                if (matches.size) break;
-            }
-        }
-        else {
-            const suffixes = [`/node_modules/${name}.d.ts`, `/node_modules/${name}/index.d.ts`, `/node_modules/@types/${name}/index.d.ts`];
-            for (const fileName of getSourceFileNames()) {
-                const canon = canonicalSourceFilePath(fileName);
-                for (const suffix of suffixes) {
-                    if (canon.endsWith(suffix)) {
-                        add(fileName);
-                        break;
-                    }
-                }
-            }
-        }
-        return matches.size === 1 ? [...matches.values()][0] : undefined;
-    };
+    /** Per-program symlink cache for hosts without one (see getSymlinkCache). */
+    let symlinkCache: any;
 
     const thinProgram: any = {
         // Marks this as a tsgo-backed program: its SourceFiles come straight from
@@ -5944,7 +6111,16 @@ export function createTsgoProgram(
             // it), turning every metadata lookup into a disk read + fs.stat +
             // remote-AST RPC via getOrCreateSourceFile. Builder machinery only
             // needs metadata here — serve the memoized light stub directly.
+            // Exception: stock include-reason consumers (explainFiles, FAR
+            // getReferencesForNonModule) index imports/referencedFiles off the
+            // referencing file's SourceFile — a light stub's empty arrays would
+            // crash those walks (the probe is a bare Set check until
+            // getFileIncludeReasons has been fetched).
             if (preferLightProgramFiles) {
+                const incHostName = includeReasonReferencingHostName(pathStr);
+                if (incHostName !== undefined) {
+                    return getOrCreateSourceFile(incHostName);
+                }
                 return getLightSourceFileByRawPath(pathStr);
             }
             const hostFileName = toHostFileName(pathStr);
@@ -5953,8 +6129,9 @@ export function createTsgoProgram(
             // to discover closed importer files. Do NOT key this on preferHost —
             // vue-tsc overlays set preferHost without projectService and OOM if
             // the whole program is materialized (see softPMaterializeAllForImportTracker).
-            if (softPMaterializeAllForImportTracker || fileHasHostSourceContent(pathStr, hostFileName)) {
-                return getOrCreateSourceFile(pathStr);
+            const incHostName = includeReasonReferencingHostName(pathStr);
+            if (softPMaterializeAllForImportTracker || fileHasHostSourceContent(pathStr, hostFileName) || incHostName !== undefined) {
+                return getOrCreateSourceFile(incHostName ?? pathStr);
             }
             return getOrCreateLightSourceFile(pathStr);
         },
@@ -6068,9 +6245,19 @@ export function createTsgoProgram(
             }
             return programDiagnosticsCache.result;
         },
-        getMissingFilePaths: () => [],
+        // Go-reported missing paths (batch RPC, epoch-memoized): tsc --watch
+        // and tsserver install file watchers from this list
+        // (updateMissingFilePathsWatch), and isProgramUptoDate re-checks them.
+        getMissingFilePaths: () => getMissingFilePaths(),
+        // Vestigial: stock's creation-pipeline name→file lookup. TNB's file
+        // lookups go through getSourceFile/getSourceFileByPath (Go is the
+        // membership authority); nothing on a TNB path consults this map, and
+        // filling it would mean materializing every program SourceFile.
         getFilesByNameMap: () => new Map(),
-        getClassifiableNames: () => new Set(),
+        // Go binder-collected classifiable-name union (batch RPC,
+        // epoch-memoized): the v1 semantic classifier's identifier pre-filter
+        // (services getEncodedSemanticClassifications, Original format).
+        getClassifiableNames: () => getClassifiableNames(),
         getCommonSourceDirectory: () => "",
         getCurrentDirectory: () => host?.getCurrentDirectory?.() ?? process.cwd(),
         // Same canonicalization rule as canonicalSourceFilePath — the builder
@@ -6286,13 +6473,37 @@ export function createTsgoProgram(
         // getBuildInfo is stock-overridden by createBuilderProgram (the JS
         // builder installs its state-based generator on the program object);
         // the buildinfo actually written comes from emitBuildInfo above, so
-        // this default is only reachable outside builder flows.
+        // this default is only reachable outside builder flows. That IS stock
+        // parity: Program.getBuildInfo is optional and absent on a base
+        // program — createBuilderProgram installs it (builder.ts), and the
+        // emitBuildInfo JS-builder bypass above consumes the installed one.
         getBuildInfo: () => undefined,
-        getSourceFileFromReference: () => undefined,
-        getFileIncludeReasons: () => new Map(),
+        // Stock semantics: resolve the triple-slash path relative to the
+        // referencing file, then the program's file lookup. Live path:
+        // goToDefinition on /// <reference path> and importTracker's
+        // per-reference membership probe. The membership gate in getSourceFile
+        // is the filesByName miss answer.
+        getSourceFileFromReference: (referencingFile: any, ref: any) =>
+            thinProgram.getSourceFile(ts.resolveTripleslashReference(ref.fileName, referencingFile?.fileName ?? "")),
+        // Go-computed include reasons (batch RPC, epoch-memoized): tsc
+        // --explainFiles, FAR on non-module files, module-specifier reuse all
+        // read this map. Referencing files get full SourceFiles from
+        // getSourceFileByPath once fetched (isIncludeReasonReferencingFile).
+        getFileIncludeReasons: () => getFileIncludeReasonsState().map,
+        // Vestigial: the cache backing JS-side module resolution. Resolution
+        // happens in Go; the only JS consumers (AutoImportProvider root
+        // discovery, module-specifier host) pass it to stock resolvers as an
+        // optional memo — undefined just recomputes. A JS cache here would be
+        // a second, diverging source of resolution truth.
         getModuleResolutionCache: () => undefined,
+        // Vestigial: thin file sets carry no project-reference redirects (the
+        // LS never redirects — stock Project.getRedirectFromSourceFile answers
+        // undefined too — and no thin SourceFile has redirectInfo), so the
+        // empty map is the truthful answer, not a degrading default.
         redirectTargetsMap: new Map(),
-        getGlobalTypingsCacheLocation: () => undefined,
+        // Stock: maybeBind(host, host.getGlobalTypingsCacheLocation) — plain
+        // host passthrough.
+        getGlobalTypingsCacheLocation: () => host?.getGlobalTypingsCacheLocation?.(),
         // ── Module format / resolution (delegated to tsgo program RPC) ──
         getCompilerOptionsForFile: (file: any) => optionsForFile(file),
         getImpliedNodeFormatForEmit: (file: any) => {
@@ -6328,36 +6539,117 @@ export function createTsgoProgram(
             if (!id || typeof pos !== "number") return undefined;
             try { return goProgram()?.getEmitSyntaxForUsageLocation?.(id, pos); } catch { return undefined; }
         },
-        // ── ModuleSpecifierResolutionHost / project metadata stubs ──
+        // ── ModuleSpecifierResolutionHost / project metadata ──
         useCaseSensitiveFileNames: () => host?.useCaseSensitiveFileNames?.() ?? false,
         fileExists: (fileName: string) => !!(host?.fileExists?.(fileName) ?? host?.fileExists?.(toHostFileName(fileName))),
+        // Stock: the updateHostForUseSourceOfProjectReferenceRedirect wrapper
+        // falls back to plain host passthrough when the program does not use
+        // source-of-project-reference redirects — the thin program never does,
+        // so host passthrough is stock's behavior verbatim.
         directoryExists: (path: string) => !!host?.directoryExists?.(path),
         readFile: (path: string) => host?.readFile?.(path),
+        // Stock binds host.realpath (leaving the property undefined when the
+        // host lacks one); every consumer applies its own `?? path`, so the
+        // identity default here is observationally identical.
         realpath: (path: string) => host?.realpath?.(path) ?? path,
-        getSymlinkCache: () => host?.getSymlinkCache?.(),
+        // Stock: the host cache wins; otherwise a per-program cache seeded from
+        // the program's resolutions. Seeding pulls the resolution batch
+        // (getProgramResolutions) on first use — non-Project hosts only.
+        getSymlinkCache: () => {
+            const fromHost = host?.getSymlinkCache?.();
+            if (fromHost) return fromHost;
+            symlinkCache ??= ts.createSymlinkCache(thinProgram.getCurrentDirectory(), thinProgram.getCanonicalFileName);
+            if (!symlinkCache.hasProcessedResolutions()) {
+                symlinkCache.setSymlinksFromResolutions(
+                    thinProgram.forEachResolvedModule,
+                    thinProgram.forEachResolvedTypeReferenceDirective,
+                    thinProgram.getAutomaticTypeDirectiveResolutions(),
+                );
+            }
+            return symlinkCache;
+        },
+        // Stock leaves these undefined on the program (the module-specifier
+        // host binds them from the LS host directly); delegating surfaces the
+        // same host caches instead of hiding them.
         getModuleSpecifierCache: () => host?.getModuleSpecifierCache?.(),
         getPackageJsonInfoCache: () => host?.getPackageJsonInfoCache?.(),
         getNearestAncestorDirectoryWithPackageJson: (fileName: string, rootDir?: string) =>
             host?.getNearestAncestorDirectoryWithPackageJson?.(fileName, rootDir),
         trace: (s: string) => { host?.trace?.(s); },
         getProjectReferences: () => options.projectReferences,
+        // Vestigial: project references are resolved by the tsgo session /
+        // build orchestrator; the JS program never holds stock
+        // ResolvedProjectReference objects. The one JS consumer that needed
+        // them (AutoImportProviderProject) synthesizes its own from
+        // hostProject.getParsedCommandLine, and Go's include-reason model has
+        // no redirect kinds, so --explainFiles never reaches the
+        // getResolvedProjectReferences branch of fileIncludeReasonToDiagnostics.
         getResolvedProjectReferences: () => undefined,
+        // Vestigial: thin file sets carry no redirects (see redirectTargetsMap
+        // above) — undefined/false are the truthful answers, and the LS
+        // redirect probes (documentHighlights, sourcemaps) behave as stock
+        // does for redirect-free programs.
         getRedirectFromSourceFile: () => undefined,
         getRedirectFromOutput: () => undefined,
         isSourceOfProjectReferenceRedirect: () => false,
-        isEmittedFile: () => false,
+        // Pure-JS port of stock Program.isEmittedFile: output-location logic
+        // over options + program membership. Consulted by the watch-mode
+        // resolutionCache invalidation path (isEmittedFileOfProgram).
+        isEmittedFile: (file: string) => {
+            if (options.noEmit) return false;
+            const filePath = canonicalSourceFilePath(resolveHostFileName(file, host));
+            // If this is source file, its not emitted file
+            if (thinProgram.getSourceFileByPath(filePath)) return false;
+            const out = options.outFile;
+            if (out) {
+                const outPath = canonicalSourceFilePath(resolveHostFileName(out, host));
+                const outDtsPath = canonicalSourceFilePath(resolveHostFileName(ts.removeFileExtension(out) + ts.Extension.Dts, host));
+                return filePath === outPath || filePath === outDtsPath;
+            }
+            const ignoreCase = !thinProgram.useCaseSensitiveFileNames();
+            const currentDirectory = thinProgram.getCurrentDirectory();
+            if (options.declarationDir && ts.containsPath(options.declarationDir, filePath, currentDirectory, ignoreCase)) {
+                return true;
+            }
+            if (options.outDir) {
+                return ts.containsPath(options.outDir, filePath, currentDirectory, ignoreCase);
+            }
+            if (ts.fileExtensionIsOneOf(filePath, ts.supportedJSExtensionsFlat) || ts.isDeclarationFileName(filePath)) {
+                const filePathWithoutExtension = ts.removeFileExtension(filePath);
+                return !!thinProgram.getSourceFileByPath(filePathWithoutExtension + ts.Extension.Ts)
+                    || !!thinProgram.getSourceFileByPath(filePathWithoutExtension + ts.Extension.Tsx);
+            }
+            return false;
+        },
+        // Vestigial: only consulted by the stock checker's module-not-found
+        // message elaboration (createModuleNotFoundChain); TNB diagnostics are
+        // Go-produced, so no TNB path reads the packages map.
         typesPackageExists: () => false,
         packageBundlesTypes: () => false,
-        getNodeCount: () => 0,
-        getIdentifierCount: () => 0,
-        getSymbolCount: () => 0,
-        getTypeCount: () => 0,
-        getInstantiationCount: () => 0,
-        getRelationCacheSizes: () => ({ assignable: 0, identity: 0, subtype: 0, strictSubtype: 0 }),
+        // Stock delegates the counters to the checker; so does the thin
+        // program — the tsgo checker adapter owns the (currently zero) values.
+        // tsc --diagnostics reads them off the program.
+        getNodeCount: () => checker.getNodeCount(),
+        getIdentifierCount: () => checker.getIdentifierCount(),
+        getSymbolCount: () => checker.getSymbolCount(),
+        getTypeCount: () => checker.getTypeCount(),
+        getInstantiationCount: () => checker.getInstantiationCount(),
+        getRelationCacheSizes: () => checker.getRelationCacheSizes(),
+        // Vestigial: TNB holds no JS-side bind/check diagnostic cache (Go owns
+        // diagnostics), so undefined is the truthful cache-miss answer — its
+        // one consumer (getRegionSemanticDiagnostics) treats it as "compute".
         getCachedSemanticDiagnostics: () => undefined,
-        getAutomaticTypeDirectiveNames: () => [],
+        // Go-computed names (rides the resolution batch): @types packages the
+        // program auto-included (options.types or typeRoots sweep).
+        getAutomaticTypeDirectiveNames: () => getProgramResolutions().automaticTypeDirectiveNames,
+        // Vestigial: the JS-side preprocessing diagnostic container is empty by
+        // construction — Go surfaces resolution/processing diagnostics through
+        // its own diagnostics RPCs (getProgramDiagnostics). No fork consumer.
         getFileProcessingDiagnostics: () => undefined,
-        getResolvedModule: () => undefined,
+        // Reads the lazily materialized resolution map (getProgramResolutions) —
+        // the same data stock's resolvedModules cache answers.
+        getResolvedModule: (file: any, moduleName: string, mode: any) =>
+            getProgramResolutions().modules.get(file?.path)?.get(moduleName, mode),
         // No resolution cache on the thin program; resolve through the checker
         // (tsgo RPC) so services' getReferenceAtPosition can produce stock's
         // file-start definition for module specifiers.
@@ -6378,21 +6670,35 @@ export function createTsgoProgram(
                 };
             } catch { return undefined; }
         },
-        getResolvedTypeReferenceDirective: () => undefined,
+        // Reads the lazily materialized type-reference resolution map.
+        getResolvedTypeReferenceDirective: (file: any, typeDirectiveName: string, mode: any) =>
+            getProgramResolutions().typeRefs.get(file?.path)?.get(typeDirectiveName, mode),
+        // Stock reads resolvedTypeReferenceDirectiveNames.get(file.path).get(
+        // name, ref.resolutionMode || getDefaultResolutionModeForFile(file)) —
+        // the same map the resolution batch materializes, so this answers with
+        // stock's full entry (packageId included).
         getResolvedTypeReferenceDirectiveFromTypeReferenceDirective: (ref: any, sourceFile: any) => {
             const name = ref?.fileName;
             if (typeof name !== "string" || !name) return undefined;
-            const referencingFileName = String(sourceFile?.fileName ?? "");
-            const key = referencingFileName + "\n" + name;
-            if (typeRefDirectiveResolutionCache.has(key)) return typeRefDirectiveResolutionCache.get(key);
-            const resolvedFileName = resolveTypeReferenceDirectiveInProgram(name, referencingFileName);
-            const result = resolvedFileName
-                ? { resolvedTypeReferenceDirective: { resolvedFileName, primary: true }, failedLookupLocations: [] }
-                : undefined;
-            typeRefDirectiveResolutionCache.set(key, result);
-            return result;
+            const mode = ref.resolutionMode ?? thinProgram.getDefaultResolutionModeForFile(sourceFile);
+            return getProgramResolutions().typeRefs.get(sourceFile?.path)?.get(name, mode);
         },
-        getLibFileFromReference: () => undefined,
+        // Stock resolves the lib reference through resolvedLibReferences
+        // (lib name → actual path). TNB libs always load from the fork's
+        // packageRoot/lib (noembed), so the actual path is that directory plus
+        // the lib file name — the same mapping the bundled-lib wire decode
+        // uses. Live path: goToDefinition on /// <reference lib="..."/>.
+        getLibFileFromReference: (ref: any) => {
+            const libFileName = ts.getLibFileNameFromLibReference(ref);
+            if (libFileName === undefined) return undefined;
+            const candidate = bundledLibPathToHostPath("bundled:///libs/" + libFileName);
+            // Membership-gated: a lib the program did not resolve (noLib, a
+            // custom lib directory) answers undefined like stock.
+            if (!programContainsFile(candidate)) return undefined;
+            return getOrCreateSourceFile(candidate);
+        },
+        // Vestigial: no JS-side ResolvedProjectReference objects exist (see
+        // getResolvedProjectReferences), so there is nothing to iterate.
         forEachResolvedProjectReference: () => undefined,
         getResolvedProjectReferenceByPath: () => undefined,
         // Stock container (config/file-processing diagnostics + common source
@@ -6401,13 +6707,34 @@ export function createTsgoProgram(
         // reuseStateFromOldProgram — give them the stock one per program
         // instance instead of throwing.
         getProgramDiagnosticsContainer: () => (diagnosticsContainer ??= ts.createProgramDiagnostics(() => undefined)),
+        // Vestigial: only feeds typesPackageExists/packageBundlesTypes (see
+        // above) — no TNB path reads the packages map.
         getCurrentPackagesMap: () => undefined,
         structureIsReused,
+        // Vestigial: stock populates this during JS module resolution and reads
+        // it back only from stock's structure-reuse path — neither runs for a
+        // tsgo-backed program.
         sourceFileToPackageName: new Map(),
-        resolvedModules: undefined,
-        resolvedTypeReferenceDirectiveNames: undefined,
+        // Lazily materialized from the Go resolution batch on first access
+        // (never at program creation — it is a whole-program dump). tsgo does
+        // not retain failed lookup locations; entries keep the stock shape
+        // with failedLookupLocations always empty.
+        get resolvedModules() {
+            return getProgramResolutions().modules;
+        },
+        get resolvedTypeReferenceDirectiveNames() {
+            return getProgramResolutions().typeRefs;
+        },
+        // Vestigial: stock's lib-resolution cache, read back only by stock's
+        // structure-reuse checks — tsgo owns program reuse.
+        // getLibFileFromReference resolves lib references directly (above).
         resolvedLibReferences: undefined,
-        usesUriStyleNodeCoreModules: undefined,
+        // Go-aggregated tristate (tiny RPC, epoch-memoized): whether depth-0
+        // non-declaration files use node:-prefixed core-module specifiers —
+        // the auto-import specifier-style fallback (shouldUseUriStyleNodeCoreModules).
+        get usesUriStyleNodeCoreModules() {
+            return getUsesUriStyleNodeCoreModules();
+        },
         writeFile: host?.writeFile?.bind(host) ?? (() => {}),
         // BuilderProgram support
         structureIsChanged: () => false,
@@ -6429,8 +6756,20 @@ export function createTsgoProgram(
                 }, /*moduleName*/ "");
             }
         },
-        forEachResolvedTypeReferenceDirective: (_callback: any) => {},
-        getAutomaticTypeDirectiveResolutions: () => new Map(),
+        // Stock forEachResolution over the lazily materialized type-reference
+        // map (Project.getSymlinkCache seeds from these).
+        forEachResolvedTypeReferenceDirective: (callback: any, file?: any) => {
+            const typeRefs = getProgramResolutions().typeRefs;
+            if (file) {
+                typeRefs.get(file.path)?.forEach((resolution: any, name: string, mode: any) => callback(resolution, name, mode, file.path));
+            }
+            else {
+                typeRefs.forEach((resolutions, filePath) => resolutions.forEach((resolution: any, name: string, mode: any) => callback(resolution, name, mode, filePath)));
+            }
+        },
+        // Mode-aware cache of the automatic (@types / types-list) directive
+        // resolutions, from the Go resolution batch.
+        getAutomaticTypeDirectiveResolutions: () => getProgramResolutions().automaticTypeDirectiveResolutions,
     };
 
     registerProgramContext(thinProgram, programCtx);
@@ -11870,7 +12209,10 @@ const _tnbCheckerCoverage = {
 
 // ── Program adapter coverage (compile-time guard) ──
 //   "adapter" — explicit thinProgram implementation with real/stock-parity behavior.
-//   "stub"    — intentional safe default (empty counters, undefined resolvers).
+//   "stub"    — audited vestigial: the state is tsgo-owned (or never populated
+//               on a tsgo-backed program) and no TNB JS path consults it. Every
+//               "stub" entry carries an inline justification below and a fuller
+//               comment at the implementation site.
 //   "throw"   — must not be called on supported paths; proxy throws if missing.
 type TnbProgramCoverage = "adapter" | "stub" | "throw";
 // eslint-disable-next-line @typescript-eslint/no-unused-vars
@@ -11881,17 +12223,21 @@ const _tnbProgramCoverage = {
     getCurrentDirectory: "adapter",
     getRootFileNames: "adapter",
     getSourceFiles: "adapter",
-    getMissingFilePaths: "stub",
+    getMissingFilePaths: "adapter",
+    // Vestigial: resolution happens in Go; JS consumers pass this only as an
+    // optional memo cache (undefined recomputes).
     getModuleResolutionCache: "stub",
+    // Vestigial: stock's creation-pipeline lookup; TNB file lookups go through
+    // getSourceFile(ByPath), and filling it would materialize every SourceFile.
     getFilesByNameMap: "stub",
-    resolvedModules: "stub",
-    resolvedTypeReferenceDirectiveNames: "stub",
-    getResolvedModule: "stub",
+    resolvedModules: "adapter",
+    resolvedTypeReferenceDirectiveNames: "adapter",
+    getResolvedModule: "adapter",
     getResolvedModuleFromModuleSpecifier: "adapter",
-    getResolvedTypeReferenceDirective: "stub",
+    getResolvedTypeReferenceDirective: "adapter",
     getResolvedTypeReferenceDirectiveFromTypeReferenceDirective: "adapter",
     forEachResolvedModule: "adapter",
-    forEachResolvedTypeReferenceDirective: "stub",
+    forEachResolvedTypeReferenceDirective: "adapter",
     emit: "adapter",
     getOptionsDiagnostics: "adapter",
     getGlobalDiagnostics: "adapter",
@@ -11904,17 +12250,21 @@ const _tnbProgramCoverage = {
     getProgramDiagnostics: "adapter",
     getTypeChecker: "adapter",
     getCommonSourceDirectory: "adapter",
+    // Vestigial: no JS-side bind/check diagnostic cache exists (Go owns
+    // diagnostics); undefined is the truthful cache-miss.
     getCachedSemanticDiagnostics: "stub",
-    getClassifiableNames: "stub",
-    getNodeCount: "stub",
-    getIdentifierCount: "stub",
-    getSymbolCount: "stub",
-    getTypeCount: "stub",
-    getInstantiationCount: "stub",
-    getRelationCacheSizes: "stub",
+    getClassifiableNames: "adapter",
+    getNodeCount: "adapter",
+    getIdentifierCount: "adapter",
+    getSymbolCount: "adapter",
+    getTypeCount: "adapter",
+    getInstantiationCount: "adapter",
+    getRelationCacheSizes: "adapter",
+    // Vestigial: Go surfaces processing diagnostics via its diagnostics RPCs;
+    // the JS preprocessing container is empty by construction.
     getFileProcessingDiagnostics: "stub",
-    getAutomaticTypeDirectiveNames: "stub",
-    getAutomaticTypeDirectiveResolutions: "stub",
+    getAutomaticTypeDirectiveNames: "adapter",
+    getAutomaticTypeDirectiveResolutions: "adapter",
     isSourceFileFromExternalLibrary: "adapter",
     isSourceFileDefaultLibrary: "adapter",
     getModeForUsageLocation: "adapter",
@@ -11924,40 +12274,53 @@ const _tnbProgramCoverage = {
     getEmitModuleFormatOfFile: "adapter",
     shouldTransformImportCall: "adapter",
     structureIsReused: "adapter",
-    getSourceFileFromReference: "stub",
-    getLibFileFromReference: "stub",
+    getSourceFileFromReference: "adapter",
+    getLibFileFromReference: "adapter",
+    // Vestigial: only stock's structure-reuse path reads it back.
     sourceFileToPackageName: "stub",
+    // Vestigial: thin file sets carry no redirects (LS never redirects, thin
+    // SourceFiles never carry redirectInfo) — empty is truthful.
     redirectTargetsMap: "stub",
-    usesUriStyleNodeCoreModules: "stub",
+    usesUriStyleNodeCoreModules: "adapter",
+    // Vestigial: stock's lib-resolution cache for structure reuse; tsgo owns
+    // reuse, and getLibFileFromReference resolves libs directly.
     resolvedLibReferences: "stub",
     getProgramDiagnosticsContainer: "adapter",
+    // Vestigial: only feeds typesPackageExists/packageBundlesTypes.
     getCurrentPackagesMap: "stub",
-    isEmittedFile: "stub",
-    getFileIncludeReasons: "stub",
+    isEmittedFile: "adapter",
+    getFileIncludeReasons: "adapter",
     useCaseSensitiveFileNames: "adapter",
     getCanonicalFileName: "adapter",
     getProjectReferences: "adapter",
+    // Vestigial: references are resolved by the tsgo session/build
+    // orchestrator; no JS-side ResolvedProjectReference objects exist (the
+    // AutoImportProvider synthesizes its own from the host project).
     getResolvedProjectReferences: "stub",
+    // Vestigial: no redirects in thin file sets (see redirectTargetsMap).
     getRedirectFromSourceFile: "stub",
+    // Vestigial: nothing to iterate while getResolvedProjectReferences is.
     forEachResolvedProjectReference: "stub",
     getResolvedProjectReferenceByPath: "stub",
     getRedirectFromOutput: "stub",
     isSourceOfProjectReferenceRedirect: "stub",
     getCompilerOptionsForFile: "adapter",
-    getBuildInfo: "stub",
+    getBuildInfo: "adapter",
     emitBuildInfo: "adapter",
     fileExists: "adapter",
-    directoryExists: "stub",
-    readFile: "stub",
-    realpath: "stub",
-    getSymlinkCache: "stub",
-    getModuleSpecifierCache: "stub",
-    getPackageJsonInfoCache: "stub",
-    getGlobalTypingsCacheLocation: "stub",
-    getNearestAncestorDirectoryWithPackageJson: "stub",
-    trace: "stub",
-    writeFile: "stub",
+    directoryExists: "adapter",
+    readFile: "adapter",
+    realpath: "adapter",
+    getSymlinkCache: "adapter",
+    getModuleSpecifierCache: "adapter",
+    getPackageJsonInfoCache: "adapter",
+    getGlobalTypingsCacheLocation: "adapter",
+    getNearestAncestorDirectoryWithPackageJson: "adapter",
+    trace: "adapter",
+    writeFile: "adapter",
     getEmitSyntaxForUsageLocation: "adapter",
+    // Vestigial: only the stock checker's module-not-found elaboration reads
+    // these; TNB diagnostics are Go-produced.
     typesPackageExists: "stub",
     packageBundlesTypes: "stub",
 } as const satisfies Record<keyof Program, TnbProgramCoverage>;

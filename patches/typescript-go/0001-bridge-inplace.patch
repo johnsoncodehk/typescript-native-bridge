@@ -443,7 +443,7 @@ index 1aba5087e..bd622023a 100644
      id: number;
      flags: number;
 diff --git a/_packages/native-preview/src/api/sync/types.ts b/_packages/native-preview/src/api/sync/types.ts
-index 658d07806..e6a23df64 100644
+index 658d07806..fdf13a1a0 100644
 --- a/_packages/native-preview/src/api/sync/types.ts
 +++ b/_packages/native-preview/src/api/sync/types.ts
 @@ -12,6 +12,7 @@ import type { ElementFlags } from "#enums/elementFlags";
@@ -454,7 +454,7 @@ index 658d07806..e6a23df64 100644
  import type {
      NodeHandle,
      Symbol,
-@@ -334,6 +335,134 @@ export interface CompletionInfo {
+@@ -334,6 +335,212 @@ export interface CompletionInfo {
      readonly entries: readonly CompletionEntry[];
  }
  
@@ -483,6 +483,84 @@ index 658d07806..e6a23df64 100644
 +    readonly affectsGlobalScope?: boolean;
 +    readonly impliedNodeFormat?: number;
 +    readonly refs?: readonly string[];
++}
++
++/** Stock PackageId field names, as carried by resolution/include-reason payloads. */
++export interface PackageIdWire {
++    readonly name: string;
++    readonly subModuleName?: string;
++    readonly version?: string;
++    readonly peerDependencies?: string;
++}
++
++/**
++ * One stock-shaped FileIncludeReason (stock FileIncludeKind numbering) from
++ * {@link Program.getFileIncludeReasons}. `file` is the referencing file for
++ * the referenced kinds; `index` addresses the referencing file's
++ * imports/referencedFiles/typeReferenceDirectives/libReferenceDirectives (or
++ * the root name / options.lib list for root/lib reasons).
++ */
++export interface FileIncludeReasonWire {
++    readonly kind: number;
++    readonly file?: string;
++    readonly index?: number;
++    readonly typeReference?: string;
++    readonly packageId?: PackageIdWire;
++}
++
++/** One included file paired with its include reasons. */
++export interface FileIncludeReasonsForFileWire {
++    readonly file: string;
++    readonly reasons: readonly FileIncludeReasonWire[];
++}
++
++/**
++ * One module resolution from {@link Program.getProgramResolutionInfo}.
++ * `mode` is the stock ResolutionMode (0 = none/undefined, 1 = CommonJS,
++ * 99 = ESNext). An empty `resolvedFileName` is an unresolved (failed)
++ * resolution — stock caches those too.
++ */
++export interface ModuleResolutionWire {
++    readonly moduleName: string;
++    readonly mode: number;
++    readonly resolvedFileName?: string;
++    readonly originalPath?: string;
++    readonly extension?: string;
++    readonly isExternalLibraryImport?: boolean;
++    readonly packageId?: PackageIdWire;
++    readonly resolvedUsingTsExtension?: boolean;
++    readonly alternateResult?: string;
++}
++
++/** One file's module resolution cache. */
++export interface FileModuleResolutionsWire {
++    readonly file: string;
++    readonly resolutions: readonly ModuleResolutionWire[];
++}
++
++/** One type-reference-directive resolution from {@link Program.getProgramResolutionInfo}. */
++export interface TypeRefResolutionWire {
++    readonly name: string;
++    readonly mode: number;
++    readonly resolvedFileName?: string;
++    readonly originalPath?: string;
++    readonly primary: boolean;
++    readonly isExternalLibraryImport?: boolean;
++    readonly packageId?: PackageIdWire;
++}
++
++/** One file's type-reference-directive resolution cache. */
++export interface FileTypeRefResolutionsWire {
++    readonly file: string;
++    readonly resolutions: readonly TypeRefResolutionWire[];
++}
++
++/** The program's full resolution state (see {@link Program.getProgramResolutionInfo}). */
++export interface ProgramResolutionInfoWire {
++    readonly modules: readonly FileModuleResolutionsWire[];
++    readonly typeReferenceDirectives: readonly FileTypeRefResolutionsWire[];
++    readonly automaticTypeDirectiveNames: readonly string[];
++    readonly automaticTypeDirectiveResolutions: readonly TypeRefResolutionWire[];
 +}
 +
 +/**
@@ -1566,7 +1644,7 @@ index 12b9d4079..a8ec576ae 100644
  	if symbol.Flags&ast.SymbolFlagsTransient != 0 {
  		if c.spreadLinks.Has(symbol) {
 diff --git a/internal/compiler/fileloader.go b/internal/compiler/fileloader.go
-index f8d006e92..f955c8f53 100644
+index f8d006e92..3390c5b57 100644
 --- a/internal/compiler/fileloader.go
 +++ b/internal/compiler/fileloader.go
 @@ -125,7 +125,7 @@ func processAllProgramFiles(
@@ -1596,7 +1674,49 @@ index f8d006e92..f955c8f53 100644
  	if opts.Tracing != nil {
  		defer opts.Tracing.Push(tracing.PhaseProgram, "processRootFiles", map[string]any{"count": len(rootFiles)}, false)()
  	}
-@@ -590,8 +601,13 @@ func (p *fileLoader) resolveImportsAndModuleAugmentations(t *parseTask) {
+@@ -431,7 +442,7 @@ func (p *fileLoader) getSourceFileFromReference(
+ 	return "", &sourceFileFromReferenceDiagnostic{message: diagnostics.Could_not_resolve_the_path_0_with_the_extensions_Colon_1, args: []any{diagnosticFileName, "'" + strings.Join(core.Flatten(p.supportedExtensions), "', '") + "'"}}
+ }
+ 
+-func (p *fileLoader) resolveTripleslashPathReference(moduleName string, containingFile string, index int) (*resolvedRef, *processingDiagnostic) {
++func (p *fileLoader) resolveTripleslashPathReference(moduleName string, containingFile string, index int) (*resolvedRef, *processingDiagnostic, string) {
+ 	basePath := tspath.GetDirectoryPath(containingFile)
+ 	referencedFileName := moduleName
+ 
+@@ -454,6 +465,16 @@ func (p *fileLoader) resolveTripleslashPathReference(moduleName string, containi
+ 		includeReason,
+ 	)
+ 	if diagnostic != nil {
++		// Stock tracks referenced-but-not-found files in
++		// Program.missingFilePaths (the watch layer installs watchers that
++		// re-probe them). Report the attempted path so the caller can do the
++		// same — only true not-found failures; unsupported extensions and
++		// self-references are not missing files.
++		var missingPath string
++		if diagnostic.message == diagnostics.File_0_not_found ||
++			diagnostic.message == diagnostics.Could_not_resolve_the_path_0_with_the_extensions_Colon_1 {
++			missingPath = normalizedFileName
++		}
+ 		return nil, &processingDiagnostic{
+ 			kind: processingDiagnosticKindExplainingFileInclude,
+ 			data: &includeExplainingDiagnostic{
+@@ -461,13 +482,13 @@ func (p *fileLoader) resolveTripleslashPathReference(moduleName string, containi
+ 				message:          diagnostic.message,
+ 				args:             diagnostic.args,
+ 			},
+-		}
++		}, missingPath
+ 	}
+ 
+ 	return &resolvedRef{
+ 		fileName:      resolvedFileName,
+ 		includeReason: includeReason,
+-	}, nil
++	}, nil, ""
+ }
+ 
+ func (p *fileLoader) resolveTypeReferenceDirectives(t *parseTask) {
+@@ -590,8 +611,13 @@ func (p *fileLoader) resolveImportsAndModuleAugmentations(t *parseTask) {
  
  			resolvedFileName := resolvedModule.ResolvedFileName
  			isFromNodeModulesSearch := resolvedModule.IsExternalLibraryImport
@@ -1612,6 +1732,43 @@ index f8d006e92..f955c8f53 100644
  			isJsFileFromNodeModules := isFromNodeModulesSearch && isJsFile && strings.Contains(resolvedFileName, "/node_modules/")
  
  			// add file to program only if:
+diff --git a/internal/compiler/filesparser.go b/internal/compiler/filesparser.go
+index 5817fc6bb..2fc0c2b4e 100644
+--- a/internal/compiler/filesparser.go
++++ b/internal/compiler/filesparser.go
+@@ -36,6 +36,9 @@ type parseTask struct {
+ 	typeResolutionsTrace         []module.DiagAndArgs
+ 	resolutionDiagnostics        []*ast.Diagnostic
+ 	processingDiagnostics        []*processingDiagnostic
++	// missingFiles records triple-slash path references that resolved to
++	// nothing on disk (stock Program.missingFilePaths parity).
++	missingFiles                 []string
+ 	importHelpersImportSpecifier *ast.StringLiteralNode
+ 	jsxRuntimeImportSpecifier    *jsxRuntimeImportSpecifier
+ 
+@@ -120,9 +123,12 @@ func (t *parseTask) load(loader *fileLoader) {
+ 	compilerOptions := loader.opts.Config.CompilerOptions()
+ 	if !compilerOptions.NoResolve.IsTrue() {
+ 		for index, ref := range file.ReferencedFiles {
+-			resolvedRef, processingDiagnostic := loader.resolveTripleslashPathReference(ref.FileName, file.FileName(), index)
++			resolvedRef, processingDiagnostic, missingPath := loader.resolveTripleslashPathReference(ref.FileName, file.FileName(), index)
+ 			if processingDiagnostic != nil {
+ 				t.processingDiagnostics = append(t.processingDiagnostics, processingDiagnostic)
++				if missingPath != "" {
++					t.missingFiles = append(t.missingFiles, missingPath)
++				}
+ 				continue
+ 			}
+ 			t.addSubTask(*resolvedRef, nil)
+@@ -478,6 +484,8 @@ func (w *filesParser) getProcessedFiles(loader *fileLoader) processedFiles {
+ 				includeProcessor.processingDiagnostics = append(includeProcessor.processingDiagnostics, task.processingDiagnostics...)
+ 			}
+ 
++			missingFiles = append(missingFiles, task.missingFiles...)
++
+ 			if file == nil {
+ 				missingFiles = append(missingFiles, task.normalizedFilePath)
+ 				continue
 diff --git a/internal/compiler/program.go b/internal/compiler/program.go
 index 74b2504d9..b3b598571 100644
 --- a/internal/compiler/program.go
@@ -2090,7 +2247,7 @@ index a5992fa73..ddc807e95 100644
  		for current := node; current != nil; current = ast.GetNextJSDocCommentLocation(current) {
  			jsdocs := current.JSDoc(nil)
 diff --git a/internal/module/resolver.go b/internal/module/resolver.go
-index 52400dc2b..5dde0f5a1 100644
+index 52400dc2b..10546290b 100644
 --- a/internal/module/resolver.go
 +++ b/internal/module/resolver.go
 @@ -158,9 +158,30 @@ type Resolver struct {
@@ -2124,7 +2281,22 @@ index 52400dc2b..5dde0f5a1 100644
  type ResolverOptions struct {
  	PackageJsonCache *packagejson.InfoCache
  }
-@@ -1558,11 +1579,27 @@ func (r *resolutionState) tryAddingExtensions(extensionless string, extensions e
+@@ -1195,6 +1216,14 @@ func (r *resolutionState) createResolvedTypeReferenceDirective(resolved *resolve
+ 		resolvedTypeReferenceDirective.ResolvedFileName = resolved.path
+ 		resolvedTypeReferenceDirective.Primary = primary
+ 		resolvedTypeReferenceDirective.PackageId = resolved.packageId
++		// Stock stamps PackageId on every package-backed resolution; the
++		// typeRoot (@types) primary lookup above never fills it, so
++		// explainFiles / ATA messages lost stock's "with packageId" suffix.
++		if resolvedTypeReferenceDirective.PackageId.Name == "" {
++			if packageDirectory := ParseNodeModuleFromPath(resolved.path, false); packageDirectory != "" {
++				resolvedTypeReferenceDirective.PackageId = r.getPackageId(resolved.path, r.getPackageJsonInfo(packageDirectory))
++			}
++		}
+ 		resolvedTypeReferenceDirective.IsExternalLibraryImport = strings.Contains(resolved.path, "/node_modules/")
+ 
+ 		if r.compilerOptions.PreserveSymlinks != core.TSTrue {
+@@ -1558,11 +1587,27 @@ func (r *resolutionState) tryAddingExtensions(extensionless string, extensions e
  		}
  		return continueSearching()
  	default:
