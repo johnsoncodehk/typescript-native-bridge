@@ -57,7 +57,11 @@ if (!program || !dependencySourceFile) {
 	throw new Error(`dependency source file was not loaded into the program: ${JSON.stringify(program?.getSourceFileNames?.())}`);
 }
 
-const defaultLibFile = program.getSourceFile(ts.getDefaultLibFilePath(options));
+// Locate the default lib from the program's own file list: ts.getDefaultLibFilePath
+// resolves through the typescript.js realpath, but the program registers libs
+// under the TNB_LIB_PATH form — the two diverge in CI's symlinked layout.
+const defaultLibName = program.getSourceFileNames().find(n => /\/lib\.es\d+\.d\.ts$/.test(n));
+const defaultLibFile = defaultLibName && program.getSourceFile(defaultLibName);
 if (!defaultLibFile || !program.isSourceFileDefaultLibrary(defaultLibFile)) {
 	throw new Error('the bundled lib.d.ts was not recognized as a default library');
 }

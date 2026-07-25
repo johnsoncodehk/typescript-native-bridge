@@ -177,7 +177,7 @@ jobs:
               # failure keys (run 30062511367 misread this way): on failure,
               # surface diff lines with their stock/tnb context.
               echo "=== witness group $j (failure lines) ==="
-              grep -E -A2 "^DIFF |^FAIL |VERDICT: FAIL|FAILURES \(" "/tmp/tnb-wg$j.log" || true
+              grep -E -A2 "^DIFF |^FAIL |VERDICT: FAIL|FAILURES \(|verdict=DIFF" "/tmp/tnb-wg$j.log" || true
             fi
           done
           exit $rc
