@@ -160,6 +160,7 @@ type arenaReq struct{ a *arena }
 func (r arenaReq) u64(off int) uint64 { return binary.LittleEndian.Uint64(r.a.buf[off:]) }
 func (r arenaReq) u32(off int) uint32 { return binary.LittleEndian.Uint32(r.a.buf[off:]) }
 func (r arenaReq) i32(off int) int32  { return int32(r.u32(off)) }
+func (r arenaReq) u8(off int) uint32  { return uint32(r.a.buf[off]) }
 func (r arenaReq) str(off int) string {
 	o, n := r.u32(off), r.u32(off+4)
 	if n == 0 {
@@ -175,6 +176,20 @@ func (r arenaReq) nodeHandle(off int) string {
 	kind := r.u32(off + 4)
 	path := r.str(off + 8)
 	return fmt.Sprintf("%d.%d.%s", idx, kind, path)
+}
+
+// symbolIDs decodes a (ptr,count) array of u64 symbol ids at off.
+func (r arenaReq) symbolIDs(off int) []SymbolID {
+	count := r.u32(off + 4)
+	if count == 0 {
+		return nil
+	}
+	p := r.u32(off)
+	ids := make([]SymbolID, count)
+	for i := range ids {
+		ids[i] = SymbolID(r.u64(int(p) + 8*i))
+	}
+	return ids
 }
 
 // ── Response framing ─────────────────────────────────────────────────────
@@ -391,7 +406,11 @@ func (a *arena) encodeTypeResponse(r *TypeResponse) {
 
 // encodeSymbolResponse writes a SymbolResponse record (72 bytes fixed).
 func (a *arena) encodeSymbolResponse(r *SymbolResponse) {
-	off := a.rec(72)
+	a.encodeSymbolResponseAt(a.rec(72), r)
+}
+
+// encodeSymbolResponseAt writes a SymbolResponse record at off (pack region).
+func (a *arena) encodeSymbolResponseAt(off int, r *SymbolResponse) {
 	a.u64(off+0, uint64(r.Id))
 	a.u32(off+8, a.str(string(r.Project)))
 	a.u32(off+12, a.str(r.Name))
@@ -648,4 +667,386 @@ func (a *arena) encodeDefinitionAndBoundSpanResponse(r *DefinitionAndBoundSpanRe
 			a.encodeDefinitionInfoResponse(p+definitionRecordSize*i, d)
 		}
 	}
+}
+
+const jsdocTagRecordSize = 8
+
+const ambientModuleRecordSize = 40
+
+// encodeJSDocTag writes a JSDocTagInfo record ({name strId, text strId}, 8 bytes).
+func (a *arena) encodeJSDocTag(t *JSDocTagInfo) {
+	off := a.rec(jsdocTagRecordSize)
+	a.u32(off+0, a.str(t.Name))
+	a.u32(off+4, a.str(t.Text))
+}
+
+// zeroSymbolRecord zeroes one 72-byte symbol slot (a nil element in a symbols run
+// reads back as JS null — getSymbolsDeclarations/getParentsOfSymbols holes).
+func (a *arena) zeroSymbolRecord(off int) {
+	for i := 0; i < 72; i += 4 {
+		a.u32(off+i, 0)
+	}
+}
+
+// encodeLightSymbol writes a LightSymbolResponse record (32 bytes fixed).
+func (a *arena) encodeLightSymbol(off int, s *LightSymbolResponse) {
+	if s == nil {
+		for i := 0; i < 32; i += 4 {
+			a.u32(off+i, 0)
+		}
+		return
+	}
+	a.u64(off+0, uint64(s.Id))
+	a.u32(off+8, a.str(string(s.Project)))
+	a.u32(off+12, a.str(s.Name))
+	a.u32(off+16, s.Flags)
+	a.u32(off+20, s.CheckFlags)
+	a.u64(off+24, uint64(s.Parent))
+}
+
+// encodeAmbientModule writes an AmbientModuleResponse record (40 bytes:
+// moduleName strId, pad, inline 32-byte light symbol).
+func (a *arena) encodeAmbientModule(off int, m *AmbientModuleResponse) {
+	a.u32(off+0, a.str(m.ModuleName))
+	a.u32(off+4, 0)
+	a.encodeLightSymbol(off+8, m.ModuleSymbol)
+}
+
+// encodeAmbientModulesResponse writes an AmbientModulesResponse as a single
+// 8-byte record {modules ptr, modules count} with 40-byte module records packed.
+func (a *arena) encodeAmbientModulesResponse(r *AmbientModulesResponse) {
+	off := a.rec(8)
+	a.u32(off+0, 0)
+	a.u32(off+4, uint32(len(r.Modules)))
+	if len(r.Modules) > 0 {
+		p := a.pack(ambientModuleRecordSize * len(r.Modules))
+		a.u32(off+0, uint32(p))
+		for i, m := range r.Modules {
+			a.encodeAmbientModule(p+ambientModuleRecordSize*i, m)
+		}
+	}
+}
+
+// encodeExpandedParameters writes a [][]SymbolID as an outer (ptr,count) array
+// of inner (ptr,count) u64 runs (the getExpandedParameters result).
+func (a *arena) encodeExpandedParameters(v [][]SymbolID) {
+	off := a.rec(8)
+	a.u32(off+0, 0)
+	a.u32(off+4, uint32(len(v)))
+	if len(v) == 0 {
+		a.finish(arenaKindRecord)
+		return
+	}
+	// Like records(): the pack region starts after all fixed records.
+	a.packOff = a.recOff
+	p := a.pack(8 * len(v))
+	a.u32(off+0, uint32(p))
+	for i, inner := range v {
+		a.u32(p+8*i, 0)
+		a.u32(p+8*i+4, uint32(len(inner)))
+		if len(inner) > 0 {
+			q := a.pack(8 * len(inner))
+			a.u32(p+8*i, uint32(q))
+			for j, id := range inner {
+				a.u64(q+8*j, uint64(id))
+			}
+		}
+	}
+	a.finish(arenaKindRecord)
+}
+
+// ── Completions (issue #12) ───────────────────────────────────────────────
+
+const (
+	completionInfoRecordSize  = 32
+	completionEntryRecordSize = 88
+)
+
+// encodeCompletionEntry writes a CompletionEntryResponse record (88 bytes fixed).
+func (a *arena) encodeCompletionEntry(off int, r *CompletionEntryResponse) {
+	a.u32(off+0, a.str(r.Name))
+	a.u32(off+4, a.str(r.ElementKind))
+	a.u32(off+8, a.str(r.KindModifiers))
+	a.u32(off+12, a.str(strVal(r.SortText)))
+	a.u32(off+16, a.str(strVal(r.InsertText)))
+	a.u32(off+20, a.str(strVal(r.FilterText)))
+	a.u32(off+24, a.str(r.Source))
+	a.u32(off+28, a.str(strVal(r.Detail)))
+	var ldDetail, ldDesc string
+	if r.LabelDetails != nil {
+		ldDetail = strVal(r.LabelDetails.Detail)
+		ldDesc = strVal(r.LabelDetails.Description)
+	}
+	a.u32(off+32, a.str(ldDetail))
+	a.u32(off+36, a.str(ldDesc))
+	var repStart, repLen uint32
+	if r.ReplacementStart != nil {
+		repStart = *r.ReplacementStart
+	}
+	if r.ReplacementLength != nil {
+		repLen = *r.ReplacementLength
+	}
+	a.u32(off+40, repStart)
+	a.u32(off+44, repLen)
+	a.strArray(off+48, r.CommitCharacters)
+	a.u32(off+56, 0)
+	if r.Symbol != nil {
+		p := a.pack(72)
+		a.u32(off+56, uint32(p))
+		a.encodeSymbolResponseAt(p, r.Symbol)
+	}
+	a.u32(off+60, r.Kind)
+	var flags byte
+	if r.HasAction != nil && *r.HasAction {
+		flags |= 1
+	}
+	if r.IsRecommended != nil && *r.IsRecommended {
+		flags |= 2
+	}
+	if r.ReplacementStart != nil {
+		flags |= 4
+	}
+	if r.LabelDetails != nil {
+		flags |= 8
+	}
+	if r.Symbol != nil {
+		flags |= 16
+	}
+	var dataExportName, dataFileName, dataModuleSpecifier string
+	if r.Data != nil {
+		flags |= 32
+		dataExportName = r.Data.ExportName
+		dataFileName = r.Data.FileName
+		dataModuleSpecifier = r.Data.ModuleSpecifier
+	}
+	if r.IsPackageJsonImport != nil && *r.IsPackageJsonImport {
+		flags |= 64
+	}
+	a.b(off+64, flags)
+	a.b(off+65, 0)
+	a.b(off+66, 0)
+	a.b(off+67, 0)
+	a.u32(off+68, a.str(dataModuleSpecifier))
+	a.u32(off+72, a.str(dataExportName))
+	a.u32(off+76, a.str(dataFileName))
+	a.displayParts(off+80, r.SourceDisplay)
+	// offset map (u32 unless noted):
+	//   0 name / 4 elementKind / 8 kindModifiers / 12 sortText / 16 insertText
+	//   20 filterText / 24 source / 28 detail / 32 labelDetail.detail
+	//   36 labelDetail.description / 40 replacementStart / 44 replacementLength
+	//   48 commitCharacters (ptr,count) / 56 symbolPtr / 60 kindU32 / 64 flags u8
+	//   65-67 pad / 68 dataModuleSpecifier / 72 dataExportName / 76 dataFileName
+	//   80 sourceDisplay (ptr,count of {text,kind} records)
+}
+
+// encodeCompletionsResponse writes a CompletionInfoResponse record (32 bytes).
+func (a *arena) encodeCompletionsResponse(r *CompletionInfoResponse) {
+	off := a.rec(completionInfoRecordSize)
+	var f1, f2 byte
+	if r.IsGlobalCompletion {
+		f1 |= 1
+	}
+	if r.IsMemberCompletion {
+		f1 |= 2
+	}
+	if r.IsNewIdentifierLocation {
+		f1 |= 4
+	}
+	if r.IsIncomplete {
+		f1 |= 8
+	}
+	if r.Flags != nil {
+		f2 |= 1
+	}
+	if r.OptionalSpanStart != nil {
+		f2 |= 2
+	}
+	if r.DefaultCommitCharacters != nil {
+		f2 |= 4
+	}
+	a.b(off+0, f1)
+	a.b(off+1, f2)
+	a.b(off+2, 0)
+	a.b(off+3, 0)
+	var flagsField, spanStart, spanLen uint32
+	if r.Flags != nil {
+		flagsField = *r.Flags
+	}
+	if r.OptionalSpanStart != nil {
+		spanStart = *r.OptionalSpanStart
+	}
+	if r.OptionalSpanLength != nil {
+		spanLen = *r.OptionalSpanLength
+	}
+	a.u32(off+4, flagsField)
+	a.u32(off+8, spanStart)
+	a.u32(off+12, spanLen)
+	a.strArray(off+16, r.DefaultCommitCharacters)
+	a.u32(off+24, 0)
+	a.u32(off+28, uint32(len(r.Entries)))
+	if len(r.Entries) > 0 {
+		p := a.pack(completionEntryRecordSize * len(r.Entries))
+		a.u32(off+24, uint32(p))
+		for i, e := range r.Entries {
+			a.encodeCompletionEntry(p+completionEntryRecordSize*i, e)
+		}
+	}
+	// offset map: 0-1 flags / 2-3 pad / 4 flagsField / 8 optionalSpanStart
+	//   12 optionalSpanLength / 16 defaultCommitCharacters (ptr,count) / 24 entries (ptr,count)
+}
+
+// strVal dereferences an optional string ("" when nil).
+func strVal(s *string) string {
+	if s == nil {
+		return ""
+	}
+	return *s
+}
+
+// ── SignatureHelp (issue #12 batch 2) ─────────────────────────────────────
+
+const (
+	signatureHelpItemRecordSize      = 52
+	signatureHelpParameterRecordSize = 24
+	signatureHelpTopRecordSize       = 28
+)
+
+// encodeSignatureHelpParameter writes a SignatureHelpParameterResponse record
+// (24 bytes: name strId, documentation (ptr,count), displayParts (ptr,count), flags).
+func (a *arena) encodeSignatureHelpParameter(off int, p *SignatureHelpParameterResponse) {
+	a.u32(off+0, a.str(p.Name))
+	a.displayParts(off+4, p.Documentation)
+	a.displayParts(off+12, p.DisplayParts)
+	var flags byte
+	if p.IsOptional {
+		flags |= 1
+	}
+	if p.IsRest {
+		flags |= 2
+	}
+	a.b(off+20, flags)
+	a.b(off+21, 0)
+	a.b(off+22, 0)
+	a.b(off+23, 0)
+}
+
+// encodeSignatureHelpItem writes a SignatureHelpItemResponse record (48 bytes).
+func (a *arena) encodeSignatureHelpItem(off int, r *SignatureHelpItemResponse) {
+	a.displayParts(off+0, r.Prefix)
+	a.displayParts(off+8, r.Suffix)
+	a.displayParts(off+16, r.Separator)
+	a.u32(off+24, 0)
+	a.u32(off+28, uint32(len(r.Parameters)))
+	if len(r.Parameters) > 0 {
+		p := a.pack(signatureHelpParameterRecordSize * len(r.Parameters))
+		a.u32(off+24, uint32(p))
+		for i, param := range r.Parameters {
+			a.encodeSignatureHelpParameter(p+signatureHelpParameterRecordSize*i, param)
+		}
+	}
+	a.displayParts(off+32, r.Documentation)
+	a.u32(off+40, 0)
+	a.u32(off+44, uint32(len(r.Tags)))
+	if len(r.Tags) > 0 {
+		p := a.pack(tagRecordSize * len(r.Tags))
+		a.u32(off+40, uint32(p))
+		for i, t := range r.Tags {
+			a.u32(p+tagRecordSize*i, a.str(t.Name))
+			a.displayParts(p+tagRecordSize*i+4, t.Text)
+		}
+	}
+	var flags byte
+	if r.IsVariadic {
+		flags |= 1
+	}
+	a.b(off+48, flags)
+	a.b(off+49, 0)
+	a.b(off+50, 0)
+	a.b(off+51, 0)
+	// offset map: 0 prefix / 8 suffix / 16 separator (each (ptr,count))
+	//   24 parameters (ptr,count) / 32 documentation (ptr,count) / 40 tags (ptr,count)
+	//   48 flags u8 / 49-51 pad
+}
+
+// encodeSignatureHelpItemsResponse writes a SignatureHelpItemsResponse record (28 bytes).
+func (a *arena) encodeSignatureHelpItemsResponse(r *SignatureHelpItemsResponse) {
+	off := a.rec(signatureHelpTopRecordSize)
+	a.u32(off+0, r.ApplicableSpan.Start)
+	a.u32(off+4, r.ApplicableSpan.Length)
+	a.u32(off+8, r.SelectedItemIndex)
+	a.u32(off+12, r.ArgumentIndex)
+	a.u32(off+16, r.ArgumentCount)
+	a.u32(off+20, 0)
+	a.u32(off+24, uint32(len(r.Items)))
+	if len(r.Items) > 0 {
+		p := a.pack(signatureHelpItemRecordSize * len(r.Items))
+		a.u32(off+20, uint32(p))
+		for i, item := range r.Items {
+			a.encodeSignatureHelpItem(p+signatureHelpItemRecordSize*i, item)
+		}
+	}
+}
+
+// ── Rename (issue #12 batch 2) ────────────────────────────────────────────
+
+const (
+	renameInfoRecordSize     = 36
+	renameLocationRecordSize = 32
+)
+
+// encodeRenameInfoResponse writes a RenameInfoResponse record (36 bytes).
+func (a *arena) encodeRenameInfoResponse(r *RenameInfoResponse) {
+	off := a.rec(renameInfoRecordSize)
+	var flags byte
+	if r.CanRename {
+		flags |= 1
+	}
+	if r.KindModifiers != nil {
+		flags |= 2
+	}
+	a.b(off+0, flags)
+	a.b(off+1, 0)
+	a.b(off+2, 0)
+	a.b(off+3, 0)
+	a.u32(off+4, a.str(r.FileToRename))
+	a.u32(off+8, a.str(r.DisplayName))
+	a.u32(off+12, a.str(r.FullDisplayName))
+	a.u32(off+16, a.str(r.Kind))
+	a.u32(off+20, a.str(strVal(r.KindModifiers)))
+	var spanStart, spanLen uint32
+	if r.TriggerSpan != nil {
+		spanStart = r.TriggerSpan.Start
+		spanLen = r.TriggerSpan.Length
+	}
+	a.u32(off+24, spanStart)
+	a.u32(off+28, spanLen)
+	a.u32(off+32, a.str(r.LocalizedErrorMessage))
+	// offset map: 0 flags / 4 fileToRename / 8 displayName / 12 fullDisplayName
+	//   16 kind / 20 kindModifiers / 24 triggerSpanStart / 28 triggerSpanLength / 32 localizedErrorMessage
+}
+
+// encodeRenameLocationResponse writes a RenameLocationResponse record (32 bytes).
+func (a *arena) encodeRenameLocationResponse(off int, r *RenameLocationResponse) {
+	a.u32(off+0, a.str(r.FileName))
+	a.u32(off+4, r.Start)
+	a.u32(off+8, r.Length)
+	var contextStart, contextLength uint32
+	if r.ContextStart != nil {
+		contextStart = *r.ContextStart
+	}
+	if r.ContextLength != nil {
+		contextLength = *r.ContextLength
+	}
+	a.u32(off+12, contextStart)
+	a.u32(off+16, contextLength)
+	a.u32(off+20, a.str(r.PrefixText))
+	a.u32(off+24, a.str(r.SuffixText))
+	var flags byte
+	if r.ContextStart != nil {
+		flags |= 1
+	}
+	a.b(off+28, flags)
+	a.b(off+29, 0)
+	a.b(off+30, 0)
+	a.b(off+31, 0)
 }

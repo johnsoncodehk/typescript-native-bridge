@@ -14,8 +14,11 @@ import (
 	"github.com/microsoft/typescript-go/internal/astnav"
 	"github.com/microsoft/typescript-go/internal/checker"
 	"github.com/microsoft/typescript-go/internal/core"
+	"github.com/microsoft/typescript-go/internal/locale"
 	"github.com/microsoft/typescript-go/internal/ls/lsutil"
 	"github.com/microsoft/typescript-go/internal/lsp/lsproto"
+	"github.com/microsoft/typescript-go/internal/nodebuilder"
+	"github.com/microsoft/typescript-go/internal/printer"
 	"github.com/microsoft/typescript-go/internal/scanner"
 	"github.com/microsoft/typescript-go/internal/tspath"
 )
@@ -90,6 +93,19 @@ type ReferencedSymbolPayload struct {
 type DefinitionAndBoundSpanPayload struct {
 	Definitions []*DefinitionInfoPayload
 	TextSpan    core.TextRange
+}
+
+// ScriptElementKindString maps lsutil kinds to Strada's ScriptElementKind
+// strings (exported for the api package; never map by index — lsutil's iota
+// order diverges from Strada's declaration order at JsxAttribute).
+func ScriptElementKindString(kind lsutil.ScriptElementKind) string {
+	return scriptElementKindString(kind)
+}
+
+// ScriptElementKindModifiersText renders a symbol's kindModifiers in Strada's
+// SymbolDisplay.getSymbolModifiers order (exported for the api package).
+func ScriptElementKindModifiersText(c *checker.Checker, symbol *ast.Symbol) string {
+	return lsutil.GetSymbolModifiersText(c, symbol)
 }
 
 // scriptElementKindString maps lsutil kinds to Strada's ScriptElementKind strings.
@@ -176,37 +192,14 @@ func scriptElementKindString(kind lsutil.ScriptElementKind) string {
 	}
 }
 
-// symbolModifiersString mirrors Strada's getSymbolModifiers: joined in stock's
-// getNodeModifiers emission order (private, protected, public, static, abstract,
-// export, deprecated, ambient, then optional last), NOT lsutil's table order.
+// symbolModifiersString mirrors Strada's getSymbolModifiers: first-declaration
+// modifiers, then the alias target's, insertion-deduped (order is observable:
+// "export,declare" direct, "declare,export" ambient alias).
 func symbolModifiersString(c *checker.Checker, symbol *ast.Symbol) string {
 	if symbol == nil {
 		return ""
 	}
-	m := lsutil.GetSymbolModifiers(c, symbol)
-	var out []string
-	add := func(flag lsutil.ScriptElementKindModifier, name string) {
-		if m&flag != 0 {
-			out = append(out, name)
-		}
-	}
-	add(lsutil.ScriptElementKindModifierPrivate, "private")
-	add(lsutil.ScriptElementKindModifierProtected, "protected")
-	add(lsutil.ScriptElementKindModifierPublic, "public")
-	add(lsutil.ScriptElementKindModifierStatic, "static")
-	add(lsutil.ScriptElementKindModifierAbstract, "abstract")
-	add(lsutil.ScriptElementKindModifierExported, "export")
-	add(lsutil.ScriptElementKindModifierDeprecated, "deprecated")
-	add(lsutil.ScriptElementKindModifierAmbient, "declare")
-	add(lsutil.ScriptElementKindModifierOptional, "optional")
-	if len(out) == 0 {
-		return ""
-	}
-	result := out[0]
-	for _, s := range out[1:] {
-		result += "," + s
-	}
-	return result
+	return lsutil.GetSymbolModifiersText(c, symbol)
 }
 
 // docParts joins per-declaration documentation strings the way Strada's
@@ -578,6 +571,10 @@ func classificationToPartKind(c lsproto.ClassificationTypeName) string {
 		return "punctuation"
 	case lsproto.ClassificationTypeNameWhiteSpace:
 		return "space"
+	case lsproto.ClassificationTypeNameIdentifier:
+		// classificationForSymbol only emits Identifier for TypeAlias/Alias
+		// symbols — Strada maps both to aliasName.
+		return "aliasName"
 	default:
 		return "text"
 	}
@@ -985,4 +982,521 @@ func (l *LanguageService) createDefinitionInfoFromName(c *checker.Checker, decla
 		Unverified:            unverified,
 		FailedAliasResolution: failedAliasResolution,
 	}
+}
+
+// ── SignatureHelp (issue #12 batch 2) ─────────────────────────────────────
+// Stock SignatureHelpItems computed Go-side (services/signatureHelp.ts shape):
+// items with prefix/suffix/separator display parts, parameters with classified
+// display parts, documentation and JSDoc tags.
+
+// SignatureHelpPayload mirrors Strada's SignatureHelpItems.
+type SignatureHelpPayload struct {
+	Items            []*SignatureHelpItemPayload
+	ApplicableSpan   core.TextRange
+	SelectedItemIndex uint32
+	ArgumentIndex    uint32
+	ArgumentCount    uint32
+}
+
+// SignatureHelpItemPayload mirrors Strada's SignatureHelpItem.
+type SignatureHelpItemPayload struct {
+	IsVariadic    bool
+	Prefix        []DisplayPart
+	Suffix        []DisplayPart
+	Separator     []DisplayPart
+	Parameters    []*SignatureHelpParameterPayload
+	Documentation []DisplayPart
+	Tags          []JSDocTagPayload
+}
+
+// SignatureHelpParameterPayload mirrors Strada's SignatureHelpParameter.
+type SignatureHelpParameterPayload struct {
+	Name          string
+	Documentation []DisplayPart
+	DisplayParts  []DisplayPart
+	IsOptional    bool
+	IsRest        bool
+}
+
+// runsToDisplayParts maps VS-classified runs onto Strada part kinds.
+func runsToDisplayParts(runs []*lsproto.VSClassifiedTextRun) []DisplayPart {
+	if len(runs) == 0 {
+		return nil
+	}
+	out := make([]DisplayPart, 0, len(runs))
+	for _, r := range runs {
+		out = append(out, DisplayPart{Text: r.Text, Kind: classificationToPartKind(lsproto.ClassificationTypeName(r.ClassificationTypeName))})
+	}
+	return out
+}
+
+// symbolDisplayPartsForCallTarget mirrors stock's symbolToDisplayParts for a
+// call target (single classified name part).
+func symbolDisplayPartsForCallTarget(c *checker.Checker, symbol *ast.Symbol, enclosing *ast.Node) []DisplayPart {
+	if symbol == nil {
+		return nil
+	}
+	text := c.SymbolToStringEx(symbol, enclosing, ast.SymbolFlagsNone, symbolFormatFlags)
+	if text == "" {
+		return nil
+	}
+	return []DisplayPart{{Text: text, Kind: classificationToPartKind(classificationForSymbol(symbol))}}
+}
+
+// parameterDisplayParts prints one parameter declaration with classified runs
+// (mirrors stock's createSignatureHelpParameterForParameter displayParts).
+func (l *LanguageService) parameterDisplayParts(param *ast.Symbol, enclosing *ast.Node, sourceFile *ast.SourceFile, c *checker.Checker) []DisplayPart {
+	emitContext := printer.NewEmitContext()
+	idToSymbol := make(map[*ast.IdentifierNode]*ast.Symbol)
+	nb := checker.NewNodeBuilderEx(c, emitContext, idToSymbol)
+	node := nb.SymbolToParameterDeclaration(param, enclosing, signatureHelpNodeBuilderFlags, nodebuilder.InternalFlagsNone, nil)
+	if node == nil {
+		return nil
+	}
+	p := printer.NewPrinter(printer.PrinterOptions{NewLine: core.NewLineKindLF}, printer.PrintHandlers{}, emitContext)
+	p.IdToSymbol = idToSymbol
+	dpw := newDisplayPartsWriter(true)
+	p.Write(node, sourceFile, dpw, nil)
+	return runsToDisplayParts(dpw.GetRuns())
+}
+
+// typeParameterListParts prints the type-parameter list "<T, U>" as parts.
+func (l *LanguageService) typeParameterListParts(candidate *checker.Signature, enclosing *ast.Node, sourceFile *ast.SourceFile, c *checker.Checker) []DisplayPart {
+	if len(candidate.TypeParameters()) == 0 {
+		return nil
+	}
+	out := []DisplayPart{{Text: "<", Kind: "punctuation"}}
+	emitContext := printer.NewEmitContext()
+	idToSymbol := make(map[*ast.IdentifierNode]*ast.Symbol)
+	nb := checker.NewNodeBuilderEx(c, emitContext, idToSymbol)
+	p := printer.NewPrinter(printer.PrinterOptions{NewLine: core.NewLineKindLF}, printer.PrintHandlers{}, emitContext)
+	p.IdToSymbol = idToSymbol
+	for i, tp := range candidate.TypeParameters() {
+		if i > 0 {
+			out = append(out, DisplayPart{Text: ",", Kind: "punctuation"}, DisplayPart{Text: " ", Kind: "space"})
+		}
+		node := nb.TypeParameterToDeclaration(tp, enclosing, signatureHelpNodeBuilderFlags, nodebuilder.InternalFlagsNone, nil)
+		dpw := newDisplayPartsWriter(true)
+		p.Write(node, sourceFile, dpw, nil)
+		out = append(out, runsToDisplayParts(dpw.GetRuns())...)
+	}
+	out = append(out, DisplayPart{Text: ">", Kind: "punctuation"})
+	return out
+}
+
+// signatureHelpParameterForParam mirrors stock's createSignatureHelpParameterForParameter.
+func (l *LanguageService) signatureHelpParameterForParam(param *ast.Symbol, enclosing *ast.Node, sourceFile *ast.SourceFile, c *checker.Checker) *SignatureHelpParameterPayload {
+	payload := &SignatureHelpParameterPayload{
+		Name:         param.Name,
+		DisplayParts: l.parameterDisplayParts(param, enclosing, sourceFile, c),
+		IsRest:       param.CheckFlags&ast.CheckFlagsRestParameter != 0,
+	}
+	if param.CheckFlags&ast.CheckFlagsOptionalParameter != 0 {
+		payload.IsOptional = true
+	}
+	if param.ValueDeclaration != nil {
+		if doc := l.getDocumentationFromDeclaration(c, nil, param.ValueDeclaration, nil, lsproto.MarkupKindPlainText, true /*commentOnly*/); doc != "" {
+			payload.Documentation = []DisplayPart{{Text: doc, Kind: "text"}}
+		}
+	}
+	if payload.Documentation == nil {
+		payload.Documentation = []DisplayPart{}
+	}
+	return payload
+}
+
+var signatureHelpSeparatorParts = []DisplayPart{{Text: ",", Kind: "punctuation"}, {Text: " ", Kind: "space"}}
+
+// signatureHelpItemForCandidate mirrors stock's getSignatureHelpItem.
+func (l *LanguageService) signatureHelpItemForCandidate(ctx context.Context, candidate *checker.Signature, callTargetParts []DisplayPart, isTypeParameterList bool, argumentInfo *argumentListInfo, sourceFile *ast.SourceFile, c *checker.Checker) []*SignatureHelpItemPayload {
+	enclosing := getEnclosingDeclarationFromInvocation(argumentInfo.invocation)
+	suffixDpw := returnTypeToDisplayParts(candidate, c, enclosing, sourceFile, true /*vsCapability*/)
+
+	var documentation []DisplayPart
+	var tags []JSDocTagPayload
+	if declaration := candidate.Declaration(); declaration != nil {
+		if doc := l.getDocumentationFromDeclaration(c, nil, declaration, nil, lsproto.MarkupKindPlainText, true /*commentOnly*/); doc != "" {
+			documentation = []DisplayPart{{Text: doc, Kind: "text"}}
+		}
+		if sym := declaration.Symbol(); sym != nil {
+			tags = l.jsDocTagPayloads(sym)
+		}
+	}
+	if documentation == nil {
+		documentation = []DisplayPart{}
+	}
+
+	expanded := c.GetExpandedParameters(candidate, false)
+	isVariadic := func(parameterList []*ast.Symbol) bool {
+		if !c.HasEffectiveRestParameter(candidate) {
+			return false
+		}
+		if len(expanded) == 1 {
+			return true
+		}
+		return len(parameterList) != 0 && parameterList[len(parameterList)-1] != nil && parameterList[len(parameterList)-1].CheckFlags&ast.CheckFlagsRestParameter != 0
+	}
+
+	out := make([]*SignatureHelpItemPayload, 0, len(expanded))
+	if isTypeParameterList {
+		typeParameters := candidate.TypeParameters()
+		if candidate.Target() != nil {
+			typeParameters = candidate.Target().TypeParameters()
+		}
+		for range expanded {
+			params := make([]*SignatureHelpParameterPayload, 0, len(typeParameters))
+			for _, tp := range typeParameters {
+				param := &SignatureHelpParameterPayload{IsOptional: false, IsRest: false, Documentation: []DisplayPart{}}
+				if sym := tp.Symbol(); sym != nil {
+					param.Name = sym.Name
+					if doc := l.getDocumentationFromDeclaration(c, nil, core.FirstOrNil(sym.Declarations), nil, lsproto.MarkupKindPlainText, true /*commentOnly*/); doc != "" {
+						param.Documentation = []DisplayPart{{Text: doc, Kind: "text"}}
+					}
+				}
+				emitContext := printer.NewEmitContext()
+				idToSymbol := make(map[*ast.IdentifierNode]*ast.Symbol)
+				nb := checker.NewNodeBuilderEx(c, emitContext, idToSymbol)
+				p := printer.NewPrinter(printer.PrinterOptions{NewLine: core.NewLineKindLF}, printer.PrintHandlers{}, emitContext)
+				p.IdToSymbol = idToSymbol
+				node := nb.TypeParameterToDeclaration(tp, enclosing, signatureHelpNodeBuilderFlags, nodebuilder.InternalFlagsNone, nil)
+				dpw := newDisplayPartsWriter(true)
+				p.Write(node, sourceFile, dpw, nil)
+				param.DisplayParts = runsToDisplayParts(dpw.GetRuns())
+				params = append(params, param)
+			}
+			prefix := append(append([]DisplayPart{}, callTargetParts...), DisplayPart{Text: "<", Kind: "punctuation"})
+			suffix := append([]DisplayPart{{Text: ">", Kind: "punctuation"}}, runsToDisplayParts(suffixDpw.GetRuns())...)
+			out = append(out, &SignatureHelpItemPayload{
+				IsVariadic:    false,
+				Prefix:        prefix,
+				Suffix:        suffix,
+				Separator:     signatureHelpSeparatorParts,
+				Parameters:    params,
+				Documentation: documentation,
+				Tags:          tags,
+			})
+		}
+		return out
+	}
+
+	for _, parameterList := range expanded {
+		params := make([]*SignatureHelpParameterPayload, 0, len(parameterList))
+		for _, param := range parameterList {
+			params = append(params, l.signatureHelpParameterForParam(param, enclosing, sourceFile, c))
+		}
+		prefix := append(append(append([]DisplayPart{}, callTargetParts...), l.typeParameterListParts(candidate, enclosing, sourceFile, c)...), DisplayPart{Text: "(", Kind: "punctuation"})
+		suffix := append([]DisplayPart{{Text: ")", Kind: "punctuation"}}, runsToDisplayParts(suffixDpw.GetRuns())...)
+		out = append(out, &SignatureHelpItemPayload{
+			IsVariadic:    isVariadic(parameterList),
+			Prefix:        prefix,
+			Suffix:        suffix,
+			Separator:     signatureHelpSeparatorParts,
+			Parameters:    params,
+			Documentation: documentation,
+			Tags:          tags,
+		})
+	}
+	return out
+}
+
+// GetSignatureHelpForAPI mirrors services getSignatureHelpItems (no-triggerReason
+// path; triggerReason kinds map onto onlyUseSyntacticOwners/isManuallyInvoked).
+// Returns nil when stock returns undefined.
+func (l *LanguageService) GetSignatureHelpForAPI(ctx context.Context, file *ast.SourceFile, position int, triggerReason string) *SignatureHelpPayload {
+	c, done := l.program.GetTypeCheckerForFile(ctx, file)
+	defer done()
+
+	startingToken := astnav.FindPrecedingToken(file, position)
+	if startingToken == nil {
+		return nil
+	}
+	onlyUseSyntacticOwners := triggerReason == "characterTyped"
+	if onlyUseSyntacticOwners && (IsInString(file, position, startingToken) || isInComment(file, position, startingToken) != nil) {
+		return nil
+	}
+	isManuallyInvoked := triggerReason == "invoked"
+	argumentInfo := getContainingArgumentInfo(startingToken, file, c, isManuallyInvoked, position)
+	if argumentInfo == nil {
+		return nil
+	}
+	candidateInfo := getCandidateOrTypeInfo(argumentInfo, c, file, startingToken, onlyUseSyntacticOwners)
+	if candidateInfo == nil {
+		return nil
+	}
+
+	invocation := argumentInfo.invocation
+	var callTargetSymbol *ast.Symbol
+	if invocation.contextualInvocation != nil {
+		callTargetSymbol = invocation.contextualInvocation.symbol
+	} else {
+		callTargetSymbol = c.GetSymbolAtLocation(getExpressionFromInvocation(argumentInfo))
+	}
+	callTargetParts := symbolDisplayPartsForCallTarget(c, callTargetSymbol, nil)
+
+	if candidateInfo.typeInfo != nil {
+		// createTypeHelpItems: type-parameter list help for a symbol.
+		typeParameters := c.GetLocalTypeParametersOfClassOrInterfaceOrTypeAlias(candidateInfo.typeInfo)
+		if len(typeParameters) == 0 {
+			return nil
+		}
+		return &SignatureHelpPayload{
+			ApplicableSpan:   argumentInfo.argumentsSpan,
+			SelectedItemIndex: 0,
+			ArgumentIndex:    uint32(argumentInfo.argumentIndex),
+			ArgumentCount:    uint32(argumentInfo.argumentCount),
+		}
+	}
+
+	candidates := candidateInfo.candidateInfo.candidates
+	resolved := candidateInfo.candidateInfo.resolvedSignature
+	payload := &SignatureHelpPayload{
+		ApplicableSpan: argumentInfo.argumentsSpan,
+		ArgumentIndex:  uint32(argumentInfo.argumentIndex),
+		ArgumentCount:  uint32(argumentInfo.argumentCount),
+	}
+	itemsSeen := 0
+	for _, candidate := range candidates {
+		items := l.signatureHelpItemForCandidate(ctx, candidate, callTargetParts, argumentInfo.isTypeParameterList, argumentInfo, file, c)
+		if candidate == resolved && len(items) > 0 {
+			payload.SelectedItemIndex = uint32(itemsSeen)
+			if len(items) > 1 {
+				count := 0
+				for _, item := range items {
+					if item.IsVariadic || len(item.Parameters) >= argumentInfo.argumentCount {
+						payload.SelectedItemIndex = uint32(itemsSeen + count)
+						break
+					}
+					count++
+				}
+			}
+		}
+		itemsSeen += len(items)
+		payload.Items = append(payload.Items, items...)
+	}
+	if len(payload.Items) == 0 {
+		return nil
+	}
+	// Variadic argument-index adjustment (stock signatureHelp.ts).
+	selected := payload.Items[payload.SelectedItemIndex]
+	if selected.IsVariadic {
+		firstRest := -1
+		for i, p := range selected.Parameters {
+			if p.IsRest {
+				firstRest = i
+				break
+			}
+		}
+		if firstRest >= 0 && firstRest < len(selected.Parameters)-1 {
+			payload.ArgumentIndex = uint32(len(selected.Parameters))
+		} else if int(payload.ArgumentIndex) > len(selected.Parameters)-1 {
+			payload.ArgumentIndex = uint32(len(selected.Parameters) - 1)
+		}
+	}
+	return payload
+}
+
+// ── Rename (issue #12 batch 2) ────────────────────────────────────────────
+
+// RenameInfoPayload mirrors Strada's RenameInfo (success or failure).
+type RenameInfoPayload struct {
+	CanRename             bool
+	FileToRename          string
+	DisplayName           string
+	FullDisplayName       string
+	Kind                  string
+	KindModifiers         string
+	TriggerSpan           core.TextRange
+	LocalizedErrorMessage string
+}
+
+// RenameLocationPayload mirrors Strada's RenameLocation entry.
+type RenameLocationPayload struct {
+	DocumentSpanPayload
+	PrefixText string
+	SuffixText string
+}
+
+// renameTriggerSpan mirrors stock's createTriggerSpanForNode (string literals
+// shrink by the quotes).
+func renameTriggerSpan(node *ast.Node, sourceFile *ast.SourceFile) core.TextRange {
+	span := plainSpanOfNode(node, sourceFile)
+	if ast.IsStringLiteralLike(node) && span.Len() > 2 {
+		return core.NewTextRange(span.Pos()+1, span.End()-1)
+	}
+	return span
+}
+
+// GetRenameInfoForAPI mirrors services/rename.ts getRenameInfo (identifier /
+// string-literal / label paths; module-specifier renames included).
+func (l *LanguageService) GetRenameInfoForAPI(ctx context.Context, file *ast.SourceFile, position int, allowRenameOfImportPath bool, providePrefixAndSuffix bool) *RenameInfoPayload {
+	node := astnav.GetTouchingPropertyName(file, position)
+	node = getAdjustedLocation(node, true /*forRename*/, file)
+	if !nodeIsEligibleForRename(node) {
+		return &RenameInfoPayload{CanRename: false, LocalizedErrorMessage: "You cannot rename this element."}
+	}
+	c, done := l.program.GetTypeCheckerForFile(ctx, file)
+	defer done()
+	symbol := c.GetSymbolAtLocation(node)
+	if symbol == nil {
+		if ast.IsStringLiteralLike(node) {
+			typ := getContextualTypeFromParentOrAncestorTypeNode(node, c)
+			if typ != nil && (typ.IsStringLiteral() || (typ.IsUnion() && core.Every(typ.Types(), func(t *checker.Type) bool { return t.IsStringLiteral() }))) {
+				return &RenameInfoPayload{CanRename: true, DisplayName: node.Text(), FullDisplayName: node.Text(), Kind: "string", TriggerSpan: renameTriggerSpan(node, file)}
+			}
+		} else if ast.IsLabelName(node) {
+			name := node.Text()
+			return &RenameInfoPayload{CanRename: true, DisplayName: name, FullDisplayName: name, Kind: "label", TriggerSpan: renameTriggerSpan(node, file)}
+		}
+		return &RenameInfoPayload{CanRename: false, LocalizedErrorMessage: "You cannot rename this element."}
+	}
+	if len(symbol.Declarations) == 0 {
+		return &RenameInfoPayload{CanRename: false, LocalizedErrorMessage: "You cannot rename this element."}
+	}
+	if msg := l.renameBlockedReason(file, node, symbol, c, l.program); msg != nil {
+		return &RenameInfoPayload{CanRename: false, LocalizedErrorMessage: msg.Localize(locale.FromContext(ctx))}
+	}
+	if ast.IsStringLiteralLike(node) && ast.TryGetImportFromModuleSpecifier(node) != nil {
+		if !allowRenameOfImportPath {
+			return nil
+		}
+		// Mirrors stock's getRenameInfoForModule.
+		if !tspath.IsExternalModuleNameRelative(node.Text()) {
+			return &RenameInfoPayload{CanRename: false, LocalizedErrorMessage: "You cannot rename a module via a global import."}
+		}
+		var moduleSourceFile *ast.SourceFile
+		for _, d := range symbol.Declarations {
+			if ast.IsSourceFile(d) {
+				moduleSourceFile = d.AsSourceFile()
+				break
+			}
+		}
+		if moduleSourceFile == nil {
+			return &RenameInfoPayload{CanRename: false, LocalizedErrorMessage: "You cannot rename this element."}
+		}
+		return &RenameInfoPayload{CanRename: true, Kind: "module", DisplayName: node.Text(), FullDisplayName: node.Text(), TriggerSpan: renameTriggerSpan(node, file)}
+	}
+	var specifierName string
+	if (ast.IsIdentifier(node) && node.Parent != nil && (ast.IsImportSpecifier(node.Parent) || ast.IsExportSpecifier(node.Parent)) && node.Parent.Name() == node) || (ast.IsStringLiteralLike(node) && node.Parent != nil && node.Parent.Kind == ast.KindComputedPropertyName) {
+		specifierName = scanner.GetTextOfNode(node)
+	}
+	displayName := specifierName
+	if displayName == "" {
+		displayName = c.SymbolToString(symbol)
+	}
+	fullDisplayName := specifierName
+	if fullDisplayName == "" {
+		fullDisplayName = c.GetFullyQualifiedName(symbol, nil)
+	}
+	return &RenameInfoPayload{
+		CanRename:      true,
+		DisplayName:    displayName,
+		FullDisplayName: fullDisplayName,
+		Kind:           symbolKindString(c, symbol, node),
+		KindModifiers:  symbolModifiersString(c, symbol),
+		TriggerSpan:    renameTriggerSpan(node, file),
+	}
+}
+
+// getPrefixAndSuffixForRename mirrors Strada's getPrefixAndSuffixText.
+func getPrefixAndSuffixForRename(originalNode *ast.Node, entry *ReferenceEntry, c *checker.Checker) (string, string) {
+	if entry.kind == entryKindRange || (!ast.IsIdentifier(originalNode) && !ast.IsStringLiteralLike(originalNode)) {
+		return "", ""
+	}
+	node := entry.node
+	parent := node.Parent
+	name := originalNode.Text()
+	isShorthandAssignment := ast.IsShorthandPropertyAssignment(parent)
+	isBindingNoProp := parent != nil && parent.Kind == ast.KindBindingElement && parent.AsBindingElement().PropertyName == nil && parent.Name() == node && parent.AsBindingElement().DotDotDotToken == nil
+	if isShorthandAssignment || isBindingNoProp {
+		if entry.kind == entryKindSearchedLocalFoundProperty {
+			return name + ": ", ""
+		}
+		if entry.kind == entryKindSearchedPropertyFoundLocal {
+			return "", ": " + name
+		}
+		if isShorthandAssignment {
+			grandParent := parent.Parent
+			if ast.IsObjectLiteralExpression(grandParent) && ast.IsBinaryExpression(grandParent.Parent) && ast.IsModuleExportsAccessExpression(grandParent.Parent.AsBinaryExpression().Left) {
+				return name + ": ", ""
+			}
+			return "", ": " + name
+		}
+		return name + ": ", ""
+	}
+	if parent != nil && ast.IsImportSpecifier(parent) && parent.PropertyName() == nil {
+		var originalSymbol *ast.Symbol
+		if originalNode.Parent != nil && ast.IsExportSpecifier(originalNode.Parent) {
+			originalSymbol = c.GetExportSpecifierLocalTargetSymbol(originalNode.Parent)
+		} else {
+			originalSymbol = c.GetSymbolAtLocation(originalNode)
+		}
+		if originalSymbol != nil {
+			for _, d := range originalSymbol.Declarations {
+				if d == parent {
+					return name + " as ", ""
+				}
+			}
+		}
+		return "", ""
+	}
+	if parent != nil && ast.IsExportSpecifier(parent) && parent.PropertyName() == nil {
+		if originalNode == entry.node || c.GetSymbolAtLocation(originalNode) == c.GetSymbolAtLocation(entry.node) {
+			return name + " as ", ""
+		}
+		return "", " as " + name
+	}
+	return "", ""
+}
+
+// FindRenameLocationsForAPI mirrors services findRenameLocations.
+func (l *LanguageService) FindRenameLocationsForAPI(ctx context.Context, file *ast.SourceFile, position int, findInStrings bool, findInComments bool, providePrefixAndSuffix bool) []*RenameLocationPayload {
+	node := astnav.GetTouchingPropertyName(file, position)
+	node = getAdjustedLocation(node, true /*forRename*/, file)
+	if !nodeIsEligibleForRename(node) {
+		return nil
+	}
+	// JSX intrinsic tag rename: both the opening and closing tag names.
+	if ast.IsIdentifier(node) && node.Parent != nil && (ast.IsJsxOpeningElement(node.Parent) || ast.IsJsxClosingElement(node.Parent)) && scanner.IsIntrinsicJsxName(node.Text()) {
+		if element := node.Parent.Parent; element != nil {
+			var out []*RenameLocationPayload
+			for _, tag := range []*ast.Node{element.AsJsxElement().OpeningElement.TagName(), element.AsJsxElement().ClosingElement.TagName()} {
+				sourceFile := ast.GetSourceFileOfNode(tag)
+				span := plainSpanOfNode(tag, sourceFile)
+				out = append(out, &RenameLocationPayload{DocumentSpanPayload: DocumentSpanPayload{FileName: sourceFile.FileName(), TextSpan: span}})
+			}
+			return out
+		}
+	}
+	// Stock excludes default-library files from rename searches.
+	var sourceFiles []*ast.SourceFile
+	for _, sf := range l.program.GetSourceFiles() {
+		if !l.program.IsSourceFileDefaultLibrary(l.toPath(sf.FileName())) {
+			sourceFiles = append(sourceFiles, sf)
+		}
+	}
+	referencedSymbols := l.getReferencedSymbolsForNode(ctx, position, node, l.program, sourceFiles, refOptions{
+		findInStrings: findInStrings, findInComments: findInComments, use: referenceUseRename, useAliasesForRename: providePrefixAndSuffix,
+	})
+	if len(referencedSymbols) == 0 {
+		return nil
+	}
+	c, done := l.program.GetTypeCheckerForFile(ctx, file)
+	defer done()
+	var out []*RenameLocationPayload
+	for _, s := range referencedSymbols {
+		for _, entry := range s.References() {
+			var span DocumentSpanPayload
+			if entry.kind == entryKindRange {
+				span = DocumentSpanPayload{FileName: entry.fileName, TextSpan: *entry.textRange}
+			} else {
+				span = documentSpanOfNode(entry.node, entry.context)
+			}
+			loc := &RenameLocationPayload{DocumentSpanPayload: span}
+			if providePrefixAndSuffix {
+				loc.PrefixText, loc.SuffixText = getPrefixAndSuffixForRename(node, entry, c)
+			}
+			out = append(out, loc)
+		}
+	}
+	return out
 }

@@ -4235,7 +4235,7 @@ index 6a90030eb..fc58b512a 100644
      const docFiles = {
          "/tsconfig.json": JSON.stringify({ compilerOptions: { strict: true } }),
 diff --git a/internal/api/proto.go b/internal/api/proto.go
-index 0917c385d..3903c622e 100644
+index 0917c385d..5fb458aa5 100644
 --- a/internal/api/proto.go
 +++ b/internal/api/proto.go
 @@ -67,33 +67,69 @@ const (
@@ -4502,13 +4502,16 @@ index 0917c385d..3903c622e 100644
  
  	// Reference methods
  	MethodGetReferencesToSymbolInFile Method = "getReferencesToSymbolInFile"
-@@ -166,11 +282,15 @@ const (
+@@ -166,11 +282,18 @@ const (
  
  	// Language service methods
  	MethodGetCompletionsAtPosition Method = "getCompletionsAtPosition"
 +	MethodQuickinfo                Method = "quickinfo"
 +	MethodReferences               Method = "references"
 +	MethodDefinitionAndBoundSpan   Method = "definitionAndBoundSpan"
++	MethodSignatureHelp            Method = "signatureHelp"
++	MethodGetRenameInfo            Method = "getRenameInfo"
++	MethodGetEditsForRename        Method = "getEditsForRename"
  
  	// Diagnostic methods
  	MethodGetSyntacticDiagnostics         Method = "getSyntacticDiagnostics"
@@ -4518,7 +4521,7 @@ index 0917c385d..3903c622e 100644
  	MethodGetSuggestionDiagnostics        Method = "getSuggestionDiagnostics"
  	MethodGetDeclarationDiagnostics       Method = "getDeclarationDiagnostics"
  	MethodGetProgramDiagnostics           Method = "getProgramDiagnostics"
-@@ -178,10 +298,13 @@ const (
+@@ -178,20 +301,30 @@ const (
  	MethodGetConfigFileParsingDiagnostics Method = "getConfigFileParsingDiagnostics"
  
  	// Emitter methods
@@ -4528,16 +4531,30 @@ index 0917c385d..3903c622e 100644
 +	MethodEmitBuildInfo Method = "emitBuildInfo"
  
  	// Intrinsic type getters
- 	MethodGetAnyType       Method = "getAnyType"
-+	MethodGetErrorType     Method = "getErrorType"
- 	MethodGetStringType    Method = "getStringType"
- 	MethodGetNumberType    Method = "getNumberType"
- 	MethodGetBooleanType   Method = "getBooleanType"
-@@ -192,6 +315,13 @@ const (
- 	MethodGetUnknownType   Method = "getUnknownType"
- 	MethodGetBigIntType    Method = "getBigIntType"
- 	MethodGetESSymbolType  Method = "getESSymbolType"
-+	MethodGetOptionalType  Method = "getOptionalType"
+-	MethodGetAnyType       Method = "getAnyType"
+-	MethodGetStringType    Method = "getStringType"
+-	MethodGetNumberType    Method = "getNumberType"
+-	MethodGetBooleanType   Method = "getBooleanType"
+-	MethodGetVoidType      Method = "getVoidType"
+-	MethodGetUndefinedType Method = "getUndefinedType"
+-	MethodGetNullType      Method = "getNullType"
+-	MethodGetNeverType     Method = "getNeverType"
+-	MethodGetUnknownType   Method = "getUnknownType"
+-	MethodGetBigIntType    Method = "getBigIntType"
+-	MethodGetESSymbolType  Method = "getESSymbolType"
++	MethodGetAnyType          Method = "getAnyType"
++	MethodGetErrorType        Method = "getErrorType"
++	MethodGetStringType       Method = "getStringType"
++	MethodGetNumberType       Method = "getNumberType"
++	MethodGetBooleanType      Method = "getBooleanType"
++	MethodGetVoidType         Method = "getVoidType"
++	MethodGetUndefinedType    Method = "getUndefinedType"
++	MethodGetNullType         Method = "getNullType"
++	MethodGetNeverType        Method = "getNeverType"
++	MethodGetUnknownType      Method = "getUnknownType"
++	MethodGetBigIntType       Method = "getBigIntType"
++	MethodGetESSymbolType     Method = "getESSymbolType"
++	MethodGetOptionalType     Method = "getOptionalType"
 +	MethodGetNonPrimitiveType Method = "getNonPrimitiveType"
 +
 +	// Literal type factories
@@ -4547,7 +4564,7 @@ index 0917c385d..3903c622e 100644
  
  	// Well-known per-checker symbols
  	MethodGetWellKnownSymbols Method = "getWellKnownSymbols"
-@@ -208,6 +338,10 @@ type InitializeResponse struct {
+@@ -208,6 +341,10 @@ type InitializeResponse struct {
  	UseCaseSensitiveFileNames bool `json:"useCaseSensitiveFileNames"`
  	// CurrentDirectory is the server's current working directory.
  	CurrentDirectory string `json:"currentDirectory"`
@@ -4558,7 +4575,7 @@ index 0917c385d..3903c622e 100644
  }
  
  // DocumentIdentifier identifies a document by either a file name (plain string) or a URI object.
-@@ -324,6 +458,44 @@ type UpdateSnapshotParams struct {
+@@ -324,6 +461,44 @@ type UpdateSnapshotParams struct {
  	// CloseFiles lists files to release in the new snapshot. A file is only fully
  	// closed once every API client that opened it closes it.
  	CloseFiles []DocumentIdentifier `json:"closeFiles,omitempty"`
@@ -4603,7 +4620,7 @@ index 0917c385d..3903c622e 100644
  }
  
  // ProjectFileChanges describes what source files changed within a single project.
-@@ -332,6 +504,11 @@ type ProjectFileChanges struct {
+@@ -332,6 +507,11 @@ type ProjectFileChanges struct {
  	ChangedFiles []tspath.Path `json:"changedFiles,omitempty"`
  	// DeletedFiles lists source file paths removed from the project's program.
  	DeletedFiles []tspath.Path `json:"deletedFiles,omitempty"`
@@ -4615,7 +4632,7 @@ index 0917c385d..3903c622e 100644
  }
  
  // SnapshotChanges describes what changed between the previous latest snapshot
-@@ -358,33 +535,61 @@ type UpdateSnapshotResponse struct {
+@@ -358,33 +538,61 @@ type UpdateSnapshotResponse struct {
  }
  
  var unmarshalers = map[Method]func([]byte) (any, error){
@@ -4699,7 +4716,7 @@ index 0917c385d..3903c622e 100644
  
  	MethodGetSymbolOfType:               unmarshallerFor[GetTypePropertyParams],
  	MethodGetTargetOfType:               unmarshallerFor[GetTypePropertyParams],
-@@ -410,70 +615,163 @@ var unmarshalers = map[Method]func([]byte) (any, error){
+@@ -410,70 +618,166 @@ var unmarshalers = map[Method]func([]byte) (any, error){
  	MethodGetThisParameterOfSignature:  unmarshallerFor[GetSignaturePropertyParams],
  	MethodGetTargetOfSignature:         unmarshallerFor[GetSignaturePropertyParams],
  
@@ -4891,6 +4908,9 @@ index 0917c385d..3903c622e 100644
 +	MethodQuickinfo:                                         unmarshallerFor[QuickinfoParams],
 +	MethodReferences:                                        unmarshallerFor[ReferencesParams],
 +	MethodDefinitionAndBoundSpan:                            unmarshallerFor[DefinitionAndBoundSpanParams],
++	MethodSignatureHelp:                                     unmarshallerFor[SignatureHelpParams],
++	MethodGetRenameInfo:                                    unmarshallerFor[RenameInfoParams],
++	MethodGetEditsForRename:                                unmarshallerFor[EditsForRenameParams],
 +	MethodPrintNode:                                         unmarshallerFor[PrintNodeParams],
 +	MethodGetAnyType:                                        unmarshallerFor[GetIntrinsicTypeParams],
 +	MethodGetErrorType:                                      unmarshallerFor[GetIntrinsicTypeParams],
@@ -4927,7 +4947,7 @@ index 0917c385d..3903c622e 100644
  }
  
  type ParseConfigFileParams struct {
-@@ -529,6 +827,16 @@ type GetSymbolAtPositionParams struct {
+@@ -529,6 +833,16 @@ type GetSymbolAtPositionParams struct {
  	Position uint32             `json:"position"`
  }
  
@@ -4944,7 +4964,7 @@ index 0917c385d..3903c622e 100644
  type GetSymbolsAtPositionsParams struct {
  	Snapshot  SnapshotID         `json:"snapshot"`
  	Project   ProjectID          `json:"project"`
-@@ -660,6 +968,17 @@ func newTypeResponse(t *checker.Type, id TypeID) *TypeResponse {
+@@ -660,6 +974,17 @@ func newTypeResponse(t *checker.Type, id TypeID) *TypeResponse {
  		if flags&checker.TypeFlagsLiteral != 0 {
  			resp.Value = literalValueToJSON(lit.Value())
  		}
@@ -4962,7 +4982,7 @@ index 0917c385d..3903c622e 100644
  		if lit.FreshType() != nil {
  			resp.FreshType = TypeHandle(lit.FreshType())
  		}
-@@ -670,20 +989,22 @@ func newTypeResponse(t *checker.Type, id TypeID) *TypeResponse {
+@@ -670,20 +995,22 @@ func newTypeResponse(t *checker.Type, id TypeID) *TypeResponse {
  		resp.ObjectFlags = uint32(t.ObjectFlags())
  		objectFlags := t.ObjectFlags()
  		if objectFlags&checker.ObjectFlagsReference != 0 {
@@ -4999,7 +5019,7 @@ index 0917c385d..3903c622e 100644
  			}
  		}
  		if objectFlags&checker.ObjectFlagsClassOrInterface != 0 {
-@@ -781,6 +1102,57 @@ type SourceFileMetadata struct {
+@@ -781,6 +1108,57 @@ type SourceFileMetadata struct {
  	ImpliedNodeFormat     core.ResolutionMode `json:"impliedNodeFormat"`
  }
  
@@ -5057,7 +5077,7 @@ index 0917c385d..3903c622e 100644
  type ResolveNameParams struct {
  	Snapshot       SnapshotID          `json:"snapshot"`
  	Project        ProjectID           `json:"project"`
-@@ -806,6 +1178,13 @@ type GetSymbolPropertyParams struct {
+@@ -806,6 +1184,13 @@ type GetSymbolPropertyParams struct {
  	Symbol   SymbolID   `json:"objectId"`
  }
  
@@ -5071,7 +5091,7 @@ index 0917c385d..3903c622e 100644
  // GetSignaturePropertyParams is used for all signature sub-property endpoints.
  type GetSignaturePropertyParams struct {
  	Snapshot  SnapshotID  `json:"snapshot"`
-@@ -815,9 +1194,10 @@ type GetSignaturePropertyParams struct {
+@@ -815,9 +1200,10 @@ type GetSignaturePropertyParams struct {
  
  // GetContextualTypeParams returns the contextual type for a node.
  type GetContextualTypeParams struct {
@@ -5085,7 +5105,102 @@ index 0917c385d..3903c622e 100644
  }
  
  // GetTypeOfSymbolAtLocationParams returns the narrowed type of a symbol at a specific location.
-@@ -904,6 +1284,29 @@ type GetIntrinsicTypeParams struct {
+@@ -866,12 +1252,25 @@ type SignatureUsageResponse struct {
+ 
+ // GetCompletionsAtPositionParams are the parameters for the getCompletionsAtPosition method.
+ type GetCompletionsAtPositionParams struct {
+-	Snapshot         SnapshotID         `json:"snapshot"`
+-	Project          ProjectID          `json:"project"`
+-	File             DocumentIdentifier `json:"file"`
+-	Position         uint32             `json:"position"`
+-	TriggerCharacter *string            `json:"triggerCharacter,omitempty"`
+-	IncludeSymbol    bool               `json:"includeSymbol,omitempty"`
++	Snapshot         SnapshotID              `json:"snapshot"`
++	Project          ProjectID               `json:"project"`
++	File             DocumentIdentifier      `json:"file"`
++	Position         uint32                  `json:"position"`
++	TriggerCharacter *string                 `json:"triggerCharacter,omitempty"`
++	IncludeSymbol    bool                    `json:"includeSymbol,omitempty"`
++	Preferences      *CompletionsPreferences `json:"preferences,omitempty"`
++}
++
++// CompletionsPreferences mirrors the editor completion preferences the tsserver
++// session forwards (nil fields keep the snapshot defaults). Only the fields the
++// ls pipeline actually reads are wired (insert-text/snippet/package-json behavior
++// is hardcoded in the pipeline and matches editor defaults).
++type CompletionsPreferences struct {
++	IncludeCompletionsForModuleExports       *bool `json:"includeCompletionsForModuleExports,omitempty"`
++	IncludeCompletionsForImportStatements    *bool `json:"includeCompletionsForImportStatements,omitempty"`
++	IncludeAutomaticOptionalChainCompletions *bool `json:"includeAutomaticOptionalChainCompletions,omitempty"`
++	IncludeCompletionsWithClassMemberSnippets        *bool `json:"includeCompletionsWithClassMemberSnippets,omitempty"`
++	IncludeCompletionsWithObjectLiteralMethodSnippets *bool `json:"includeCompletionsWithObjectLiteralMethodSnippets,omitempty"`
+ }
+ 
+ // CompletionEntryLabelDetailsResponse holds additional label display text for a completion entry.
+@@ -882,20 +1281,52 @@ type CompletionEntryLabelDetailsResponse struct {
+ 
+ // CompletionEntryResponse represents a single completion item.
+ type CompletionEntryResponse struct {
+-	Name         string                               `json:"name"`
+-	Kind         uint32                               `json:"kind,omitempty"`
+-	SortText     *string                              `json:"sortText,omitempty"`
+-	InsertText   *string                              `json:"insertText,omitempty"`
+-	FilterText   *string                              `json:"filterText,omitempty"`
+-	Detail       *string                              `json:"detail,omitempty"`
+-	LabelDetails *CompletionEntryLabelDetailsResponse `json:"labelDetails,omitempty"`
+-	Symbol       *SymbolResponse                      `json:"symbol,omitempty"`
++	Name             string                               `json:"name"`
++	Kind             uint32                               `json:"kind,omitempty"`
++	ElementKind      string                               `json:"elementKind,omitempty"`
++	KindModifiers    string                               `json:"kindModifiers,omitempty"`
++	SortText         *string                              `json:"sortText,omitempty"`
++	InsertText       *string                              `json:"insertText,omitempty"`
++	FilterText       *string                              `json:"filterText,omitempty"`
++	Detail           *string                              `json:"detail,omitempty"`
++	LabelDetails     *CompletionEntryLabelDetailsResponse `json:"labelDetails,omitempty"`
++	Symbol           *SymbolResponse                      `json:"symbol,omitempty"`
++	Source           string                               `json:"source,omitempty"`
++	HasAction        *bool                                `json:"hasAction,omitzero"`
++	IsRecommended    *bool                                `json:"isRecommended,omitzero"`
++	ReplacementStart *uint32                              `json:"replacementStart,omitempty"`
++	ReplacementLength *uint32                              `json:"replacementLength,omitempty"`
++	CommitCharacters []string                             `json:"commitCharacters,omitempty"`
++	Data             *CompletionEntryDataResponse         `json:"data,omitempty"`
++	// Stock attaches sourceDisplay + isPackageJsonImport (not labelDetails) to
++	// auto-import entries: sourceDisplay is the module specifier as a text
++	// part; isPackageJsonImport marks candidates covered by the package.json
++	// auto-import provider (dependencies/peerDependencies only).
++	SourceDisplay      []DisplayPartResponse `json:"sourceDisplay,omitempty"`
++	IsPackageJsonImport *bool                `json:"isPackageJsonImport,omitzero"`
++}
++
++// CompletionEntryDataResponse mirrors the stock CompletionEntryData payload:
++// present exactly on auto-import (sourced) entries, where consumers either
++// send it back to getCompletionEntryDetails or key their own metadata on it
++// (volar's getAutoImportSuggestions filters on data presence).
++type CompletionEntryDataResponse struct {
++	ExportName      string `json:"exportName,omitempty"`
++	FileName        string `json:"fileName,omitempty"`
++	ModuleSpecifier string `json:"moduleSpecifier,omitempty"`
+ }
+ 
+ // CompletionInfoResponse wraps a list of completion entries.
+ type CompletionInfoResponse struct {
+-	IsIncomplete bool                       `json:"isIncomplete"`
+-	Entries      []*CompletionEntryResponse `json:"entries"`
++	IsIncomplete            bool                       `json:"isIncomplete,omitzero"`
++	Entries                 []*CompletionEntryResponse `json:"entries"`
++	Flags                   *uint32                    `json:"flags,omitzero"`
++	IsGlobalCompletion      bool                       `json:"isGlobalCompletion"`
++	IsMemberCompletion      bool                       `json:"isMemberCompletion"`
++	IsNewIdentifierLocation bool                       `json:"isNewIdentifierLocation"`
++	OptionalSpanStart       *uint32                    `json:"optionalSpanStart,omitempty"`
++	OptionalSpanLength      *uint32                    `json:"optionalSpanLength,omitempty"`
++	DefaultCommitCharacters []string                   `json:"defaultCommitCharacters,omitempty"`
+ }
+ 
+ // GetIntrinsicTypeParams is used for intrinsic type getters (anyType, stringType, etc.).
+@@ -904,6 +1335,29 @@ type GetIntrinsicTypeParams struct {
  	Project  ProjectID  `json:"project"`
  }
  
@@ -5115,7 +5230,7 @@ index 0917c385d..3903c622e 100644
  // WellKnownSymbolsResponse carries the handle ids of the per-checker singleton
  // symbols (unknown, undefined, arguments) so the client can identify them by id
  // without a round-trip on every check.
-@@ -927,6 +1330,13 @@ type GetNonNullableTypeParams struct {
+@@ -927,6 +1381,13 @@ type GetNonNullableTypeParams struct {
  	Type     TypeID     `json:"type"`
  }
  
@@ -5129,7 +5244,7 @@ index 0917c385d..3903c622e 100644
  // GetTypeFromTypeNodeParams are the parameters for the getTypeFromTypeNode method.
  type GetTypeFromTypeNodeParams struct {
  	Snapshot SnapshotID `json:"snapshot"`
-@@ -956,6 +1366,74 @@ type IsArrayLikeTypeParams struct {
+@@ -956,6 +1417,74 @@ type IsArrayLikeTypeParams struct {
  	Type     TypeID     `json:"type"`
  }
  
@@ -5204,7 +5319,7 @@ index 0917c385d..3903c622e 100644
  // IsTypeAssignableToParams checks assignability between two types.
  type IsTypeAssignableToParams struct {
  	Snapshot SnapshotID `json:"snapshot"`
-@@ -977,6 +1455,47 @@ type GetResolvedSignatureParams struct {
+@@ -977,6 +1506,47 @@ type GetResolvedSignatureParams struct {
  	Location NodeHandle `json:"location"`
  }
  
@@ -5252,7 +5367,7 @@ index 0917c385d..3903c622e 100644
  type GetTypeAtLocationParams struct {
  	Snapshot SnapshotID `json:"snapshot"`
  	Project  ProjectID  `json:"project"`
-@@ -1012,6 +1531,24 @@ type TypeToTypeNodeParams struct {
+@@ -1012,6 +1582,24 @@ type TypeToTypeNodeParams struct {
  	Flags    int32      `json:"flags,omitempty"`
  }
  
@@ -5277,7 +5392,7 @@ index 0917c385d..3903c622e 100644
  // SignatureToSignatureDeclarationParams are the parameters for the signatureToSignatureDeclaration method.
  type SignatureToSignatureDeclarationParams struct {
  	Snapshot  SnapshotID  `json:"snapshot"`
-@@ -1022,6 +1559,15 @@ type SignatureToSignatureDeclarationParams struct {
+@@ -1022,6 +1610,15 @@ type SignatureToSignatureDeclarationParams struct {
  	Flags     int32       `json:"flags,omitempty"`
  }
  
@@ -5293,7 +5408,7 @@ index 0917c385d..3903c622e 100644
  // PrintNodeParams are the parameters for the printNode method.
  type PrintNodeParams struct {
  	Data                          string `json:"data"` // base64-encoded binary AST data
-@@ -1060,6 +1606,88 @@ type CheckerNodeParams struct {
+@@ -1060,6 +1657,88 @@ type CheckerNodeParams struct {
  	Location NodeHandle `json:"location"`
  }
  
@@ -5382,7 +5497,7 @@ index 0917c385d..3903c622e 100644
  // CheckerSymbolParams are parameters for checker methods that operate on a symbol.
  type CheckerSymbolParams struct {
  	Snapshot SnapshotID `json:"snapshot"`
-@@ -1074,6 +1702,216 @@ type JSDocTagInfo struct {
+@@ -1074,6 +1753,216 @@ type JSDocTagInfo struct {
  	Text string `json:"text,omitempty"`
  }
  
@@ -5599,7 +5714,7 @@ index 0917c385d..3903c622e 100644
  // CheckerSignatureParams are parameters for checker methods that operate on a signature.
  type CheckerSignatureParams struct {
  	Snapshot  SnapshotID  `json:"snapshot"`
-@@ -1095,6 +1933,9 @@ type IndexInfoResponse struct {
+@@ -1095,6 +1984,9 @@ type IndexInfoResponse struct {
  	ValueType   TypeResponse `json:"valueType"`
  	IsReadonly  bool         `json:"isReadonly,omitempty"`
  	Declaration NodeHandle   `json:"declaration,omitempty"`
@@ -5609,7 +5724,7 @@ index 0917c385d..3903c622e 100644
  }
  
  // SourceFileResponse contains the binary-encoded AST data for a source file.
-@@ -1110,6 +1951,68 @@ type GetDiagnosticsParams struct {
+@@ -1110,6 +2002,68 @@ type GetDiagnosticsParams struct {
  	File     *DocumentIdentifier `json:"file,omitempty"`
  }
  
@@ -5679,10 +5794,18 @@ index 0917c385d..3903c622e 100644
  type GetProjectDiagnosticsParams struct {
  	Snapshot SnapshotID `json:"snapshot"`
 diff --git a/internal/api/session.go b/internal/api/session.go
-index 7e29c44b6..fc4516ff4 100644
+index 7e29c44b6..c288561dc 100644
 --- a/internal/api/session.go
 +++ b/internal/api/session.go
-@@ -13,12 +13,16 @@ import (
+@@ -3,6 +3,7 @@ package api
+ import (
+ 	"context"
+ 	"encoding/base64"
++	"errors"
+ 	"fmt"
+ 	"slices"
+ 	"strconv"
+@@ -13,12 +14,17 @@ import (
  	"github.com/microsoft/typescript-go/internal/api/encoder"
  	"github.com/microsoft/typescript-go/internal/ast"
  	"github.com/microsoft/typescript-go/internal/astnav"
@@ -5696,10 +5819,11 @@ index 7e29c44b6..fc4516ff4 100644
  	"github.com/microsoft/typescript-go/internal/json"
  	"github.com/microsoft/typescript-go/internal/ls"
 +	"github.com/microsoft/typescript-go/internal/ls/lsconv"
++	"github.com/microsoft/typescript-go/internal/ls/lsutil"
  	"github.com/microsoft/typescript-go/internal/lsp/lsproto"
  	"github.com/microsoft/typescript-go/internal/nodebuilder"
  	"github.com/microsoft/typescript-go/internal/pprof"
-@@ -53,8 +57,192 @@ type snapshotData struct {
+@@ -53,8 +59,192 @@ type snapshotData struct {
  	// the choice is stable. Guarded by symbolRegistryMu.
  	symbolCanonicalProjects map[SymbolID]ProjectID
  
@@ -5892,7 +6016,7 @@ index 7e29c44b6..fc4516ff4 100644
  }
  
  // projectRegistryData holds per-project type and signature registries.
-@@ -159,6 +347,8 @@ func (sd *snapshotData) newSymbolResponse(symbol *ast.Symbol, canonicalProject P
+@@ -159,6 +349,8 @@ func (sd *snapshotData) newSymbolResponse(symbol *ast.Symbol, canonicalProject P
  
  	if symbol.Parent != nil {
  		resp.Parent = SymbolHandle(symbol.Parent)
@@ -5901,7 +6025,7 @@ index 7e29c44b6..fc4516ff4 100644
  	}
  
  	if symbol.ExportSymbol != nil {
-@@ -168,6 +358,36 @@ func (sd *snapshotData) newSymbolResponse(symbol *ast.Symbol, canonicalProject P
+@@ -168,6 +360,36 @@ func (sd *snapshotData) newSymbolResponse(symbol *ast.Symbol, canonicalProject P
  	return resp
  }
  
@@ -5938,7 +6062,7 @@ index 7e29c44b6..fc4516ff4 100644
  // registerSymbol registers a symbol in the snapshot's registry and returns its handle along with
  // its canonical project. The canonical project is the project the symbol was first observed in
  // (first writer wins for stability) and is always non-empty: every symbol handed to a client must
-@@ -365,6 +585,10 @@ type Session struct {
+@@ -365,6 +587,10 @@ type Session struct {
  	// This is set to true when using MessagePackProtocol.
  	useBinaryResponses bool
  
@@ -5949,7 +6073,7 @@ index 7e29c44b6..fc4516ff4 100644
  	// snapshots maps snapshot handles to their data. Each snapshot has its own
  	// symbol/type registries.
  	//
-@@ -390,6 +614,14 @@ type Session struct {
+@@ -390,6 +616,14 @@ type Session struct {
  	openProjects collections.Set[tspath.Path]
  	openFiles    collections.Set[tspath.Path]
  
@@ -5964,7 +6088,7 @@ index 7e29c44b6..fc4516ff4 100644
  	// updateMu serializes the whole of handleUpdateSnapshot (and releaseOpenRefs)
  	// against other updates. Unlike snapshotsMu it is held across the slow
  	// projectSession.APIUpdate call, because building the request from
-@@ -400,6 +632,16 @@ type Session struct {
+@@ -400,6 +634,16 @@ type Session struct {
  	// snapshots. Lock ordering is updateMu -> snapshotsMu (never the reverse).
  	updateMu sync.Mutex
  
@@ -5981,7 +6105,7 @@ index 7e29c44b6..fc4516ff4 100644
  	cpuProfiler pprof.CPUProfiler
  }
  
-@@ -477,6 +719,21 @@ func (setup checkerSetup) resolveTypeHandle(id TypeID) (*checker.Type, error) {
+@@ -477,6 +721,21 @@ func (setup checkerSetup) resolveTypeHandle(id TypeID) (*checker.Type, error) {
  	return setup.sd.resolveTypeHandle(setup.projectID, id)
  }
  
@@ -6003,7 +6127,7 @@ index 7e29c44b6..fc4516ff4 100644
  func (setup checkerSetup) resolveSymbolHandle(id SymbolID) (*ast.Symbol, error) {
  	return setup.sd.resolveSymbolHandle(id)
  }
-@@ -564,6 +821,38 @@ func (s *Session) HandleRequest(ctx context.Context, method string, params json.
+@@ -564,6 +823,38 @@ func (s *Session) HandleRequest(ctx context.Context, method string, params json.
  		return s.handleGetSourceFileNames(ctx, parsed.(*GetSourceFileNamesParams))
  	case string(MethodGetSourceFileMetadata):
  		return s.handleGetSourceFileMetadata(ctx, parsed.(*GetSourceFileParams))
@@ -6042,7 +6166,7 @@ index 7e29c44b6..fc4516ff4 100644
  	case string(MethodGetSymbolAtPosition):
  		return s.handleGetSymbolAtPosition(ctx, parsed.(*GetSymbolAtPositionParams))
  	case string(MethodGetSymbolsAtPositions):
-@@ -580,10 +869,26 @@ func (s *Session) HandleRequest(ctx context.Context, method string, params json.
+@@ -580,10 +871,26 @@ func (s *Session) HandleRequest(ctx context.Context, method string, params json.
  		return s.handleGetDeclaredTypeOfSymbol(ctx, parsed.(*GetTypeOfSymbolParams))
  	case string(MethodResolveName):
  		return s.handleResolveName(ctx, parsed.(*ResolveNameParams))
@@ -6069,7 +6193,7 @@ index 7e29c44b6..fc4516ff4 100644
  	case string(MethodGetTypeAtLocation):
  		return s.handleGetTypeAtLocation(ctx, parsed.(*GetTypeAtLocationParams))
  	case string(MethodGetTypeAtLocations):
-@@ -594,12 +899,18 @@ func (s *Session) HandleRequest(ctx context.Context, method string, params json.
+@@ -594,12 +901,18 @@ func (s *Session) HandleRequest(ctx context.Context, method string, params json.
  		return s.handleGetTypesAtPositions(ctx, parsed.(*GetTypesAtPositionsParams))
  	case string(MethodGetParentOfSymbol):
  		return s.handleGetParentOfSymbol(ctx, parsed.(*GetSymbolPropertyParams))
@@ -6088,7 +6212,7 @@ index 7e29c44b6..fc4516ff4 100644
  	case string(MethodGetSymbolOfType):
  		return s.handleGetSymbolOfType(ctx, parsed.(*GetTypePropertyParams))
  	case string(MethodGetTargetOfType):
-@@ -650,6 +961,8 @@ func (s *Session) HandleRequest(ctx context.Context, method string, params json.
+@@ -650,6 +963,8 @@ func (s *Session) HandleRequest(ctx context.Context, method string, params json.
  		return s.handleGetBaseTypeOfLiteralType(ctx, parsed.(*GetBaseTypeOfLiteralTypeParams))
  	case string(MethodGetNonNullableType):
  		return s.handleGetNonNullableType(ctx, parsed.(*GetNonNullableTypeParams))
@@ -6097,7 +6221,7 @@ index 7e29c44b6..fc4516ff4 100644
  	case string(MethodGetTypeFromTypeNode):
  		return s.handleGetTypeFromTypeNode(ctx, parsed.(*GetTypeFromTypeNodeParams))
  	case string(MethodGetWidenedType):
-@@ -660,14 +973,34 @@ func (s *Session) HandleRequest(ctx context.Context, method string, params json.
+@@ -660,14 +975,34 @@ func (s *Session) HandleRequest(ctx context.Context, method string, params json.
  		return s.handleIsArrayLikeType(ctx, parsed.(*IsArrayLikeTypeParams))
  	case string(MethodIsTypeAssignableTo):
  		return s.handleIsTypeAssignableTo(ctx, parsed.(*IsTypeAssignableToParams))
@@ -6132,7 +6256,7 @@ index 7e29c44b6..fc4516ff4 100644
  	case string(MethodTypeToString):
  		return s.handleTypeToString(ctx, parsed.(*TypeToTypeNodeParams))
  	case string(MethodPrintNode):
-@@ -690,10 +1023,22 @@ func (s *Session) HandleRequest(ctx context.Context, method string, params json.
+@@ -690,10 +1025,22 @@ func (s *Session) HandleRequest(ctx context.Context, method string, params json.
  		return s.handleGetPropertyOfType(ctx, parsed.(*GetPropertyOfTypeParams))
  	case string(MethodGetIndexInfosOfType):
  		return s.handleGetIndexInfosOfType(ctx, parsed.(*CheckerTypeParams))
@@ -6155,7 +6279,7 @@ index 7e29c44b6..fc4516ff4 100644
  	case string(MethodGetTypeArguments):
  		return s.handleGetTypeArguments(ctx, parsed.(*CheckerTypeParams))
  	case string(MethodGetConstantValue):
-@@ -708,8 +1053,14 @@ func (s *Session) HandleRequest(ctx context.Context, method string, params json.
+@@ -708,8 +1055,14 @@ func (s *Session) HandleRequest(ctx context.Context, method string, params json.
  		return s.handleGetImmediateAliasedSymbol(ctx, parsed.(*CheckerSymbolParams))
  	case string(MethodGetExportsOfModule):
  		return s.handleGetExportsOfModule(ctx, parsed.(*CheckerSymbolParams))
@@ -6170,7 +6294,7 @@ index 7e29c44b6..fc4516ff4 100644
  	case string(MethodGetJSDocTags):
  		return s.handleGetJSDocTags(ctx, parsed.(*CheckerSymbolParams))
  	case string(MethodGetDocumentationComment):
-@@ -718,8 +1069,130 @@ func (s *Session) HandleRequest(ctx context.Context, method string, params json.
+@@ -718,8 +1071,130 @@ func (s *Session) HandleRequest(ctx context.Context, method string, params json.
  		return s.handleIsArrayType(ctx, parsed.(*CheckerTypeParams))
  	case string(MethodIsTupleType):
  		return s.handleIsTupleType(ctx, parsed.(*CheckerTypeParams))
@@ -6301,7 +6425,7 @@ index 7e29c44b6..fc4516ff4 100644
  	case string(MethodGetStringType):
  		return s.handleGetIntrinsicType(ctx, parsed.(*GetIntrinsicTypeParams), (*checker.Checker).GetStringType)
  	case string(MethodGetNumberType):
-@@ -730,6 +1203,16 @@ func (s *Session) HandleRequest(ctx context.Context, method string, params json.
+@@ -730,6 +1205,16 @@ func (s *Session) HandleRequest(ctx context.Context, method string, params json.
  		return s.handleGetIntrinsicType(ctx, parsed.(*GetIntrinsicTypeParams), (*checker.Checker).GetVoidType)
  	case string(MethodGetUndefinedType):
  		return s.handleGetIntrinsicType(ctx, parsed.(*GetIntrinsicTypeParams), (*checker.Checker).GetUndefinedType)
@@ -6318,7 +6442,7 @@ index 7e29c44b6..fc4516ff4 100644
  	case string(MethodGetNullType):
  		return s.handleGetIntrinsicType(ctx, parsed.(*GetIntrinsicTypeParams), (*checker.Checker).GetNullType)
  	case string(MethodGetNeverType):
-@@ -748,6 +1231,12 @@ func (s *Session) HandleRequest(ctx context.Context, method string, params json.
+@@ -748,6 +1233,12 @@ func (s *Session) HandleRequest(ctx context.Context, method string, params json.
  		return s.handleGetBindDiagnostics(ctx, parsed.(*GetDiagnosticsParams))
  	case string(MethodGetSemanticDiagnostics):
  		return s.handleGetSemanticDiagnostics(ctx, parsed.(*GetDiagnosticsParams))
@@ -6331,7 +6455,7 @@ index 7e29c44b6..fc4516ff4 100644
  	case string(MethodGetSuggestionDiagnostics):
  		return s.handleGetSuggestionDiagnostics(ctx, parsed.(*GetDiagnosticsParams))
  	case string(MethodGetDeclarationDiagnostics):
-@@ -772,6 +1261,12 @@ func (s *Session) HandleRequest(ctx context.Context, method string, params json.
+@@ -772,6 +1263,18 @@ func (s *Session) HandleRequest(ctx context.Context, method string, params json.
  		return s.handleGetSignatureUsages(ctx, parsed.(*GetSignatureUsagesParams))
  	case string(MethodGetCompletionsAtPosition):
  		return s.handleGetCompletionsAtPosition(ctx, parsed.(*GetCompletionsAtPositionParams))
@@ -6341,10 +6465,16 @@ index 7e29c44b6..fc4516ff4 100644
 +		return s.handleReferences(ctx, parsed.(*ReferencesParams))
 +	case string(MethodDefinitionAndBoundSpan):
 +		return s.handleDefinitionAndBoundSpan(ctx, parsed.(*DefinitionAndBoundSpanParams))
++	case string(MethodSignatureHelp):
++		return s.handleSignatureHelp(ctx, parsed.(*SignatureHelpParams))
++	case string(MethodGetRenameInfo):
++		return s.handleGetRenameInfo(ctx, parsed.(*RenameInfoParams))
++	case string(MethodGetEditsForRename):
++		return s.handleGetEditsForRename(ctx, parsed.(*EditsForRenameParams))
  	default:
  		return nil, fmt.Errorf("unknown method: %s", method)
  	}
-@@ -816,6 +1311,7 @@ func (s *Session) handleInitialize(ctx context.Context) (*InitializeResponse, er
+@@ -816,6 +1319,7 @@ func (s *Session) handleInitialize(ctx context.Context) (*InitializeResponse, er
  	return &InitializeResponse{
  		UseCaseSensitiveFileNames: s.projectSession.FS().UseCaseSensitiveFileNames(),
  		CurrentDirectory:          s.projectSession.GetCurrentDirectory(),
@@ -6352,7 +6482,7 @@ index 7e29c44b6..fc4516ff4 100644
  	}, nil
  }
  
-@@ -832,6 +1328,17 @@ func (s *Session) handleUpdateSnapshot(ctx context.Context, params *UpdateSnapsh
+@@ -832,6 +1336,17 @@ func (s *Session) handleUpdateSnapshot(ctx context.Context, params *UpdateSnapsh
  	s.updateMu.Lock()
  	defer s.updateMu.Unlock()
  
@@ -6370,7 +6500,7 @@ index 7e29c44b6..fc4516ff4 100644
  	fileChanges := s.toFileChangeSummary(params.FileChanges)
  
  	apiRequest := &project.APISnapshotRequest{}
-@@ -850,6 +1357,18 @@ func (s *Session) handleUpdateSnapshot(ctx context.Context, params *UpdateSnapsh
+@@ -850,6 +1365,18 @@ func (s *Session) handleUpdateSnapshot(ctx context.Context, params *UpdateSnapsh
  		apiRequest.OpenProjects.Add(configFileName)
  		openedProjects = append(openedProjects, configPath)
  	}
@@ -6389,7 +6519,7 @@ index 7e29c44b6..fc4516ff4 100644
  
  	// Close projects: only release a ref we currently hold.
  	var closedProjects []tspath.Path
-@@ -883,6 +1402,7 @@ func (s *Session) handleUpdateSnapshot(ctx context.Context, params *UpdateSnapsh
+@@ -883,6 +1410,7 @@ func (s *Session) handleUpdateSnapshot(ctx context.Context, params *UpdateSnapsh
  
  	// Close files: only release a ref we currently hold.
  	var closedFiles []tspath.Path
@@ -6397,7 +6527,7 @@ index 7e29c44b6..fc4516ff4 100644
  	for _, f := range params.CloseFiles {
  		path := s.toPath(f.ToURI(s.projectSession.GetCurrentDirectory()).FileName())
  		if !s.openFiles.Has(path) {
-@@ -893,6 +1413,72 @@ func (s *Session) handleUpdateSnapshot(ctx context.Context, params *UpdateSnapsh
+@@ -893,6 +1421,72 @@ func (s *Session) handleUpdateSnapshot(ctx context.Context, params *UpdateSnapsh
  		}
  		apiRequest.CloseFiles.Add(path)
  		closedFiles = append(closedFiles, path)
@@ -6470,7 +6600,7 @@ index 7e29c44b6..fc4516ff4 100644
  	}
  
  	// Even when nothing is opened or closed, APIUpdate ensures all projects and
-@@ -938,6 +1524,7 @@ func (s *Session) handleUpdateSnapshot(ctx context.Context, params *UpdateSnapsh
+@@ -938,6 +1532,7 @@ func (s *Session) handleUpdateSnapshot(ctx context.Context, params *UpdateSnapsh
  			refCount:                1,
  			symbolRegistry:          make(map[SymbolID]*ast.Symbol),
  			symbolCanonicalProjects: make(map[SymbolID]ProjectID),
@@ -6478,7 +6608,7 @@ index 7e29c44b6..fc4516ff4 100644
  			projectRegistries:       make(map[ProjectID]*projectRegistryData),
  		}
  		s.snapshots[handle] = sd
-@@ -962,6 +1549,32 @@ func (s *Session) handleUpdateSnapshot(ctx context.Context, params *UpdateSnapsh
+@@ -962,6 +1557,32 @@ func (s *Session) handleUpdateSnapshot(ctx context.Context, params *UpdateSnapsh
  		changes = computeSnapshotChanges(prevSD.snapshot, snapshot)
  	}
  
@@ -6511,7 +6641,7 @@ index 7e29c44b6..fc4516ff4 100644
  	return &UpdateSnapshotResponse{
  		Snapshot: handle,
  		Projects: projectResponses,
-@@ -1061,8 +1674,8 @@ func (s *Session) handleGetSourceFile(ctx context.Context, params *GetSourceFile
+@@ -1061,8 +1682,8 @@ func (s *Session) handleGetSourceFile(ctx context.Context, params *GetSourceFile
  		return nil, nil
  	}
  
@@ -6522,7 +6652,7 @@ index 7e29c44b6..fc4516ff4 100644
  	if err != nil {
  		return nil, fmt.Errorf("failed to encode source file: %w", err)
  	}
-@@ -1076,6 +1689,42 @@ func (s *Session) handleGetSourceFile(ctx context.Context, params *GetSourceFile
+@@ -1076,6 +1697,42 @@ func (s *Session) handleGetSourceFile(ctx context.Context, params *GetSourceFile
  	}, nil
  }
  
@@ -6565,7 +6695,7 @@ index 7e29c44b6..fc4516ff4 100644
  // handleGetSourceFileNames returns file names of all source files in a project.
  func (s *Session) handleGetSourceFileNames(ctx context.Context, params *GetSourceFileNamesParams) ([]string, error) {
  	sd, err := s.getSnapshotData(params.Snapshot)
-@@ -1124,261 +1773,409 @@ func (s *Session) handleGetSourceFileMetadata(ctx context.Context, params *GetSo
+@@ -1124,261 +1781,409 @@ func (s *Session) handleGetSourceFileMetadata(ctx context.Context, params *GetSo
  	}, nil
  }
  
@@ -7124,7 +7254,7 @@ index 7e29c44b6..fc4516ff4 100644
  	setup, err := s.setupChecker(ctx, params.Snapshot, params.Project)
  	if err != nil {
  		return nil, err
-@@ -1393,23 +2190,23 @@ func (s *Session) handleGetTypeAtLocation(ctx context.Context, params *GetTypeAt
+@@ -1393,23 +2198,23 @@ func (s *Session) handleGetTypeAtLocation(ctx context.Context, params *GetTypeAt
  		return nil, nil
  	}
  
@@ -7154,7 +7284,7 @@ index 7e29c44b6..fc4516ff4 100644
  	for i, loc := range params.Locations {
  		node, err := setup.sd.resolveNodeHandle(setup.program, loc)
  		if err != nil {
-@@ -1418,35 +2215,32 @@ func (s *Session) handleGetTypeAtLocations(ctx context.Context, params *GetTypeA
+@@ -1418,35 +2223,32 @@ func (s *Session) handleGetTypeAtLocations(ctx context.Context, params *GetTypeA
  		if node == nil {
  			continue
  		}
@@ -7200,7 +7330,7 @@ index 7e29c44b6..fc4516ff4 100644
  	if t == nil {
  		return nil, nil
  	}
-@@ -1454,27 +2248,24 @@ func (s *Session) handleGetTypeAtPosition(ctx context.Context, params *GetTypeAt
+@@ -1454,27 +2256,24 @@ func (s *Session) handleGetTypeAtPosition(ctx context.Context, params *GetTypeAt
  	return setup.newTypeResponse(t), nil
  }
  
@@ -7238,7 +7368,7 @@ index 7e29c44b6..fc4516ff4 100644
  		if t != nil {
  			results[i] = setup.newTypeResponse(t)
  		}
-@@ -1483,373 +2274,2929 @@ func (s *Session) handleGetTypesAtPositions(ctx context.Context, params *GetType
+@@ -1483,373 +2282,2929 @@ func (s *Session) handleGetTypesAtPositions(ctx context.Context, params *GetType
  	return results, nil
  }
  
@@ -9306,7 +9436,9 @@ index 7e29c44b6..fc4516ff4 100644
 +	}
 +	return results, nil
 +}
-+
+ 
+-func (s *Session) handleGetExportSymbolOfSymbol(_ context.Context, params *GetSymbolPropertyParams) (*SymbolResponse, error) {
+-	return s.resolveSymbolPropertyOfSymbol(params, func(sym *ast.Symbol) *ast.Symbol { return sym.ExportSymbol })
 +// handleGetSymbolsOfParameterPropertyDeclaration returns the parameter and
 +// property symbols for a parameter-property declaration (length-2 array).
 +func (s *Session) handleGetSymbolsOfParameterPropertyDeclaration(ctx context.Context, params *GetSymbolsOfParameterPropertyDeclarationParams) ([]*SymbolResponse, error) {
@@ -9595,19 +9727,14 @@ index 7e29c44b6..fc4516ff4 100644
 +		return false, err
 +	}
 +	defer setup.done()
- 
--func (s *Session) handleGetExportSymbolOfSymbol(_ context.Context, params *GetSymbolPropertyParams) (*SymbolResponse, error) {
--	return s.resolveSymbolPropertyOfSymbol(params, func(sym *ast.Symbol) *ast.Symbol { return sym.ExportSymbol })
++
 +	t, err := setup.resolveTypeHandle(params.Type)
 +	if err != nil {
 +		return false, err
 +	}
 +	return setup.checker.IsLibType(t), nil
- }
- 
--func (s *Session) handleGetSymbolOfType(_ context.Context, params *GetTypePropertyParams) (*SymbolResponse, error) {
--	return s.resolveSymbolPropertyOfType(params, (*checker.Type).Symbol)
--}
++}
++
 +// handleSymbolIsValue reports whether a symbol is a value.
 +func (s *Session) handleSymbolIsValue(ctx context.Context, params *CheckerSymbolParams) (bool, error) {
 +	setup, err := s.setupChecker(ctx, params.Snapshot, params.Project)
@@ -9615,9 +9742,7 @@ index 7e29c44b6..fc4516ff4 100644
 +		return false, err
 +	}
 +	defer setup.done()
- 
--func (s *Session) handleGetTargetOfType(_ context.Context, params *GetTypePropertyParams) (*TypeResponse, error) {
--	return s.resolveTypePropertyOfType(params, (*checker.Type).Target)
++
 +	symbol, err := setup.resolveSymbolHandle(params.Symbol)
 +	if err != nil {
 +		return false, err
@@ -9628,9 +9753,8 @@ index 7e29c44b6..fc4516ff4 100644
 +	return setup.checker.SymbolIsValue(symbol), nil
  }
  
--func (s *Session) handleGetFreshTypeOfType(_ context.Context, params *GetTypePropertyParams) (*TypeResponse, error) {
--	return s.resolveTypePropertyOfType(params, func(t *checker.Type) *checker.Type { return t.AsLiteralType().FreshType() })
--}
+-func (s *Session) handleGetSymbolOfType(_ context.Context, params *GetTypePropertyParams) (*SymbolResponse, error) {
+-	return s.resolveSymbolPropertyOfType(params, (*checker.Type).Symbol)
 +// handleRequiresAddingImplicitUndefined reports whether a parameter needs implicit undefined.
 +func (s *Session) handleRequiresAddingImplicitUndefined(ctx context.Context, params *CheckerNodeParams) (bool, error) {
 +	setup, err := s.setupChecker(ctx, params.Snapshot, params.Project)
@@ -9638,9 +9762,7 @@ index 7e29c44b6..fc4516ff4 100644
 +		return false, err
 +	}
 +	defer setup.done()
- 
--func (s *Session) handleGetRegularTypeOfType(_ context.Context, params *GetTypePropertyParams) (*TypeResponse, error) {
--	return s.resolveTypePropertyOfType(params, func(t *checker.Type) *checker.Type { return t.AsLiteralType().RegularType() })
++
 +	node, err := setup.sd.resolveNodeHandle(setup.program, params.Location)
 +	if err != nil {
 +		return false, err
@@ -9651,8 +9773,8 @@ index 7e29c44b6..fc4516ff4 100644
 +	return setup.checker.RequiresAddingImplicitUndefined(node), nil
  }
  
--func (s *Session) handleGetTypesOfType(_ context.Context, params *GetTypePropertyParams) ([]*TypeResponse, error) {
--	return s.resolveTypeArrayPropertyOfType(params, (*checker.Type).Types)
+-func (s *Session) handleGetTargetOfType(_ context.Context, params *GetTypePropertyParams) (*TypeResponse, error) {
+-	return s.resolveTypePropertyOfType(params, (*checker.Type).Target)
 -}
 +// handleGetTypeOnlyAliasDeclaration returns the type-only alias declaration for a symbol.
 +func (s *Session) handleGetTypeOnlyAliasDeclaration(ctx context.Context, params *CheckerSymbolParams) (any, error) {
@@ -9662,8 +9784,9 @@ index 7e29c44b6..fc4516ff4 100644
 +	}
 +	defer setup.done()
  
--func (s *Session) handleGetTypeParametersOfType(_ context.Context, params *GetTypePropertyParams) ([]*TypeResponse, error) {
--	return s.resolveTypeArrayPropertyOfType(params, func(t *checker.Type) []*checker.Type { return t.AsInterfaceType().TypeParameters() })
+-func (s *Session) handleGetFreshTypeOfType(_ context.Context, params *GetTypePropertyParams) (*TypeResponse, error) {
+-	return s.resolveTypePropertyOfType(params, func(t *checker.Type) *checker.Type { return t.AsLiteralType().FreshType() })
+-}
 +	symbol, err := setup.resolveSymbolHandle(params.Symbol)
 +	if err != nil {
 +		return nil, err
@@ -9671,7 +9794,9 @@ index 7e29c44b6..fc4516ff4 100644
 +	if symbol == nil {
 +		return nil, nil
 +	}
-+
+ 
+-func (s *Session) handleGetRegularTypeOfType(_ context.Context, params *GetTypePropertyParams) (*TypeResponse, error) {
+-	return s.resolveTypePropertyOfType(params, func(t *checker.Type) *checker.Type { return t.AsLiteralType().RegularType() })
 +	node := setup.checker.GetTypeOnlyAliasDeclaration(symbol)
 +	if node == nil {
 +		return nil, nil
@@ -9679,8 +9804,9 @@ index 7e29c44b6..fc4516ff4 100644
 +	return setup.sd.nodeHandleFrom(node), nil
  }
  
--func (s *Session) handleGetOuterTypeParametersOfType(_ context.Context, params *GetTypePropertyParams) ([]*TypeResponse, error) {
--	return s.resolveTypeArrayPropertyOfType(params, func(t *checker.Type) []*checker.Type { return t.AsInterfaceType().OuterTypeParameters() })
+-func (s *Session) handleGetTypesOfType(_ context.Context, params *GetTypePropertyParams) ([]*TypeResponse, error) {
+-	return s.resolveTypeArrayPropertyOfType(params, (*checker.Type).Types)
+-}
 +// handleResolveExternalModuleName resolves an external module name to a symbol.
 +func (s *Session) handleResolveExternalModuleName(ctx context.Context, params *CheckerNodeParams) (*SymbolResponse, error) {
 +	setup, err := s.setupChecker(ctx, params.Snapshot, params.Project)
@@ -9688,7 +9814,10 @@ index 7e29c44b6..fc4516ff4 100644
 +		return nil, err
 +	}
 +	defer setup.done()
-+
+ 
+-func (s *Session) handleGetTypeParametersOfType(_ context.Context, params *GetTypePropertyParams) ([]*TypeResponse, error) {
+-	return s.resolveTypeArrayPropertyOfType(params, func(t *checker.Type) []*checker.Type { return t.AsInterfaceType().TypeParameters() })
+-}
 +	node, err := setup.sd.resolveNodeHandle(setup.program, params.Location)
 +	if err != nil {
 +		return nil, err
@@ -9696,7 +9825,9 @@ index 7e29c44b6..fc4516ff4 100644
 +	if node == nil {
 +		return nil, nil
 +	}
-+
+ 
+-func (s *Session) handleGetOuterTypeParametersOfType(_ context.Context, params *GetTypePropertyParams) ([]*TypeResponse, error) {
+-	return s.resolveTypeArrayPropertyOfType(params, func(t *checker.Type) []*checker.Type { return t.AsInterfaceType().OuterTypeParameters() })
 +	symbol := setup.checker.ResolveExternalModuleName(node)
 +	if symbol == nil {
 +		return nil, nil
@@ -9896,13 +10027,16 @@ index 7e29c44b6..fc4516ff4 100644
  
 -func (s *Session) handleGetThisParameterOfSignature(_ context.Context, params *GetSignaturePropertyParams) (*SymbolResponse, error) {
 -	return s.resolveSymbolPropertyOfSignature(params, (*checker.Signature).ThisParameter)
+-}
 +func (s *Session) handleGetSuggestedSymbolForNonexistentClassMember(ctx context.Context, params *GetSuggestedSymbolForNonexistentClassMemberParams) (*SymbolResponse, error) {
 +	setup, err := s.setupChecker(ctx, params.Snapshot, params.Project)
 +	if err != nil {
 +		return nil, err
 +	}
 +	defer setup.done()
-+
+ 
+-func (s *Session) handleGetTargetOfSignature(_ context.Context, params *GetSignaturePropertyParams) (*SignatureResponse, error) {
+-	return s.resolveSignaturePropertyOfSignature(params, (*checker.Signature).Target)
 +	t, err := setup.resolveTypeHandle(params.Type)
 +	if err != nil {
 +		return nil, err
@@ -9914,30 +10048,10 @@ index 7e29c44b6..fc4516ff4 100644
 +	return setup.newSymbolResponse(symbol), nil
  }
  
--func (s *Session) handleGetTargetOfSignature(_ context.Context, params *GetSignaturePropertyParams) (*SignatureResponse, error) {
--	return s.resolveSignaturePropertyOfSignature(params, (*checker.Signature).Target)
-+func (s *Session) handleGetSuggestedSymbolForNonexistentJSXAttribute(ctx context.Context, params *GetSuggestedSymbolForNonexistentJSXAttributeParams) (*SymbolResponse, error) {
-+	setup, err := s.setupChecker(ctx, params.Snapshot, params.Project)
-+	if err != nil {
-+		return nil, err
-+	}
-+	defer setup.done()
-+
-+	t, err := setup.resolveTypeHandle(params.Type)
-+	if err != nil {
-+		return nil, err
-+	}
-+	symbol := setup.checker.GetSuggestedSymbolForNonexistentJSXAttribute(params.Name, t)
-+	if symbol == nil {
-+		return nil, nil
-+	}
-+	return setup.newSymbolResponse(symbol), nil
- }
- 
 -// resolveTypePropertyOfType resolves a type property of type `Type` and returns a type response.
 -func (s *Session) resolveTypePropertyOfType(params *GetTypePropertyParams, getter func(*checker.Type) *checker.Type) (*TypeResponse, error) {
 -	sd, err := s.getSnapshotData(params.Snapshot)
-+func (s *Session) handleGetSuggestedSymbolForNonexistentModule(ctx context.Context, params *GetSuggestedSymbolForNonexistentModuleParams) (*SymbolResponse, error) {
++func (s *Session) handleGetSuggestedSymbolForNonexistentJSXAttribute(ctx context.Context, params *GetSuggestedSymbolForNonexistentJSXAttributeParams) (*SymbolResponse, error) {
 +	setup, err := s.setupChecker(ctx, params.Snapshot, params.Project)
  	if err != nil {
  		return nil, err
@@ -9945,18 +10059,35 @@ index 7e29c44b6..fc4516ff4 100644
 +	defer setup.done()
  
 -	t, err := sd.resolveTypeHandle(params.Project, params.Type)
-+	node, err := setup.sd.resolveNodeHandle(setup.program, params.Location)
++	t, err := setup.resolveTypeHandle(params.Type)
  	if err != nil {
  		return nil, err
  	}
 -
 -	result := getter(t)
 -	if result == nil {
-+	if node == nil {
++	symbol := setup.checker.GetSuggestedSymbolForNonexistentJSXAttribute(params.Name, t)
++	if symbol == nil {
  		return nil, nil
  	}
--
++	return setup.newSymbolResponse(symbol), nil
++}
++
++func (s *Session) handleGetSuggestedSymbolForNonexistentModule(ctx context.Context, params *GetSuggestedSymbolForNonexistentModuleParams) (*SymbolResponse, error) {
++	setup, err := s.setupChecker(ctx, params.Snapshot, params.Project)
++	if err != nil {
++		return nil, err
++	}
++	defer setup.done()
+ 
 -	return sd.newTypeResponse(params.Project, result), nil
++	node, err := setup.sd.resolveNodeHandle(setup.program, params.Location)
++	if err != nil {
++		return nil, err
++	}
++	if node == nil {
++		return nil, nil
++	}
 +	mod, err := setup.resolveSymbolHandle(params.Symbol)
 +	if err != nil {
 +		return nil, err
@@ -10369,7 +10500,7 @@ index 7e29c44b6..fc4516ff4 100644
  	setup, err := s.setupChecker(ctx, params.Snapshot, params.Project)
  	if err != nil {
  		return nil, err
-@@ -1860,123 +5207,195 @@ func (s *Session) handleGetNonNullableType(ctx context.Context, params *GetNonNu
+@@ -1860,123 +5215,195 @@ func (s *Session) handleGetNonNullableType(ctx context.Context, params *GetNonNu
  	if err != nil {
  		return nil, err
  	}
@@ -10431,16 +10562,15 @@ index 7e29c44b6..fc4516ff4 100644
 -	result := setup.checker.GetWidenedType(t)
 -	if result == nil {
 -		return nil, nil
--	}
--
--	return setup.newTypeResponse(result), nil
 +	var t *checker.Type
 +	if params.Type != 0 {
 +		t, err = setup.resolveTypeHandle(params.Type)
 +		if err != nil {
 +			return nil, err
 +		}
-+	}
+ 	}
+-
+-	return setup.newTypeResponse(result), nil
 +	symbol := setup.checker.CreateTransientSymbolWithType(ast.SymbolFlags(params.Flags), params.Name, t)
 +	return setup.newSymbolResponse(symbol), nil
  }
@@ -10473,23 +10603,24 @@ index 7e29c44b6..fc4516ff4 100644
 -
 -	if params.Index < 0 {
 -		return nil, fmt.Errorf("%w: invalid parameter index", ErrClientError)
+-	}
+-
+-	t := setup.checker.GetTypeAtPosition(sig, int(params.Index))
+-	if t == nil {
+-		return nil, nil
 +	typeParameters, err := setup.resolveTypeHandles(params.TypeParameters)
 +	if err != nil {
 +		return nil, err
  	}
 -
--	t := setup.checker.GetTypeAtPosition(sig, int(params.Index))
--	if t == nil {
--		return nil, nil
+-	return setup.newTypeResponse(t), nil
 +	var thisParameter *ast.Symbol
 +	if params.ThisParameter != 0 {
 +		thisParameter, err = setup.resolveSymbolHandle(params.ThisParameter)
 +		if err != nil {
 +			return nil, err
 +		}
- 	}
--
--	return setup.newTypeResponse(t), nil
++	}
 +	sig := setup.checker.CreateSignatureFromParts(
 +		parameters,
 +		returnType,
@@ -10623,7 +10754,7 @@ index 7e29c44b6..fc4516ff4 100644
  	setup, err := s.setupChecker(ctx, params.Snapshot, params.Project)
  	if err != nil {
  		return nil, err
-@@ -1990,49 +5409,38 @@ func (s *Session) handleGetShorthandAssignmentValueSymbol(ctx context.Context, p
+@@ -1990,49 +5417,38 @@ func (s *Session) handleGetShorthandAssignmentValueSymbol(ctx context.Context, p
  	if node == nil {
  		return nil, nil
  	}
@@ -10685,7 +10816,7 @@ index 7e29c44b6..fc4516ff4 100644
  	setup, err := s.setupChecker(ctx, params.Snapshot, params.Project)
  	if err != nil {
  		return nil, err
-@@ -2044,72 +5452,47 @@ func (s *Session) handleTypeToTypeNode(ctx context.Context, params *TypeToTypeNo
+@@ -2044,72 +5460,47 @@ func (s *Session) handleTypeToTypeNode(ctx context.Context, params *TypeToTypeNo
  		return nil, err
  	}
  
@@ -10775,7 +10906,7 @@ index 7e29c44b6..fc4516ff4 100644
  	setup, err := s.setupChecker(ctx, params.Snapshot, params.Project)
  	if err != nil {
  		return nil, err
-@@ -2121,302 +5504,266 @@ func (s *Session) handleTypeToString(ctx context.Context, params *TypeToTypeNode
+@@ -2121,302 +5512,266 @@ func (s *Session) handleTypeToString(ctx context.Context, params *TypeToTypeNode
  		return nil, err
  	}
  
@@ -11210,7 +11341,7 @@ index 7e29c44b6..fc4516ff4 100644
  }
  
  // handleGetConstraintOfTypeParameter returns the constraint of a type parameter.
-@@ -2430,6 +5777,7 @@ func (s *Session) handleGetConstraintOfTypeParameter(ctx context.Context, params
+@@ -2430,6 +5785,7 @@ func (s *Session) handleGetConstraintOfTypeParameter(ctx context.Context, params
  	t, err := setup.resolveTypeHandle(params.Type)
  	if err != nil {
  		return nil, err
@@ -11218,7 +11349,7 @@ index 7e29c44b6..fc4516ff4 100644
  	}
  
  	constraint := setup.checker.GetConstraintOfTypeParameter(t)
-@@ -2628,6 +5976,73 @@ func (s *Session) handleGetExportsOfModule(ctx context.Context, params *CheckerS
+@@ -2628,6 +5984,73 @@ func (s *Session) handleGetExportsOfModule(ctx context.Context, params *CheckerS
  	return results, nil
  }
  
@@ -11292,7 +11423,7 @@ index 7e29c44b6..fc4516ff4 100644
  // handleGetMemberInModuleExports returns an export by name from a module symbol.
  func (s *Session) handleGetMemberInModuleExports(ctx context.Context, params *GetMemberInModuleExportsParams) (*SymbolResponse, error) {
  	setup, err := s.setupChecker(ctx, params.Snapshot, params.Project)
-@@ -2830,7 +6245,9 @@ func computeSnapshotChanges(prev *project.Snapshot, next *project.Snapshot) *Sna
+@@ -2830,7 +6253,9 @@ func computeSnapshotChanges(prev *project.Snapshot, next *project.Snapshot) *Sna
  			var projectChanges ProjectFileChanges
  			core.DiffMaps(
  				oldFiles, newFiles,
@@ -11303,7 +11434,7 @@ index 7e29c44b6..fc4516ff4 100644
  				func(path tspath.Path, _ *ast.SourceFile) {
  					projectChanges.DeletedFiles = append(projectChanges.DeletedFiles, path)
  				},
-@@ -2838,7 +6255,7 @@ func computeSnapshotChanges(prev *project.Snapshot, next *project.Snapshot) *Sna
+@@ -2838,7 +6263,7 @@ func computeSnapshotChanges(prev *project.Snapshot, next *project.Snapshot) *Sna
  					projectChanges.ChangedFiles = append(projectChanges.ChangedFiles, path)
  				},
  			)
@@ -11312,7 +11443,7 @@ index 7e29c44b6..fc4516ff4 100644
  				if changes.ChangedProjects == nil {
  					changes.ChangedProjects = make(map[ProjectID]*ProjectFileChanges)
  				}
-@@ -2979,7 +6396,6 @@ func (s *Session) handleGetBindDiagnostics(ctx context.Context, params *GetDiagn
+@@ -2979,7 +6404,6 @@ func (s *Session) handleGetBindDiagnostics(ctx context.Context, params *GetDiagn
  
  // handleGetSemanticDiagnostics returns semantic diagnostics for a file or all files.
  func (s *Session) handleGetSemanticDiagnostics(ctx context.Context, params *GetDiagnosticsParams) ([]*DiagnosticResponse, error) {
@@ -11320,7 +11451,7 @@ index 7e29c44b6..fc4516ff4 100644
  	sd, err := s.getSnapshotData(params.Snapshot)
  	if err != nil {
  		return nil, err
-@@ -2995,10 +6411,150 @@ func (s *Session) handleGetSemanticDiagnostics(ctx context.Context, params *GetD
+@@ -2995,10 +6419,150 @@ func (s *Session) handleGetSemanticDiagnostics(ctx context.Context, params *GetD
  		return nil, err
  	}
  
@@ -11471,7 +11602,7 @@ index 7e29c44b6..fc4516ff4 100644
  // handleGetSuggestionDiagnostics returns suggestion diagnostics for a file or all files.
  func (s *Session) handleGetSuggestionDiagnostics(ctx context.Context, params *GetDiagnosticsParams) ([]*DiagnosticResponse, error) {
  	ctx = core.WithCheckerLifetime(ctx, core.CheckerLifetimeDiagnostics)
-@@ -3077,7 +6633,6 @@ func (s *Session) handleGetProgramDiagnostics(ctx context.Context, params *GetPr
+@@ -3077,7 +6641,6 @@ func (s *Session) handleGetProgramDiagnostics(ctx context.Context, params *GetPr
  
  // handleGetGlobalDiagnostics returns global (non-file-specific) semantic diagnostics.
  func (s *Session) handleGetGlobalDiagnostics(ctx context.Context, params *GetProjectDiagnosticsParams) ([]*DiagnosticResponse, error) {
@@ -11479,7 +11610,7 @@ index 7e29c44b6..fc4516ff4 100644
  	sd, err := s.getSnapshotData(params.Snapshot)
  	if err != nil {
  		return nil, err
-@@ -3094,11 +6649,27 @@ func (s *Session) handleGetGlobalDiagnostics(ctx context.Context, params *GetPro
+@@ -3094,11 +6657,27 @@ func (s *Session) handleGetGlobalDiagnostics(ctx context.Context, params *GetPro
  	}
  
  	// Global diagnostics are accumulated lazily by the project's checker pool as
@@ -11512,7 +11643,159 @@ index 7e29c44b6..fc4516ff4 100644
  
  	diags := core.Filter(proj.GetProjectDiagnostics(ctx), func(d *ast.Diagnostic) bool {
  		return d.File() == nil
-@@ -3298,3 +6869,24 @@ func (s *Session) handleGetReferencedSymbolsForNode(ctx context.Context, params
+@@ -3206,29 +6785,72 @@ func (s *Session) handleGetCompletionsAtPosition(ctx context.Context, params *Ge
+ 	if sourceFile == nil {
+ 		return nil, nil
+ 	}
+-	langSvc, err := s.setupLanguageService(sd, program, params.Project, "")
+-	if err != nil {
+-		return nil, err
+-	}
+ 	positionMap := sourceFile.GetPositionMap()
+ 	internalPos := positionMap.UTF16ToUTF8(int(params.Position))
++	// Always wrap the snapshot host: mergeCompletionsPreferences normalizes the
++	// unset includeCompletionsForModuleExports tri-state to stock's off default,
++	// and per-request tri-states override it when present.
++	proj := sd.snapshot.ProjectCollection.GetProjectByPath(parseProjectHandle(params.Project))
++	if proj == nil {
++		return nil, fmt.Errorf("%w: project not found", ErrClientError)
++	}
++	langSvc := ls.NewLanguageService(proj.ID(), program, &completionsPrefsHost{
++		Host:  sd.snapshot,
++		prefs: mergeCompletionsPreferences(sd.snapshot.GetPreferences(""), params.Preferences),
++	}, "")
+ 	result, err := langSvc.GetCompletionsAtPosition(ctx, sourceFile, internalPos, params.TriggerCharacter, params.IncludeSymbol)
++	if errors.Is(err, ls.ErrNeedsAutoImports) {
++		// The auto-import registry is not prepared for this file. Mirror the
++		// LSP handler (registerLanguageServiceWithAutoImportsRequestHandler):
++		// prepare it on a cloned snapshot and retry once.
++		uri := params.File.ToURI(s.projectSession.GetCurrentDirectory())
++		prepared, prepProj, prepErr := s.projectSession.GetSnapshotWithAutoImports(ctx, sd.snapshot, uri)
++		if prepErr != nil {
++			return nil, prepErr
++		}
++		defer prepared.Deref(s.projectSession)
++		prepProgram := prepProj.GetProgram()
++		sourceFile = prepProgram.GetSourceFile(params.File.ToFileName())
++		if sourceFile == nil {
++			return nil, nil
++		}
++		langSvc = ls.NewLanguageService(prepProj.ID(), prepProgram, &completionsPrefsHost{
++			Host:  prepared,
++			prefs: mergeCompletionsPreferences(prepared.GetPreferences(""), params.Preferences),
++		}, "")
++		result, err = langSvc.GetCompletionsAtPosition(ctx, sourceFile, internalPos, params.TriggerCharacter, params.IncludeSymbol)
++	}
+ 	if err != nil || result == nil {
+ 		return nil, err
+ 	}
+-	entries := make([]*CompletionEntryResponse, 0, len(result.Items))
+-	for _, item := range result.Items {
++	items, providerDeps := filterAutoImportItemsByPackageJsonVisibility(result.Items, params.File.ToFileName(), s.projectSession.FS())
++	for _, item := range items {
++		// The vscode-derived LSP layer appends "?" to optional members for its
++		// client UI (completions.go:4507); stock tsserver never does — strip it
++		// for protocol parity (name only; insertText/filterText were captured
++		// before the suffix).
++		if item.KindModifiers&lsutil.ScriptElementKindModifierOptional != 0 {
++			item.Label = strings.TrimSuffix(item.Label, "?")
++		}
++	}
++	sortCompletionItems(items)
++	entries := make([]*CompletionEntryResponse, 0, len(items))
++	for _, item := range items {
+ 		entry := &CompletionEntryResponse{
+-			Name:       item.Label,
+-			SortText:   item.SortText,
+-			InsertText: item.InsertText,
+-			FilterText: item.FilterText,
+-			Detail:     item.Detail,
++			Name:          item.Label,
++			SortText:      item.SortText,
++			InsertText:    item.InsertText,
++			FilterText:    item.FilterText,
++			Detail:        item.Detail,
++			ElementKind:   ls.ScriptElementKindString(item.ElementKind),
++			KindModifiers: item.KindModifiersText,
+ 		}
+ 		if item.Kind != nil {
+ 			entry.Kind = uint32(*item.Kind)
+ 		}
+-		if item.LabelDetails != nil {
++		if item.LabelDetails != nil && (item.Data == nil || item.Data.Source == "") {
++			// Stock omits labelDetails on auto-import (sourced) entries — it uses
++			// sourceDisplay instead.
+ 			entry.LabelDetails = &CompletionEntryLabelDetailsResponse{
+ 				Detail:      item.LabelDetails.Detail,
+ 				Description: item.LabelDetails.Description,
+@@ -3237,12 +6859,62 @@ func (s *Session) handleGetCompletionsAtPosition(ctx context.Context, params *Ge
+ 		if item.Symbol != nil {
+ 			entry.Symbol = sd.newSymbolResponse(item.Symbol, params.Project)
+ 		}
++		if item.Data != nil {
++			entry.Source = item.Data.Source
++			if item.Data.AutoImport != nil {
++				entry.HasAction = ptrTrue()
++			}
++			// Stock attaches a data payload to every sourced (auto-import)
++			// entry; consumers key on its presence (volar) or post it back to
++			// getCompletionEntryDetails (stock resolves the module via
++			// data.fileName + data.exportName).
++			if item.Data.Source != "" {
++				moduleSpecifier := item.Data.Source
++				if item.Data.AutoImport != nil && item.Data.AutoImport.ModuleSpecifier != "" {
++					moduleSpecifier = item.Data.AutoImport.ModuleSpecifier
++				}
++				entry.SourceDisplay = []DisplayPartResponse{{Text: moduleSpecifier, Kind: "text"}}
++				if providerDeps != nil && item.Data.AutoImport != nil && providerDeps.Has(packageNameFromSpecifier(item.Data.AutoImport.ModuleSpecifier)) {
++					entry.IsPackageJsonImport = ptrTrue()
++				}
++				entry.Data = &CompletionEntryDataResponse{
++					ExportName: item.Data.Name,
++					FileName:   item.ModuleFileName,
++				}
++				if item.Data.AutoImport != nil {
++					entry.Data.ModuleSpecifier = item.Data.AutoImport.ModuleSpecifier
++				}
++			}
++		}
++		if item.Preselect != nil && *item.Preselect {
++			entry.IsRecommended = ptrTrue()
++		}
++		if item.TextEdit != nil && item.TextEdit.TextEdit != nil {
++			start, length := lspRangeToSpan(sourceFile, item.TextEdit.TextEdit.Range)
++			entry.ReplacementStart = &start
++			entry.ReplacementLength = &length
++		}
++		if item.CommitCharacters != nil {
++			entry.CommitCharacters = *item.CommitCharacters
++		}
+ 		entries = append(entries, entry)
+ 	}
+-	return &CompletionInfoResponse{
+-		IsIncomplete: result.IsIncomplete,
+-		Entries:      entries,
+-	}, nil
++	resp := &CompletionInfoResponse{
++		IsIncomplete:           result.IsIncomplete,
++		Entries:                entries,
++		IsGlobalCompletion:     result.IsGlobalCompletion,
++		IsMemberCompletion:     result.IsMemberCompletion,
++		IsNewIdentifierLocation: result.IsNewIdentifierLocation,
++	}
++	if result.OptionalReplacementSpan != nil {
++		start, length := lspRangeToSpan(sourceFile, *result.OptionalReplacementSpan)
++		resp.OptionalSpanStart = &start
++		resp.OptionalSpanLength = &length
++	}
++	if result.ItemDefaults != nil && result.ItemDefaults.CommitCharacters != nil {
++		resp.DefaultCommitCharacters = *result.ItemDefaults.CommitCharacters
++	}
++	return resp, nil
+ }
+ 
+ // handleGetReferencedSymbolsForNode returns node handles for all references found at a node.
+@@ -3298,3 +6970,24 @@ func (s *Session) handleGetReferencedSymbolsForNode(ctx context.Context, params
  	}
  	return result, nil
  }

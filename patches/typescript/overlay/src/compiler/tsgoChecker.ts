@@ -831,8 +831,8 @@ const ARENA_KIND_NULL = 0;
 const ARENA_KIND_RECORD = 1;
 const ARENA_KIND_ERROR = 4;
 
-type ArenaMethodKind = "node" | "type" | "typeKind" | "typeStr" | "symbol" | "symbolNode" | "filePos" | "filePosHover" | "signature" | "contextual" | "contextualArg";
-type ArenaResultKind = "type" | "types" | "symbol" | "symbols" | "signature" | "signatures" | "string" | "bool" | "quickinfo" | "referencedSymbols" | "definitionAndBoundSpan";
+type ArenaMethodKind = "node" | "type" | "typeKind" | "typeStr" | "symbol" | "symbolNode" | "filePos" | "filePosHover" | "signature" | "contextual" | "contextualArg" | "intrinsic" | "typeName" | "literalStr" | "literalNum" | "symbolChain" | "twoHandles" | "thisAt" | "symbolArray" | "completions" | "filePosReason" | "filePosRename";
+type ArenaResultKind = "type" | "types" | "symbol" | "symbols" | "signature" | "signatures" | "string" | "bool" | "quickinfo" | "referencedSymbols" | "definitionAndBoundSpan" | "jsdocTags" | "expandedParams" | "ambientModules" | "completionInfo" | "signatureHelpItems" | "renameInfo" | "renameLocations";
 // Method → [request shape, result shape] (must mirror arena_dispatch.go and
 // the Go handlers' return types exactly).
 const ARENA_METHODS: ReadonlyMap<string, [ArenaMethodKind, ArenaResultKind]> = new Map([
@@ -872,6 +872,99 @@ const ARENA_METHODS: ReadonlyMap<string, [ArenaMethodKind, ArenaResultKind]> = n
     ["quickinfo", ["filePosHover", "quickinfo"]],
     ["references", ["filePos", "referencedSymbols"]],
     ["definitionAndBoundSpan", ["filePos", "definitionAndBoundSpan"]],
+    // issue #12 candidate 2: record-shaped query classes.
+    ["getAliasedSymbol", ["symbol", "symbol"]],
+    ["getImmediateAliasedSymbol", ["symbol", "symbol"]],
+    ["getRootSymbols", ["symbol", "symbols"]],
+    ["getExportsOfModule", ["symbol", "symbols"]],
+    ["getExportsAndPropertiesOfModule", ["symbol", "symbols"]],
+    ["getExportsOfSymbol", ["symbol", "symbols"]],
+    ["getMembersOfSymbol", ["symbol", "symbols"]],
+    ["getParentOfSymbol", ["symbol", "symbol"]],
+    ["getExportSymbolOfSymbol", ["symbol", "symbol"]],
+    ["getDocumentationComment", ["symbol", "string"]],
+    ["resolveExternalModuleSymbol", ["symbol", "symbol"]],
+    ["symbolIsValue", ["symbol", "bool"]],
+    ["getLocalTypeParametersOfClassOrInterfaceOrTypeAlias", ["symbol", "types"]],
+    ["getJsDocTags", ["symbol", "jsdocTags"]],
+    ["collectVisitedTypeParameters", ["type", "types"]],
+    ["createArrayType", ["type", "type"]],
+    ["createPromiseType", ["type", "type"]],
+    ["getAugmentedPropertiesOfType", ["type", "symbols"]],
+    ["getAwaitedType", ["type", "type"]],
+    ["getBaseConstraintOfType", ["type", "type"]],
+    ["getConstraintOfTypeParameter", ["type", "type"]],
+    ["getDefaultFromTypeParameter", ["type", "type"]],
+    ["getElementTypeOfArrayType", ["type", "type"]],
+    ["getExactOptionalProperties", ["type", "symbols"]],
+    ["getIndexedAccessIndexType", ["type", "type"]],
+    ["getPromisedTypeOfPromise", ["type", "type"]],
+    ["getWidenedLiteralType", ["type", "type"]],
+    ["isEmptyAnonymousObjectType", ["type", "bool"]],
+    ["isLibType", ["type", "bool"]],
+    ["isNullableType", ["type", "bool"]],
+    ["isTupleType", ["type", "bool"]],
+    ["typeHasCallOrConstructSignatures", ["type", "bool"]],
+    ["getConstraintOfType", ["type", "type"]],
+    ["getFalseTypeOfConditionalType", ["type", "type"]],
+    ["getTrueTypeOfConditionalType", ["type", "type"]],
+    ["getAliasSymbolOfType", ["type", "symbol"]],
+    ["getAnyType", ["intrinsic", "type"]],
+    ["getBigIntType", ["intrinsic", "type"]],
+    ["getBooleanType", ["intrinsic", "type"]],
+    ["getESSymbolType", ["intrinsic", "type"]],
+    ["getErrorType", ["intrinsic", "type"]],
+    ["getNeverType", ["intrinsic", "type"]],
+    ["getNonPrimitiveType", ["intrinsic", "type"]],
+    ["getNullType", ["intrinsic", "type"]],
+    ["getNumberType", ["intrinsic", "type"]],
+    ["getOptionalType", ["intrinsic", "type"]],
+    ["getPromiseLikeType", ["intrinsic", "type"]],
+    ["getPromiseType", ["intrinsic", "type"]],
+    ["getStringType", ["intrinsic", "type"]],
+    ["getUndefinedType", ["intrinsic", "type"]],
+    ["getUnknownType", ["intrinsic", "type"]],
+    ["getVoidType", ["intrinsic", "type"]],
+    ["getAnyAsyncIterableType", ["intrinsic", "type"]],
+    ["containsArgumentsReference", ["node", "bool"]],
+    ["getContextualTypeForJsxAttribute", ["node", "type"]],
+    ["getTypeArgumentConstraint", ["node", "type"]],
+    ["getTypeOfAssignmentPattern", ["node", "type"]],
+    ["isDeclarationVisible", ["node", "bool"]],
+    ["isImplementationOfOverload", ["node", "bool"]],
+    ["isOptionalParameter", ["node", "bool"]],
+    ["requiresAddingImplicitUndefined", ["node", "bool"]],
+    ["getJsxFragmentFactory", ["node", "string"]],
+    ["getJsxIntrinsicTagNamesAt", ["node", "symbols"]],
+    ["getPropertySymbolOfDestructuringAssignment", ["node", "symbol"]],
+    ["getSignatureFromDeclaration", ["node", "signature"]],
+    ["getExportSpecifierLocalTargetSymbol", ["node", "symbol"]],
+    ["resolveExternalModuleName", ["node", "symbol"]],
+    ["getRestTypeOfSignature", ["signature", "type"]],
+    ["getTypeArgumentsForResolvedSignature", ["signature", "types"]],
+    ["getTargetOfSignature", ["signature", "symbol"]],
+    ["getThisParameterOfSignature", ["signature", "symbol"]],
+    ["getTypeParametersOfSignature", ["signature", "types"]],
+    ["hasEffectiveRestParameter", ["signature", "bool"]],
+    ["getExpandedParameters", ["signature", "expandedParams"]],
+    ["getPropertyOfType", ["typeName", "symbol"]],
+    ["getTypeOfPropertyOfType", ["typeName", "type"]],
+    ["getTypeOfPropertyOfContextualType", ["typeName", "type"]],
+    ["getStringLiteralType", ["literalStr", "type"]],
+    ["getBigIntLiteralType", ["literalStr", "type"]],
+    ["getNumberLiteralType", ["literalNum", "type"]],
+    ["getTypeAtPosition", ["filePos", "type"]],
+    ["getModuleSymbolForSourceFile", ["filePos", "symbol"]],
+    ["getAccessibleSymbolChain", ["symbolChain", "symbols"]],
+    ["getCandidateSignaturesForStringLiteralCompletions", ["twoHandles", "signatures"]],
+    ["tryGetThisTypeAt", ["thisAt", "type"]],
+    ["getSymbolsDeclarations", ["symbolArray", "symbols"]],
+    ["getParentsOfSymbols", ["symbolArray", "symbols"]],
+    ["getAmbientModules", ["intrinsic", "ambientModules"]],
+    ["getCompletionsAtPosition", ["completions", "completionInfo"]],
+    ["signatureHelp", ["filePosReason", "signatureHelpItems"]],
+    ["getRenameInfo", ["filePosRename", "renameInfo"]],
+    ["getEditsForRename", ["filePosRename", "renameLocations"]],
 ]);
 
 class ArenaClient {
@@ -918,6 +1011,10 @@ class ArenaClient {
             putStr(handle.slice(d2 + 1), off + 8);
         };
         const typeId = params.type ?? params.objectId ?? 0;
+        // Registry-level fetches (fetchSymbol/fetchSymbols — getExportsOfSymbol,
+        // getMembersOfSymbol, …) key the same handle as `objectId`; checker
+        // methods send `symbol`.
+        const symbolId = params.symbol ?? params.objectId ?? 0;
         switch (ARENA_METHODS.get(method)![0]) {
             case "node":
                 putHandle(String(params.location), 16);
@@ -944,10 +1041,10 @@ class ArenaClient {
                 else { v.setUint32(24, 0, true); v.setUint32(28, 0, true); v.setUint32(32, 0, true); v.setUint32(36, 0, true); }
                 break;
             case "symbol":
-                v.setBigUint64(16, BigInt(params.symbol ?? 0), true);
+                v.setBigUint64(16, BigInt(symbolId), true);
                 break;
             case "symbolNode":
-                v.setBigUint64(16, BigInt(params.symbol ?? 0), true);
+                v.setBigUint64(16, BigInt(symbolId), true);
                 putHandle(String(params.location), 24);
                 break;
             case "filePos":
@@ -960,6 +1057,87 @@ class ArenaClient {
                 v.setInt32(28, params.maximumHoverLength ?? 0, true);
                 v.setInt32(32, params.verbosityLevel ?? -1, true);
                 break;
+            case "intrinsic":
+                break;
+            case "typeName":
+                v.setUint32(16, typeId >>> 0, true);
+                putStr(String(params.name ?? ""), 20);
+                break;
+            case "literalStr":
+                putStr(String(params.value ?? ""), 16);
+                break;
+            case "literalNum":
+                v.setFloat64(16, Number(params.value ?? 0), true);
+                break;
+            case "symbolChain":
+                v.setBigUint64(16, BigInt(symbolId), true);
+                putHandle(String(params.enclosingDeclaration), 24);
+                v.setUint32(40, params.meaning >>> 0, true);
+                v.setUint32(44, params.useOnlyExternalAliasing ? 1 : 0, true);
+                break;
+            case "twoHandles":
+                putHandle(String(params.call), 16);
+                putHandle(String(params.editingArgument), 32);
+                break;
+            case "thisAt":
+                putHandle(String(params.location), 16);
+                v.setUint32(32, params.includeGlobalThis ? 1 : 0, true);
+                if (params.container != null) putHandle(String(params.container), 36);
+                else { v.setUint32(36, 0, true); v.setUint32(40, 0, true); v.setUint32(44, 0, true); v.setUint32(48, 0, true); }
+                break;
+            case "symbolArray": {
+                const ids = params.symbols ?? [];
+                v.setUint32(20, ids.length, true);
+                if (ids.length) {
+                    v.setUint32(16, writeOff, true);
+                    for (const id of ids) {
+                        v.setBigUint64(writeOff, BigInt(id), true);
+                        writeOff += 8;
+                    }
+                } else {
+                    v.setUint32(16, 0, true);
+                }
+                break;
+            }
+            case "filePosReason": {
+                putStr(String(params.file ?? ""), 16);
+                v.setUint32(24, params.position >>> 0, true);
+                if (params.triggerReason != null) putStr(String(params.triggerReason), 28);
+                else { v.setUint32(28, 0, true); v.setUint32(32, 0, true); }
+                break;
+            }
+            case "filePosRename": {
+                putStr(String(params.file ?? ""), 16);
+                v.setUint32(24, params.position >>> 0, true);
+                const tri2 = (b: any) => b === true ? 1 : b === false ? 2 : 0;
+                if (method === "getEditsForRename") {
+                    // Go contract: findInStrings u8 @28, findInComments u8 @29, providePrefixSuffix tri byte @30.
+                    v.setUint8(28, params.findInStrings ? 1 : 0);
+                    v.setUint8(29, params.findInComments ? 1 : 0);
+                    v.setUint8(30, tri2(params.providePrefixAndSuffixTextForRename));
+                }
+                else {
+                    // Go contract: allowRenameOfImportPath tri byte @28, providePrefixSuffix tri byte @29.
+                    v.setUint8(28, tri2(params.allowRenameOfImportPath));
+                    v.setUint8(29, tri2(params.providePrefixAndSuffixTextForRename));
+                }
+                break;
+            }
+            case "completions": {
+                putStr(String(params.file ?? ""), 16);
+                v.setUint32(24, params.position >>> 0, true);
+                if (params.triggerCharacter != null) putStr(String(params.triggerCharacter), 28);
+                else { v.setUint32(28, 0, true); v.setUint32(32, 0, true); }
+                v.setUint32(36, params.includeSymbol ? 1 : 0, true);
+                const tri = (b: any) => b === true ? 1 : b === false ? 2 : 0;
+                const prefs = params.preferences ?? {};
+                v.setUint8(40, tri(prefs.includeCompletionsForModuleExports));
+                v.setUint8(41, tri(prefs.includeCompletionsForImportStatements));
+                v.setUint8(42, tri(prefs.includeAutomaticOptionalChainCompletions));
+                v.setUint8(43, tri(prefs.includeCompletionsWithClassMemberSnippets));
+                v.setUint8(44, tri(prefs.includeCompletionsWithObjectLiteralMethodSnippets));
+                break;
+            }
             case "signature":
                 v.setBigUint64(16, BigInt(params.signature ?? params.objectId ?? 0), true);
                 break;
@@ -1009,6 +1187,9 @@ class ArenaClient {
             return this.dec.decode(this.buf.subarray(o, o + n));
         }
         if (resKind === "bool") return v.getUint8(ARENA_RESP_OFFSET + 16) !== 0;
+        // expandedParams is a scalar-shaped payload: (ptr,count) of inner u64
+        // runs at +16, no record-count slot.
+        if (resKind === "expandedParams") return this.readExpandedParams(ARENA_RESP_OFFSET + 16);
         const reader = this.arenaReaders[resKind];
         if (!reader) throw new Error(`arena: no reader for result kind ${resKind} (${method})`);
         const count = v.getUint32(ARENA_RESP_OFFSET + 16, true);
@@ -1033,6 +1214,12 @@ class ArenaClient {
         quickinfo: { read: o => this.readQuickinfo(o), stride: 40, singular: true },
         referencedSymbols: { read: o => this.readReferencedSymbol(o), stride: 56, singular: false },
         definitionAndBoundSpan: { read: o => this.readDefinitionAndBoundSpan(o), stride: 16, singular: true },
+        jsdocTags: { read: o => this.readJsDocTag(o), stride: 8, singular: false },
+        ambientModules: { read: o => this.readAmbientModules(o), stride: 8, singular: true },
+        completionInfo: { read: o => this.readCompletions(o), stride: 32, singular: true },
+        signatureHelpItems: { read: o => this.readSignatureHelpItems(o), stride: 28, singular: true },
+        renameInfo: { read: o => this.readRenameInfo(o), stride: 36, singular: true },
+        renameLocations: { read: o => this.readRenameLocation(o), stride: 32, singular: false },
     };
 
     // (ptr,count) pair of {text strId, kind strId} records; count 0 = absent.
@@ -1148,6 +1335,244 @@ class ArenaClient {
         return { definitions, start: v.getUint32(off, true), length: v.getUint32(off + 4, true) };
     }
 
+    private readJsDocTag(off: number): any {
+        const v = this.view;
+        const d: any = { name: this.str(v.getUint32(off, true)) ?? "" };
+        const text = this.str(v.getUint32(off + 4, true));
+        if (text !== undefined) d.text = text;
+        return d;
+    }
+
+    // Outer (ptr,count) array of inner (ptr,count) u64 runs (getExpandedParameters).
+    private readExpandedParams(off: number): any {
+        const v = this.view;
+        const count = v.getUint32(off + 4, true);
+        const out = new Array(count);
+        let p = v.getUint32(off, true);
+        for (let i = 0; i < count; i++) {
+            const n = v.getUint32(p + 8 * i + 4, true);
+            const inner = new Array(n);
+            let q = v.getUint32(p + 8 * i, true);
+            for (let j = 0; j < n; j++) {
+                inner[j] = Number(v.getBigUint64(q, true));
+                q += 8;
+            }
+            out[i] = inner;
+        }
+        return out;
+    }
+
+    private readLightSymbol(off: number): any {
+        const v = this.view;
+        const id = Number(v.getBigUint64(off, true));
+        if (id === 0) return null;
+        const d: any = { id };
+        const project = this.str(v.getUint32(off + 8, true));
+        if (project !== undefined) d.project = project;
+        d.name = this.str(v.getUint32(off + 12, true)) ?? "";
+        d.flags = v.getUint32(off + 16, true);
+        d.checkFlags = v.getUint32(off + 20, true);
+        const parent = Number(v.getBigUint64(off + 24, true));
+        if (parent !== 0) d.parent = parent;
+        return d;
+    }
+
+    private readCompletionEntry(off: number): any {
+        const v = this.view;
+        const str = (id: number) => this.str(id);
+        const strz = (id: number) => str(id) ?? "";
+        const d: any = { name: strz(v.getUint32(off, true)) };
+        const kind = v.getUint32(off + 60, true);
+        if (kind !== 0) d.kind = kind;
+        const elementKind = str(v.getUint32(off + 4, true));
+        if (elementKind !== undefined) d.elementKind = elementKind;
+        const kindModifiers = str(v.getUint32(off + 8, true));
+        if (kindModifiers !== undefined) d.kindModifiers = kindModifiers;
+        const sortText = str(v.getUint32(off + 12, true));
+        if (sortText !== undefined) d.sortText = sortText;
+        const insertText = str(v.getUint32(off + 16, true));
+        if (insertText !== undefined) d.insertText = insertText;
+        const filterText = str(v.getUint32(off + 20, true));
+        if (filterText !== undefined) d.filterText = filterText;
+        const detail = str(v.getUint32(off + 28, true));
+        if (detail !== undefined) d.detail = detail;
+        const flags = v.getUint8(off + 64);
+        if (flags & 8) {
+            const ld: any = {};
+            const ldd = str(v.getUint32(off + 32, true));
+            if (ldd !== undefined) ld.detail = ldd;
+            const lds = str(v.getUint32(off + 36, true));
+            if (lds !== undefined) ld.description = lds;
+            d.labelDetails = ld;
+        }
+        if (flags & 16) d.symbol = this.readSymbol(v.getUint32(off + 56, true));
+        const source = str(v.getUint32(off + 24, true));
+        if (source !== undefined) d.source = source;
+        if (flags & 1) d.hasAction = true;
+        if (flags & 2) d.isRecommended = true;
+        if (flags & 4) {
+            d.replacementStart = v.getUint32(off + 40, true);
+            d.replacementLength = v.getUint32(off + 44, true);
+        }
+        const cc = this.strArray(off + 48);
+        if (cc) d.commitCharacters = cc;
+        if (flags & 32) {
+            const data: any = {};
+            const exportName = str(v.getUint32(off + 72, true));
+            if (exportName !== undefined) data.exportName = exportName;
+            const fileName = str(v.getUint32(off + 76, true));
+            if (fileName !== undefined) data.fileName = fileName;
+            const moduleSpecifier = str(v.getUint32(off + 68, true));
+            if (moduleSpecifier !== undefined) data.moduleSpecifier = moduleSpecifier;
+            d.data = data;
+        }
+        if (flags & 64) d.isPackageJsonImport = true;
+        const sourceDisplay = this.readDisplayParts(off + 80);
+        if (sourceDisplay) d.sourceDisplay = sourceDisplay;
+        return d;
+    }
+
+    private readCompletions(off: number): any {
+        const v = this.view;
+        const f1 = v.getUint8(off);
+        const f2 = v.getUint8(off + 1);
+        const d: any = {};
+        if (f1 & 8) d.isIncomplete = true;
+        const count = v.getUint32(off + 28, true);
+        let p = v.getUint32(off + 24, true);
+        const entries = new Array(count);
+        for (let i = 0; i < count; i++) {
+            entries[i] = this.readCompletionEntry(p);
+            p += 88;
+        }
+        d.entries = entries;
+        if (f2 & 1) d.flags = v.getUint32(off + 4, true);
+        d.isGlobalCompletion = (f1 & 1) !== 0;
+        d.isMemberCompletion = (f1 & 2) !== 0;
+        d.isNewIdentifierLocation = (f1 & 4) !== 0;
+        if (f2 & 2) {
+            d.optionalSpanStart = v.getUint32(off + 8, true);
+            d.optionalSpanLength = v.getUint32(off + 12, true);
+        }
+        const dcc = this.strArray(off + 16);
+        if (dcc) d.defaultCommitCharacters = dcc;
+        return d;
+    }
+
+    private readSignatureHelpItem(off: number): any {
+        const v = this.view;
+        const strz = (id: number) => this.str(id) ?? "";
+        const d: any = {
+            isVariadic: (v.getUint8(off + 48) & 1) !== 0,
+            prefixDisplayParts: this.readDisplayParts(off) ?? [],
+            suffixDisplayParts: this.readDisplayParts(off + 8) ?? [],
+            separatorDisplayParts: this.readDisplayParts(off + 16) ?? [],
+        };
+        const pc = v.getUint32(off + 28, true);
+        const params = new Array(pc);
+        let p = v.getUint32(off + 24, true);
+        for (let i = 0; i < pc; i++) {
+            const flags = v.getUint8(p + 20);
+            params[i] = {
+                name: strz(v.getUint32(p, true)),
+                documentation: this.readDisplayParts(p + 4) ?? [],
+                displayParts: this.readDisplayParts(p + 12) ?? [],
+                isOptional: (flags & 1) !== 0,
+                isRest: (flags & 2) !== 0,
+            };
+            p += 24;
+        }
+        d.parameters = params;
+        d.documentation = this.readDisplayParts(off + 32) ?? [];
+        const tc = v.getUint32(off + 44, true);
+        if (tc) {
+            let t = v.getUint32(off + 40, true);
+            d.tags = new Array(tc);
+            for (let i = 0; i < tc; i++) {
+                const tag: any = { name: strz(v.getUint32(t, true)) };
+                const text = this.readDisplayParts(t + 4);
+                if (text) tag.text = text;
+                d.tags[i] = tag;
+                t += 12;
+            }
+        }
+        return d;
+    }
+
+    private readSignatureHelpItems(off: number): any {
+        const v = this.view;
+        const count = v.getUint32(off + 24, true);
+        let p = v.getUint32(off + 20, true);
+        const items = new Array(count);
+        for (let i = 0; i < count; i++) {
+            items[i] = this.readSignatureHelpItem(p);
+            p += 52;
+        }
+        return {
+            items,
+            applicableSpan: { start: v.getUint32(off, true), length: v.getUint32(off + 4, true) },
+            selectedItemIndex: v.getUint32(off + 8, true),
+            argumentIndex: v.getUint32(off + 12, true),
+            argumentCount: v.getUint32(off + 16, true),
+        };
+    }
+
+    private readRenameInfo(off: number): any {
+        const v = this.view;
+        const str = (id: number) => this.str(id);
+        const d: any = { canRename: (v.getUint8(off) & 1) !== 0 };
+        const fileToRename = str(v.getUint32(off + 4, true));
+        if (fileToRename !== undefined) d.fileToRename = fileToRename;
+        const displayName = str(v.getUint32(off + 8, true));
+        if (displayName !== undefined) d.displayName = displayName;
+        const fullDisplayName = str(v.getUint32(off + 12, true));
+        if (fullDisplayName !== undefined) d.fullDisplayName = fullDisplayName;
+        const kind = str(v.getUint32(off + 16, true));
+        if (kind !== undefined) d.kind = kind;
+        if (v.getUint8(off) & 2) d.kindModifiers = str(v.getUint32(off + 20, true)) ?? "";
+        const triggerSpanStart = v.getUint32(off + 24, true);
+        const triggerSpanLength = v.getUint32(off + 28, true);
+        if (d.canRename) d.triggerSpan = { start: triggerSpanStart, length: triggerSpanLength };
+        const localizedErrorMessage = str(v.getUint32(off + 32, true));
+        if (localizedErrorMessage !== undefined) d.localizedErrorMessage = localizedErrorMessage;
+        return d;
+    }
+
+    private readRenameLocation(off: number): any {
+        const v = this.view;
+        const d: any = {
+            fileName: this.str(v.getUint32(off, true)) ?? "",
+            start: v.getUint32(off + 4, true),
+            length: v.getUint32(off + 8, true),
+        };
+        const flags = v.getUint8(off + 28);
+        if (flags & 1) {
+            d.contextStart = v.getUint32(off + 12, true);
+            d.contextLength = v.getUint32(off + 16, true);
+        }
+        const prefixText = this.str(v.getUint32(off + 20, true));
+        if (prefixText !== undefined) d.prefixText = prefixText;
+        const suffixText = this.str(v.getUint32(off + 24, true));
+        if (suffixText !== undefined) d.suffixText = suffixText;
+        return d;
+    }
+
+    // Single outer record {modules ptr, modules count} of 40-byte module records.
+    private readAmbientModules(off: number): any {
+        const v = this.view;
+        const count = v.getUint32(off + 4, true);
+        let p = v.getUint32(off, true);
+        const modules = new Array(count);
+        for (let i = 0; i < count; i++) {
+            modules[i] = {
+                moduleName: this.str(v.getUint32(p, true)) ?? "",
+                moduleSymbol: this.readLightSymbol(p + 8),
+            };
+            p += 40;
+        }
+        return { modules };
+    }
+
     private str(id: number): string | undefined {
         return id === 0 ? undefined : this.strTab[id];
     }
@@ -1254,8 +1679,12 @@ class ArenaClient {
 
     private readSymbol(off: number): any {
         const v = this.view;
+        const id = Number(v.getBigUint64(off, true));
+        // Zero slot in a symbols run = null element (getSymbolsDeclarations /
+        // getParentsOfSymbols holes).
+        if (id === 0) return null;
         const data: any = {
-            id: Number(v.getBigUint64(off, true)),
+            id,
             name: this.str(v.getUint32(off + 12, true)) ?? "",
             flags: v.getUint32(off + 16, true),
             checkFlags: v.getUint32(off + 20, true),
@@ -4099,8 +4528,18 @@ function resolveLanguageServiceScriptKind(
     fromHostSnapshot = false,
 ): number {
     const fromHost = host?.getScriptKind?.(requestFileName) ?? host?.getScriptKind?.(hostFileName);
-    if (fromHost === ts.ScriptKind.TS || fromHost === ts.ScriptKind.TSX
-        || fromHost === ts.ScriptKind.JS || fromHost === ts.ScriptKind.JSX) {
+    if (fromHost === ts.ScriptKind.TS || fromHost === ts.ScriptKind.TSX) {
+        return fromHost;
+    }
+    if (fromHostSnapshot && (requestFileName.endsWith(".vue") || hostFileName.endsWith(".vue"))) {
+        // A .vue path's host snapshot is the language plugin's embedded service
+        // script (TS syntax by construction — the boilerplate is TS even for
+        // js-lang SFCs). The project host's per-SFC-block JS/JSX answer
+        // describes the block, not this content; trusting it leaves the mirror
+        // unchecked and kills template-expression completions (volar #5847).
+        return ts.ScriptKind.TS;
+    }
+    if (fromHost === ts.ScriptKind.JS || fromHost === ts.ScriptKind.JSX) {
         return fromHost;
     }
     if (fromHostSnapshot) {
@@ -5049,6 +5488,106 @@ function tnbComputeNamedDeclarations(sourceFile: any): Map<string, any[]> {
 // overlay RPC so tsgo doesn't double-read from disk.
 
 // Wire (flat) → stock (nested) span mapping for the LS nav bridge results.
+
+/** @internal — LS bridge entry for services-layer interception (issue #12 batch 2). */
+export function tsgoLsApiRequest(program: any, method: string, params: any): any {
+    const configFilePath = program?.getCompilerOptions?.()?.configFilePath;
+    const proj = configFilePath && _projectCache.get(configFilePath);
+    if (!proj?.checker) return undefined;
+    return proj.checker.client.apiRequest(method, {
+        snapshot: proj.checker.snapshotId,
+        project: proj.checker.project.id,
+        ...params,
+        ...(params?.file != null ? { file: toTsgoFileName(params.file) } : {}),
+    });
+}
+
+/** @internal — Go-computed stock-shaped RenameInfo (issue #12 batch 2). */
+export function tsgoGetRenameInfo(program: any, fileName: string, position: number, preferences: any): any {
+    return tsgoLsApiRequest(program, "getRenameInfo", {
+        file: fileName,
+        position,
+        ...(preferences?.allowRenameOfImportPath !== undefined ? { allowRenameOfImportPath: preferences.allowRenameOfImportPath } : {}),
+        ...(preferences?.providePrefixAndSuffixTextForRename !== undefined ? { providePrefixAndSuffixTextForRename: preferences.providePrefixAndSuffixTextForRename } : {}),
+    });
+}
+
+/** @internal — Go-computed stock-shaped rename locations (issue #12 batch 2). */
+export function tsgoGetEditsForRename(program: any, fileName: string, position: number, findInStrings: boolean, findInComments: boolean, providePrefixAndSuffixTextForRename: boolean): any {
+    const r = tsgoLsApiRequest(program, "getEditsForRename", {
+        file: fileName,
+        position,
+        findInStrings,
+        findInComments,
+        providePrefixAndSuffixTextForRename,
+    });
+    if (r == null) return undefined;
+    return r.map((e: any) => ({
+        fileName: e.fileName,
+        textSpan: { start: e.start, length: e.length },
+        ...(e.contextStart !== undefined ? { contextSpan: { start: e.contextStart, length: e.contextLength } } : {}),
+        ...(e.prefixText !== undefined ? { prefixText: e.prefixText } : {}),
+        ...(e.suffixText !== undefined ? { suffixText: e.suffixText } : {}),
+    }));
+}
+
+/** @internal — LS bridge entry for services-layer interception (issue #12 batch 2). */
+export function tsgoGetSignatureHelp(program: any, fileName: string, position: number, triggerReason: any): any {
+    const kind = triggerReason?.kind;
+    return tsgoLsApiRequest(program, "signatureHelp", {
+        file: fileName,
+        position,
+        ...(typeof kind === "string" ? { triggerReason: kind } : {}),
+    });
+}
+
+/** @internal — Go-computed stock-shaped CompletionInfo (issue #12 batch 2). */
+export function tsgoGetCompletionsAtPosition(program: any, fileName: string, position: number, options: any): any {
+    const configFilePath = program?.getCompilerOptions?.()?.configFilePath;
+    const registry = configFilePath && (_projectCache.get(configFilePath)?.checker as any)?.objectRegistry;
+    const r = tsgoLsApiRequest(program, "getCompletionsAtPosition", {
+        file: fileName,
+        position,
+        ...(options?.triggerCharacter != null ? { triggerCharacter: options.triggerCharacter } : {}),
+        ...(options?.includeSymbol ? { includeSymbol: true } : {}),
+        preferences: {
+            includeCompletionsForModuleExports: options?.includeCompletionsForModuleExports ?? options?.includeExternalModuleExports,
+            includeCompletionsForImportStatements: options?.includeCompletionsForImportStatements,
+            includeAutomaticOptionalChainCompletions: options?.includeAutomaticOptionalChainCompletions,
+            includeCompletionsWithClassMemberSnippets: options?.includeCompletionsWithClassMemberSnippets,
+            includeCompletionsWithObjectLiteralMethodSnippets: options?.includeCompletionsWithObjectLiteralMethodSnippets,
+        },
+    });
+    if (r == null) return undefined;
+    return {
+        ...(r.flags !== undefined ? { flags: r.flags } : {}),
+        isGlobalCompletion: r.isGlobalCompletion,
+        isMemberCompletion: r.isMemberCompletion,
+        isNewIdentifierLocation: r.isNewIdentifierLocation,
+        ...(r.isIncomplete ? { isIncomplete: true } : {}),
+        ...(r.optionalSpanStart !== undefined ? { optionalReplacementSpan: { start: r.optionalSpanStart, length: r.optionalSpanLength } } : {}),
+        entries: (r.entries ?? []).map((e: any) => ({
+            name: e.name,
+            kind: e.elementKind,
+            kindModifiers: e.kindModifiers ?? "",
+            sortText: e.sortText,
+            ...(e.insertText !== undefined ? { insertText: e.insertText } : {}),
+            ...(e.filterText !== undefined ? { filterText: e.filterText } : {}),
+            ...(e.replacementStart !== undefined ? { replacementSpan: { start: e.replacementStart, length: e.replacementLength } } : {}),
+            ...(e.commitCharacters !== undefined ? { commitCharacters: e.commitCharacters } : {}),
+            ...(e.data !== undefined ? { data: e.data } : {}),
+            ...(e.symbol !== undefined && registry ? { symbol: registry.getOrCreateSymbol(e.symbol) } : {}),
+            ...(e.hasAction ? { hasAction: true } : {}),
+            ...(e.source !== undefined ? { source: e.source } : {}),
+            ...(e.sourceDisplay !== undefined ? { sourceDisplay: e.sourceDisplay } : {}),
+            ...(e.isPackageJsonImport ? { isPackageJsonImport: true } : {}),
+            ...(e.isRecommended ? { isRecommended: true } : {}),
+            ...(e.labelDetails !== undefined ? { labelDetails: e.labelDetails } : {}),
+        })),
+        defaultCommitCharacters: r.defaultCommitCharacters,
+    };
+}
+
 function lsNavDocumentSpanToStock(s: any): any {
     return {
         // THE normalization point for every LS-nav wire payload: arena
@@ -11312,7 +11851,11 @@ export function createTsgoChecker(program: any): any {
         },
         getModuleSymbolForSourceFile(sourceFile: any): any {
             if (!sourceFile) return undefined;
-            if (sourceFile.symbol) return sourceFile.symbol;
+            // Registry proxies are id-keyed singletons, so they compare === to
+            // checker-RPC results (export-info maps). A host-binder facade does
+            // not; fall through to the RPC so strict-identity export-info
+            // matching (completion entry details) holds.
+            if (sourceFile.symbol?.objectRegistry) return sourceFile.symbol;
             ensureProject();
             const host = hostForOverlaySyncLocal();
             const hostFile = resolveHostFileName(sourceFile.fileName, host);
@@ -11324,7 +11867,7 @@ export function createTsgoChecker(program: any): any {
                     if (sym && typeof sym.id === "number" && sym.id !== 0) return sym;
                 } catch { /* try next path shape */ }
             }
-            return resolveExportMapModuleSymbol(undefined, hostFile);
+            return resolveExportMapModuleSymbol(undefined, hostFile) ?? sourceFile.symbol;
         },
         forEachExportAndPropertyOfModule(moduleSymbol: any, cb: (symbol: any, key: string) => void): void {
             const fileName = moduleSymbolSourceFileName(moduleSymbol);

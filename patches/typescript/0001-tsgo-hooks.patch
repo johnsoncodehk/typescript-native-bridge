@@ -496,7 +496,7 @@ index 6034c9dfc3..0c9a6178db 100644
      let computedWithoutCacheCount = 0;
      const fixes = flatMap(exportInfo, (exportInfo, i) => {
 diff --git a/src/services/completions.ts b/src/services/completions.ts
-index 28d29136da..a9cbe3483b 100644
+index 28d29136da..a806bae867 100644
 --- a/src/services/completions.ts
 +++ b/src/services/completions.ts
 @@ -175,6 +175,7 @@ import {
@@ -851,7 +851,33 @@ index 28d29136da..a9cbe3483b 100644
          symbolToOriginInfoMap[symbols.length] = origin;
          symbolToSortTextMap[symbolId] = importStatementCompletion ? SortText.LocationPriority : SortText.AutoImportSuggestions;
          symbols.push(symbol);
-@@ -6089,6 +6217,23 @@ function isDeprecated(symbol: Symbol, checker: TypeChecker) {
+@@ -5383,7 +5511,7 @@ function getAutoImportSymbolFromCompletionEntryData(name: string, data: Completi
+     const containingProgram = data.isPackageJsonImport ? host.getPackageJsonAutoImportProvider!()! : program;
+     const checker = containingProgram.getTypeChecker();
+     const moduleSymbol = data.ambientModuleName ? checker.tryFindAmbientModule(data.ambientModuleName) :
+-        data.fileName ? checker.getMergedSymbol(Debug.checkDefined(containingProgram.getSourceFile(data.fileName)).symbol) :
++        data.fileName ? getModuleSymbolForCompletionEntryData(containingProgram, checker, data.fileName) :
+         undefined;
+ 
+     if (!moduleSymbol) return undefined;
+@@ -5396,6 +5524,16 @@ function getAutoImportSymbolFromCompletionEntryData(name: string, data: Completi
+     return { symbol, origin: completionEntryDataToSymbolOriginInfo(data, name, moduleSymbol) };
+ }
+ 
++function getModuleSymbolForCompletionEntryData(program: Program, checker: TypeChecker, fileName: string): Symbol {
++    const sourceFile = Debug.checkDefined(program.getSourceFile(fileName));
++    // tsgo-backed programs hand out a host-binder facade for sf.symbol whose
++    // object identity does not match the registry-proxied symbols inside
++    // export info maps; resolve through the bridged checker when it can answer
++    // (absent on stock checkers — falls back to stock behavior).
++    const forSourceFile = (checker as unknown as { getModuleSymbolForSourceFile?: (sourceFile: SourceFile) => Symbol | undefined; }).getModuleSymbolForSourceFile;
++    return checker.getMergedSymbol(forSourceFile?.(sourceFile) ?? Debug.checkDefined(sourceFile.symbol));
++}
++
+ interface CompletionEntryDisplayNameForSymbol {
+     readonly name: string;
+     readonly needsConvertPropertyAccess: boolean;
+@@ -6089,6 +6227,23 @@ function isDeprecated(symbol: Symbol, checker: TypeChecker) {
      return !!length(declarations) && every(declarations, isDeprecatedDeclaration);
  }
  
@@ -2085,7 +2111,7 @@ index 0a45cc3e3e..d296a01666 100644
      const classElement = findAncestor(node, isClassElement);
      if (!(classElement && classElement.name)) return;
 diff --git a/src/services/services.ts b/src/services/services.ts
-index 9885093ed6..9eefac5fa4 100644
+index 9885093ed6..c079f66f6f 100644
 --- a/src/services/services.ts
 +++ b/src/services/services.ts
 @@ -330,6 +330,9 @@ import {
@@ -2098,7 +2124,18 @@ index 9885093ed6..9eefac5fa4 100644
      Token,
      toPath,
      tracing,
-@@ -1723,6 +1726,9 @@ export function createLanguageService(
+@@ -342,6 +345,10 @@ import {
+     TypePredicate,
+     TypeReference,
+     typeToDisplayParts,
++    tsgoGetCompletionsAtPosition,
++    tsgoGetEditsForRename,
++    tsgoGetRenameInfo,
++    tsgoGetSignatureHelp,
+     UnionOrIntersectionType,
+     UnionType,
+     updateSourceFile,
+@@ -1723,6 +1730,9 @@ export function createLanguageService(
          // so we need to make a copy in case the host mutates the underlying array - otherwise it would look
          // like every program always has the host's current list of root files.
          const rootFileNames = host.getScriptFileNames().slice();
@@ -2108,7 +2145,7 @@ index 9885093ed6..9eefac5fa4 100644
  
          // Get a fresh cache of the host information
          const newSettings = host.getCompilationSettings() || getDefaultCompilerOptions();
-@@ -1733,6 +1739,17 @@ export function createLanguageService(
+@@ -1733,6 +1743,17 @@ export function createLanguageService(
          let parsedCommandLines: Map<Path, ParsedCommandLine | false> | undefined;
  
          // Now create a new compiler
@@ -2126,7 +2163,7 @@ index 9885093ed6..9eefac5fa4 100644
          let compilerHost: CompilerHost | undefined = {
              getSourceFile: getOrCreateSourceFile,
              getSourceFileByPath: getOrCreateSourceFileByPath,
-@@ -2034,9 +2051,15 @@ export function createLanguageService(
+@@ -2034,9 +2055,15 @@ export function createLanguageService(
  
      function cleanupSemanticCache(): void {
          if (program) {
@@ -2145,7 +2182,17 @@ index 9885093ed6..9eefac5fa4 100644
              program = undefined!; // TODO: GH#18217
          }
      }
-@@ -2275,6 +2298,9 @@ export function createLanguageService(
+@@ -2232,6 +2259,9 @@ export function createLanguageService(
+     }
+ 
+     function getCompletionsAtPosition(fileName: string, position: number, options: GetCompletionsAtPositionOptions = emptyOptions, formattingSettings?: FormatCodeSettings): CompletionInfo | undefined {
++        if ((program as any).isTsgoBackedProgram === true) {
++            return tsgoGetCompletionsAtPosition(program, fileName, position, options);
++        }
+         // Convert from deprecated options names to new names
+         const fullPreferences: UserPreferences = {
+             ...identity<UserPreferences>(options), // avoid excess property check
+@@ -2275,6 +2305,9 @@ export function createLanguageService(
      }
  
      function getQuickInfoAtPosition(fileName: string, position: number, maximumLength?: number, verbosityLevel?: number): QuickInfo | undefined {
@@ -2155,7 +2202,7 @@ index 9885093ed6..9eefac5fa4 100644
          synchronizeHostData();
  
          const sourceFile = getValidSourceFile(fileName);
-@@ -2402,6 +2428,9 @@ export function createLanguageService(
+@@ -2402,6 +2435,9 @@ export function createLanguageService(
      }
  
      function getDefinitionAndBoundSpan(fileName: string, position: number): DefinitionInfoAndBoundSpan | undefined {
@@ -2165,7 +2212,18 @@ index 9885093ed6..9eefac5fa4 100644
          synchronizeHostData();
          return GoToDefinition.getDefinitionAndBoundSpan(program, getValidSourceFile(fileName), position);
      }
-@@ -2469,6 +2498,9 @@ export function createLanguageService(
+@@ -2430,6 +2466,10 @@ export function createLanguageService(
+     }
+ 
+     function findRenameLocations(fileName: string, position: number, findInStrings: boolean, findInComments: boolean, preferences?: UserPreferences | boolean): RenameLocation[] | undefined {
++        if ((program as any).isTsgoBackedProgram === true) {
++            const providePrefixAndSuffixTextForRename = typeof preferences === "boolean" ? preferences : preferences?.providePrefixAndSuffixTextForRename;
++            return tsgoGetEditsForRename(program, fileName, position, findInStrings, findInComments, providePrefixAndSuffixTextForRename || false);
++        }
+         synchronizeHostData();
+         const sourceFile = getValidSourceFile(fileName);
+         const node = getAdjustedRenameLocation(getTouchingPropertyName(sourceFile, position));
+@@ -2469,6 +2509,9 @@ export function createLanguageService(
      }
  
      function findReferences(fileName: string, position: number): ReferencedSymbol[] | undefined {
@@ -2174,6 +2232,26 @@ index 9885093ed6..9eefac5fa4 100644
 +        }
          synchronizeHostData();
          return FindAllReferences.findReferencedSymbols(program, cancellationToken, program.getSourceFiles(), getValidSourceFile(fileName), position);
+     }
+@@ -2497,6 +2540,9 @@ export function createLanguageService(
+      * This is a semantic operation.
+      */
+     function getSignatureHelpItems(fileName: string, position: number, { triggerReason }: SignatureHelpItemsOptions = emptyOptions): SignatureHelpItems | undefined {
++        if ((program as any).isTsgoBackedProgram === true) {
++            return tsgoGetSignatureHelp(program, fileName, position, triggerReason);
++        }
+         synchronizeHostData();
+ 
+         const sourceFile = getValidSourceFile(fileName);
+@@ -3255,6 +3301,9 @@ export function createLanguageService(
+     }
+ 
+     function getRenameInfo(fileName: string, position: number, preferences: UserPreferences | RenameInfoOptions | undefined): RenameInfo {
++        if ((program as any).isTsgoBackedProgram === true) {
++            return tsgoGetRenameInfo(program, fileName, position, preferences);
++        }
+         synchronizeHostData();
+         return Rename.getRenameInfo(program, getValidSourceFile(fileName), position, preferences || {});
      }
 diff --git a/src/services/utilities.ts b/src/services/utilities.ts
 index bec7d4b266..927d0cff0e 100644

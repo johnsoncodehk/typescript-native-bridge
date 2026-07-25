@@ -1118,7 +1118,7 @@ index b639d488e..a9252e75a 100644
  	case ast.KindVariableDeclaration, ast.KindParameter, ast.KindPropertyDeclaration, ast.KindPropertySignature, ast.KindBindingElement:
  		return c.getContextualTypeForInitializerExpression(node, contextFlags)
 diff --git a/internal/checker/exports.go b/internal/checker/exports.go
-index 90162bdae..95ef7f04e 100644
+index 90162bdae..3da08ed33 100644
 --- a/internal/checker/exports.go
 +++ b/internal/checker/exports.go
 @@ -3,7 +3,9 @@ package checker
@@ -1131,7 +1131,7 @@ index 90162bdae..95ef7f04e 100644
  )
  
  func (c *Checker) GetStringType() *Type {
-@@ -54,20 +56,64 @@ func (c *Checker) GetESSymbolType() *Type {
+@@ -54,20 +56,68 @@ func (c *Checker) GetESSymbolType() *Type {
  	return c.esSymbolType
  }
  
@@ -1199,12 +1199,16 @@ index 90162bdae..95ef7f04e 100644
 +	return c.getBaseTypeOfLiteralType(t)
 +}
 +
++func (c *Checker) GetFullyQualifiedName(symbol *ast.Symbol, containingLocation *ast.Node) string {
++	return c.getFullyQualifiedName(symbol, containingLocation)
++}
++
 +func (c *Checker) GetUnknownSymbol() *ast.Symbol {
 +	return c.unknownSymbol
  }
  
  func (c *Checker) GetUnionType(types []*Type) *Type {
-@@ -201,6 +247,10 @@ func (c *Checker) GetBaseConstraintOfType(t *Type) *Type {
+@@ -201,6 +251,10 @@ func (c *Checker) GetBaseConstraintOfType(t *Type) *Type {
  	return c.getBaseConstraintOfType(t)
  }
  
@@ -1215,7 +1219,7 @@ index 90162bdae..95ef7f04e 100644
  func (c *Checker) GetTypePredicateOfSignature(sig *Signature) *TypePredicate {
  	return c.getTypePredicateOfSignature(sig)
  }
-@@ -306,6 +356,43 @@ func (c *Checker) GetIndexInfosOfType(t *Type) []*IndexInfo {
+@@ -306,6 +360,43 @@ func (c *Checker) GetIndexInfosOfType(t *Type) []*IndexInfo {
  	return c.getIndexInfosOfType(t)
  }
  
@@ -1259,7 +1263,7 @@ index 90162bdae..95ef7f04e 100644
  func (c *Checker) IsContextSensitive(node *ast.Node) bool {
  	return c.isContextSensitive(node)
  }
-@@ -353,3 +440,256 @@ func (c *Checker) GetWidenedType(t *Type) *Type {
+@@ -353,3 +444,256 @@ func (c *Checker) GetWidenedType(t *Type) *Type {
  func (c *Checker) CompareSymbols(s1, s2 *ast.Symbol) int {
  	return c.compareSymbols(s1, s2)
  }
@@ -1733,13 +1737,27 @@ index f8d006e92..3390c5b57 100644
  
  			// add file to program only if:
 diff --git a/internal/compiler/filesparser.go b/internal/compiler/filesparser.go
-index 5817fc6bb..2fc0c2b4e 100644
+index 5817fc6bb..698abd084 100644
 --- a/internal/compiler/filesparser.go
 +++ b/internal/compiler/filesparser.go
-@@ -36,6 +36,9 @@ type parseTask struct {
- 	typeResolutionsTrace         []module.DiagAndArgs
- 	resolutionDiagnostics        []*ast.Diagnostic
- 	processingDiagnostics        []*processingDiagnostic
+@@ -29,13 +29,16 @@ type parseTask struct {
+ 	includeReason               *FileIncludeReason
+ 	packageId                   module.PackageId
+ 
+-	metadata                     ast.SourceFileMetaData
+-	resolutionsInFile            module.ModeAwareCache[*module.ResolvedModule]
+-	resolutionsTrace             []module.DiagAndArgs
+-	typeResolutionsInFile        module.ModeAwareCache[*module.ResolvedTypeReferenceDirective]
+-	typeResolutionsTrace         []module.DiagAndArgs
+-	resolutionDiagnostics        []*ast.Diagnostic
+-	processingDiagnostics        []*processingDiagnostic
++	metadata              ast.SourceFileMetaData
++	resolutionsInFile     module.ModeAwareCache[*module.ResolvedModule]
++	resolutionsTrace      []module.DiagAndArgs
++	typeResolutionsInFile module.ModeAwareCache[*module.ResolvedTypeReferenceDirective]
++	typeResolutionsTrace  []module.DiagAndArgs
++	resolutionDiagnostics []*ast.Diagnostic
++	processingDiagnostics []*processingDiagnostic
 +	// missingFiles records triple-slash path references that resolved to
 +	// nothing on disk (stock Program.missingFilePaths parity).
 +	missingFiles                 []string
@@ -1920,6 +1938,531 @@ index 44b9b4cbc..0a8aafd0d 100644
  	}
  	to := &toProgramSnapshot{
  		program:    program,
+diff --git a/internal/ls/autoimport/export.go b/internal/ls/autoimport/export.go
+index cb5278fab..bf5b19e51 100644
+--- a/internal/ls/autoimport/export.go
++++ b/internal/ls/autoimport/export.go
+@@ -62,6 +62,10 @@ type Export struct {
+ 	IsTypeOnly                 bool
+ 	ScriptElementKind          lsutil.ScriptElementKind
+ 	ScriptElementKindModifiers lsutil.ScriptElementKindModifier
++	// ScriptElementKindModifiersText is stock's ordered kindModifiers display
++	// ("declare,export" for an ambient re-export alias); the bitmask above
++	// stays for set operations (view merge).
++	ScriptElementKindModifiersText string
+ 
+ 	// The file where the export was found.
+ 	Path tspath.Path
+diff --git a/internal/ls/autoimport/extract.go b/internal/ls/autoimport/extract.go
+index dc0a1db7e..ceb098328 100644
+--- a/internal/ls/autoimport/extract.go
++++ b/internal/ls/autoimport/extract.go
+@@ -297,8 +297,14 @@ func (e *symbolExtractor) createExport(symbol *ast.Symbol, moduleID ModuleID, mo
+ 				export.Flags = targetSymbol.Flags
+ 				export.IsTypeOnly = core.Some(symbol.Declarations, ast.IsPartOfTypeOnlyImportOrExportDeclaration)
+ 			}
+-			export.ScriptElementKind = lsutil.GetSymbolKind(checkerLease.TryChecker(), targetSymbol, decl)
+-			export.ScriptElementKindModifiers = lsutil.GetSymbolModifiers(checkerLease.TryChecker(), targetSymbol)
++			// Stock presents the export-map entry as the alias (getSymbolKind
++			// maps SymbolFlags.Alias to "alias"); the target only contributes
++			// kindModifiers. The modifier SET keeps the alias union for the
++			// view merge; the TEXT is stock's ordered join (ambient re-export
++			// declarations read "declare,export", not "export,declare").
++			export.ScriptElementKind = lsutil.ScriptElementKindAlias
++			export.ScriptElementKindModifiers = lsutil.GetSymbolModifiers(checkerLease.TryChecker(), symbol)
++			export.ScriptElementKindModifiersText = lsutil.GetSymbolModifiersText(checkerLease.TryChecker(), symbol)
+ 			targetModuleID := ModuleID(ast.GetSourceFileOfNode(decl).Path())
+ 			if parent != nil && parent.IsExternalModule() {
+ 				if id, ok := e.getModuleIDForSymbol(parent); ok {
+@@ -313,6 +319,7 @@ func (e *symbolExtractor) createExport(symbol *ast.Symbol, moduleID ModuleID, mo
+ 	} else {
+ 		export.ScriptElementKind = lsutil.GetSymbolKind(checkerLease.TryChecker(), symbol, symbol.Declarations[0])
+ 		export.ScriptElementKindModifiers = lsutil.GetSymbolModifiers(checkerLease.TryChecker(), symbol)
++		export.ScriptElementKindModifiersText = lsutil.GetSymbolModifiersText(checkerLease.TryChecker(), symbol)
+ 	}
+ 
+ 	if symbol.Name == ast.InternalSymbolNameDefault || symbol.Name == ast.InternalSymbolNameExportEquals {
+diff --git a/internal/ls/autoimport/registry.go b/internal/ls/autoimport/registry.go
+index 6c6468095..a618ccd85 100644
+--- a/internal/ls/autoimport/registry.go
++++ b/internal/ls/autoimport/registry.go
+@@ -244,6 +244,12 @@ type RegistryBucket struct {
+ 	// DependencyNames is considered immutable after the bucket is finalized.
+ 	// It should be fully replaced rather than mutated while changing a bucket.
+ 	DependencyNames *collections.Set[string]
++	// PackageJsonDependencyNames is the package.json-listed subset of
++	// DependencyNames (dependencies/peerDependencies only, before the
++	// program-resolved union). Only these packages earn stock-provider-style
++	// full entrypoint coverage in View.search; the union remainder is covered
++	// program-files-only (stock's main-path rule).
++	PackageJsonDependencyNames *collections.Set[string]
+ 	// AmbientModuleNames is only defined for node_modules buckets. It is the set of
+ 	// ambient module names found while extracting exports in the bucket.
+ 	//
+@@ -271,6 +277,7 @@ func (b *RegistryBucket) Clone() *RegistryBucket {
+ 		PackageFiles:         b.PackageFiles,
+ 		ResolvedPackageNames: b.ResolvedPackageNames,
+ 		DependencyNames:      b.DependencyNames,
++		PackageJsonDependencyNames: b.PackageJsonDependencyNames,
+ 		AmbientModuleNames:   b.AmbientModuleNames,
+ 		Index:                b.Index,
+ 	}
+@@ -549,10 +556,10 @@ func (b *registryBuilder) updateBucketAndDirectoryExistence(change RegistryChang
+ 	start := time.Now()
+ 	neededProjects := make(map[tspath.Path]struct{})
+ 	neededDirectories := make(map[tspath.Path]string)
+-	for path, fileName := range change.OpenFiles {
++	walkImportingFile := func(path tspath.Path, fileName string) {
+ 		neededProjects[core.FirstResult(b.host.GetDefaultProject(path))] = struct{}{}
+ 		if tspath.IsDynamicFileName(fileName) {
+-			continue
++			return
+ 		}
+ 		dir := fileName
+ 		dirPath := path
+@@ -568,13 +575,22 @@ func (b *registryBuilder) updateBucketAndDirectoryExistence(change RegistryChang
+ 			}
+ 			neededDirectories[dirPath] = dir
+ 		}
+-
+ 		if !b.specifierCache.Has(path) {
+ 			b.specifierCache.Set(path, &collections.SyncMap[tspath.Path, string]{})
+ 		}
+ 	}
++	for path, fileName := range change.OpenFiles {
++		walkImportingFile(path, fileName)
++	}
+ 
+ 	if change.RequestedFile != "" {
++		// The requested file imports too: its ancestors gate node_modules
++		// discovery (the updateIndexes task walk already iterates them). The
++		// LSP always has it open, so this only matters for API callers whose
++		// requested file is a disk file with no overlay.
++		if _, ok := change.OpenFiles[change.RequestedFile]; !ok {
++			walkImportingFile(change.RequestedFile, string(change.RequestedFile))
++		}
+ 		neededProjects[core.FirstResult(b.host.GetDefaultProject(change.RequestedFile))] = struct{}{}
+ 		if !b.specifierCache.Has(change.RequestedFile) {
+ 			b.specifierCache.Set(change.RequestedFile, &collections.SyncMap[tspath.Path, string]{})
+@@ -783,6 +799,7 @@ func (b *registryBuilder) updateIndexes(ctx context.Context, change RegistryChan
+ 	type nodeModulesBucketTask struct {
+ 		entry           *dirty.MapEntry[tspath.Path, *RegistryBucket]
+ 		dependencyNames *collections.Set[string]
++		packageJsonDependencyNames *collections.Set[string]
+ 		dirName         string
+ 		dirPath         tspath.Path
+ 
+@@ -842,7 +859,7 @@ func (b *registryBuilder) updateIndexes(ctx context.Context, change RegistryChan
+ 	tspath.ForEachAncestorDirectoryPath(change.RequestedFile, func(dirPath tspath.Path) (any, bool) {
+ 		if nodeModulesBucket, ok := b.nodeModules.Get(dirPath); ok {
+ 			dirName := core.FirstResult(b.directories.Get(dirPath)).Value().name
+-			dependencies := b.computeDependenciesForNodeModulesDirectory(change, allResolvedPackageNames, dirName, dirPath)
++			dependencies, packageJsonDependencies := b.computeDependenciesForNodeModulesDirectory(change, allResolvedPackageNames, dirName, dirPath)
+ 			bucketState := nodeModulesBucket.Value().state
+ 			// !!! Optimization: handle different dependency set via granular updates
+ 			needsFullRebuild := bucketState.multipleFilesDirty ||
+@@ -856,6 +873,7 @@ func (b *registryBuilder) updateIndexes(ctx context.Context, change RegistryChan
+ 				nodeModulesTasks = append(nodeModulesTasks, &nodeModulesBucketTask{
+ 					entry:           nodeModulesBucket,
+ 					dependencyNames: dependencies,
++					packageJsonDependencyNames: packageJsonDependencies,
+ 					dirName:         dirName,
+ 					dirPath:         dirPath,
+ 				})
+@@ -863,6 +881,7 @@ func (b *registryBuilder) updateIndexes(ctx context.Context, change RegistryChan
+ 				nodeModulesTasks = append(nodeModulesTasks, &nodeModulesBucketTask{
+ 					entry:           nodeModulesBucket,
+ 					dependencyNames: dependencies,
++					packageJsonDependencyNames: packageJsonDependencies,
+ 					dirName:         dirName,
+ 					dirPath:         dirPath,
+ 					isUpdate:        true,
+@@ -1004,7 +1023,7 @@ func (b *registryBuilder) updateIndexes(ctx context.Context, change RegistryChan
+ 				)
+ 			} else {
+ 				b.buildNodeModulesBucket(
+-					ctx, br, task.dependencyNames, task.dirPath, task.discovered, task.directoryPackageNames, extractionCache,
++					ctx, br, task.dependencyNames, task.packageJsonDependencyNames, task.dirPath, task.discovered, task.directoryPackageNames, extractionCache,
+ 					targetRecursivePackages, nodeModulesLogger.Fork(task.dirName),
+ 				)
+ 			}
+@@ -1291,34 +1310,41 @@ func (b *registryBuilder) buildProjectBucket(
+ 	}
+ }
+ 
+-func (b *registryBuilder) computeDependenciesForNodeModulesDirectory(change RegistryChange, allResolvedPackageNames map[tspath.Path]*collections.Set[string], dirName string, dirPath tspath.Path) *collections.Set[string] {
++func (b *registryBuilder) computeDependenciesForNodeModulesDirectory(change RegistryChange, allResolvedPackageNames map[tspath.Path]*collections.Set[string], dirName string, dirPath tspath.Path) (dependencies *collections.Set[string], packageJsonDependencies *collections.Set[string]) {
+ 	// If any open files are in scope of this directory but not in scope of any package.json,
+ 	// we need to add all packages in this node_modules directory.
+ 	for path := range change.OpenFiles {
+ 		if dirPath.ContainsPath(path) && b.getNearestAncestorDirectoryWithPackageJson(path) == nil {
+-			return nil
++			return nil, nil
+ 		}
+ 	}
+ 
+ 	// Get all package.jsons that have this node_modules directory in their spine
+-	dependencies := &collections.Set[string]{}
++	packageJsonDependencies = &collections.Set[string]{}
++	dependencies = &collections.Set[string]{}
+ 	b.directories.Range(func(entry *dirty.MapEntry[tspath.Path, *directory]) bool {
+ 		if entry.Value().packageJson.Exists() && dirPath.ContainsPath(entry.Key()) {
+-			addPackageJsonDependencies(entry.Value().packageJson.Contents, dependencies)
++			addPackageJsonDependencies(entry.Value().packageJson.Contents, packageJsonDependencies)
+ 		}
+ 		return true
+ 	})
++	for name := range packageJsonDependencies.Keys() {
++		dependencies.Add(name)
++	}
+ 
+ 	// Add packages that are directly imported by programs but not listed in package.json.
+ 	// This ensures node_modules files are always in node_modules buckets.
+ 	// Include packages from all projects that have this node_modules directory in their spine.
++	// Note: membership here only earns bucket coverage for files already in the
++	// program (see View.search) — full entrypoint expansion stays reserved for
++	// package.json-listed dependencies, matching stock's provider/main-path split.
+ 	for _, resolvedPackageNames := range allResolvedPackageNames {
+ 		for name := range resolvedPackageNames.Keys() {
+ 			dependencies.Add(name)
+ 		}
+ 	}
+ 
+-	return dependencies
++	return dependencies, packageJsonDependencies
+ }
+ 
+ // discoveredPackage represents a package found during the discovery phase.
+@@ -1598,6 +1624,7 @@ func (b *registryBuilder) buildNodeModulesBucket(
+ 	ctx context.Context,
+ 	result *bucketBuildResult,
+ 	dependencies *collections.Set[string],
++	packageJsonDependencies *collections.Set[string],
+ 	dirPath tspath.Path,
+ 	discovered []*discoveredPackage,
+ 	directoryPackageNames *collections.Set[string],
+@@ -1634,6 +1661,7 @@ func (b *registryBuilder) buildNodeModulesBucket(
+ 	result.bucket = &RegistryBucket{
+ 		Index:              &Index[*Export]{},
+ 		DependencyNames:    dependencies,
++		PackageJsonDependencyNames: packageJsonDependencies,
+ 		PackageFiles:       allPackageFiles,
+ 		AmbientModuleNames: extraction.ambientModuleNames,
+ 		Paths:              paths,
+@@ -1781,6 +1809,7 @@ func (b *registryBuilder) updateNodeModulesBucket(
+ 	result.bucket = &RegistryBucket{
+ 		Index:              newIndex,
+ 		DependencyNames:    existingBucket.DependencyNames,
++		PackageJsonDependencyNames: existingBucket.PackageJsonDependencyNames,
+ 		PackageFiles:       newPackageFiles,
+ 		AmbientModuleNames: newAmbientModuleNames,
+ 		Paths:              newPaths,
+diff --git a/internal/ls/autoimport/view.go b/internal/ls/autoimport/view.go
+index 9f8b144fa..fb0eb38a2 100644
+--- a/internal/ls/autoimport/view.go
++++ b/internal/ls/autoimport/view.go
+@@ -32,6 +32,12 @@ type View struct {
+ 	shouldUseRequireForFixes         *bool
+ }
+ 
++// inProgram reports whether fileName is one of the program's own source files
++// (stock's main-path coverage for program-imported packages).
++func (v *View) inProgram(fileName string) bool {
++	return fileName != "" && v.program.GetSourceFile(fileName) != nil
++}
++
+ func NewView(registry *Registry, importingFile *ast.SourceFile, projectKey tspath.Path, program *compiler.Program, preferences modulespecifiers.UserPreferences) *View {
+ 	return &View{
+ 		registry:      registry,
+@@ -141,6 +147,7 @@ func (v *View) search(searchFn func(*RegistryBucket) []*Export) []*Export {
+ 		if nodeModulesBucket, ok := v.registry.nodeModules[dirPath]; ok {
+ 			exports := searchFn(nodeModulesBucket)
+ 			results = slices.Grow(results, len(exports))
++			packageJsonDeps := nodeModulesBucket.PackageJsonDependencyNames
+ 			for _, e := range exports {
+ 				// Exclude packages found in lower node_modules (shadowing)
+ 				if excludePackages.Has(e.PackageName) {
+@@ -151,6 +158,16 @@ func (v *View) search(searchFn func(*RegistryBucket) []*Export) []*Export {
+ 				if allowedPackages != nil && !allowedPackages.Has(e.PackageName) {
+ 					continue
+ 				}
++				// Stock splits coverage by how a package reached the index:
++				// package.json-listed dependencies get full entrypoint coverage
++				// (its auto-import provider); program-imported packages are
++				// covered like the main-program path — only files already in the
++				// program. Without this gate, a dependency's exports-subpath
++				// modules (never in the program, never provider-covered) leak in
++				// as candidates stock never offers.
++				if (packageJsonDeps == nil || !packageJsonDeps.Has(e.PackageName)) && !v.inProgram(e.ModuleFileName) {
++					continue
++				}
+ 				results = append(results, e)
+ 			}
+ 
+@@ -206,18 +223,25 @@ outer:
+ 		if existing, ok := grouped[key]; ok {
+ 			for i, ex := range existing {
+ 				if e.ExportID == ex.ExportID {
++					// The merged entry presents the "smaller" kind; its
++					// modifier text comes from the same winner.
++					modifiersText := e.ScriptElementKindModifiersText
++					if ex.ScriptElementKind < e.ScriptElementKind {
++						modifiersText = ex.ScriptElementKindModifiersText
++					}
+ 					grouped[key] = slices.Replace(existing, i, i+1, &Export{
+-						ExportID:                   e.ExportID,
+-						ModuleFileName:             e.ModuleFileName,
+-						PackageName:                e.PackageName,
+-						IsTypeOnly:                 e.IsTypeOnly || ex.IsTypeOnly,
+-						Syntax:                     min(e.Syntax, ex.Syntax),
+-						Flags:                      e.Flags | ex.Flags,
+-						ScriptElementKind:          min(e.ScriptElementKind, ex.ScriptElementKind),
+-						ScriptElementKindModifiers: e.ScriptElementKindModifiers | ex.ScriptElementKindModifiers,
+-						localName:                  e.localName,
+-						Target:                     e.Target,
+-						Path:                       e.Path,
++						ExportID:                       e.ExportID,
++						ModuleFileName:                 e.ModuleFileName,
++						PackageName:                    e.PackageName,
++						IsTypeOnly:                     e.IsTypeOnly || ex.IsTypeOnly,
++						Syntax:                         min(e.Syntax, ex.Syntax),
++						Flags:                          e.Flags | ex.Flags,
++						ScriptElementKind:              min(e.ScriptElementKind, ex.ScriptElementKind),
++						ScriptElementKindModifiers:     e.ScriptElementKindModifiers | ex.ScriptElementKindModifiers,
++						ScriptElementKindModifiersText: modifiersText,
++						localName:                      e.localName,
++						Target:                         e.Target,
++						Path:                           e.Path,
+ 					})
+ 					continue outer
+ 				}
+diff --git a/internal/ls/completions.go b/internal/ls/completions.go
+index 5e62661fc..aebe2cb73 100644
+--- a/internal/ls/completions.go
++++ b/internal/ls/completions.go
+@@ -64,7 +64,15 @@ func (l *LanguageService) GetCompletionsAtPosition(ctx context.Context, file *as
+ 
+ type CompletionItem struct {
+ 	*lsproto.CompletionItem
+-	Symbol *ast.Symbol // non-nil for symbol completions when IncludeSymbols is set; nil otherwise
++	Symbol        *ast.Symbol // non-nil for symbol completions when IncludeSymbols is set; nil otherwise
++	ElementKind   lsutil.ScriptElementKind
++	KindModifiers lsutil.ScriptElementKindModifier
++	// KindModifiersText is stock's ordered kindModifiers display (ambient
++	// re-export aliases read "declare,export"); "" means none.
++	KindModifiersText string
++	// ModuleFileName is the declaring module of an auto-import candidate
++	// (stock CompletionEntryData.fileName); empty for non-auto-import items.
++	ModuleFileName string
+ }
+ 
+ type CompletionList struct {
+@@ -72,6 +80,12 @@ type CompletionList struct {
+ 	ItemDefaults *lsproto.CompletionItemDefaults
+ 	ApplyKind    *lsproto.CompletionItemApplyKinds
+ 	Items        []*CompletionItem
++	// Protocol-level flags for the tsserver CompletionInfo shape (issue #12).
++	Flags                   uint32
++	IsGlobalCompletion      bool
++	IsMemberCompletion      bool
++	IsNewIdentifierLocation bool
++	OptionalReplacementSpan *lsproto.Range
+ }
+ 
+ func ensureItemData(fileName string, pos int, list *lsproto.CompletionList) *lsproto.CompletionList {
+@@ -576,6 +590,7 @@ func (l *LanguageService) getCompletionData(
+ 							Kind:     new(lsproto.CompletionItemKindKeyword),
+ 							SortText: new(string(SortTextGlobalsOrKeywords)),
+ 						},
++						ElementKind: lsutil.ScriptElementKindKeyword,
+ 					}},
+ 					isNewIdentifierLocation: importStatementCompletionInfo.isNewIdentifierLocation,
+ 				}, nil
+@@ -1804,14 +1819,14 @@ func (l *LanguageService) completionInfoFromData(
+ 	for _, keywordEntry := range getContextualKeywords(file, contextToken, position) {
+ 		if !uniqueNames.Has(keywordEntry.Label) {
+ 			uniqueNames.Add(keywordEntry.Label)
+-			sortedEntries = append(sortedEntries, &CompletionItem{CompletionItem: keywordEntry})
++			sortedEntries = append(sortedEntries, &CompletionItem{CompletionItem: keywordEntry, ElementKind: lsutil.ScriptElementKindKeyword})
+ 		}
+ 	}
+ 
+ 	for _, literal := range literals {
+ 		literalEntry := createCompletionItemForLiteral(file, preferences, literal)
+ 		uniqueNames.Add(literalEntry.Label)
+-		sortedEntries = append(sortedEntries, &CompletionItem{CompletionItem: literalEntry})
++		sortedEntries = append(sortedEntries, &CompletionItem{CompletionItem: literalEntry, ElementKind: lsutil.ScriptElementKindString})
+ 	}
+ 
+ 	if !isChecked {
+@@ -1839,7 +1854,7 @@ func (l *LanguageService) completionInfoFromData(
+ 				return nil, err
+ 			}
+ 			if casesItem != nil {
+-				sortedEntries = append(sortedEntries, &CompletionItem{CompletionItem: casesItem})
++				sortedEntries = append(sortedEntries, &CompletionItem{CompletionItem: casesItem, ElementKind: lsutil.ScriptElementKindString})
+ 			}
+ 		}
+ 	}
+@@ -1854,9 +1869,14 @@ func (l *LanguageService) completionInfoFromData(
+ 	)
+ 
+ 	return &CompletionList{
+-		IsIncomplete: data.hasUnresolvedAutoImports,
+-		ItemDefaults: itemDefaults,
+-		Items:        sortedEntries,
++		IsIncomplete:           data.hasUnresolvedAutoImports,
++		ItemDefaults:           itemDefaults,
++		Items:                  sortedEntries,
++		Flags:                  0,
++		IsGlobalCompletion:     data.isInSnippetScope,
++		IsMemberCompletion:     data.completionKind == CompletionKindObjectPropertyDeclaration || data.completionKind == CompletionKindMemberLike || data.completionKind == CompletionKindPropertyAccess,
++		IsNewIdentifierLocation: data.isNewIdentifierLocation,
++		OptionalReplacementSpan: optionalReplacementSpan,
+ 	}, nil
+ }
+ 
+@@ -1935,11 +1955,10 @@ func (l *LanguageService) getCompletionEntriesFromSymbols(
+ 			!(symbol.Parent == nil &&
+ 				!core.Some(symbol.Declarations, func(d *ast.Node) bool { return ast.GetSourceFileOfNode(d) == file }))
+ 		uniques[name] = shouldShadowLaterSymbols
+-		var sym *ast.Symbol
+ 		if includeSymbols {
+-			sym = symbol
++			entry.Symbol = symbol
+ 		}
+-		sortedEntries = append(sortedEntries, &CompletionItem{CompletionItem: entry, Symbol: sym})
++		sortedEntries = append(sortedEntries, entry)
+ 	}
+ 
+ 	for _, autoImport := range data.autoImports {
+@@ -1993,7 +2012,9 @@ func (l *LanguageService) getCompletionEntriesFromSymbols(
+ 
+ 		if isShadowed, _ := uniques[autoImport.Fix.Name]; !isShadowed {
+ 			uniques[autoImport.Fix.Name] = false
+-			sortedEntries = append(sortedEntries, &CompletionItem{CompletionItem: entry})
++			entry.ModuleFileName = autoImport.Export.ModuleFileName
++			entry.KindModifiersText = autoImport.Export.ScriptElementKindModifiersText
++			sortedEntries = append(sortedEntries, entry)
+ 		}
+ 	}
+ 
+@@ -2049,7 +2070,7 @@ func (l *LanguageService) createCompletionItem(
+ 	useSemicolons bool,
+ 	compilerOptions *core.CompilerOptions,
+ 	isMemberCompletion bool,
+-) *lsproto.CompletionItem {
++) *CompletionItem {
+ 	contextToken := data.contextToken
+ 	var insertText string
+ 	var filterText string
+@@ -2273,8 +2294,9 @@ func (l *LanguageService) createCompletionItem(
+ 
+ 	preselect := isRecommendedCompletionMatch(symbol, data.recommendedCompletion, typeChecker)
+ 	kindModifiers := lsutil.GetSymbolModifiers(typeChecker, symbol)
++	kindModifiersText := lsutil.GetSymbolModifiersText(typeChecker, symbol)
+ 
+-	return l.createLSPCompletionItem(
++	item := l.createLSPCompletionItem(
+ 		ctx,
+ 		name,
+ 		insertText,
+@@ -2295,6 +2317,8 @@ func (l *LanguageService) createCompletionItem(
+ 		nil, /*autoImportFix*/
+ 		nil, /*detail*/
+ 	)
++	item.KindModifiersText = kindModifiersText
++	return item
+ }
+ 
+ func isRecommendedCompletionMatch(localSymbol *ast.Symbol, recommendedCompletion *ast.Symbol, typeChecker *checker.Checker) bool {
+@@ -3279,7 +3303,7 @@ func cloneItems(items []*lsproto.CompletionItem) []*CompletionItem {
+ 	entries := make([]*CompletionItem, len(items))
+ 	for i, item := range items {
+ 		itemClone := *item
+-		entries[i] = &CompletionItem{CompletionItem: &itemClone}
++		entries[i] = &CompletionItem{CompletionItem: &itemClone, ElementKind: lsutil.ScriptElementKindKeyword}
+ 	}
+ 	return entries
+ }
+@@ -4382,7 +4406,7 @@ func (l *LanguageService) getJsxClosingTagCompletion(
+ 	optionalReplacementSpan := new(l.createLspRangeFromNode(jsxClosingElement.TagName(), file))
+ 	defaultCommitCharacters := getDefaultCommitCharacters(false /*isNewIdentifierLocation*/)
+ 
+-	lspItem := l.createLSPCompletionItem(
++	item := l.createLSPCompletionItem(
+ 		ctx,
+ 		fullClosingTag, /*name*/
+ 		"",             /*insertText*/
+@@ -4403,9 +4427,6 @@ func (l *LanguageService) getJsxClosingTagCompletion(
+ 		nil,   /*autoImportEntryData*/ // !!! jsx autoimports
+ 		nil,   /*detail*/
+ 	)
+-	item := &CompletionItem{
+-		CompletionItem: lspItem,
+-	}
+ 	items := []*CompletionItem{item}
+ 	itemDefaults := l.setItemDefaults(
+ 		ctx,
+@@ -4443,7 +4464,7 @@ func (l *LanguageService) createLSPCompletionItem(
+ 	source string,
+ 	autoImportFix *lsproto.AutoImportFix,
+ 	detail *string,
+-) *lsproto.CompletionItem {
++) *CompletionItem {
+ 	kind := getCompletionsSymbolKind(elementKind)
+ 	data := &lsproto.CompletionItemData{
+ 		FileName:   file.FileName(),
+@@ -4499,20 +4520,24 @@ func (l *LanguageService) createLSPCompletionItem(
+ 		insertTextFormat = new(lsproto.InsertTextFormatSnippet)
+ 	}
+ 
+-	return &lsproto.CompletionItem{
+-		Label:            name,
+-		LabelDetails:     labelDetails,
+-		Kind:             &kind,
+-		Tags:             tags,
+-		Detail:           detail,
+-		Preselect:        boolToPtr(preselect),
+-		SortText:         new(string(sortText)),
+-		FilterText:       strPtrTo(filterText),
+-		InsertText:       strPtrTo(insertText),
+-		InsertTextFormat: insertTextFormat,
+-		TextEdit:         textEdit,
+-		CommitCharacters: commitCharacters,
+-		Data:             data,
++	return &CompletionItem{
++		CompletionItem: &lsproto.CompletionItem{
++			Label:            name,
++			LabelDetails:     labelDetails,
++			Kind:             &kind,
++			Tags:             tags,
++			Detail:           detail,
++			Preselect:        boolToPtr(preselect),
++			SortText:         new(string(sortText)),
++			FilterText:       strPtrTo(filterText),
++			InsertText:       strPtrTo(insertText),
++			InsertTextFormat: insertTextFormat,
++			TextEdit:         textEdit,
++			CommitCharacters: commitCharacters,
++			Data:             data,
++		},
++		ElementKind:   elementKind,
++		KindModifiers: kindModifiers,
+ 	}
+ }
+ 
+@@ -4581,9 +4606,7 @@ func (l *LanguageService) getLabelStatementCompletions(
+ 					nil,   /*autoImportEntryData*/
+ 					nil,   /*detail*/
+ 				)
+-				items = append(items, &CompletionItem{
+-					CompletionItem: lspItem,
+-				})
++				items = append(items, lspItem)
+ 			}
+ 		}
+ 		current = current.Parent
 diff --git a/internal/ls/findallreferences.go b/internal/ls/findallreferences.go
 index 28043f859..beb9638d4 100644
 --- a/internal/ls/findallreferences.go
@@ -2246,6 +2789,198 @@ index a5992fa73..ddc807e95 100644
  	if node.Flags&ast.NodeFlagsJSDoc == 0 {
  		for current := node; current != nil; current = ast.GetNextJSDocCommentLocation(current) {
  			jsdocs := current.JSDoc(nil)
+diff --git a/internal/ls/languageservice.go b/internal/ls/languageservice.go
+index 7c7e1aced..b6d587aba 100644
+--- a/internal/ls/languageservice.go
++++ b/internal/ls/languageservice.go
+@@ -97,7 +97,8 @@ func (l *LanguageService) getPreparedAutoImportView(fromFile *ast.SourceFile) (*
+ 		return nil, nil
+ 	}
+ 	registry := l.host.AutoImportRegistry()
+-	if !registry.IsPreparedForImportingFile(fromFile.FileName(), l.projectPath, l.UserPreferences()) {
++	prepared := registry.IsPreparedForImportingFile(fromFile.FileName(), l.projectPath, l.UserPreferences())
++	if !prepared {
+ 		return nil, ErrNeedsAutoImports
+ 	}
+ 
+diff --git a/internal/ls/lsutil/symbol_display.go b/internal/ls/lsutil/symbol_display.go
+index 8ee6bd52b..1a94babdb 100644
+--- a/internal/ls/lsutil/symbol_display.go
++++ b/internal/ls/lsutil/symbol_display.go
+@@ -1,6 +1,8 @@
+ package lsutil
+ 
+ import (
++	"strings"
++
+ 	"github.com/microsoft/typescript-go/internal/ast"
+ 	"github.com/microsoft/typescript-go/internal/checker"
+ 	"github.com/microsoft/typescript-go/internal/collections"
+@@ -365,6 +367,95 @@ func GetSymbolModifiers(typeChecker *checker.Checker, symbol *ast.Symbol) Script
+ 	return modifiers
+ }
+ 
++// GetSymbolModifiersText mirrors Strada's SymbolDisplay.getSymbolModifiers:
++// the first declaration's modifiers in getNodeModifiers order, then (for
++// aliases) the resolved target's, insertion-deduped, optional last. The order
++// is observable ("export,declare" for a direct export, "declare,export" for an
++// ambient re-export alias) and lost if taken from the bitmask.
++func GetSymbolModifiersText(typeChecker *checker.Checker, symbol *ast.Symbol) string {
++	if symbol == nil {
++		return ""
++	}
++	seen := make(map[string]struct{})
++	var out []string
++	add := func(mods []string) {
++		for _, m := range mods {
++			if _, ok := seen[m]; !ok {
++				seen[m] = struct{}{}
++				out = append(out, m)
++			}
++		}
++	}
++	add(getNormalizedSymbolModifiersText(typeChecker, symbol))
++	if symbol.Flags&ast.SymbolFlagsAlias != 0 && typeChecker != nil {
++		if resolvedSymbol := typeChecker.GetAliasedSymbol(symbol); resolvedSymbol != symbol {
++			add(getNormalizedSymbolModifiersText(typeChecker, resolvedSymbol))
++		}
++	}
++	if symbol.Flags&ast.SymbolFlagsOptional != 0 {
++		add([]string{"optional"})
++	}
++	return strings.Join(out, ",")
++}
++
++func getNormalizedSymbolModifiersText(typeChecker *checker.Checker, symbol *ast.Symbol) []string {
++	if len(symbol.Declarations) == 0 {
++		return nil
++	}
++	declaration := symbol.Declarations[0]
++	declarations := symbol.Declarations[1:]
++	// omit deprecated flag if some declarations are not deprecated
++	var excludeFlags ast.ModifierFlags
++	if len(declarations) > 0 &&
++		isDeprecatedDeclaration(typeChecker, declaration) &&
++		core.Some(declarations, func(d *ast.Node) bool { return !isDeprecatedDeclaration(typeChecker, d) }) {
++		excludeFlags = ast.ModifierFlagsDeprecated
++	} else {
++		excludeFlags = ast.ModifierFlagsNone
++	}
++	return getNodeModifiersText(typeChecker, declaration, excludeFlags)
++}
++
++func getNodeModifiersText(typeChecker *checker.Checker, node *ast.Node, excludeFlags ast.ModifierFlags) []string {
++	var out []string
++	var flags ast.ModifierFlags
++	if ast.IsDeclaration(node) {
++		flags = ast.GetCombinedModifierFlags(node)
++		if isDeprecatedDeclaration(typeChecker, node) {
++			flags |= ast.ModifierFlagsDeprecated
++		}
++		flags &^= excludeFlags
++	}
++	if flags&ast.ModifierFlagsPrivate != 0 {
++		out = append(out, "private")
++	}
++	if flags&ast.ModifierFlagsProtected != 0 {
++		out = append(out, "protected")
++	}
++	if flags&ast.ModifierFlagsPublic != 0 {
++		out = append(out, "public")
++	}
++	if flags&ast.ModifierFlagsStatic != 0 || node.Kind == ast.KindClassStaticBlockDeclaration {
++		out = append(out, "static")
++	}
++	if flags&ast.ModifierFlagsAbstract != 0 {
++		out = append(out, "abstract")
++	}
++	if flags&ast.ModifierFlagsExport != 0 {
++		out = append(out, "export")
++	}
++	if flags&ast.ModifierFlagsDeprecated != 0 {
++		out = append(out, "deprecated")
++	}
++	if node.Flags&ast.NodeFlagsAmbient != 0 {
++		out = append(out, "declare")
++	}
++	if node.Kind == ast.KindExportAssignment {
++		out = append(out, "export")
++	}
++	return out
++}
++
+ func getNormalizedSymbolModifiers(typeChecker *checker.Checker, symbol *ast.Symbol) ScriptElementKindModifier {
+ 	var modifierSet ScriptElementKindModifier
+ 	if len(symbol.Declarations) > 0 {
+diff --git a/internal/ls/signaturehelp.go b/internal/ls/signaturehelp.go
+index c83765666..5e3df8463 100644
+--- a/internal/ls/signaturehelp.go
++++ b/internal/ls/signaturehelp.go
+@@ -470,8 +470,9 @@ func (l *LanguageService) getSignatureHelpItem(candidate *checker.Signature, isT
+ func returnTypeToDisplayParts(candidateSignature *checker.Signature, c *checker.Checker, enclosingDeclaration *ast.Node, sourceFile *ast.SourceFile, vsCapability bool) *displayPartsWriter {
+ 	dpw := newDisplayPartsWriter(vsCapability)
+ 
+-	// Add ": " prefix
+-	dpw.WritePunctuation(": ")
++	// Add ": " prefix (":" punctuation + " " space, mirroring Strada's part split)
++	dpw.WritePunctuation(":")
++	dpw.WriteSpace(" ")
+ 
+ 	predicate := c.GetTypePredicateOfSignature(candidateSignature)
+ 	if predicate != nil {
+diff --git a/internal/ls/string_completions.go b/internal/ls/string_completions.go
+index f5240bcf3..12380ce79 100644
+--- a/internal/ls/string_completions.go
++++ b/internal/ls/string_completions.go
+@@ -173,9 +173,7 @@ func (l *LanguageService) convertStringLiteralCompletions(
+ 				nil,   /*autoImportEntryData*/
+ 				nil,   /*detail*/
+ 			)
+-			return &CompletionItem{
+-				CompletionItem: lspItem,
+-			}
++			return lspItem
+ 		})
+ 		defaultCommitCharacters := getDefaultCommitCharacters(completion.isNewIdentifier)
+ 		itemDefaults := l.setItemDefaults(
+@@ -234,9 +232,7 @@ func (l *LanguageService) convertPathCompletions(
+ 			nil,   /*autoImportEntryData*/
+ 			&detail,
+ 		)
+-		return &CompletionItem{
+-			CompletionItem: lspItem,
+-		}
++		return lspItem
+ 	})
+ 	itemDefaults := l.setItemDefaults(
+ 		ctx,
+@@ -1007,7 +1003,7 @@ func (l *LanguageService) getExtensionOptions(
+ 	mode core.ResolutionMode,
+ 	checker *checker.Checker,
+ ) *extensionOptions {
+-	extensionsToSearch := getSupportedExtensionsForModuleResolution(options, checker)
++	extensionsToSearch := getSupportedExtensionsForModuleResolution(options, l.program.CommandLine().ExtraFileExtensions(), checker)
+ 
+ 	return &extensionOptions{
+ 		extensionsToSearch:  extensionsToSearch,
+@@ -1018,7 +1014,7 @@ func (l *LanguageService) getExtensionOptions(
+ 	}
+ }
+ 
+-func getSupportedExtensionsForModuleResolution(options *core.CompilerOptions, checker *checker.Checker) []string {
++func getSupportedExtensionsForModuleResolution(options *core.CompilerOptions, extraFileExtensions []tsoptions.FileExtensionInfo, checker *checker.Checker) []string {
+ 	/** file extensions from ambient modules declarations e.g. *.css */
+ 	var extensions []string
+ 	if checker != nil {
+@@ -1031,7 +1027,7 @@ func getSupportedExtensionsForModuleResolution(options *core.CompilerOptions, ch
+ 			extensions = append(extensions, name[1:])
+ 		}
+ 	}
+-	supportedExtensions := tsoptions.GetSupportedExtensions(options, nil /*extraFileExtensions*/)
++	supportedExtensions := tsoptions.GetSupportedExtensions(options, extraFileExtensions)
+ 	for _, ext := range supportedExtensions {
+ 		extensions = append(extensions, ext...)
+ 	}
 diff --git a/internal/module/resolver.go b/internal/module/resolver.go
 index 52400dc2b..10546290b 100644
 --- a/internal/module/resolver.go
@@ -2907,7 +3642,7 @@ index 909b5aa4b..2237d958c 100644
  	existing, loaded := c.entries.LoadOrStore(key, entry)
  	if loaded {
 diff --git a/internal/project/session.go b/internal/project/session.go
-index 00f4056e5..bc42163ab 100644
+index 00f4056e5..2e2a332af 100644
 --- a/internal/project/session.go
 +++ b/internal/project/session.go
 @@ -26,6 +26,7 @@ import (
@@ -2964,6 +3699,44 @@ index 00f4056e5..bc42163ab 100644
  func (s *Session) DidChangeFile(ctx context.Context, uri lsproto.DocumentUri, version int32, changes []lsproto.TextDocumentContentChangePartialOrWholeDocument) {
  	s.cancelDiagnosticsRefresh()
  	s.cancelWarmAutoImportCache()
+@@ -1153,6 +1179,37 @@ func (s *Session) GetLanguageServiceWithAutoImports(ctx context.Context, baseSna
+ 	return ls.NewLanguageService(project.configFilePath, project.GetProgram(), newSnapshot, uri.FileName()), nil
+ }
+ 
++// GetSnapshotWithAutoImports is the bridge-API variant of
++// GetLanguageServiceWithAutoImports: it returns the prepared snapshot and the
++// file's default project so the caller can wrap the snapshot host (e.g.
++// per-request preferences) before constructing a LanguageService of its own.
++func (s *Session) GetSnapshotWithAutoImports(ctx context.Context, baseSnapshot *Snapshot, uri lsproto.DocumentUri) (*Snapshot, *Project, error) {
++	change := SnapshotChange{
++		reason: UpdateReasonRequestedLanguageServiceWithAutoImports,
++		ResourceRequest: ResourceRequest{
++			AutoImports: uri,
++		},
++	}
++	newSnapshot := baseSnapshot.Clone(ctx, change, baseSnapshot.fs.overlays, s)
++
++	project := newSnapshot.GetDefaultProject(uri)
++	if project == nil {
++		// Clone's initial ref (1) is released since we won't use this snapshot.
++		newSnapshot.Deref(s)
++		return nil, nil, fmt.Errorf("no project found for URI %s", uri)
++	}
++
++	// The caller derefs after its synchronous use; without this extra ref the
++	// background adopt below could dispose the clone mid-use when the session
++	// has already moved on (adopt owns the clone's initial ref).
++	newSnapshot.tryRef()
++	s.backgroundQueue.Enqueue(s.backgroundCtx, func(ctx context.Context) {
++		s.adoptSnapshotChange(baseSnapshot, newSnapshot)
++	})
++
++	return newSnapshot, project, nil
++}
++
+ // adoptSnapshotChange promotes a cloned snapshot as the session's current
+ // snapshot so future requests benefit from the work already done. If the
+ // session has moved on, the snapshot is discarded; the next request needing
 diff --git a/internal/project/snapshot.go b/internal/project/snapshot.go
 index 61af433d3..a45d3a81f 100644
 --- a/internal/project/snapshot.go

@@ -28,15 +28,19 @@ fs.writeFileSync(path.join(dir, 'tsconfig.json'), JSON.stringify({
 }, null, 2));
 const aSrc = `export interface Entity<K extends string> { id: K; meta: Record<string, unknown>; tags: string[] }
 export interface Model extends Entity<"m"> { value: number; nested: { a: string; b: number[] } }
+export type NestedPick = Model["nested"];
+export const np: NestedPick = { a: "x", b: [1] };
 export type RO = readonly [string, number, boolean];
 export type MutTup = [string, number];
 export type Lit = "x" | 42 | true;
 export class Base { z: string = ""; }
 export class Derived extends Base { w?: number; }
+/** Adds a number and reports it. @param a the number @param b optional label */
 export function add(a: number, b?: string): Promise<number> { return Promise.resolve(a); }
 export const callResult = add(1, "s");
 export const model: Model = { id: "m", meta: {}, tags: ["t"], value: 1, nested: { a: "x", b: [1] } };
 export type Cond<T> = T extends string ? "str" : "other";
+export function getKey<T, K extends keyof T>(obj: T, k: K): T[K] { return obj[k]; }
 export const lit: Lit = "x";
 export const tup: RO = ["a", 1, true];
 export const mtup: MutTup = ["a", 1];
@@ -48,6 +52,8 @@ export const numLit = 42 as const;
 export const strLit = "hello" as const;
 export type M<T> = { [P in keyof T]?: T[P] };
 export const mm: M<Model> = {};
+export const { nested } = model;
+export { model as modelAlias };
 `;
 fs.writeFileSync(aTs, aSrc);
 
@@ -105,12 +111,84 @@ function arenaCall(method, params) {
 			view.setBigUint64(16, BigInt(params.symbol ?? 0), true); putHandle(String(params.location), 24, w); break;
 		case 'getSymbolAtPosition':
 			putStr(String(params.file ?? ''), 16, w); view.setUint32(24, params.position >>> 0, true); break;
+		case 'getTypeAtPosition': case 'getModuleSymbolForSourceFile':
+			putStr(String(params.file ?? ''), 16, w); view.setUint32(24, params.position >>> 0, true); break;
 		case 'quickinfo':
 			putStr(String(params.file ?? ''), 16, w); view.setUint32(24, params.position >>> 0, true);
 			view.setInt32(28, params.maximumHoverLength ?? 0, true); view.setInt32(32, params.verbosityLevel ?? -1, true); break;
 		case 'references': case 'definitionAndBoundSpan':
 			putStr(String(params.file ?? ''), 16, w); view.setUint32(24, params.position >>> 0, true); break;
+		case 'getAliasedSymbol': case 'getImmediateAliasedSymbol': case 'getRootSymbols':
+		case 'getExportsOfModule': case 'getExportsAndPropertiesOfModule': case 'getExportsOfSymbol':
+		case 'getMembersOfSymbol': case 'getParentOfSymbol': case 'getExportSymbolOfSymbol':
+		case 'getDocumentationComment': case 'resolveExternalModuleSymbol': case 'symbolIsValue':
+		case 'getLocalTypeParametersOfClassOrInterfaceOrTypeAlias': case 'getJsDocTags':
+			view.setBigUint64(16, BigInt(params.symbol ?? params.objectId ?? 0), true); break;
+		case 'containsArgumentsReference': case 'getContextualTypeForJsxAttribute':
+		case 'getTypeArgumentConstraint': case 'getTypeOfAssignmentPattern':
+		case 'isDeclarationVisible': case 'isImplementationOfOverload': case 'isOptionalParameter':
+		case 'requiresAddingImplicitUndefined': case 'getJsxFragmentFactory':
+		case 'getJsxIntrinsicTagNamesAt': case 'getPropertySymbolOfDestructuringAssignment':
+		case 'getSignatureFromDeclaration': case 'getExportSpecifierLocalTargetSymbol':
+		case 'resolveExternalModuleName':
+			putHandle(String(params.location), 16, w); break;
+		case 'getPropertyOfType': case 'getTypeOfPropertyOfType': case 'getTypeOfPropertyOfContextualType':
+			view.setUint32(16, typeId >>> 0, true); putStr(String(params.name ?? ''), 20, w); break;
+		case 'getStringLiteralType': case 'getBigIntLiteralType':
+			putStr(String(params.value ?? ''), 16, w); break;
+		case 'getNumberLiteralType':
+			view.setFloat64(16, Number(params.value ?? 0), true); break;
+		case 'getAccessibleSymbolChain':
+			view.setBigUint64(16, BigInt(params.symbol ?? 0), true); putHandle(String(params.enclosingDeclaration), 24, w);
+			view.setUint32(40, params.meaning >>> 0, true); view.setUint32(44, params.useOnlyExternalAliasing ? 1 : 0, true); break;
+		case 'getCandidateSignaturesForStringLiteralCompletions':
+			putHandle(String(params.call), 16, w); putHandle(String(params.editingArgument), 32, w); break;
+		case 'tryGetThisTypeAt':
+			putHandle(String(params.location), 16, w); view.setUint32(32, params.includeGlobalThis ? 1 : 0, true);
+			view.setUint32(36, 0, true); view.setUint32(40, 0, true); view.setUint32(44, 0, true); view.setUint32(48, 0, true); break;
+		case 'getExpandedParameters':
+			view.setBigUint64(16, BigInt(params.signature ?? 0), true); view.setUint32(24, params.skipUnionExpanding ? 1 : 0, true); break;
+		case 'getRenameInfo': case 'getEditsForRename': {
+			putStr(String(params.file ?? ''), 16, w); view.setUint32(24, params.position >>> 0, true);
+			const tri2 = (b) => b === true ? 1 : b === false ? 2 : 0;
+			view.setUint8(28, tri2(params.allowRenameOfImportPath));
+			view.setUint8(29, tri2(params.providePrefixAndSuffixTextForRename));
+			view.setUint8(30, tri2(params.providePrefixAndSuffixTextForRename));
+			break;
+		}
+		case 'signatureHelp': {
+			putStr(String(params.file ?? ''), 16, w); view.setUint32(24, params.position >>> 0, true);
+			if (params.triggerReason != null) putStr(String(params.triggerReason), 28, w);
+			else { view.setUint32(28, 0, true); view.setUint32(32, 0, true); }
+			break;
+		}
+		case 'getCompletionsAtPosition': {
+			putStr(String(params.file ?? ''), 16, w); view.setUint32(24, params.position >>> 0, true);
+			if (params.triggerCharacter != null) putStr(String(params.triggerCharacter), 28, w);
+			else { view.setUint32(28, 0, true); view.setUint32(32, 0, true); }
+			view.setUint32(36, params.includeSymbol ? 1 : 0, true);
+			const tri = (b) => b === true ? 1 : b === false ? 2 : 0;
+			const prefs = params.preferences ?? {};
+			view.setUint8(40, tri(prefs.includeCompletionsForModuleExports));
+			view.setUint8(41, tri(prefs.includeCompletionsForImportStatements));
+			view.setUint8(42, tri(prefs.includeAutomaticOptionalChainCompletions));
+			view.setUint8(43, tri(prefs.includeCompletionsWithClassMemberSnippets));
+			view.setUint8(44, tri(prefs.includeCompletionsWithObjectLiteralMethodSnippets));
+			break;
+		}
+		case 'getSymbolsDeclarations': case 'getParentsOfSymbols': {
+			const ids = params.symbols ?? [];
+			view.setUint32(20, ids.length, true);
+			if (ids.length) {
+				view.setUint32(16, w.off, true);
+				for (const id of ids) { view.setBigUint64(w.off, BigInt(id), true); w.off += 8; }
+			} else view.setUint32(16, 0, true);
+			break;
+		}
 		case 'getReturnTypeOfSignature': case 'getParametersOfSignature':
+		case 'getRestTypeOfSignature': case 'getTypeArgumentsForResolvedSignature':
+		case 'getTargetOfSignature': case 'getThisParameterOfSignature':
+		case 'getTypeParametersOfSignature': case 'hasEffectiveRestParameter':
 			view.setBigUint64(16, BigInt(params.signature ?? params.objectId ?? 0), true); break;
 		default: // type / objectId shapes
 			view.setUint32(16, typeId >>> 0, true); break;
@@ -135,11 +213,6 @@ function arenaCall(method, params) {
 		const o = view.getUint32(ARENA_RESP_OFFSET + 16, true), n = view.getUint32(ARENA_RESP_OFFSET + 20, true);
 		throw new Error(dec.decode(arenaBuf.subarray(o, o + n)));
 	}
-	if (method === 'typeToString') {
-		const o = view.getUint32(ARENA_RESP_OFFSET + 16, true), n = view.getUint32(ARENA_RESP_OFFSET + 20, true);
-		return dec.decode(arenaBuf.subarray(o, o + n));
-	}
-	if (method === 'isArrayType') return view.getUint8(ARENA_RESP_OFFSET + 16) !== 0;
 	const str = id => (id === 0 ? undefined : strTab[id]);
 	const u32z = off => { const x = view.getUint32(off, true); return x === 0 ? undefined : x; };
 	const u64z = off => { const x = view.getBigUint64(off, true); return x === 0n ? undefined : Number(x); };
@@ -173,7 +246,9 @@ function arenaCall(method, params) {
 		return d;
 	};
 	const readSymbol = off => {
-		const d = { id: Number(view.getBigUint64(off, true)), project: str(view.getUint32(off + 8, true)), name: str(view.getUint32(off + 12, true)) ?? '', flags: view.getUint32(off + 16, true), checkFlags: view.getUint32(off + 20, true) };
+		const id = Number(view.getBigUint64(off, true));
+		if (id === 0) return null; // zero slot in a symbols run = null element
+		const d = { id, project: str(view.getUint32(off + 8, true)), name: str(view.getUint32(off + 12, true)) ?? '', flags: view.getUint32(off + 16, true), checkFlags: view.getUint32(off + 20, true) };
 		const dc = view.getUint32(off + 28, true);
 		if (dc > 0) { let p = view.getUint32(off + 24, true); d.declarations = new Array(dc); for (let i = 0; i < dc; i++) { d.declarations[i] = readHandle(p); p += 16; } }
 		const vd = readHandle(off + 32);
@@ -271,6 +346,204 @@ function arenaCall(method, params) {
 		for (let i = 0; i < count; i++) { definitions[i] = readDefinitionInfo(p); p += 48; }
 		return { definitions, start: view.getUint32(off, true), length: view.getUint32(off + 4, true) };
 	};
+	const readJsDocTag = off => {
+		const d = { name: strz(view.getUint32(off, true)) };
+		const text = str(view.getUint32(off + 4, true));
+		if (text !== undefined) d.text = text;
+		return d;
+	};
+	const readLightSymbol = off => {
+		const id = Number(view.getBigUint64(off, true));
+		if (id === 0) return null;
+		const d = { id };
+		const project = str(view.getUint32(off + 8, true));
+		if (project !== undefined) d.project = project;
+		d.name = strz(view.getUint32(off + 12, true));
+		d.flags = view.getUint32(off + 16, true);
+		d.checkFlags = view.getUint32(off + 20, true);
+		const parent = Number(view.getBigUint64(off + 24, true));
+		if (parent !== 0) d.parent = parent;
+		return d;
+	};
+	const readAmbientModules = off => {
+		const count = view.getUint32(off + 4, true);
+		let p = view.getUint32(off, true);
+		const modules = new Array(count);
+		for (let i = 0; i < count; i++) {
+			modules[i] = { moduleName: strz(view.getUint32(p, true)), moduleSymbol: readLightSymbol(p + 8) };
+			p += 40;
+		}
+		return { modules };
+	};
+	const readExpandedParams = off => {
+		const count = view.getUint32(off + 4, true);
+		let p = view.getUint32(off, true);
+		const out = new Array(count);
+		for (let i = 0; i < count; i++) {
+			const n = view.getUint32(p + 8 * i + 4, true);
+			let q = view.getUint32(p + 8 * i, true);
+			const inner = new Array(n);
+			for (let j = 0; j < n; j++) { inner[j] = Number(view.getBigUint64(q, true)); q += 8; }
+			out[i] = inner;
+		}
+		return out;
+	};
+	const readCompletionEntry = off => {
+		const d = { name: strz(view.getUint32(off, true)) };
+		const kind = view.getUint32(off + 60, true);
+		if (kind !== 0) d.kind = kind;
+		const elementKind = str(view.getUint32(off + 4, true));
+		if (elementKind !== undefined) d.elementKind = elementKind;
+		const kindModifiers = str(view.getUint32(off + 8, true));
+		if (kindModifiers !== undefined) d.kindModifiers = kindModifiers;
+		const sortText = str(view.getUint32(off + 12, true));
+		if (sortText !== undefined) d.sortText = sortText;
+		const insertText = str(view.getUint32(off + 16, true));
+		if (insertText !== undefined) d.insertText = insertText;
+		const filterText = str(view.getUint32(off + 20, true));
+		if (filterText !== undefined) d.filterText = filterText;
+		const detail = str(view.getUint32(off + 28, true));
+		if (detail !== undefined) d.detail = detail;
+		const flags = view.getUint8(off + 64);
+		if (flags & 8) {
+			const ld = {};
+			const ldd = str(view.getUint32(off + 32, true));
+			if (ldd !== undefined) ld.detail = ldd;
+			const lds = str(view.getUint32(off + 36, true));
+			if (lds !== undefined) ld.description = lds;
+			d.labelDetails = ld;
+		}
+		if (flags & 16) d.symbol = readSymbol(view.getUint32(off + 56, true));
+		const source = str(view.getUint32(off + 24, true));
+		if (source !== undefined) d.source = source;
+		if (flags & 1) d.hasAction = true;
+		if (flags & 2) d.isRecommended = true;
+		if (flags & 4) {
+			d.replacementStart = view.getUint32(off + 40, true);
+			d.replacementLength = view.getUint32(off + 44, true);
+		}
+		const cc = strArr(off + 48);
+		if (cc) d.commitCharacters = cc;
+		if (flags & 32) {
+			const data = {};
+			const exportName = str(view.getUint32(off + 72, true));
+			if (exportName !== undefined) data.exportName = exportName;
+			const fileName = str(view.getUint32(off + 76, true));
+			if (fileName !== undefined) data.fileName = fileName;
+			const moduleSpecifier = str(view.getUint32(off + 68, true));
+			if (moduleSpecifier !== undefined) data.moduleSpecifier = moduleSpecifier;
+			d.data = data;
+		}
+		if (flags & 64) d.isPackageJsonImport = true;
+		const sourceDisplay = readParts(off + 80);
+		if (sourceDisplay) d.sourceDisplay = sourceDisplay;
+		return d;
+	};
+	const readCompletions = off => {
+		const f1 = view.getUint8(off);
+		const f2 = view.getUint8(off + 1);
+		const d = {};
+		if (f1 & 8) d.isIncomplete = true;
+		const count = view.getUint32(off + 28, true);
+		let p = view.getUint32(off + 24, true);
+		const entries = new Array(count);
+		for (let i = 0; i < count; i++) { entries[i] = readCompletionEntry(p); p += 88; }
+		d.entries = entries;
+		if (f2 & 1) d.flags = view.getUint32(off + 4, true);
+		d.isGlobalCompletion = (f1 & 1) !== 0;
+		d.isMemberCompletion = (f1 & 2) !== 0;
+		d.isNewIdentifierLocation = (f1 & 4) !== 0;
+		if (f2 & 2) {
+			d.optionalSpanStart = view.getUint32(off + 8, true);
+			d.optionalSpanLength = view.getUint32(off + 12, true);
+		}
+		const dcc = strArr(off + 16);
+		if (dcc) d.defaultCommitCharacters = dcc;
+		return d;
+	};
+	const readSignatureHelpItem = off => {
+		const d = {
+			isVariadic: (view.getUint8(off + 48) & 1) !== 0,
+			prefixDisplayParts: readParts(off) ?? [],
+			suffixDisplayParts: readParts(off + 8) ?? [],
+			separatorDisplayParts: readParts(off + 16) ?? [],
+		};
+		const pc = view.getUint32(off + 28, true);
+		let p = view.getUint32(off + 24, true);
+		const params = new Array(pc);
+		for (let i = 0; i < pc; i++) {
+			const flags = view.getUint8(p + 20);
+			params[i] = {
+				name: strz(view.getUint32(p, true)),
+				documentation: readParts(p + 4) ?? [],
+				displayParts: readParts(p + 12) ?? [],
+				isOptional: (flags & 1) !== 0,
+				isRest: (flags & 2) !== 0,
+			};
+			p += 24;
+		}
+		d.parameters = params;
+		d.documentation = readParts(off + 32) ?? [];
+		const tc = view.getUint32(off + 44, true);
+		if (tc) {
+			let t = view.getUint32(off + 40, true);
+			d.tags = new Array(tc);
+			for (let i = 0; i < tc; i++) {
+				const tag = { name: strz(view.getUint32(t, true)) };
+				const text = readParts(t + 4);
+				if (text) tag.text = text;
+				d.tags[i] = tag;
+				t += 12;
+			}
+		}
+		return d;
+	};
+	const readSignatureHelpItems = off => {
+		const count = view.getUint32(off + 24, true);
+		let p = view.getUint32(off + 20, true);
+		const items = new Array(count);
+		for (let i = 0; i < count; i++) { items[i] = readSignatureHelpItem(p); p += 52; }
+		return {
+			items,
+			applicableSpan: { start: view.getUint32(off, true), length: view.getUint32(off + 4, true) },
+			selectedItemIndex: view.getUint32(off + 8, true),
+			argumentIndex: view.getUint32(off + 12, true),
+			argumentCount: view.getUint32(off + 16, true),
+		};
+	};
+	const readRenameInfo = off => {
+		const d = { canRename: (view.getUint8(off) & 1) !== 0 };
+		const fileToRename = str(view.getUint32(off + 4, true));
+		if (fileToRename !== undefined) d.fileToRename = fileToRename;
+		const displayName = str(view.getUint32(off + 8, true));
+		if (displayName !== undefined) d.displayName = displayName;
+		const fullDisplayName = str(view.getUint32(off + 12, true));
+		if (fullDisplayName !== undefined) d.fullDisplayName = fullDisplayName;
+		const kind = str(view.getUint32(off + 16, true));
+		if (kind !== undefined) d.kind = kind;
+		if (view.getUint8(off) & 2) d.kindModifiers = str(view.getUint32(off + 20, true)) ?? '';
+		if (d.canRename) d.triggerSpan = { start: view.getUint32(off + 24, true), length: view.getUint32(off + 28, true) };
+		const localizedErrorMessage = str(view.getUint32(off + 32, true));
+		if (localizedErrorMessage !== undefined) d.localizedErrorMessage = localizedErrorMessage;
+		return d;
+	};
+	const readRenameLocation = off => {
+		const d = {
+			fileName: strz(view.getUint32(off, true)),
+			start: view.getUint32(off + 4, true),
+			length: view.getUint32(off + 8, true),
+		};
+		const flags = view.getUint8(off + 28);
+		if (flags & 1) {
+			d.contextStart = view.getUint32(off + 12, true);
+			d.contextLength = view.getUint32(off + 16, true);
+		}
+		const prefixText = str(view.getUint32(off + 20, true));
+		if (prefixText !== undefined) d.prefixText = prefixText;
+		const suffixText = str(view.getUint32(off + 24, true));
+		if (suffixText !== undefined) d.suffixText = suffixText;
+		return d;
+	};
 	const RESULT = {
 		getTypeAtLocation: 'type', getContextualType: 'type', getApparentType: 'type',
 		getTypeOfSymbolAtLocation: 'type', getTypeOfSymbol: 'type', getDeclaredTypeOfSymbol: 'type',
@@ -284,17 +557,60 @@ function arenaCall(method, params) {
 		getSymbolAtPosition: 'symbol', getSymbolAtLocation: 'symbol', getSymbolOfType: 'symbol',
 		getPropertiesOfType: 'symbols', getParametersOfSignature: 'symbols',
 		getResolvedSignature: 'signature', getSignaturesOfType: 'signatures',
+		typeToString: 'string', isArrayType: 'bool',
 		quickinfo: 'quickinfo', references: 'referencedSymbols', definitionAndBoundSpan: 'definitionAndBoundSpan',
+		getAliasedSymbol: 'symbol', getImmediateAliasedSymbol: 'symbol', getExportSymbolOfSymbol: 'symbol',
+		getParentOfSymbol: 'symbol', resolveExternalModuleSymbol: 'symbol', getAliasSymbolOfType: 'symbol',
+		getPropertyOfType: 'symbol', getPropertySymbolOfDestructuringAssignment: 'symbol',
+		getExportSpecifierLocalTargetSymbol: 'symbol', resolveExternalModuleName: 'symbol',
+		getTargetOfSignature: 'symbol', getThisParameterOfSignature: 'symbol', getModuleSymbolForSourceFile: 'symbol',
+		getRootSymbols: 'symbols', getExportsOfModule: 'symbols', getExportsAndPropertiesOfModule: 'symbols',
+		getExportsOfSymbol: 'symbols', getMembersOfSymbol: 'symbols', getExactOptionalProperties: 'symbols',
+		getAugmentedPropertiesOfType: 'symbols', getJsxIntrinsicTagNamesAt: 'symbols', getAccessibleSymbolChain: 'symbols',
+		getDocumentationComment: 'string', getJsxFragmentFactory: 'string',
+		symbolIsValue: 'bool', isEmptyAnonymousObjectType: 'bool', isLibType: 'bool', isNullableType: 'bool',
+		isTupleType: 'bool', typeHasCallOrConstructSignatures: 'bool', containsArgumentsReference: 'bool',
+		isDeclarationVisible: 'bool', isImplementationOfOverload: 'bool', isOptionalParameter: 'bool',
+		requiresAddingImplicitUndefined: 'bool', hasEffectiveRestParameter: 'bool',
+		getLocalTypeParametersOfClassOrInterfaceOrTypeAlias: 'types', collectVisitedTypeParameters: 'types',
+		getTypeArgumentsForResolvedSignature: 'types', getTypeParametersOfSignature: 'types',
+		createArrayType: 'type', createPromiseType: 'type', getAwaitedType: 'type', getBaseConstraintOfType: 'type',
+		getConstraintOfTypeParameter: 'type', getDefaultFromTypeParameter: 'type', getElementTypeOfArrayType: 'type',
+		getIndexedAccessIndexType: 'type', getPromisedTypeOfPromise: 'type', getWidenedLiteralType: 'type',
+		getConstraintOfType: 'type', getFalseTypeOfConditionalType: 'type', getTrueTypeOfConditionalType: 'type',
+		getContextualTypeForJsxAttribute: 'type', getTypeArgumentConstraint: 'type', getTypeOfAssignmentPattern: 'type',
+		getTypeOfPropertyOfType: 'type', getTypeOfPropertyOfContextualType: 'type', getRestTypeOfSignature: 'type',
+		getStringLiteralType: 'type', getBigIntLiteralType: 'type', getNumberLiteralType: 'type',
+		getTypeAtPosition: 'type', tryGetThisTypeAt: 'type',
+		getAnyType: 'type', getBigIntType: 'type', getBooleanType: 'type', getESSymbolType: 'type',
+		getErrorType: 'type', getNeverType: 'type', getNonPrimitiveType: 'type', getNullType: 'type',
+		getNumberType: 'type', getOptionalType: 'type', getPromiseLikeType: 'type', getPromiseType: 'type',
+		getStringType: 'type', getUndefinedType: 'type', getUnknownType: 'type', getVoidType: 'type',
+		getAnyAsyncIterableType: 'type',
+		getJsDocTags: 'jsdocTags', getExpandedParameters: 'expandedParams',
+		getSignatureFromDeclaration: 'signature', getCandidateSignaturesForStringLiteralCompletions: 'signatures',
+		getSymbolsDeclarations: 'symbols', getParentsOfSymbols: 'symbols', getAmbientModules: 'ambientModules',
+		getCompletionsAtPosition: 'completionInfo', signatureHelp: 'signatureHelpItems',
+		getRenameInfo: 'renameInfo', getEditsForRename: 'renameLocations',
 	};
+	{
+		const resKind = RESULT[method];
+		if (resKind === 'string') {
+			const o = view.getUint32(ARENA_RESP_OFFSET + 16, true), n = view.getUint32(ARENA_RESP_OFFSET + 20, true);
+			return dec.decode(arenaBuf.subarray(o, o + n));
+		}
+		if (resKind === 'bool') return view.getUint8(ARENA_RESP_OFFSET + 16) !== 0;
+		if (resKind === 'expandedParams') return readExpandedParams(ARENA_RESP_OFFSET + 16);
+	}
 	const resKind = RESULT[method];
 	const count = view.getUint32(ARENA_RESP_OFFSET + 16, true);
 	let off = ARENA_RESP_OFFSET + 20;
-	const recKind = resKind === 'type' || resKind === 'types' ? 'type' : resKind === 'symbol' || resKind === 'symbols' ? 'symbol' : resKind === 'quickinfo' || resKind === 'referencedSymbols' || resKind === 'definitionAndBoundSpan' ? resKind : 'signature';
-	const read = recKind === 'type' ? readType : recKind === 'symbol' ? readSymbol : recKind === 'quickinfo' ? readQuickinfo : recKind === 'referencedSymbols' ? readReferencedSymbol : recKind === 'definitionAndBoundSpan' ? readDabs : readSignature;
-	const stride = recKind === 'type' ? 152 : recKind === 'symbol' ? 72 : recKind === 'quickinfo' ? 40 : recKind === 'referencedSymbols' ? 56 : recKind === 'definitionAndBoundSpan' ? 16 : 64;
+	const recKind = resKind === 'type' || resKind === 'types' ? 'type' : resKind === 'symbol' || resKind === 'symbols' ? 'symbol' : resKind === 'quickinfo' || resKind === 'referencedSymbols' || resKind === 'definitionAndBoundSpan' || resKind === 'jsdocTags' || resKind === 'expandedParams' || resKind === 'ambientModules' || resKind === 'completionInfo' || resKind === 'signatureHelpItems' || resKind === 'renameInfo' || resKind === 'renameLocations' ? resKind : 'signature';
+	const read = recKind === 'type' ? readType : recKind === 'symbol' ? readSymbol : recKind === 'quickinfo' ? readQuickinfo : recKind === 'referencedSymbols' ? readReferencedSymbol : recKind === 'definitionAndBoundSpan' ? readDabs : recKind === 'jsdocTags' ? readJsDocTag : recKind === 'expandedParams' ? readExpandedParams : recKind === 'ambientModules' ? readAmbientModules : recKind === 'completionInfo' ? readCompletions : recKind === 'signatureHelpItems' ? readSignatureHelpItems : recKind === 'renameInfo' ? readRenameInfo : recKind === 'renameLocations' ? readRenameLocation : readSignature;
+	const stride = recKind === 'type' ? 152 : recKind === 'symbol' ? 72 : recKind === 'quickinfo' ? 40 : recKind === 'referencedSymbols' ? 56 : recKind === 'definitionAndBoundSpan' ? 16 : recKind === 'jsdocTags' ? 8 : recKind === 'expandedParams' ? 8 : recKind === 'ambientModules' ? 8 : recKind === 'completionInfo' ? 32 : recKind === 'signatureHelpItems' ? 28 : recKind === 'renameInfo' ? 36 : recKind === 'renameLocations' ? 32 : 64;
 	const out = [];
 	for (let i = 0; i < count; i++) { out.push(read(off)); off += stride; }
-	const singular = resKind === 'type' || resKind === 'symbol' || resKind === 'signature' || resKind === 'quickinfo' || resKind === 'definitionAndBoundSpan';
+	const singular = resKind === 'type' || resKind === 'symbol' || resKind === 'signature' || resKind === 'quickinfo' || resKind === 'definitionAndBoundSpan' || resKind === 'expandedParams' || resKind === 'ambientModules' || resKind === 'completionInfo' || resKind === 'signatureHelpItems' || resKind === 'renameInfo';
 	return singular ? out[0] : out;
 }
 
@@ -312,6 +628,12 @@ function query(method, params, note = '') {
 	if (jErr || aErr) {
 		if (jErr === aErr) { pass++; console.log(`ok ${label} (both error: ${jErr.slice(0, 80)})`); return undefined; }
 		fail++; console.log(`FAIL ${label}: jsonErr=${jErr} arenaErr=${aErr}`); return undefined;
+	}
+	// Go map iteration order is nondeterministic for export tables: compare the
+	// symbol SET (id-sorted) for these two methods, not the array order.
+	if ((method === 'getExportsAndPropertiesOfModule' || method === 'getExportsOfModule') && Array.isArray(j) && Array.isArray(a)) {
+		j = [...j].sort((x, y) => x.id - y.id);
+		a = [...a].sort((x, y) => x.id - y.id);
 	}
 	if (norm(j) !== norm(a)) {
 		fail++;
@@ -446,12 +768,156 @@ if (genType) {
 	const sigs = query('getSignaturesOfType', P({ type: genType.id, kind: 0 }), '(generic)');
 	if (sigs?.length) query('getParametersOfSignature', P({ objectId: sigs[0].id }), '(generic sig)');
 }
+
 // safe on any type (nil-checked handlers)
 if (modelType) {
 	query('getAliasTypeArgumentsOfType', P({ objectId: modelType.id }), '(no alias)');
 	query('getOuterTypeParametersOfType', P({ objectId: modelType.id }), '(interface)');
 	query('getLocalTypeParametersOfType', P({ objectId: modelType.id }), '(interface)');
 }
+
+// ── issue #12 candidate 2 battery: record-shaped query classes ────────────
+const symNp = query('getSymbolAtPosition', P({ file: aTs, position: pos('NestedPick = Model') }), '(indexed-access alias)');
+const symCallResult = query('getSymbolAtPosition', P({ file: aTs, position: pos('callResult = add') }));
+const moduleSym = query('getModuleSymbolForSourceFile', P({ file: aTs }), '(module symbol)');
+
+// symbol u64 @16 family
+const symAlias = query('getSymbolAtPosition', P({ file: aTs, position: pos('modelAlias }') }), '(export alias)');
+if (symAlias) {
+	query('getAliasedSymbol', P({ symbol: symAlias.id }));
+	query('getImmediateAliasedSymbol', P({ symbol: symAlias.id }));
+	query('resolveExternalModuleSymbol', P({ symbol: symAlias.id }));
+}
+query('getRootSymbols', P({ symbol: symModel.id }));
+query('getParentOfSymbol', P({ objectId: symModel.id }));
+query('getExportSymbolOfSymbol', P({ objectId: symModel.id }), '(no export symbol)');
+if (moduleSym) {
+	query('getExportsOfModule', P({ symbol: moduleSym.id }));
+	query('getExportsAndPropertiesOfModule', P({ symbol: moduleSym.id }));
+}
+query('getExportsOfSymbol', P({ objectId: symEntity.id }));
+query('getMembersOfSymbol', P({ objectId: symEntity.id }));
+query('getDocumentationComment', P({ symbol: symAdd.id }), '(jsdoc fn)');
+query('symbolIsValue', P({ symbol: symModel.id }), '(value)');
+query('symbolIsValue', P({ symbol: symEntity.id }), '(type)');
+query('getLocalTypeParametersOfClassOrInterfaceOrTypeAlias', P({ symbol: symEntity.id }), '(K)');
+query('getJsDocTags', P({ symbol: symAdd.id }), '(jsdoc tags)');
+query('getJsDocTags', P({ symbol: symModel.id }), '(no jsdoc)');
+
+// type u32 @16 family
+query('collectVisitedTypeParameters', P({ type: genType.id }));
+query('createArrayType', P({ type: modelType.id }));
+query('createPromiseType', P({ type: modelType.id }));
+query('getAugmentedPropertiesOfType', P({ type: dType.id }));
+query('getAwaitedType', P({ type: addType.id }), '(non-promise)');
+if (symCallResult) {
+	const promiseType = query('getTypeOfSymbol', P({ symbol: symCallResult.id }));
+	if (promiseType) {
+		query('getAwaitedType', P({ type: promiseType.id }), '(promise)');
+		query('getPromisedTypeOfPromise', P({ type: promiseType.id }));
+	}
+}
+query('getBaseConstraintOfType', P({ type: litType.id }));
+query('getConstraintOfTypeParameter', P({ type: entityType.id }));
+query('getDefaultFromTypeParameter', P({ type: entityType.id }), '(no default)');
+query('getElementTypeOfArrayType', P({ type: tupType.id }), '(tuple)');
+query('getExactOptionalProperties', P({ type: modelType.id }));
+const symGetKey = query('getSymbolAtPosition', P({ file: aTs, position: pos('getKey<T') }), '(generic fn for indexed access)');
+if (symGetKey) {
+	const gkType = query('getTypeOfSymbol', P({ symbol: symGetKey.id }));
+	const gkSigs = gkType && query('getSignaturesOfType', P({ type: gkType.id, kind: 0 }));
+	const gkRet = gkSigs?.length && query('getReturnTypeOfSignature', P({ signature: gkSigs[0].id }), '(T[K])');
+	if (gkRet) query('getIndexedAccessIndexType', P({ objectId: gkRet.id }), '(K)');
+}
+query('getWidenedLiteralType', P({ type: litType.id }));
+query('isEmptyAnonymousObjectType', P({ type: modelType.id }), '(false)');
+query('isLibType', P({ type: modelType.id }), '(false)');
+query('isNullableType', P({ type: maybeType.id }), '(true)');
+query('isTupleType', P({ type: tupType.id }), '(true)');
+query('typeHasCallOrConstructSignatures', P({ type: addType.id }), '(true)');
+// getConstraintOfType takes a substitution type (not producible from this
+// fixture's surface — same reachability convention as getResolvedSignature).
+query('getFalseTypeOfConditionalType', P({ objectId: condType.id }));
+query('getTrueTypeOfConditionalType', P({ objectId: condType.id }));
+if (mmType) query('getAliasSymbolOfType', P({ objectId: mmType.id }));
+
+// intrinsic type getters
+for (const m of ['getAnyType', 'getBigIntType', 'getBooleanType', 'getESSymbolType', 'getErrorType', 'getNeverType', 'getNonPrimitiveType', 'getNullType', 'getNumberType', 'getOptionalType', 'getPromiseLikeType', 'getPromiseType', 'getStringType', 'getUndefinedType', 'getUnknownType', 'getVoidType', 'getAnyAsyncIterableType']) {
+	query(m, P({}));
+}
+
+// node handle @16 family
+query('containsArgumentsReference', P({ location: symAdd.valueDeclaration }), '(false)');
+query('getContextualTypeForJsxAttribute', P({ location: symAdd.valueDeclaration }), '(not jsx)');
+query('getTypeArgumentConstraint', P({ location: symAdd.valueDeclaration }), '(not a type ref)');
+query('getTypeOfAssignmentPattern', P({ location: symAdd.valueDeclaration }), '(not a pattern)');
+query('isDeclarationVisible', P({ location: symAdd.valueDeclaration }), '(visible)');
+query('isImplementationOfOverload', P({ location: symAdd.valueDeclaration }), '(false)');
+const symParamB = query('getSymbolAtPosition', P({ file: aTs, position: pos('b?: string') }), '(parameter)');
+if (symParamB) {
+	query('isOptionalParameter', P({ location: symParamB.valueDeclaration }), '(true)');
+	query('requiresAddingImplicitUndefined', P({ location: symParamB.valueDeclaration }), '(b?)');
+}
+query('getJsxFragmentFactory', P({ location: symAdd.valueDeclaration }));
+query('getJsxIntrinsicTagNamesAt', P({ location: symAdd.valueDeclaration }), '(no jsx)');
+const symNested = query('getSymbolAtPosition', P({ file: aTs, position: pos('nested } = model') }), '(destructuring)');
+if (symNested) query('getPropertySymbolOfDestructuringAssignment', P({ location: symNested.valueDeclaration }));
+query('getSignatureFromDeclaration', P({ location: symAdd.valueDeclaration }), '(fn decl)');
+if (symAlias) {
+	query('getExportSpecifierLocalTargetSymbol', P({ location: symAlias.declarations?.[0] }), '(export specifier)');
+}
+query('resolveExternalModuleName', P({ location: symAdd.valueDeclaration }), '(not a module specifier)');
+
+// signature u64 @16 family
+if (addType) {
+	const sigs = query('getSignaturesOfType', P({ type: addType.id, kind: 0 }));
+	if (sigs?.length) {
+		const sig = sigs[0];
+		query('getRestTypeOfSignature', P({ signature: sig.id }), '(no rest)');
+		query('getTypeArgumentsForResolvedSignature', P({ signature: sig.id }), '(no type args)');
+		query('getTargetOfSignature', P({ objectId: sig.id }), '(no target)');
+		query('getThisParameterOfSignature', P({ objectId: sig.id }), '(no this param)');
+		query('getTypeParametersOfSignature', P({ objectId: sig.id }), '(none)');
+		query('hasEffectiveRestParameter', P({ signature: sig.id }), '(false)');
+		query('getExpandedParameters', P({ signature: sig.id }), '(a, b?)');
+		query('getExpandedParameters', P({ signature: sig.id, skipUnionExpanding: true }), '(skip union)');
+	}
+}
+
+// typeName family
+query('getPropertyOfType', P({ type: modelType.id, name: 'value' }), '(hit)');
+query('getPropertyOfType', P({ type: modelType.id, name: 'missing' }), '(miss)');
+query('getTypeOfPropertyOfType', P({ type: modelType.id, name: 'value' }));
+query('getTypeOfPropertyOfContextualType', P({ type: modelType.id, name: 'value' }));
+
+// literal value family
+query('getStringLiteralType', P({ value: 'hello' }));
+query('getBigIntLiteralType', P({ value: '9007199254740993' }));
+query('getNumberLiteralType', P({ value: 42 }));
+
+// file @16 family
+query('getTypeAtPosition', P({ file: aTs, position: pos('add(a: number') }));
+
+// symbolChain / twoHandles / thisAt
+query('getAccessibleSymbolChain', P({ symbol: symModel.id, enclosingDeclaration: symModel.valueDeclaration, meaning: 1 }));
+// getCandidateSignaturesForStringLiteralCompletions needs call-expression and
+// argument handles (not producible from the surface — reachability convention).
+query('tryGetThisTypeAt', P({ location: symAdd.valueDeclaration, includeGlobalThis: true }));
+
+// batch symbol-declarations (holes decode as null) + ambient modules
+query('getSymbolsDeclarations', P({ symbols: [symAdd.id, symModel.id, 999999] }), '(2 valid + 1 hole)');
+query('getParentsOfSymbols', P({ symbols: [symModel.id] }));
+query('getAmbientModules', P({}), '(no ambient modules in fixture)');
+query('getCompletionsAtPosition', P({ file: aTs, position: pos('callResult = add') }), '(mid-expression)');
+query('getCompletionsAtPosition', P({ file: aTs, position: aSrc.length }), '(eof)');
+query('getCompletionsAtPosition', P({ file: aTs, position: pos('model: Model'), includeSymbol: true }), '(includeSymbol)');
+query('signatureHelp', P({ file: aTs, position: pos('add(1') + 4 }), '(inside add call)');
+query('signatureHelp', P({ file: aTs, position: pos('model: Model') }), '(not a call site: null-ish)');
+query('getRenameInfo', P({ file: aTs, position: pos('add(a: number') }), '(fn decl)');
+query('getRenameInfo', P({ file: aTs, position: pos('export interface Entity') }), '(keyword: cannot rename)');
+query('getEditsForRename', P({ file: aTs, position: pos('add(a: number') }), '(fn decl: decl+call)');
+query('getEditsForRename', P({ file: aTs, position: pos('model: Model') }), '(const: several uses)');
+query('getEditsForRename', P({ file: aTs, position: pos('model: Model'), providePrefixAndSuffixTextForRename: true }), '(with prefix/suffix)');
 
 addon.disposeSession(H);
 console.log(`\nVERDICT: ${fail === 0 ? 'PASS' : 'FAIL'} (${pass} ok, ${fail} mismatches)`);
