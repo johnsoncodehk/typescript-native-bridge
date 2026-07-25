@@ -7008,10 +7008,7 @@ export function createTsgoProgram(
             };
         },
         isSourceFileFromExternalLibrary: () => false,
-        isSourceFileDefaultLibrary: (sf: any) => {
-            const fn = sf?.fileName ?? "";
-            return fn.includes("/lib.") || fn.includes("/node_modules/");
-        },
+        isSourceFileDefaultLibrary: (sf: any) => goProgram().isSourceFileDefaultLibrary(sf),
         // getBuildInfo is stock-overridden by createBuilderProgram (the JS
         // builder installs its state-based generator on the program object);
         // the buildinfo actually written comes from emitBuildInfo above, so
