@@ -139,10 +139,10 @@ jobs:
         run: |
           # Parallel groups on isolated tools copies: the harness lock lives at
           # <toolsDir>/../.tnb-harness.lock, so concurrent tools from one
-          # tools/ dir would serialize. Groups are LPT-balanced from measured
-          # per-tool durations (~985s sequential -> ~330s per group). vendor/
-          # lib/ native/ are symlinked into each copy for tools that boot the
-          # bridge in-process (they resolve the repo from import.meta.dirname/..).
+          # tools/ dir would serialize. vendor/ lib/ native/ are symlinked into
+          # each copy for tools that boot the bridge in-process (they resolve the
+          # repo from import.meta.dirname/..); README.md + patches/ too — the
+          # ledger gate reads them for the patch<->README reconciliation.
           # Starts are staggered to spread the tsserver boot spike.
           group1="triage-f2qi-names triage-xrefs-diag-variants triage-tostring-gtd-vue triage-adv6b-generic-sig triage-sim-edit triage-f2hl-jsdoc triage-completion-details-array triage-refs-exportspec"
           group2="triage-f2r5-defcases triage-f2r6-samevue triage-f2r6-libref triage-f2r6-xvue triage-sim-xfile triage-f2hl-typesref triage-geterr-5823 triage-quickinfo-emptyparity triage-completion-parity triage-program-info"
@@ -157,6 +157,8 @@ jobs:
             ln -sfn "$GITHUB_WORKSPACE/vendor" "/tmp/tnb-wg$i/vendor"
             ln -sfn "$GITHUB_WORKSPACE/lib" "/tmp/tnb-wg$i/lib"
             ln -sfn "$GITHUB_WORKSPACE/native" "/tmp/tnb-wg$i/native"
+            ln -sfn "$GITHUB_WORKSPACE/README.md" "/tmp/tnb-wg$i/README.md"
+            ln -sfn "$GITHUB_WORKSPACE/patches" "/tmp/tnb-wg$i/patches"
             (
               failed=()
               for w in $group; do
