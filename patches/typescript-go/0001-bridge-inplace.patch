@@ -2269,10 +2269,18 @@ index 9f8b144fa..fb0eb38a2 100644
  					continue outer
  				}
 diff --git a/internal/ls/completions.go b/internal/ls/completions.go
-index 5e62661fc..f1b408c60 100644
+index 5e62661fc..7552798c1 100644
 --- a/internal/ls/completions.go
 +++ b/internal/ls/completions.go
-@@ -64,7 +64,15 @@ func (l *LanguageService) GetCompletionsAtPosition(ctx context.Context, file *as
+@@ -26,6 +26,7 @@ import (
+ 	"github.com/microsoft/typescript-go/internal/printer"
+ 	"github.com/microsoft/typescript-go/internal/scanner"
+ 	"github.com/microsoft/typescript-go/internal/stringutil"
++	"github.com/microsoft/typescript-go/internal/tsoptions"
+ 	"github.com/microsoft/typescript-go/internal/tspath"
+ )
+ 
+@@ -64,7 +65,15 @@ func (l *LanguageService) GetCompletionsAtPosition(ctx context.Context, file *as
  
  type CompletionItem struct {
  	*lsproto.CompletionItem
@@ -2289,7 +2297,7 @@ index 5e62661fc..f1b408c60 100644
  }
  
  type CompletionList struct {
-@@ -72,6 +80,12 @@ type CompletionList struct {
+@@ -72,6 +81,12 @@ type CompletionList struct {
  	ItemDefaults *lsproto.CompletionItemDefaults
  	ApplyKind    *lsproto.CompletionItemApplyKinds
  	Items        []*CompletionItem
@@ -2302,7 +2310,16 @@ index 5e62661fc..f1b408c60 100644
  }
  
  func ensureItemData(fileName string, pos int, list *lsproto.CompletionList) *lsproto.CompletionList {
-@@ -576,6 +590,7 @@ func (l *LanguageService) getCompletionData(
+@@ -459,7 +474,7 @@ func (l *LanguageService) getCompletionData(
+ 	preferences lsutil.UserPreferences,
+ 	forItemResolve bool,
+ ) (completionData, error) {
+-	inCheckedFile := isCheckedFile(file, l.GetProgram().Options())
++	inCheckedFile := isCheckedFile(file, l.GetProgram().Options(), l.program.CommandLine().ExtraFileExtensions())
+ 
+ 	currentToken := astnav.GetTokenAtPosition(file, position)
+ 
+@@ -576,6 +591,7 @@ func (l *LanguageService) getCompletionData(
  							Kind:     new(lsproto.CompletionItemKindKeyword),
  							SortText: new(string(SortTextGlobalsOrKeywords)),
  						},
@@ -2310,7 +2327,16 @@ index 5e62661fc..f1b408c60 100644
  					}},
  					isNewIdentifierLocation: importStatementCompletionInfo.isNewIdentifierLocation,
  				}, nil
-@@ -1804,14 +1819,14 @@ func (l *LanguageService) completionInfoFromData(
+@@ -1773,7 +1789,7 @@ func (l *LanguageService) completionInfoFromData(
+ 		})
+ 	}
+ 
+-	isChecked := isCheckedFile(file, compilerOptions)
++	isChecked := isCheckedFile(file, compilerOptions, l.program.CommandLine().ExtraFileExtensions())
+ 	if isChecked && !isNewIdentifierLocation && len(data.symbols) == 0 && keywordFilters == KeywordCompletionFiltersNone {
+ 		return nil, nil
+ 	}
+@@ -1804,14 +1820,14 @@ func (l *LanguageService) completionInfoFromData(
  	for _, keywordEntry := range getContextualKeywords(file, contextToken, position) {
  		if !uniqueNames.Has(keywordEntry.Label) {
  			uniqueNames.Add(keywordEntry.Label)
@@ -2327,7 +2353,7 @@ index 5e62661fc..f1b408c60 100644
  	}
  
  	if !isChecked {
-@@ -1839,7 +1854,7 @@ func (l *LanguageService) completionInfoFromData(
+@@ -1839,7 +1855,7 @@ func (l *LanguageService) completionInfoFromData(
  				return nil, err
  			}
  			if casesItem != nil {
@@ -2336,7 +2362,7 @@ index 5e62661fc..f1b408c60 100644
  			}
  		}
  	}
-@@ -1854,9 +1869,14 @@ func (l *LanguageService) completionInfoFromData(
+@@ -1854,9 +1870,14 @@ func (l *LanguageService) completionInfoFromData(
  	)
  
  	return &CompletionList{
@@ -2354,7 +2380,7 @@ index 5e62661fc..f1b408c60 100644
  	}, nil
  }
  
-@@ -1935,11 +1955,10 @@ func (l *LanguageService) getCompletionEntriesFromSymbols(
+@@ -1935,11 +1956,10 @@ func (l *LanguageService) getCompletionEntriesFromSymbols(
  			!(symbol.Parent == nil &&
  				!core.Some(symbol.Declarations, func(d *ast.Node) bool { return ast.GetSourceFileOfNode(d) == file }))
  		uniques[name] = shouldShadowLaterSymbols
@@ -2368,7 +2394,7 @@ index 5e62661fc..f1b408c60 100644
  	}
  
  	for _, autoImport := range data.autoImports {
-@@ -1993,7 +2012,9 @@ func (l *LanguageService) getCompletionEntriesFromSymbols(
+@@ -1993,7 +2013,9 @@ func (l *LanguageService) getCompletionEntriesFromSymbols(
  
  		if isShadowed, _ := uniques[autoImport.Fix.Name]; !isShadowed {
  			uniques[autoImport.Fix.Name] = false
@@ -2379,7 +2405,7 @@ index 5e62661fc..f1b408c60 100644
  		}
  	}
  
-@@ -2049,7 +2070,7 @@ func (l *LanguageService) createCompletionItem(
+@@ -2049,7 +2071,7 @@ func (l *LanguageService) createCompletionItem(
  	useSemicolons bool,
  	compilerOptions *core.CompilerOptions,
  	isMemberCompletion bool,
@@ -2388,7 +2414,7 @@ index 5e62661fc..f1b408c60 100644
  	contextToken := data.contextToken
  	var insertText string
  	var filterText string
-@@ -2273,8 +2294,9 @@ func (l *LanguageService) createCompletionItem(
+@@ -2273,8 +2295,9 @@ func (l *LanguageService) createCompletionItem(
  
  	preselect := isRecommendedCompletionMatch(symbol, data.recommendedCompletion, typeChecker)
  	kindModifiers := lsutil.GetSymbolModifiers(typeChecker, symbol)
@@ -2399,7 +2425,7 @@ index 5e62661fc..f1b408c60 100644
  		ctx,
  		name,
  		insertText,
-@@ -2295,6 +2317,8 @@ func (l *LanguageService) createCompletionItem(
+@@ -2295,6 +2318,8 @@ func (l *LanguageService) createCompletionItem(
  		nil, /*autoImportFix*/
  		nil, /*detail*/
  	)
@@ -2408,28 +2434,33 @@ index 5e62661fc..f1b408c60 100644
  }
  
  func isRecommendedCompletionMatch(localSymbol *ast.Symbol, recommendedCompletion *ast.Symbol, typeChecker *checker.Checker) bool {
-@@ -2753,7 +2777,19 @@ func binaryExpressionMayBeOpenTag(binaryExpression *ast.BinaryExpression) bool {
+@@ -2752,8 +2777,23 @@ func binaryExpressionMayBeOpenTag(binaryExpression *ast.BinaryExpression) bool {
+ 	return ast.NodeIsMissing(binaryExpression.Left)
  }
  
- func isCheckedFile(file *ast.SourceFile, compilerOptions *core.CompilerOptions) bool {
+-func isCheckedFile(file *ast.SourceFile, compilerOptions *core.CompilerOptions) bool {
 -	return !ast.IsSourceFileJS(file) || ast.IsCheckJSEnabledForFile(file, compilerOptions)
++func isCheckedFile(file *ast.SourceFile, compilerOptions *core.CompilerOptions, extraExtensions []tsoptions.FileExtensionInfo) bool {
 +	if !ast.IsSourceFileJS(file) {
 +		return true
 +	}
-+	if strings.HasSuffix(file.FileName(), ".vue") {
-+		// .vue embedded service scripts parse as JS for js SFC blocks, but volar's
-+		// generated boilerplate needs the checked-file completion path — tsgo
-+		// otherwise falls back to the limited unchecked-JS entries where stock's
-+		// engine does not (#5847 template-expression completions). Scope the
-+		// force to completions: checker diagnostics stay unchecked like stock,
-+		// so vue-tsc reports no extra semantic errors.
-+		return true
++	for _, ext := range extraExtensions {
++		if tspath.FileExtensionIs(file.FileName(), ext.Extension) {
++			// Registered extra extensions (language-plugin files like .vue/.svelte):
++			// their embedded service scripts parse as JS for js blocks, but the
++			// host's generated boilerplate needs the checked-file completion path —
++			// tsgo otherwise falls back to the limited unchecked-JS entries where
++			// stock's engine does not (#5847 template-expression completions).
++			// Scope the force to completions: checker diagnostics stay unchecked
++			// like stock.
++			return true
++		}
 +	}
 +	return ast.IsCheckJSEnabledForFile(file, compilerOptions)
  }
  
  func isContextTokenValueLocation(contextToken *ast.Node) bool {
-@@ -3279,7 +3315,7 @@ func cloneItems(items []*lsproto.CompletionItem) []*CompletionItem {
+@@ -3279,7 +3319,7 @@ func cloneItems(items []*lsproto.CompletionItem) []*CompletionItem {
  	entries := make([]*CompletionItem, len(items))
  	for i, item := range items {
  		itemClone := *item
@@ -2438,7 +2469,7 @@ index 5e62661fc..f1b408c60 100644
  	}
  	return entries
  }
-@@ -4382,7 +4418,7 @@ func (l *LanguageService) getJsxClosingTagCompletion(
+@@ -4382,7 +4422,7 @@ func (l *LanguageService) getJsxClosingTagCompletion(
  	optionalReplacementSpan := new(l.createLspRangeFromNode(jsxClosingElement.TagName(), file))
  	defaultCommitCharacters := getDefaultCommitCharacters(false /*isNewIdentifierLocation*/)
  
@@ -2447,7 +2478,7 @@ index 5e62661fc..f1b408c60 100644
  		ctx,
  		fullClosingTag, /*name*/
  		"",             /*insertText*/
-@@ -4403,9 +4439,6 @@ func (l *LanguageService) getJsxClosingTagCompletion(
+@@ -4403,9 +4443,6 @@ func (l *LanguageService) getJsxClosingTagCompletion(
  		nil,   /*autoImportEntryData*/ // !!! jsx autoimports
  		nil,   /*detail*/
  	)
@@ -2457,7 +2488,7 @@ index 5e62661fc..f1b408c60 100644
  	items := []*CompletionItem{item}
  	itemDefaults := l.setItemDefaults(
  		ctx,
-@@ -4443,7 +4476,7 @@ func (l *LanguageService) createLSPCompletionItem(
+@@ -4443,7 +4480,7 @@ func (l *LanguageService) createLSPCompletionItem(
  	source string,
  	autoImportFix *lsproto.AutoImportFix,
  	detail *string,
@@ -2466,7 +2497,7 @@ index 5e62661fc..f1b408c60 100644
  	kind := getCompletionsSymbolKind(elementKind)
  	data := &lsproto.CompletionItemData{
  		FileName:   file.FileName(),
-@@ -4499,20 +4532,24 @@ func (l *LanguageService) createLSPCompletionItem(
+@@ -4499,20 +4536,24 @@ func (l *LanguageService) createLSPCompletionItem(
  		insertTextFormat = new(lsproto.InsertTextFormatSnippet)
  	}
  
@@ -2505,7 +2536,7 @@ index 5e62661fc..f1b408c60 100644
  	}
  }
  
-@@ -4581,9 +4618,7 @@ func (l *LanguageService) getLabelStatementCompletions(
+@@ -4581,9 +4622,7 @@ func (l *LanguageService) getLabelStatementCompletions(
  					nil,   /*autoImportEntryData*/
  					nil,   /*detail*/
  				)
