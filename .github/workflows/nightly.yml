@@ -51,6 +51,12 @@ jobs:
       - name: Build bridge (cgo dylib)
         run: npm run build:bridge
 
+      # v5 attribution audit: every stopgap/KNOWN the tree carries must
+      # reproduce on pristine upstream tsgo (never the patched submodule).
+      # Fails loud when upstream fixes one, forcing stopgap removal.
+      - name: pristine-tsgo attribution gate
+        run: node tools/check-pristine-attribution.mjs
+
       - name: Clone volar (cache)
         id: volar-cache
         uses: actions/cache@v4
