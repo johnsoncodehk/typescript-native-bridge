@@ -12,6 +12,13 @@
  *   - astro: full text parity with stock (volar-based, control case)
  * Usage: node tools/triage-framework-checks.mjs [svelte|astro|glint...]
  * Exit: 0 = PASS, 1 = FAIL. Network required on first run (npm installs).
+ *
+ * v5 classification: the glint/svelte invariants are diagnostic-SET
+ * semantics (bridge-contract surface, stock-gated). The astro full-text
+ * parity covers diagnostic content (codes/spans — contract) but would also
+ * trip on engine-owned presentation (tsgo's own diagnostic text/code
+ * choices, e.g. the TS6196 class); such a failure is a KNOWN registration
+ * (pristine tsgo reference), not a revert-to-stock patch.
  */
 import { execFileSync, execSync } from 'node:child_process';
 import * as fs from 'node:fs';
@@ -136,7 +143,7 @@ function ensureCase(name, def) {
 function runCase(name, def) {
 	const dir = ensureCase(name, def);
 	const tsLink = path.join(dir, 'node_modules', 'typescript');
-	const linkTo = (target) => { fs.rmSync(tsLink, { force: true }); fs.symlinkSync(target, tsLink); };
+	const linkTo = (target) => { fs.rmSync(tsLink, { force: true, recursive: true }); fs.symlinkSync(target, tsLink); };
 	linkTo(repoRoot);
 	let outTnb;
 	try { outTnb = def.run(dir); } catch (e) { outTnb = (e.stdout ?? '') + (e.stderr ?? ''); }
