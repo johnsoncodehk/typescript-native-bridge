@@ -3,20 +3,68 @@
  * LS nav bridge protocol witness (issue #12 batch 1): TNB vs stock tsserver,
  * quickinfo / references / definitionAndBoundSpan over a deterministic fixture.
  * TNB serves these three commands from the Go-side arena bridge (services
- * reroute); stock composes them in JS. Responses must be byte-equal.
+ * reroute); stock composes them in JS.
  *
  * references compares loc SETS (symbol/entry ordering is not contractual);
  * quickinfo and definitionAndBoundSpan compare exact normalized bodies.
  * quickinfo runs twice: displayPartsForJSDoc true and false.
  *
+ * v5 policy: display content is engine behavior referenced to pristine tsgo,
+ * not stock. Diffs vs stock whose cause is a reverted stock-parity patch live
+ * in KNOWN_DIVERGENCES keyed by probe key, with attribution classes:
+ *   T-SEMI  tsgo prints a body-less signature declaration with its trailing
+ *           ';' (pristine hover.go); stock's symbol display trims it.
+ *   T-FLAT  tsgo's displayPartsWriter flattens line breaks to spaces
+ *           (pristine WriteLine); stock emits lineBreak parts, so object
+ *           type literals print multiline.
+ *   T-ALIAS tsgo displays an alias as the resolved symbol's own display
+ *           (pristine hover.go); stock shows the shorthand form plus an
+ *           "import X" line.
+ *   T-PARAM tsgo's declarationJSDocTags does not assign the declaring
+ *           function's @param tags to the parameter (pristine jsdoc.go);
+ *           stock surfaces the tag on parameter quickinfo.
+ * A registered key whose sides converged FAILS as stale so the list cannot
+ * rot — when pristine tsgo converges with stock, the gate demands removal.
+ *
  * Usage: node tools/triage-lsnav-parity.mjs
- * SUMMARY: total=T match=M diff=D (exit 1 when D>0)
+ * SUMMARY: total=T match=M known=K diff=D (exit 1 when D>0 or a stale key)
  */
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { tnbHarnessEnv, withTsserver } from './tsserver-harness.mjs';
+
+// ── Known divergences (probe key → class reason; see header) ───────────────
+const REASON = {
+	'T-SEMI': 'T-SEMI: tsgo keeps the trailing \';\' on signature displays (pristine tsgo reference)',
+	'T-FLAT': 'T-FLAT: tsgo flattens display line breaks to spaces (pristine tsgo reference)',
+	'T-ALIAS': 'T-ALIAS: tsgo alias display has no shorthand+import-line form (pristine tsgo reference)',
+	'T-PARAM': 'T-PARAM: tsgo does not surface @param tags on parameter quickinfo (pristine tsgo reference)',
+};
+const KNOWN_DIVERGENCES = new Map([
+	// T-SEMI — signature displayString / references symbolDisplayString
+	['quickinfo:a.ts:7:17:true:fn decl', REASON['T-SEMI']],
+	['quickinfo:a.ts:7:17:false:fn decl', REASON['T-SEMI']],
+	['quickinfo:b.ts:7:17:true:fn decl (b)', REASON['T-SEMI']],
+	['quickinfo:b.ts:7:17:false:fn decl (b)', REASON['T-SEMI']],
+	['quickinfo:a.ts:8:13:true:alias usage', REASON['T-SEMI']],
+	['quickinfo:a.ts:8:13:false:alias usage', REASON['T-SEMI']],
+	['references:a.ts:7:17:true:fn decl', REASON['T-SEMI']],
+	['references:b.ts:7:17:true:fn decl (b)', REASON['T-SEMI']],
+	['references:a.ts:8:13:true:alias usage', REASON['T-SEMI']],
+	// T-FLAT — object-literal property type display
+	['quickinfo:a.ts:11:21:true:shorthand local', REASON['T-FLAT']],
+	['quickinfo:a.ts:11:21:false:shorthand local', REASON['T-FLAT']],
+	['references:a.ts:11:21:true:shorthand local', REASON['T-FLAT']],
+	// T-ALIAS — alias call display form
+	['quickinfo:a.ts:9:14:true:call usage', REASON['T-ALIAS']],
+	['quickinfo:a.ts:9:14:false:call usage', REASON['T-ALIAS']],
+	['references:a.ts:9:14:true:call usage', REASON['T-ALIAS']],
+	// T-PARAM — parameter quickinfo tags
+	['quickinfo:a.ts:7:26:true:type ref', REASON['T-PARAM']],
+	['quickinfo:a.ts:7:26:false:type ref', REASON['T-PARAM']],
+]);
 
 const toolsDir = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(toolsDir, '..');
@@ -190,27 +238,45 @@ const stockResults = new Map();
 await runSide('TNB', tnbPath, tnbHarnessEnv({}), tnbResults);
 await runSide('STOCK', stockPath, {}, stockResults);
 
-let match = 0, diff = 0;
+let match = 0, known = 0, diff = 0, stale = 0;
 const diffs = [];
 const warns = [];
+const seenKnown = new Set();
 for (const [key, t] of tnbResults) {
 	const s = stockResults.get(key);
 	const cmd = key.split(':')[0];
 	if (t?.error || s?.error) {
 		diff++;
+		seenKnown.add(key); // an error already fails the gate; don't double-flag as stale
 		diffs.push({ key, detail: `error tnb=${t?.error} stock=${s?.error}` });
 		continue;
 	}
 	const cmp = compare(cmd, t, s);
 	if (cmp.ok) {
+		if (KNOWN_DIVERGENCES.has(key)) {
+			stale++;
+			seenKnown.add(key);
+			console.log(`FAIL ${key}: STALE EXEMPTION — sides converged, remove the KNOWN_DIVERGENCES entry (${KNOWN_DIVERGENCES.get(key)})`);
+			continue;
+		}
 		match++;
 		if (cmp.warn) warns.push({ key, warn: cmp.warn });
+	} else if (KNOWN_DIVERGENCES.has(key)) {
+		known++;
+		seenKnown.add(key);
+		console.log(`KNOWN ${key} — ${KNOWN_DIVERGENCES.get(key)}`);
 	} else {
 		diff++;
 		diffs.push({ key, ...cmp, tnb: cmp.tnb ?? undefined, stock: cmp.stock ?? undefined });
 	}
 }
-console.log(`SUMMARY total=${match + diff} match=${match} diff=${diff} warn=${warns.length}`);
+for (const key of KNOWN_DIVERGENCES.keys()) {
+	if (!seenKnown.has(key)) {
+		stale++;
+		console.log(`FAIL ${key}: STALE EXEMPTION — probe no longer diverges, remove the KNOWN_DIVERGENCES entry (${KNOWN_DIVERGENCES.get(key)})`);
+	}
+}
+console.log(`SUMMARY total=${match + known + diff} match=${match} known=${known} diff=${diff} warn=${warns.length} stale=${stale}`);
 for (const w of warns) console.log(`WARN ${w.key}: ${w.warn.slice(0, 300)}`);
 for (const d of diffs.slice(0, 12)) {
 	console.log(`\nDIFF ${d.key}: ${d.detail}`);
@@ -218,4 +284,4 @@ for (const d of diffs.slice(0, 12)) {
 	if (d.stock !== undefined) console.log('  stock:', norm(d.stock)?.slice(0, 900));
 }
 fs.writeFileSync('/tmp/tnb-lsnav-parity-diffs.json', JSON.stringify(diffs, null, 1));
-process.exit(diff === 0 ? 0 : 1);
+process.exit(diff === 0 && stale === 0 ? 0 : 1);
