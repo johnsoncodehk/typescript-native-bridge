@@ -122,9 +122,9 @@ node -e "console.log(require.resolve('typescript'))"
 
 ## Verified compatible tools
 
-Verified means: the tool runs on the fork and its output matches stock `typescript@6.0.3`
-on the stated workload (no crash, no silent under-reporting, no false positives beyond
-the [known differences](#known-differences-from-stock-typescript)).
+Verified means: the tool runs on the fork and its behavior matches tsgo's on the
+stated workload (no crash, no silent under-reporting, no false positives beyond
+the [differences from tsgo](#behavior-and-differences-from-tsgo)).
 
 | Tool | Status | Verified on |
 |---|---|---|
@@ -229,20 +229,21 @@ as a tsserver LS Plugin on this fork.
 
 ---
 
-## Known differences from stock TypeScript
+## Behavior and differences from tsgo
 
-The checker is tsgo, so behavior is not yet bit-for-bit identical to the JS checker.
-Current state, continuously enforced by a nightly CI gate against the pinned stock
-build (live baseline in `test/baselines/`):
+The checker's behavior is **tsgo 7.0.2's** (Microsoft's Go TypeScript), not stock
+TypeScript 6.0.3's — migrating from stock means inheriting tsgo's diagnostics,
+bundled libs, and display output as-is.
 
-- **Exact**: emitted errors on a large real-world Vue monorepo; quickinfo display.
-- **~1,170 / 18,825 (6.2%) of probe units** (quickinfo / definition / references /
-  diagnostics on a Vue fixture corpus): display-kind classification, and position
-  shifts into `lib.*.d.ts` — tsgo 7.0.2's bundled lib declarations are not 6.0.3's,
-  so declaration locations inside lib files point at 7.0.2 text.
+TNB's own changes to tsgo behavior — the complete list, enforced by CI:
 
-If you hit a difference not reflected in the baseline, please file an issue with a
-minimal repro.
+| Change | Why | Upstream | Removal |
+|---|---|---|---|
+| `getImmediateRootSymbols` / `getTypeOfMappedSymbol` nil-containingType guards | Prevents a SIGSEGV on the volar/.vue corpus (headline-path crasher) | (PR pending) | When the upstream fix lands |
+
+Anything that looks like a difference from stock 6.0.3 but isn't listed here is
+tsgo's own behavior, not TNB's. Found an actual TNB-only divergence? File an
+issue with a minimal repro.
 
 ---
 
@@ -301,8 +302,9 @@ then `npm run setup`; requires Go + a C toolchain).
 
 ### Type errors differ from stock
 
-Check [Known differences](#known-differences-from-stock-typescript) first — if yours
-isn't listed, pin a version, diff results, and file an issue.
+The checker's behavior is tsgo's — see [Behavior and differences from
+tsgo](#behavior-and-differences-from-tsgo). If a difference isn't listed there,
+pin a version, diff results, and file an issue.
 
 ### Missing native bridge
 
