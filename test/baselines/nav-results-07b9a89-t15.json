@@ -1,12 +1,12 @@
 {
-  "summaryLine": "SUMMARY total=19131 match=18014 diff=1112 docdiff=4 diagmsg=1 skip=0",
-  "total": 19131,
-  "match": 18014,
-  "diff": 1112,
-  "docdiff": 4,
+  "summaryLine": "SUMMARY total=18825 match=17654 diff=1170 docdiff=0 diagmsg=1 skip=0",
+  "total": 18825,
+  "match": 17654,
+  "diff": 1170,
+  "docdiff": 0,
   "diagmsg": 1,
   "skip": 0,
-  "compareKeys": 19131,
+  "compareKeys": 18825,
   "diffs": [
     {
       "key": "nav:component-meta/#4577/main.vue:3:16:quickinfo",
@@ -66,6 +66,33 @@
       "seqClass": "ALWAYS"
     },
     {
+      "key": "nav:component-meta/component-name-description/component.vue:5:1:quickinfo",
+      "file": "component-meta/component-name-description/component.vue",
+      "line": 5,
+      "offset": 1,
+      "cmd": "quickinfo",
+      "detail": "quickinfo-display/kind",
+      "seqClass": "ALWAYS"
+    },
+    {
+      "key": "nav:component-meta/component-name-description/component.vue:5:8:quickinfo",
+      "file": "component-meta/component-name-description/component.vue",
+      "line": 5,
+      "offset": 8,
+      "cmd": "quickinfo",
+      "detail": "quickinfo-display/kind",
+      "seqClass": "ALWAYS"
+    },
+    {
+      "key": "nav:component-meta/component-name-description/component.vue:7:2:quickinfo",
+      "file": "component-meta/component-name-description/component.vue",
+      "line": 7,
+      "offset": 2,
+      "cmd": "quickinfo",
+      "detail": "quickinfo-display/kind",
+      "seqClass": "ALWAYS"
+    },
+    {
       "key": "nav:component-meta/reference-type-exposed/component-options-api.vue:2:10:quickinfo",
       "file": "component-meta/reference-type-exposed/component-options-api.vue",
       "line": 2,
@@ -97,6 +124,24 @@
       "file": "component-meta/reference-type-exposed/component-options-api.vue",
       "line": 4,
       "offset": 16,
+      "cmd": "quickinfo",
+      "detail": "quickinfo-display/kind",
+      "seqClass": "ALWAYS"
+    },
+    {
+      "key": "nav:component-meta/reference-type-exposed/component-options-api.vue:5:3:quickinfo",
+      "file": "component-meta/reference-type-exposed/component-options-api.vue",
+      "line": 5,
+      "offset": 3,
+      "cmd": "quickinfo",
+      "detail": "quickinfo-display/kind",
+      "seqClass": "ALWAYS"
+    },
+    {
+      "key": "nav:component-meta/reference-type-exposed/component-options-api.vue:10:3:quickinfo",
+      "file": "component-meta/reference-type-exposed/component-options-api.vue",
+      "line": 10,
+      "offset": 3,
       "cmd": "quickinfo",
       "detail": "quickinfo-display/kind",
       "seqClass": "ALWAYS"
@@ -156,6 +201,15 @@
       "cmd": "references",
       "detail": "loc-set-mismatch",
       "locClass": "mixed",
+      "seqClass": "ALWAYS"
+    },
+    {
+      "key": "nav:component-meta/reference-type-props/component.vue:4:1:quickinfo",
+      "file": "component-meta/reference-type-props/component.vue",
+      "line": 4,
+      "offset": 1,
+      "cmd": "quickinfo",
+      "detail": "quickinfo-display/kind",
       "seqClass": "ALWAYS"
     },
     {
@@ -265,6 +319,15 @@
       "seqClass": "ALWAYS"
     },
     {
+      "key": "nav:tsc/#2048/main.vue:8:10:quickinfo",
+      "file": "tsc/#2048/main.vue",
+      "line": 8,
+      "offset": 10,
+      "cmd": "quickinfo",
+      "detail": "quickinfo-display/kind",
+      "seqClass": "ALWAYS"
+    },
+    {
       "key": "nav:tsc/#2048/main.vue:10:1:definitionAndBoundSpan",
       "file": "tsc/#2048/main.vue",
       "line": 10,
@@ -282,6 +345,15 @@
       "cmd": "definitionAndBoundSpan",
       "detail": "loc-set-mismatch",
       "locClass": "extra",
+      "seqClass": "ALWAYS"
+    },
+    {
+      "key": "nav:tsc/#2399/main.vue:7:1:quickinfo",
+      "file": "tsc/#2399/main.vue",
+      "line": 7,
+      "offset": 1,
+      "cmd": "quickinfo",
+      "detail": "quickinfo-display/kind",
       "seqClass": "ALWAYS"
     },
     {
@@ -477,6 +549,15 @@
       "seqClass": "ALWAYS"
     },
     {
+      "key": "nav:tsc/#2754/child.vue:2:1:quickinfo",
+      "file": "tsc/#2754/child.vue",
+      "line": 2,
+      "offset": 1,
+      "cmd": "quickinfo",
+      "detail": "quickinfo-display/kind",
+      "seqClass": "ALWAYS"
+    },
+    {
       "key": "nav:tsc/#3100/child.vue:2:56:quickinfo",
       "file": "tsc/#3100/child.vue",
       "line": 2,
@@ -508,6 +589,15 @@
       "file": "tsc/#3100/child.vue",
       "line": 8,
       "offset": 15,
+      "cmd": "quickinfo",
+      "detail": "quickinfo-display/kind",
+      "seqClass": "ALWAYS"
+    },
+    {
+      "key": "nav:tsc/#3100/child.vue:16:1:quickinfo",
+      "file": "tsc/#3100/child.vue",
+      "line": 16,
+      "offset": 1,
       "cmd": "quickinfo",
       "detail": "quickinfo-display/kind",
       "seqClass": "ALWAYS"
@@ -591,6 +681,15 @@
       "seqClass": "ALWAYS"
     },
     {
+      "key": "nav:tsc/#3204/main.vue:4:7:quickinfo",
+      "file": "tsc/#3204/main.vue",
+      "line": 4,
+      "offset": 7,
+      "cmd": "quickinfo",
+      "detail": "quickinfo-display/kind",
+      "seqClass": "ALWAYS"
+    },
+    {
       "key": "nav:tsc/#3204/main.vue:4:15:quickinfo",
       "file": "tsc/#3204/main.vue",
       "line": 4,
@@ -664,6 +763,15 @@
       "cmd": "references",
       "detail": "loc-set-mismatch",
       "locClass": "mixed",
+      "seqClass": "ALWAYS"
+    },
+    {
+      "key": "nav:tsc/#3204/main.vue:19:22:quickinfo",
+      "file": "tsc/#3204/main.vue",
+      "line": 19,
+      "offset": 22,
+      "cmd": "quickinfo",
+      "detail": "quickinfo-display/kind",
       "seqClass": "ALWAYS"
     },
     {
@@ -1252,6 +1360,15 @@
       "seqClass": "ALWAYS"
     },
     {
+      "key": "nav:tsc/#4512/test2.vue:6:16:quickinfo",
+      "file": "tsc/#4512/test2.vue",
+      "line": 6,
+      "offset": 16,
+      "cmd": "quickinfo",
+      "detail": "quickinfo-display/kind",
+      "seqClass": "ALWAYS"
+    },
+    {
       "key": "nav:tsc/#4540/component.vue:2:20:references",
       "file": "tsc/#4540/component.vue",
       "line": 2,
@@ -1259,6 +1376,15 @@
       "cmd": "references",
       "detail": "loc-set-mismatch",
       "locClass": "mixed",
+      "seqClass": "ALWAYS"
+    },
+    {
+      "key": "nav:tsc/#4540/component.vue:4:1:quickinfo",
+      "file": "tsc/#4540/component.vue",
+      "line": 4,
+      "offset": 1,
+      "cmd": "quickinfo",
+      "detail": "quickinfo-display/kind",
       "seqClass": "ALWAYS"
     },
     {
@@ -1288,6 +1414,15 @@
       "cmd": "definitionAndBoundSpan",
       "detail": "loc-set-mismatch",
       "locClass": "extra",
+      "seqClass": "ALWAYS"
+    },
+    {
+      "key": "nav:tsc/#4646/child.vue:5:13:quickinfo",
+      "file": "tsc/#4646/child.vue",
+      "line": 5,
+      "offset": 13,
+      "cmd": "quickinfo",
+      "detail": "quickinfo-display/kind",
       "seqClass": "ALWAYS"
     },
     {
@@ -1765,6 +1900,15 @@
       "seqClass": "ALWAYS"
     },
     {
+      "key": "nav:tsc/#5267/main.vue:3:5:quickinfo",
+      "file": "tsc/#5267/main.vue",
+      "line": 3,
+      "offset": 5,
+      "cmd": "quickinfo",
+      "detail": "quickinfo-display/kind",
+      "seqClass": "ALWAYS"
+    },
+    {
       "key": "nav:tsc/#5492/main.vue:2:10:quickinfo",
       "file": "tsc/#5492/main.vue",
       "line": 2,
@@ -1908,6 +2052,24 @@
       "seqClass": "ALWAYS"
     },
     {
+      "key": "nav:tsc/components/main.vue:43:7:quickinfo",
+      "file": "tsc/components/main.vue",
+      "line": 43,
+      "offset": 7,
+      "cmd": "quickinfo",
+      "detail": "quickinfo-display/kind",
+      "seqClass": "ALWAYS"
+    },
+    {
+      "key": "nav:tsc/components/main.vue:55:2:quickinfo",
+      "file": "tsc/components/main.vue",
+      "line": 55,
+      "offset": 2,
+      "cmd": "quickinfo",
+      "detail": "quickinfo-display/kind",
+      "seqClass": "ALWAYS"
+    },
+    {
       "key": "nav:tsc/components/main.vue:55:37:quickinfo",
       "file": "tsc/components/main.vue",
       "line": 55,
@@ -1967,6 +2129,24 @@
       "file": "tsc/components/main.vue",
       "line": 66,
       "offset": 34,
+      "cmd": "quickinfo",
+      "detail": "quickinfo-display/kind",
+      "seqClass": "ALWAYS"
+    },
+    {
+      "key": "nav:tsc/components/main.vue:68:38:quickinfo",
+      "file": "tsc/components/main.vue",
+      "line": 68,
+      "offset": 38,
+      "cmd": "quickinfo",
+      "detail": "quickinfo-display/kind",
+      "seqClass": "ALWAYS"
+    },
+    {
+      "key": "nav:tsc/components/main.vue:71:30:quickinfo",
+      "file": "tsc/components/main.vue",
+      "line": 71,
+      "offset": 30,
       "cmd": "quickinfo",
       "detail": "quickinfo-display/kind",
       "seqClass": "ALWAYS"
@@ -2048,6 +2228,15 @@
       "cmd": "references",
       "detail": "loc-set-mismatch",
       "locClass": "mixed",
+      "seqClass": "ALWAYS"
+    },
+    {
+      "key": "nav:tsc/defineModel/comp.vue:2:1:quickinfo",
+      "file": "tsc/defineModel/comp.vue",
+      "line": 2,
+      "offset": 1,
+      "cmd": "quickinfo",
+      "detail": "quickinfo-display/kind",
       "seqClass": "ALWAYS"
     },
     {
@@ -2373,6 +2562,15 @@
       "cmd": "definitionAndBoundSpan",
       "detail": "loc-set-mismatch",
       "locClass": "extra",
+      "seqClass": "ALWAYS"
+    },
+    {
+      "key": "nav:tsc/fallthroughAttributes/inherit-attrs-false-define-options.vue:4:1:quickinfo",
+      "file": "tsc/fallthroughAttributes/inherit-attrs-false-define-options.vue",
+      "line": 4,
+      "offset": 1,
+      "cmd": "quickinfo",
+      "detail": "quickinfo-display/kind",
       "seqClass": "ALWAYS"
     },
     {
@@ -2714,6 +2912,24 @@
       "file": "component-meta/options-api/component.ts",
       "line": 14,
       "offset": 8,
+      "cmd": "quickinfo",
+      "detail": "quickinfo-display/kind",
+      "seqClass": "ALWAYS"
+    },
+    {
+      "key": "nav:component-meta/options-api/component.ts:15:2:quickinfo",
+      "file": "component-meta/options-api/component.ts",
+      "line": 15,
+      "offset": 2,
+      "cmd": "quickinfo",
+      "detail": "quickinfo-display/kind",
+      "seqClass": "ALWAYS"
+    },
+    {
+      "key": "nav:component-meta/options-api/component.ts:27:2:quickinfo",
+      "file": "component-meta/options-api/component.ts",
+      "line": 27,
+      "offset": 2,
       "cmd": "quickinfo",
       "detail": "quickinfo-display/kind",
       "seqClass": "ALWAYS"
@@ -3563,6 +3779,15 @@
       "seqClass": "ALWAYS"
     },
     {
+      "key": "nav:tsc/#3782/main.vue:4:14:quickinfo",
+      "file": "tsc/#3782/main.vue",
+      "line": 4,
+      "offset": 14,
+      "cmd": "quickinfo",
+      "detail": "quickinfo-display/kind",
+      "seqClass": "ALWAYS"
+    },
+    {
       "key": "nav:tsc/#3782/main.vue:4:21:quickinfo",
       "file": "tsc/#3782/main.vue",
       "line": 4,
@@ -3846,6 +4071,15 @@
       "seqClass": "ALWAYS"
     },
     {
+      "key": "nav:tsc/#4512/test3.vue:12:16:quickinfo",
+      "file": "tsc/#4512/test3.vue",
+      "line": 12,
+      "offset": 16,
+      "cmd": "quickinfo",
+      "detail": "quickinfo-display/kind",
+      "seqClass": "ALWAYS"
+    },
+    {
       "key": "nav:tsc/#4512/test3.vue:13:18:quickinfo",
       "file": "tsc/#4512/test3.vue",
       "line": 13,
@@ -3872,6 +4106,15 @@
       "cmd": "definitionAndBoundSpan",
       "detail": "loc-set-mismatch",
       "locClass": "extra",
+      "seqClass": "ALWAYS"
+    },
+    {
+      "key": "nav:tsc/#4646/child2.vue:2:15:quickinfo",
+      "file": "tsc/#4646/child2.vue",
+      "line": 2,
+      "offset": 15,
+      "cmd": "quickinfo",
+      "detail": "quickinfo-display/kind",
       "seqClass": "ALWAYS"
     },
     {
@@ -4048,6 +4291,24 @@
       "cmd": "definitionAndBoundSpan",
       "detail": "loc-set-mismatch",
       "locClass": "extra",
+      "seqClass": "ALWAYS"
+    },
+    {
+      "key": "nav:tsc/#4899/main.vue:9:1:quickinfo",
+      "file": "tsc/#4899/main.vue",
+      "line": 9,
+      "offset": 1,
+      "cmd": "quickinfo",
+      "detail": "quickinfo-display/kind",
+      "seqClass": "ALWAYS"
+    },
+    {
+      "key": "nav:tsc/#4899/main.vue:10:2:quickinfo",
+      "file": "tsc/#4899/main.vue",
+      "line": 10,
+      "offset": 2,
+      "cmd": "quickinfo",
+      "detail": "quickinfo-display/kind",
       "seqClass": "ALWAYS"
     },
     {
@@ -4348,6 +4609,15 @@
       "seqClass": "ALWAYS"
     },
     {
+      "key": "nav:tsc/#5338/main.vue:4:1:quickinfo",
+      "file": "tsc/#5338/main.vue",
+      "line": 4,
+      "offset": 1,
+      "cmd": "quickinfo",
+      "detail": "quickinfo-display/kind",
+      "seqClass": "ALWAYS"
+    },
+    {
       "key": "nav:tsc/#5338/main.vue:5:11:references",
       "file": "tsc/#5338/main.vue",
       "line": 5,
@@ -4392,6 +4662,15 @@
       "file": "tsc/#5592/child.vue",
       "line": 1,
       "offset": 34,
+      "cmd": "quickinfo",
+      "detail": "quickinfo-display/kind",
+      "seqClass": "ALWAYS"
+    },
+    {
+      "key": "nav:tsc/#5592/child.vue:2:1:quickinfo",
+      "file": "tsc/#5592/child.vue",
+      "line": 2,
+      "offset": 1,
       "cmd": "quickinfo",
       "detail": "quickinfo-display/kind",
       "seqClass": "ALWAYS"
@@ -5208,6 +5487,15 @@
       "seqClass": "ALWAYS"
     },
     {
+      "key": "nav:tsc/intrinsicProps/main.vue:2:3:quickinfo",
+      "file": "tsc/intrinsicProps/main.vue",
+      "line": 2,
+      "offset": 3,
+      "cmd": "quickinfo",
+      "detail": "quickinfo-display/kind",
+      "seqClass": "ALWAYS"
+    },
+    {
       "key": "nav:tsc/intrinsicProps/main.vue:8:10:quickinfo",
       "file": "tsc/intrinsicProps/main.vue",
       "line": 8,
@@ -5300,6 +5588,24 @@
       "seqClass": "SEQ-ONLY"
     },
     {
+      "key": "nav:tsc/type-helpers/main.vue:2:15:quickinfo",
+      "file": "tsc/type-helpers/main.vue",
+      "line": 2,
+      "offset": 15,
+      "cmd": "quickinfo",
+      "detail": "quickinfo-display/kind",
+      "seqClass": "ALWAYS"
+    },
+    {
+      "key": "nav:tsc/type-helpers/main.vue:2:64:quickinfo",
+      "file": "tsc/type-helpers/main.vue",
+      "line": 2,
+      "offset": 64,
+      "cmd": "quickinfo",
+      "detail": "quickinfo-display/kind",
+      "seqClass": "ALWAYS"
+    },
+    {
       "key": "nav:tsc/type-helpers/main.vue:5:8:quickinfo",
       "file": "tsc/type-helpers/main.vue",
       "line": 5,
@@ -5325,7 +5631,7 @@
       "offset": 1,
       "cmd": "quickinfo",
       "detail": "quickinfo-display/kind",
-      "seqClass": "SEQ-ONLY"
+      "seqClass": "ALWAYS"
     },
     {
       "key": "nav:tsc/type-helpers/main.vue:7:12:quickinfo",
@@ -5739,6 +6045,15 @@
       "cmd": "references",
       "detail": "loc-set-mismatch",
       "locClass": "mixed",
+      "seqClass": "ALWAYS"
+    },
+    {
+      "key": "nav:component-meta/generic/component.vue:6:1:quickinfo",
+      "file": "component-meta/generic/component.vue",
+      "line": 6,
+      "offset": 1,
+      "cmd": "quickinfo",
+      "detail": "quickinfo-display/kind",
       "seqClass": "ALWAYS"
     },
     {
@@ -6578,6 +6893,15 @@
       "seqClass": "ALWAYS"
     },
     {
+      "key": "nav:tsc/#3311/component.vue:6:1:quickinfo",
+      "file": "tsc/#3311/component.vue",
+      "line": 6,
+      "offset": 1,
+      "cmd": "quickinfo",
+      "detail": "quickinfo-display/kind",
+      "seqClass": "ALWAYS"
+    },
+    {
       "key": "nav:tsc/#3311/component.vue:7:15:quickinfo",
       "file": "tsc/#3311/component.vue",
       "line": 7,
@@ -6677,6 +7001,15 @@
       "file": "tsc/#3374/main.vue",
       "line": 11,
       "offset": 16,
+      "cmd": "quickinfo",
+      "detail": "quickinfo-display/kind",
+      "seqClass": "ALWAYS"
+    },
+    {
+      "key": "nav:tsc/#3374/main.vue:14:2:quickinfo",
+      "file": "tsc/#3374/main.vue",
+      "line": 14,
+      "offset": 2,
       "cmd": "quickinfo",
       "detail": "quickinfo-display/kind",
       "seqClass": "ALWAYS"
@@ -7109,6 +7442,15 @@
       "seqClass": "ALWAYS"
     },
     {
+      "key": "nav:tsc/#4537/main.vue:6:1:quickinfo",
+      "file": "tsc/#4537/main.vue",
+      "line": 6,
+      "offset": 1,
+      "cmd": "quickinfo",
+      "detail": "quickinfo-display/kind",
+      "seqClass": "ALWAYS"
+    },
+    {
       "key": "nav:tsc/#4537/main.vue:6:13:references",
       "file": "tsc/#4537/main.vue",
       "line": 6,
@@ -7489,6 +7831,15 @@
       "seqClass": "ALWAYS"
     },
     {
+      "key": "nav:tsc/#4826/main.vue:7:17:quickinfo",
+      "file": "tsc/#4826/main.vue",
+      "line": 7,
+      "offset": 17,
+      "cmd": "quickinfo",
+      "detail": "quickinfo-display/kind",
+      "seqClass": "ALWAYS"
+    },
+    {
       "key": "nav:tsc/#4826/main.vue:7:53:references",
       "file": "tsc/#4826/main.vue",
       "line": 7,
@@ -7513,6 +7864,15 @@
       "file": "tsc/#4972/GenericComp.vue",
       "line": 1,
       "offset": 34,
+      "cmd": "quickinfo",
+      "detail": "quickinfo-display/kind",
+      "seqClass": "ALWAYS"
+    },
+    {
+      "key": "nav:tsc/#4972/GenericComp.vue:2:1:quickinfo",
+      "file": "tsc/#4972/GenericComp.vue",
+      "line": 2,
+      "offset": 1,
       "cmd": "quickinfo",
       "detail": "quickinfo-display/kind",
       "seqClass": "ALWAYS"
@@ -7580,6 +7940,15 @@
       "file": "tsc/#5159/child.vue",
       "line": 1,
       "offset": 34,
+      "cmd": "quickinfo",
+      "detail": "quickinfo-display/kind",
+      "seqClass": "ALWAYS"
+    },
+    {
+      "key": "nav:tsc/#5159/child.vue:2:1:quickinfo",
+      "file": "tsc/#5159/child.vue",
+      "line": 2,
+      "offset": 1,
       "cmd": "quickinfo",
       "detail": "quickinfo-display/kind",
       "seqClass": "ALWAYS"
@@ -7957,6 +8326,15 @@
       "seqClass": "ALWAYS"
     },
     {
+      "key": "nav:tsc/defineOptions/child.vue:4:1:quickinfo",
+      "file": "tsc/defineOptions/child.vue",
+      "line": 4,
+      "offset": 1,
+      "cmd": "quickinfo",
+      "detail": "quickinfo-display/kind",
+      "seqClass": "ALWAYS"
+    },
+    {
       "key": "nav:tsc/defineOptions/child.vue:9:34:references",
       "file": "tsc/defineOptions/child.vue",
       "line": 9,
@@ -8075,6 +8453,15 @@
       "seqClass": "ALWAYS"
     },
     {
+      "key": "nav:tsc/events/main.vue:13:3:quickinfo",
+      "file": "tsc/events/main.vue",
+      "line": 13,
+      "offset": 3,
+      "cmd": "quickinfo",
+      "detail": "quickinfo-display/kind",
+      "seqClass": "ALWAYS"
+    },
+    {
       "key": "nav:tsc/events/main.vue:14:39:references",
       "file": "tsc/events/main.vue",
       "line": 14,
@@ -8156,6 +8543,24 @@
       "file": "tsc/events/main.vue",
       "line": 42,
       "offset": 55,
+      "cmd": "quickinfo",
+      "detail": "quickinfo-display/kind",
+      "seqClass": "ALWAYS"
+    },
+    {
+      "key": "nav:tsc/events/main.vue:44:7:quickinfo",
+      "file": "tsc/events/main.vue",
+      "line": 44,
+      "offset": 7,
+      "cmd": "quickinfo",
+      "detail": "quickinfo-display/kind",
+      "seqClass": "ALWAYS"
+    },
+    {
+      "key": "nav:tsc/events/main.vue:45:7:quickinfo",
+      "file": "tsc/events/main.vue",
+      "line": 45,
+      "offset": 7,
       "cmd": "quickinfo",
       "detail": "quickinfo-display/kind",
       "seqClass": "ALWAYS"
@@ -8360,6 +8765,15 @@
       "seqClass": "ALWAYS"
     },
     {
+      "key": "nav:tsc/unknownProp/main.vue:2:3:quickinfo",
+      "file": "tsc/unknownProp/main.vue",
+      "line": 2,
+      "offset": 3,
+      "cmd": "quickinfo",
+      "detail": "quickinfo-display/kind",
+      "seqClass": "ALWAYS"
+    },
+    {
       "key": "nav:tsc/unknownProp/main.vue:6:10:quickinfo",
       "file": "tsc/unknownProp/main.vue",
       "line": 6,
@@ -8546,6 +8960,15 @@
       "seqClass": "ALWAYS"
     },
     {
+      "key": "nav:tsc/withDefaults/main.vue:8:1:quickinfo",
+      "file": "tsc/withDefaults/main.vue",
+      "line": 8,
+      "offset": 1,
+      "cmd": "quickinfo",
+      "detail": "quickinfo-display/kind",
+      "seqClass": "ALWAYS"
+    },
+    {
       "key": "nav:tsc/withDefaults/main.vue:15:34:references",
       "file": "tsc/withDefaults/main.vue",
       "line": 15,
@@ -8575,10 +8998,37 @@
       "seqClass": "ALWAYS"
     },
     {
+      "key": "nav:component-meta/component-name-description/component-ts.ts:6:1:quickinfo",
+      "file": "component-meta/component-name-description/component-ts.ts",
+      "line": 6,
+      "offset": 1,
+      "cmd": "quickinfo",
+      "detail": "quickinfo-display/kind",
+      "seqClass": "ALWAYS"
+    },
+    {
+      "key": "nav:component-meta/component-name-description/component-ts.ts:6:8:quickinfo",
+      "file": "component-meta/component-name-description/component-ts.ts",
+      "line": 6,
+      "offset": 8,
+      "cmd": "quickinfo",
+      "detail": "quickinfo-display/kind",
+      "seqClass": "ALWAYS"
+    },
+    {
       "key": "nav:component-meta/component-name-description/component-ts.ts:6:16:quickinfo",
       "file": "component-meta/component-name-description/component-ts.ts",
       "line": 6,
       "offset": 16,
+      "cmd": "quickinfo",
+      "detail": "quickinfo-display/kind",
+      "seqClass": "ALWAYS"
+    },
+    {
+      "key": "nav:component-meta/component-name-description/component-ts.ts:8:2:quickinfo",
+      "file": "component-meta/component-name-description/component-ts.ts",
+      "line": 8,
+      "offset": 2,
       "cmd": "quickinfo",
       "detail": "quickinfo-display/kind",
       "seqClass": "ALWAYS"
@@ -8674,6 +9124,15 @@
       "seqClass": "ALWAYS"
     },
     {
+      "key": "nav:component-meta/reference-type-model/component.vue:5:1:quickinfo",
+      "file": "component-meta/reference-type-model/component.vue",
+      "line": 5,
+      "offset": 1,
+      "cmd": "quickinfo",
+      "detail": "quickinfo-display/kind",
+      "seqClass": "ALWAYS"
+    },
+    {
       "key": "nav:component-meta/reference-type-model/component.vue:5:13:references",
       "file": "component-meta/reference-type-model/component.vue",
       "line": 5,
@@ -8700,7 +9159,7 @@
       "offset": 1,
       "cmd": "quickinfo",
       "detail": "quickinfo-display/kind",
-      "seqClass": "SEQ-ONLY"
+      "seqClass": "ALWAYS"
     },
     {
       "key": "nav:component-meta/reference-type-model/component.vue:17:13:references",
@@ -8710,6 +9169,15 @@
       "cmd": "references",
       "detail": "loc-set-mismatch",
       "locClass": "mixed",
+      "seqClass": "ALWAYS"
+    },
+    {
+      "key": "nav:component-meta/reference-type-props/component-non-ascii.vue:2:1:quickinfo",
+      "file": "component-meta/reference-type-props/component-non-ascii.vue",
+      "line": 2,
+      "offset": 1,
+      "cmd": "quickinfo",
+      "detail": "quickinfo-display/kind",
       "seqClass": "ALWAYS"
     },
     {
@@ -9505,6 +9973,15 @@
       "seqClass": "ALWAYS"
     },
     {
+      "key": "nav:tsc/#3612/main.vue:10:3:quickinfo",
+      "file": "tsc/#3612/main.vue",
+      "line": 10,
+      "offset": 3,
+      "cmd": "quickinfo",
+      "detail": "quickinfo-display/kind",
+      "seqClass": "ALWAYS"
+    },
+    {
       "key": "nav:tsc/#3671/main.vue:5:34:quickinfo",
       "file": "tsc/#3671/main.vue",
       "line": 5,
@@ -9719,6 +10196,15 @@
       "seqClass": "ALWAYS"
     },
     {
+      "key": "nav:tsc/#4512/test1.vue:6:16:quickinfo",
+      "file": "tsc/#4512/test1.vue",
+      "line": 6,
+      "offset": 16,
+      "cmd": "quickinfo",
+      "detail": "quickinfo-display/kind",
+      "seqClass": "ALWAYS"
+    },
+    {
       "key": "nav:tsc/#4512/test1.vue:6:28:references",
       "file": "tsc/#4512/test1.vue",
       "line": 6,
@@ -9919,6 +10405,15 @@
       "cmd": "definitionAndBoundSpan",
       "detail": "loc-set-mismatch",
       "locClass": "extra",
+      "seqClass": "ALWAYS"
+    },
+    {
+      "key": "nav:tsc/#4878/main.vue:6:15:quickinfo",
+      "file": "tsc/#4878/main.vue",
+      "line": 6,
+      "offset": 15,
+      "cmd": "quickinfo",
+      "detail": "quickinfo-display/kind",
       "seqClass": "ALWAYS"
     },
     {
@@ -10379,6 +10874,24 @@
       "seqClass": "ALWAYS"
     },
     {
+      "key": "nav:tsc/dataAttributes/main.vue:7:4:quickinfo",
+      "file": "tsc/dataAttributes/main.vue",
+      "line": 7,
+      "offset": 4,
+      "cmd": "quickinfo",
+      "detail": "quickinfo-display/kind",
+      "seqClass": "ALWAYS"
+    },
+    {
+      "key": "nav:tsc/dataAttributes/main.vue:8:19:quickinfo",
+      "file": "tsc/dataAttributes/main.vue",
+      "line": 8,
+      "offset": 19,
+      "cmd": "quickinfo",
+      "detail": "quickinfo-display/kind",
+      "seqClass": "ALWAYS"
+    },
+    {
       "key": "nav:tsc/dataAttributes/main.vue:13:10:quickinfo",
       "file": "tsc/dataAttributes/main.vue",
       "line": 13,
@@ -10631,6 +11144,15 @@
       "seqClass": "ALWAYS"
     },
     {
+      "key": "nav:tsc/unknownProp/strict.vue:5:3:quickinfo",
+      "file": "tsc/unknownProp/strict.vue",
+      "line": 5,
+      "offset": 3,
+      "cmd": "quickinfo",
+      "detail": "quickinfo-display/kind",
+      "seqClass": "ALWAYS"
+    },
+    {
       "key": "nav:tsc/unknownProp/strict.vue:12:10:quickinfo",
       "file": "tsc/unknownProp/strict.vue",
       "line": 12,
@@ -10745,20 +11267,7 @@
       "seqClass": "ALWAYS"
     }
   ],
-  "docdiffs": [
-    {
-      "key": "nav:tsc/#4699/main.vue:8:32:quickinfo"
-    },
-    {
-      "key": "nav:tsc/#4699/main.vue:8:37:quickinfo"
-    },
-    {
-      "key": "nav:tsc/#5986/main.vue:5:19:quickinfo"
-    },
-    {
-      "key": "nav:tsc/#5986/main.vue:6:24:quickinfo"
-    }
-  ],
+  "docdiffs": [],
   "diagmsgs": [
     {
       "key": "diag:tsc/_failed_directives/main.vue"
