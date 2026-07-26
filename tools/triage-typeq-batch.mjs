@@ -8,7 +8,12 @@
  * Probe is the first char after the marker.
  *
  * Usage: node tools/triage-typeq-batch.mjs
- * Output: positions=N matched=M diff=D  (+ per-diff details when D>0)
+ * Output: positions=N matched=M known=K diff=D stale=S  (+ per-diff details when D>0)
+ *
+ * v5 policy: engine behavior is referenced to pristine tsgo, not stock.
+ * Diffs whose cause is engine-owned live in KNOWN_DIVERGENCES keyed by
+ * marker id (attribution class in the reason); a registered id whose sides
+ * converged FAILS as stale so the list cannot rot.
  *
  * With TNB_TRACE_THROW=1 TNB_TRACE_THROW_FILE=/tmp/...jsonl, throw hits are
  * recorded for baseline / post-fix verification.
@@ -540,13 +545,38 @@ for (const proj of PROJECTS) {
 
 allMarkers.sort((a, b) => a.id - b.id);
 
-let matched = 0;
+// ── Known divergences (marker id → class reason; see header) ───────────────
+const KNOWN_DIVERGENCES = new Map([
+	// id 19 (cf @ jsdoc.js): the marker's own block comment closes the JSDoc
+	// comment early, so the file is deliberately broken syntax soup. tsgo's
+	// parser reports TS1161 (unterminated regular expression) where stock's
+	// grammar checker reports TS1003 (identifier expected) — engine-owned
+	// error-recovery divergence, verified against pristine tsgo 7.0.2 (its
+	// LSP pull diagnostics report 1161, not 1003). The syntax-phase bucket
+	// never reaches semanticDiagnosticsSync under either engine, so TNB's
+	// codefix aggregate carries one fewer ts-nocheck group than stock's.
+	[19, 'T-PARSE: tsgo parser error recovery in broken JSDoc (1161 vs stock 1003; pristine tsgo reference)'],
+]);
+
+let matched = 0, known = 0, stale = 0;
 const diffs = [];
+const seenKnown = new Set();
 for (const mk of allMarkers) {
 	const a = tnb[mk.id];
 	const b = stock[mk.id];
-	if (deepEqual(a, b)) matched++;
-	else {
+	if (deepEqual(a, b)) {
+		if (KNOWN_DIVERGENCES.has(mk.id)) {
+			stale++;
+			seenKnown.add(mk.id);
+			console.log(`FAIL id=${mk.id}: STALE EXEMPTION — sides converged, remove the KNOWN_DIVERGENCES entry (${KNOWN_DIVERGENCES.get(mk.id)})`);
+			continue;
+		}
+		matched++;
+	} else if (KNOWN_DIVERGENCES.has(mk.id)) {
+		known++;
+		seenKnown.add(mk.id);
+		console.log(`KNOWN id=${mk.id} — ${KNOWN_DIVERGENCES.get(mk.id)}`);
+	} else {
 		diffs.push({
 			id: mk.id,
 			cmd: mk.cmd,
@@ -557,10 +587,16 @@ for (const mk of allMarkers) {
 		});
 	}
 }
+for (const id of KNOWN_DIVERGENCES.keys()) {
+	if (!seenKnown.has(id)) {
+		stale++;
+		console.log(`FAIL id=${id}: STALE EXEMPTION — marker no longer diverges, remove the KNOWN_DIVERGENCES entry (${KNOWN_DIVERGENCES.get(id)})`);
+	}
+}
 
 const positions = allMarkers.length;
 const diff = diffs.length;
-console.log(`positions=${positions} matched=${matched} diff=${diff}`);
+console.log(`positions=${positions} matched=${matched} known=${known} diff=${diff} stale=${stale}`);
 if (diff > 0) {
 	for (const d of diffs) {
 		console.log(`\n--- diff id=${d.id} cmd=${d.cmd} @ ${d.file}:${d.lineCol.line}:${d.lineCol.offset} ---`);
@@ -568,4 +604,4 @@ if (diff > 0) {
 		console.log('STOCK:', JSON.stringify(d.stock, null, 2));
 	}
 }
-process.exitCode = diff === 0 ? 0 : 1;
+process.exitCode = diff === 0 && stale === 0 ? 0 : 1;
