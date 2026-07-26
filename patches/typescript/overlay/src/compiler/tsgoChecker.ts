@@ -4575,18 +4575,8 @@ function resolveLanguageServiceScriptKind(
     fromHostSnapshot = false,
 ): number {
     const fromHost = host?.getScriptKind?.(requestFileName) ?? host?.getScriptKind?.(hostFileName);
-    if (fromHost === ts.ScriptKind.TS || fromHost === ts.ScriptKind.TSX) {
-        return fromHost;
-    }
-    if (fromHostSnapshot && (requestFileName.endsWith(".vue") || hostFileName.endsWith(".vue"))) {
-        // A .vue path's host snapshot is the language plugin's embedded service
-        // script (TS syntax by construction — the boilerplate is TS even for
-        // js-lang SFCs). The project host's per-SFC-block JS/JSX answer
-        // describes the block, not this content; trusting it leaves the mirror
-        // unchecked and kills template-expression completions (volar #5847).
-        return ts.ScriptKind.TS;
-    }
-    if (fromHost === ts.ScriptKind.JS || fromHost === ts.ScriptKind.JSX) {
+    if (fromHost === ts.ScriptKind.TS || fromHost === ts.ScriptKind.TSX
+        || fromHost === ts.ScriptKind.JS || fromHost === ts.ScriptKind.JSX) {
         return fromHost;
     }
     if (fromHostSnapshot) {

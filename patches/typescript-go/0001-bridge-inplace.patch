@@ -2269,7 +2269,7 @@ index 9f8b144fa..fb0eb38a2 100644
  					continue outer
  				}
 diff --git a/internal/ls/completions.go b/internal/ls/completions.go
-index 5e62661fc..aebe2cb73 100644
+index 5e62661fc..f1b408c60 100644
 --- a/internal/ls/completions.go
 +++ b/internal/ls/completions.go
 @@ -64,7 +64,15 @@ func (l *LanguageService) GetCompletionsAtPosition(ctx context.Context, file *as
@@ -2408,7 +2408,28 @@ index 5e62661fc..aebe2cb73 100644
  }
  
  func isRecommendedCompletionMatch(localSymbol *ast.Symbol, recommendedCompletion *ast.Symbol, typeChecker *checker.Checker) bool {
-@@ -3279,7 +3303,7 @@ func cloneItems(items []*lsproto.CompletionItem) []*CompletionItem {
+@@ -2753,7 +2777,19 @@ func binaryExpressionMayBeOpenTag(binaryExpression *ast.BinaryExpression) bool {
+ }
+ 
+ func isCheckedFile(file *ast.SourceFile, compilerOptions *core.CompilerOptions) bool {
+-	return !ast.IsSourceFileJS(file) || ast.IsCheckJSEnabledForFile(file, compilerOptions)
++	if !ast.IsSourceFileJS(file) {
++		return true
++	}
++	if strings.HasSuffix(file.FileName(), ".vue") {
++		// .vue embedded service scripts parse as JS for js SFC blocks, but volar's
++		// generated boilerplate needs the checked-file completion path — tsgo
++		// otherwise falls back to the limited unchecked-JS entries where stock's
++		// engine does not (#5847 template-expression completions). Scope the
++		// force to completions: checker diagnostics stay unchecked like stock,
++		// so vue-tsc reports no extra semantic errors.
++		return true
++	}
++	return ast.IsCheckJSEnabledForFile(file, compilerOptions)
+ }
+ 
+ func isContextTokenValueLocation(contextToken *ast.Node) bool {
+@@ -3279,7 +3315,7 @@ func cloneItems(items []*lsproto.CompletionItem) []*CompletionItem {
  	entries := make([]*CompletionItem, len(items))
  	for i, item := range items {
  		itemClone := *item
@@ -2417,7 +2438,7 @@ index 5e62661fc..aebe2cb73 100644
  	}
  	return entries
  }
-@@ -4382,7 +4406,7 @@ func (l *LanguageService) getJsxClosingTagCompletion(
+@@ -4382,7 +4418,7 @@ func (l *LanguageService) getJsxClosingTagCompletion(
  	optionalReplacementSpan := new(l.createLspRangeFromNode(jsxClosingElement.TagName(), file))
  	defaultCommitCharacters := getDefaultCommitCharacters(false /*isNewIdentifierLocation*/)
  
@@ -2426,7 +2447,7 @@ index 5e62661fc..aebe2cb73 100644
  		ctx,
  		fullClosingTag, /*name*/
  		"",             /*insertText*/
-@@ -4403,9 +4427,6 @@ func (l *LanguageService) getJsxClosingTagCompletion(
+@@ -4403,9 +4439,6 @@ func (l *LanguageService) getJsxClosingTagCompletion(
  		nil,   /*autoImportEntryData*/ // !!! jsx autoimports
  		nil,   /*detail*/
  	)
@@ -2436,7 +2457,7 @@ index 5e62661fc..aebe2cb73 100644
  	items := []*CompletionItem{item}
  	itemDefaults := l.setItemDefaults(
  		ctx,
-@@ -4443,7 +4464,7 @@ func (l *LanguageService) createLSPCompletionItem(
+@@ -4443,7 +4476,7 @@ func (l *LanguageService) createLSPCompletionItem(
  	source string,
  	autoImportFix *lsproto.AutoImportFix,
  	detail *string,
@@ -2445,7 +2466,7 @@ index 5e62661fc..aebe2cb73 100644
  	kind := getCompletionsSymbolKind(elementKind)
  	data := &lsproto.CompletionItemData{
  		FileName:   file.FileName(),
-@@ -4499,20 +4520,24 @@ func (l *LanguageService) createLSPCompletionItem(
+@@ -4499,20 +4532,24 @@ func (l *LanguageService) createLSPCompletionItem(
  		insertTextFormat = new(lsproto.InsertTextFormatSnippet)
  	}
  
@@ -2484,7 +2505,7 @@ index 5e62661fc..aebe2cb73 100644
  	}
  }
  
-@@ -4581,9 +4606,7 @@ func (l *LanguageService) getLabelStatementCompletions(
+@@ -4581,9 +4618,7 @@ func (l *LanguageService) getLabelStatementCompletions(
  					nil,   /*autoImportEntryData*/
  					nil,   /*detail*/
  				)
