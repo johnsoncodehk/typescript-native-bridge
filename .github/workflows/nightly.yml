@@ -9,8 +9,8 @@ permissions:
   contents: read
 
 env:
-  VOLAR_BRANCH: feat/tnb-migration
-  VOLAR_SHA: 398ac0a71 # vuejs/language-tools@feat/tnb-migration, pinned for reproducibility
+  VOLAR_BRANCH: master
+  VOLAR_SHA: e51956947 # vuejs/language-tools@master, pinned for reproducibility
   BASELINE: test/baselines/nav-results-07b9a89-t15.json
 
 jobs:
@@ -58,23 +58,25 @@ jobs:
           path: |
             ${{ runner.temp }}/volar
             ${{ runner.temp }}/volar-stock
-          key: volar-${{ env.VOLAR_SHA }}-v1
+          key: volar-${{ env.VOLAR_SHA }}-v2
 
       - name: Clone volar
         if: steps.volar-cache.outputs.cache-hit != 'true'
         run: |
           git clone --depth 50 --branch "$VOLAR_BRANCH" https://github.com/vuejs/language-tools.git "$RUNNER_TEMP/volar"
           git -C "$RUNNER_TEMP/volar" checkout "$VOLAR_SHA"
-          # pnpm's `typescript: link:./typescript-native-bridge` override must
-          # resolve at install time — create the symlink BEFORE pnpm install.
-          ln -sfn "$GITHUB_WORKSPACE" "$RUNNER_TEMP/volar/typescript-native-bridge"
+          # Point volar's typescript override at the CI-built TNB — volar
+          # master's override is `npm:typescript-native-bridge@<release>`, which
+          # would fetch the released package instead of the commit under test.
+          cd "$RUNNER_TEMP/volar"
+          node -e "const fs=require('fs');const p='pnpm-workspace.yaml';let s=fs.readFileSync(p,'utf8');s=s.replace(/typescript: npm:typescript-native-bridge@.*/,'typescript: link:'+process.env.GITHUB_WORKSPACE);fs.writeFileSync(p,s)"
 
       - name: Install + build volar
         if: steps.volar-cache.outputs.cache-hit != 'true'
         run: |
           cd "$RUNNER_TEMP/volar"
           corepack enable
-          pnpm install --frozen-lockfile
+          pnpm install --no-frozen-lockfile
           pnpm run build
 
       - name: Pack stock typescript
@@ -84,9 +86,6 @@ jobs:
           cd "$RUNNER_TEMP/volar-stock"
           npm pack typescript@6.0.3 --silent
           tar -xzf typescript-6.0.3.tgz
-
-      - name: Link TNB into volar
-        run: ln -sfn "$GITHUB_WORKSPACE" "$RUNNER_TEMP/volar/typescript-native-bridge"
 
       - name: Run sim-nav (4 shards in parallel)
         env:
