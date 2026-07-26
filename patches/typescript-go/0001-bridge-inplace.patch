@@ -920,8 +920,47 @@ index 613ed0a0c..8b11b26ed 100644
  }
  
  export function isBindingPattern(node: Node): node is BindingPattern {
+diff --git a/internal/api/session_apistate_test.go b/internal/api/session_apistate_test.go
+index 91aab0904..48b7cabb1 100644
+--- a/internal/api/session_apistate_test.go
++++ b/internal/api/session_apistate_test.go
+@@ -33,14 +33,14 @@ func TestSessionTracksAndReleasesAPIRefs(t *testing.T) {
+ 		session := NewSession(projectSession, nil)
+ 
+ 		_, err := session.handleUpdateSnapshot(context.Background(), &UpdateSnapshotParams{
+-			OpenProjects: []DocumentIdentifier{{FileName: configFileName}},
++			OpenProjects: []OpenProjectParams{{DocumentIdentifier: DocumentIdentifier{FileName: configFileName}}},
+ 		})
+ 		assert.NilError(t, err)
+ 		assert.Equal(t, session.openProjects.Len(), 1)
+ 
+ 		// Opening the same project again must not take an additional ref.
+ 		_, err = session.handleUpdateSnapshot(context.Background(), &UpdateSnapshotParams{
+-			OpenProjects: []DocumentIdentifier{{FileName: configFileName}},
++			OpenProjects: []OpenProjectParams{{DocumentIdentifier: DocumentIdentifier{FileName: configFileName}}},
+ 		})
+ 		assert.NilError(t, err)
+ 		assert.Equal(t, session.openProjects.Len(), 1)
+@@ -67,7 +67,7 @@ func TestSessionTracksAndReleasesAPIRefs(t *testing.T) {
+ 		defer session.Close()
+ 
+ 		_, err := session.handleUpdateSnapshot(context.Background(), &UpdateSnapshotParams{
+-			OpenProjects: []DocumentIdentifier{{FileName: configFileName}},
++			OpenProjects: []OpenProjectParams{{DocumentIdentifier: DocumentIdentifier{FileName: configFileName}}},
+ 		})
+ 		assert.NilError(t, err)
+ 		assert.Equal(t, session.openProjects.Len(), 1)
+@@ -234,7 +234,7 @@ func TestUpdateSnapshotResponseSkipsUnloadedAncestorProject(t *testing.T) {
+ 	defer session.Close()
+ 
+ 	response, err := session.handleUpdateSnapshot(context.Background(), &UpdateSnapshotParams{
+-		OpenProjects: []DocumentIdentifier{{FileName: nestedConfigFileName}},
++		OpenProjects: []OpenProjectParams{{DocumentIdentifier: DocumentIdentifier{FileName: nestedConfigFileName}}},
+ 	})
+ 	assert.NilError(t, err)
+ 
 diff --git a/internal/checker/checker.go b/internal/checker/checker.go
-index b639d488e..a9252e75a 100644
+index b639d488e..a35fb36fb 100644
 --- a/internal/checker/checker.go
 +++ b/internal/checker/checker.go
 @@ -786,6 +786,7 @@ type Checker struct {
@@ -945,47 +984,7 @@ index b639d488e..a9252e75a 100644
  		}
  		links.immediateTarget = c.getTargetOfAliasDeclaration(node)
  	}
-@@ -7259,7 +7264,9 @@ func importClauseFromImported(node *ast.Node) *ast.Node {
- func (c *Checker) checkUnusedInferTypeParameter(node *ast.Node) {
- 	typeParameter := node.AsInferTypeNode().TypeParameter
- 	if c.isUnreferencedTypeParameter(typeParameter) {
--		c.reportUnused(node, UnusedKindParameter, NewDiagnosticForNode(typeParameter.Name(), diagnostics.X_0_is_declared_but_never_used, typeParameter.Name().Text()))
-+		// Fork parity: stock checkUnusedInferTypeParameter reports TS6133 on the
-+		// whole `infer T` node, not TS6196 on the name (checker.ts).
-+		c.reportUnused(node, UnusedKindParameter, NewDiagnosticForNode(node, diagnostics.X_0_is_declared_but_its_value_is_never_read, typeParameter.Name().Text()))
- 	}
- }
- 
-@@ -7271,14 +7278,25 @@ func (c *Checker) checkUnusedTypeParameters(node *ast.Node) {
- 	if typeParameterList == nil {
- 		return
- 	}
--	if len(typeParameterList.Nodes) > 1 && core.Every(typeParameterList.Nodes, c.isUnreferencedTypeParameter) {
-+	// Fork parity with stock checkUnusedTypeParameters (checker.ts): when the
-+	// whole list is unused, one diagnostic covers the `<...>` range — TS6133
-+	// naming the parameter when there is exactly one, TS6205 otherwise; when
-+	// only some parameters are unused, each gets TS6133 on its declaration.
-+	// (Upstream tsgo reports TS6196 for type parameters instead; tools that
-+	// filter by stock's codes — e.g. Volar's doNotReportTs6133 — would see
-+	// diverging diagnostics.)
-+	if len(typeParameterList.Nodes) > 0 && core.Every(typeParameterList.Nodes, c.isUnreferencedTypeParameter) {
- 		file := ast.GetSourceFileOfNode(node)
- 		loc := rangeOfTypeParameters(file, typeParameterList)
--		c.reportUnused(node, UnusedKindParameter, ast.NewDiagnostic(file, loc, diagnostics.All_type_parameters_are_unused))
-+		if len(typeParameterList.Nodes) == 1 {
-+			c.reportUnused(node, UnusedKindParameter, ast.NewDiagnostic(file, loc, diagnostics.X_0_is_declared_but_its_value_is_never_read, typeParameterList.Nodes[0].Name().Text()))
-+		} else {
-+			c.reportUnused(node, UnusedKindParameter, ast.NewDiagnostic(file, loc, diagnostics.All_type_parameters_are_unused))
-+		}
- 	} else {
- 		for _, typeParameter := range typeParameterList.Nodes {
- 			if c.isUnreferencedTypeParameter(typeParameter) {
--				c.reportUnused(node, UnusedKindParameter, NewDiagnosticForNode(typeParameter, diagnostics.X_0_is_declared_but_never_used, typeParameter.Name().Text()))
-+				c.reportUnused(node, UnusedKindParameter, NewDiagnosticForNode(typeParameter, diagnostics.X_0_is_declared_but_its_value_is_never_read, typeParameter.Name().Text()))
- 			}
- 		}
- 	}
-@@ -16372,7 +16390,7 @@ func (c *Checker) GetTypeOfSymbolAtLocation(symbol *ast.Symbol, location *ast.No
+@@ -16372,7 +16377,7 @@ func (c *Checker) GetTypeOfSymbolAtLocation(symbol *ast.Symbol, location *ast.No
  		// of the expression (which will reflect control flow analysis). If the expression indeed
  		// resolved to the given symbol, return the narrowed type.
  		if (ast.IsIdentifier(location) || ast.IsPrivateIdentifier(location)) &&
@@ -994,7 +993,7 @@ index b639d488e..a9252e75a 100644
  			if ast.IsRightSideOfQualifiedNameOrPropertyAccess(location) {
  				location = location.Parent
  			}
-@@ -16388,7 +16406,7 @@ func (c *Checker) GetTypeOfSymbolAtLocation(symbol *ast.Symbol, location *ast.No
+@@ -16388,7 +16393,7 @@ func (c *Checker) GetTypeOfSymbolAtLocation(symbol *ast.Symbol, location *ast.No
  				}
  			}
  		}
@@ -1003,7 +1002,7 @@ index b639d488e..a9252e75a 100644
  			return c.getWriteTypeOfAccessors(location.Parent.Symbol())
  		}
  		// The location isn't a reference to the given symbol, meaning we're being asked
-@@ -16403,13 +16421,13 @@ func (c *Checker) GetTypeOfSymbolAtLocation(symbol *ast.Symbol, location *ast.No
+@@ -16403,13 +16408,13 @@ func (c *Checker) GetTypeOfSymbolAtLocation(symbol *ast.Symbol, location *ast.No
  	return c.getNonMissingTypeOfSymbol(symbol)
  }
  
@@ -1021,7 +1020,7 @@ index b639d488e..a9252e75a 100644
  	if symbol.CheckFlags&ast.CheckFlagsMapped != 0 {
  		return c.getTypeOfMappedSymbol(symbol)
  	}
-@@ -16434,6 +16452,20 @@ func (c *Checker) getTypeOfSymbol(symbol *ast.Symbol) *Type {
+@@ -16434,6 +16439,20 @@ func (c *Checker) getTypeOfSymbol(symbol *ast.Symbol) *Type {
  	return c.errorType
  }
  
@@ -1042,7 +1041,7 @@ index b639d488e..a9252e75a 100644
  func (c *Checker) getNonMissingTypeOfSymbol(symbol *ast.Symbol) *Type {
  	return c.removeMissingType(c.getTypeOfSymbol(symbol), symbol.Flags&ast.SymbolFlagsOptional != 0)
  }
-@@ -16441,7 +16473,22 @@ func (c *Checker) getNonMissingTypeOfSymbol(symbol *ast.Symbol) *Type {
+@@ -16441,7 +16460,22 @@ func (c *Checker) getNonMissingTypeOfSymbol(symbol *ast.Symbol) *Type {
  func (c *Checker) getTypeOfInstantiatedSymbol(symbol *ast.Symbol) *Type {
  	links := c.valueSymbolLinks.Get(symbol)
  	if links.resolvedType == nil {
@@ -1066,7 +1065,7 @@ index b639d488e..a9252e75a 100644
  	}
  	return links.resolvedType
  }
-@@ -16449,7 +16496,16 @@ func (c *Checker) getTypeOfInstantiatedSymbol(symbol *ast.Symbol) *Type {
+@@ -16449,7 +16483,16 @@ func (c *Checker) getTypeOfInstantiatedSymbol(symbol *ast.Symbol) *Type {
  func (c *Checker) getWriteTypeOfInstantiatedSymbol(symbol *ast.Symbol) *Type {
  	links := c.valueSymbolLinks.Get(symbol)
  	if links.writeType == nil {
@@ -1084,21 +1083,7 @@ index b639d488e..a9252e75a 100644
  	}
  	return links.writeType
  }
-@@ -20890,6 +20946,13 @@ func (c *Checker) getTypeOfMappedSymbol(symbol *ast.Symbol) *Type {
- 	links := c.valueSymbolLinks.Get(symbol)
- 	if links.resolvedType == nil {
- 		mappedType := links.containingType
-+		if mappedType == nil {
-+			// Synthetic mapped symbol whose containing type never materialized
-+			// (volar component-meta corpus via FAR/hover): degrade to the error
-+			// type instead of dereferencing nil.
-+			links.resolvedType = c.errorType
-+			return links.resolvedType
-+		}
- 		if !c.pushTypeResolution(symbol, TypeSystemPropertyNameType) {
- 			mappedType.AsMappedType().containsError = true
- 			return c.errorType
-@@ -22798,6 +22861,18 @@ func (c *Checker) getTypeFromTypeNodeWorker(node *ast.Node) *Type {
+@@ -22798,6 +22841,18 @@ func (c *Checker) getTypeFromTypeNodeWorker(node *ast.Node) *Type {
  		return c.getTypeFromInferTypeNode(node)
  	case ast.KindImportType:
  		return c.getTypeFromImportTypeNode(node)
@@ -1117,7 +1102,7 @@ index b639d488e..a9252e75a 100644
  	default:
  		return c.errorType
  	}
-@@ -29109,6 +29184,9 @@ func (c *Checker) getContextualType(node *ast.Node, contextFlags ContextFlags) *
+@@ -29109,6 +29164,9 @@ func (c *Checker) getContextualType(node *ast.Node, contextFlags ContextFlags) *
  		return c.contextualInfos[index].t
  	}
  	parent := node.Parent
@@ -1615,7 +1600,7 @@ index 21704cc7d..2c1c23145 100644
 +	return nodeBuilder.IndexInfoToIndexSignatureDeclaration(info, enclosingDeclaration, flags, nodebuilder.InternalFlagsNone, nil)
 +}
 diff --git a/internal/checker/services.go b/internal/checker/services.go
-index 12b9d4079..a8ec576ae 100644
+index 12b9d4079..db9750b1a 100644
 --- a/internal/checker/services.go
 +++ b/internal/checker/services.go
 @@ -222,6 +222,14 @@ func (c *Checker) IsUnknownSymbol(symbol *ast.Symbol) bool {
@@ -1633,30 +1618,6 @@ index 12b9d4079..a8ec576ae 100644
  func (c *Checker) IsUndefinedSymbol(symbol *ast.Symbol) bool {
  	return symbol == c.undefinedSymbol
  }
-@@ -410,12 +418,17 @@ func (c *Checker) GetMappedTypeSymbolOfProperty(symbol *ast.Symbol) *ast.Symbol
- 
- func (c *Checker) getImmediateRootSymbols(symbol *ast.Symbol) []*ast.Symbol {
- 	if symbol.CheckFlags&ast.CheckFlagsSynthetic != 0 {
--		return core.MapNonNil(
--			c.valueSymbolLinks.Get(symbol).containingType.Types(),
--			func(t *Type) *ast.Symbol {
--				return c.getPropertyOfType(t, symbol.Name)
--			},
--		)
-+		// Synthetic union property whose containing type never materialized
-+		// (observed on the volar component-meta corpus via FAR): fall through
-+		// to the transient/spread cases instead of dereferencing a nil type.
-+		if links := c.valueSymbolLinks.Get(symbol); links != nil && links.containingType != nil {
-+			return core.MapNonNil(
-+				links.containingType.Types(),
-+				func(t *Type) *ast.Symbol {
-+					return c.getPropertyOfType(t, symbol.Name)
-+				},
-+			)
-+		}
- 	}
- 	if symbol.Flags&ast.SymbolFlagsTransient != 0 {
- 		if c.spreadLinks.Has(symbol) {
 diff --git a/internal/compiler/fileloader.go b/internal/compiler/fileloader.go
 index f8d006e92..3390c5b57 100644
 --- a/internal/compiler/fileloader.go
@@ -2525,689 +2486,6 @@ index 5e62661fc..7552798c1 100644
  			}
  		}
  		current = current.Parent
-diff --git a/internal/ls/displaypartswriter.go b/internal/ls/displaypartswriter.go
-index eaced7b9a..a26fec22f 100644
---- a/internal/ls/displaypartswriter.go
-+++ b/internal/ls/displaypartswriter.go
-@@ -16,21 +16,37 @@ var _ printer.EmitTextWriter = &displayPartsWriter{}
- // displayPartsWriter implements EmitTextWriter and captures classified text runs
- // for VS colorized labels, while also building a plain string.
- // When vsCapability is false, only the plain string is built; runs are skipped.
-+// Indent is tracked like printer.textWriter so multiline displays (object type
-+// literals) keep their indentation.
- type displayPartsWriter struct {
- 	builder      strings.Builder
- 	runs         []*lsproto.VSClassifiedTextRun
- 	vsCapability bool
- 	lastWritten  string
-+	indent       int
-+	lineStart    bool
-+	lineCount    int
-+	linePos      int
- }
- 
- func newDisplayPartsWriter(vsCapability bool) *displayPartsWriter {
--	return &displayPartsWriter{vsCapability: vsCapability}
-+	return &displayPartsWriter{vsCapability: vsCapability, lineStart: true}
- }
- 
- func (w *displayPartsWriter) addRun(classification lsproto.ClassificationTypeName, text string) {
- 	if text == "" {
- 		return
- 	}
-+	if w.lineStart {
-+		if ind := strings.Repeat(" ", w.indent*printer.GetDefaultIndentSize()); ind != "" {
-+			w.appendRun(lsproto.ClassificationTypeNameWhiteSpace, ind)
-+		}
-+		w.lineStart = false
-+	}
-+	w.appendRun(classification, text)
-+}
-+
-+func (w *displayPartsWriter) appendRun(classification lsproto.ClassificationTypeName, text string) {
- 	if w.vsCapability {
- 		w.runs = append(w.runs, &lsproto.VSClassifiedTextRun{
- 			ClassificationTypeName: string(classification),
-@@ -39,6 +55,24 @@ func (w *displayPartsWriter) addRun(classification lsproto.ClassificationTypeNam
- 	}
- 	w.lastWritten = text
- 	w.builder.WriteString(text)
-+	w.updateLineCountAndPosFor(text)
-+}
-+
-+func (w *displayPartsWriter) updateLineCountAndPosFor(s string) {
-+	var count int
-+	var lastLineStart core.TextPos
-+	for lineStart := range core.ComputeECMALineStartsSeq(s) {
-+		count++
-+		lastLineStart = lineStart
-+	}
-+	if count > 1 {
-+		w.lineCount += count - 1
-+		curLen := w.builder.Len()
-+		w.linePos = curLen - len(s) + int(lastLineStart)
-+		w.lineStart = (w.linePos - curLen) == 0
-+		return
-+	}
-+	w.lineStart = false
- }
- 
- // WriteClassified writes text with an explicit classification type.
-@@ -71,13 +105,34 @@ func (w *displayPartsWriter) Clear() {
- 	w.runs = nil
- }
- 
--func (w displayPartsWriter) DecreaseIndent() {}
-+// dropTrailingSemicolon removes a trailing punctuation ";" run (and its text
-+// from the flat string): body-less signature declarations print with a trailing
-+// ';' that stock's signature display never includes.
-+func (w *displayPartsWriter) dropTrailingSemicolon() {
-+	if len(w.runs) == 0 {
-+		return
-+	}
-+	last := w.runs[len(w.runs)-1]
-+	if last.Text == ";" && last.ClassificationTypeName == string(lsproto.ClassificationTypeNamePunctuation) {
-+		w.runs = w.runs[:len(w.runs)-1]
-+		s := w.builder.String()
-+		w.builder.Reset()
-+		w.builder.WriteString(strings.TrimSuffix(s, ";"))
-+	}
-+}
-+
-+func (w *displayPartsWriter) DecreaseIndent() { w.indent-- }
- 
--func (w displayPartsWriter) GetColumn() core.UTF16Offset { return 0 }
-+func (w *displayPartsWriter) GetColumn() core.UTF16Offset {
-+	if w.lineStart {
-+		return core.UTF16Offset(w.indent * printer.GetDefaultIndentSize())
-+	}
-+	return core.UTF16Len(w.builder.String()[w.linePos:])
-+}
- 
--func (w displayPartsWriter) GetIndent() int { return 0 }
-+func (w *displayPartsWriter) GetIndent() int { return w.indent }
- 
--func (w displayPartsWriter) GetLine() int { return 0 }
-+func (w *displayPartsWriter) GetLine() int { return w.lineCount }
- 
- func (w displayPartsWriter) GetTextPos() int {
- 	return w.builder.Len()
-@@ -96,9 +151,9 @@ func (w displayPartsWriter) HasTrailingWhitespace() bool {
- 	return stringutil.IsWhiteSpaceLike(ch)
- }
- 
--func (w displayPartsWriter) IncreaseIndent() {}
-+func (w *displayPartsWriter) IncreaseIndent() { w.indent++ }
- 
--func (w displayPartsWriter) IsAtStartOfLine() bool { return false }
-+func (w *displayPartsWriter) IsAtStartOfLine() bool { return w.lineStart }
- 
- func (w *displayPartsWriter) RawWrite(s string) {
- 	w.addRun(lsproto.ClassificationTypeNameText, s)
-@@ -118,11 +173,21 @@ func (w *displayPartsWriter) WriteKeyword(text string) {
- }
- 
- func (w *displayPartsWriter) WriteLine() {
--	w.addRun(lsproto.ClassificationTypeNameWhiteSpace, " ")
-+	// Stock lineBreakPart(): multiline displays (e.g. object type literals in
-+	// quickinfo) carry real newlines, not spaces.
-+	if !w.lineStart {
-+		w.writeLineRaw()
-+	}
- }
- 
- func (w *displayPartsWriter) WriteLineForce(force bool) {
--	w.addRun(lsproto.ClassificationTypeNameWhiteSpace, " ")
-+	if !w.lineStart || force {
-+		w.writeLineRaw()
-+	}
-+}
-+
-+func (w *displayPartsWriter) writeLineRaw() {
-+	w.appendRun(lsproto.ClassificationTypeNameWhiteSpace, "\n")
- }
- 
- func (w *displayPartsWriter) WriteLiteral(s string) {
-diff --git a/internal/ls/findallreferences.go b/internal/ls/findallreferences.go
-index 28043f859..beb9638d4 100644
---- a/internal/ls/findallreferences.go
-+++ b/internal/ls/findallreferences.go
-@@ -237,8 +237,8 @@ func getContextNodeForNodeEntry(node *ast.Node) *ast.Node {
- 			return node.Parent
- 		case ast.KindStringLiteral, ast.KindNoSubstitutionTemplateLiteral:
- 			if validImport := ast.TryGetImportFromModuleSpecifier(node); validImport != nil {
--				declOrStatement := ast.FindAncestor(validImport, func(*ast.Node) bool {
--					return ast.IsDeclaration(node) || ast.IsStatement(node) || ast.IsJSDocTag(node)
-+				declOrStatement := ast.FindAncestor(validImport, func(n *ast.Node) bool {
-+					return ast.IsDeclaration(n) || ast.IsStatement(n) || ast.IsJSDocTag(n)
- 				})
- 				if ast.IsDeclaration(declOrStatement) {
- 					return getContextNode(declOrStatement)
-diff --git a/internal/ls/hover.go b/internal/ls/hover.go
-index da4f11883..fdc8bc0f3 100644
---- a/internal/ls/hover.go
-+++ b/internal/ls/hover.go
-@@ -15,6 +15,7 @@ import (
- 	"github.com/microsoft/typescript-go/internal/nodebuilder"
- 	"github.com/microsoft/typescript-go/internal/printer"
- 	"github.com/microsoft/typescript-go/internal/scanner"
-+	"strconv"
- )
- 
- const (
-@@ -347,6 +348,9 @@ func getQuickInfoAndDeclarationAtLocation(c *checker.Checker, symbol *ast.Symbol
- 		p.IdToSymbol = idToSymbol
- 		tempDpw := newDisplayPartsWriter(true)
- 		p.Write(sigNode, sourceFile, tempDpw, nil)
-+		// A body-less signature declaration prints with a trailing ';'
-+		// (`function f(x: T): U;`); stock's signature display never includes it.
-+		tempDpw.dropTrailingSemicolon()
- 		dpw.WriteFrom(tempDpw)
- 	}
- 
-@@ -362,7 +366,8 @@ func getQuickInfoAndDeclarationAtLocation(c *checker.Checker, symbol *ast.Symbol
- 	}
- 	if node.Kind == ast.KindThisKeyword && ast.IsInExpressionContext(node) || ast.IsThisInTypeQuery(node) {
- 		dpw.WriteKeyword("this")
--		dpw.WritePunctuation(": ")
-+		dpw.WritePunctuation(":")
-+		dpw.WriteSpace(" ")
- 		writeTypeClassified(c.GetTypeAtLocation(node), container, typeFormatFlags)
- 		return symbolDisplayInfo{displayParts: dpw}
- 	}
-@@ -387,22 +392,41 @@ func getQuickInfoAndDeclarationAtLocation(c *checker.Checker, symbol *ast.Symbol
- 		if aliasLevel != 0 {
- 			dpw.WritePunctuation("(")
- 			dpw.Write("alias")
--			dpw.WritePunctuation(") ")
-+			dpw.WritePunctuation(")")
-+			dpw.WriteSpace(" ")
- 		}
- 	}
-+	// writeOverloadSuffix appends Strada's " (+N overload(s))" suffix, with stock's
-+	// part segmentation: space, "(", "+", numericLiteral, space, text, ")".
-+	writeOverloadSuffix := func(total int) {
-+		dpw.WriteSpace(" ")
-+		dpw.WritePunctuation("(")
-+		dpw.WriteOperator("+")
-+		dpw.WriteLiteral(strconv.Itoa(total - 1))
-+		dpw.WriteSpace(" ")
-+		if total == 2 {
-+			dpw.Write("overload")
-+		} else {
-+			dpw.Write("overloads")
-+		}
-+		dpw.WritePunctuation(")")
-+	}
- 	writeSignatures := func(signatures []*checker.Signature, prefix string, parenthesized bool, symbol *ast.Symbol) {
--		for i, sig := range signatures {
-+		// Strada writes a single signature plus the " (+N overloads)" suffix.
-+		total := len(signatures)
-+		if total > 1 {
-+			signatures = signatures[:1]
-+		}
-+		for _, sig := range signatures {
- 			writeNewLine()
--			if i == 3 && len(signatures) >= 5 {
--				dpw.WriteComment(fmt.Sprintf("// +%v more overloads", len(signatures)-3))
--				break
--			}
- 			if parenthesized {
- 				dpw.WritePunctuation("(")
- 				dpw.Write(prefix)
--				dpw.WritePunctuation(") ")
-+				dpw.WritePunctuation(")")
-+				dpw.WriteSpace(" ")
- 			} else {
- 				dpw.WriteKeyword(prefix)
-+				dpw.WriteSpace(" ")
- 			}
- 			writeSymbolClassified(symbol, container, ast.SymbolFlagsNone, symbolFormatFlags)
- 			if symbol.Flags&ast.SymbolFlagsOptional != 0 {
-@@ -410,23 +434,31 @@ func getQuickInfoAndDeclarationAtLocation(c *checker.Checker, symbol *ast.Symbol
- 			}
- 			writeSignatureClassified(sig, container, typeFormatFlags|checker.TypeFormatFlagsWriteCallStyleSignature|checker.TypeFormatFlagsWriteTypeArgumentsOfSignature)
- 		}
-+		if total > 1 {
-+			writeOverloadSuffix(total)
-+		}
- 	}
- 	writeTypeParams := func(params []*checker.Type) {
- 		if len(params) > 0 {
- 			dpw.WritePunctuation("<")
- 			for i, tp := range params {
- 				if i != 0 {
--					dpw.WritePunctuation(", ")
-+					dpw.WritePunctuation(",")
-+					dpw.WriteSpace(" ")
- 				}
- 				writeSymbolClassified(tp.Symbol(), nil, ast.SymbolFlagsNone, symbolFormatFlags)
- 				cons := c.GetConstraintOfTypeParameter(tp)
- 				if cons != nil {
--					dpw.WriteKeyword(" extends ")
-+					dpw.WriteSpace(" ")
-+					dpw.WriteKeyword("extends")
-+					dpw.WriteSpace(" ")
- 					writeTypeClassified(cons, nil, typeFormatFlags)
- 				}
- 				def := c.GetDefaultFromTypeParameter(tp)
- 				if def != nil {
--					dpw.WriteOperator(" = ")
-+					dpw.WriteSpace(" ")
-+					dpw.WriteOperator("=")
-+					dpw.WriteSpace(" ")
- 					writeTypeClassified(def, nil, typeFormatFlags)
- 				}
- 			}
-@@ -481,14 +513,51 @@ func getQuickInfoAndDeclarationAtLocation(c *checker.Checker, symbol *ast.Symbol
- 		}
- 		return false
- 	}
-+	// writeImportLine appends the "import X" line Strada shows after an alias
-+	// display (including import-equals suffixes).
-+	writeImportLine := func(symbol *ast.Symbol) {
-+		if dpw.String() != "" {
-+			dpw.Write("\n")
-+		}
-+		dpw.WriteKeyword("import")
-+		dpw.WriteSpace(" ")
-+		writeSymbolClassified(symbol, container, ast.SymbolFlagsNone, symbolFormatFlags)
-+		for _, declaration := range symbol.Declarations {
-+			if !ast.IsImportEqualsDeclaration(declaration) {
-+				continue
-+			}
-+			if ast.IsExternalModuleImportEqualsDeclaration(declaration) {
-+				dpw.WriteSpace(" ")
-+				dpw.WriteOperator("=")
-+				dpw.WriteSpace(" ")
-+				dpw.WriteKeyword("require")
-+				dpw.WritePunctuation("(")
-+				dpw.WriteLiteral(scanner.GetTextOfNode(ast.GetExternalModuleImportEqualsDeclarationExpression(declaration)))
-+				dpw.WritePunctuation(")")
-+			} else if internalAlias := c.GetSymbolAtLocation(declaration.AsImportEqualsDeclaration().ModuleReference); internalAlias != nil {
-+				dpw.WriteSpace(" ")
-+				dpw.WriteOperator("=")
-+				dpw.WriteSpace(" ")
-+				writeSymbolClassified(internalAlias, container, ast.SymbolFlagsNone, symbolFormatFlags)
-+			}
-+		}
-+	}
- 	var writeSymbol func(*ast.Symbol)
- 	writeSymbol = func(symbol *ast.Symbol) {
- 		// Recursively write all meanings of alias
- 		if symbol.Flags&ast.SymbolFlagsAlias != 0 && visitedAliases.AddIfAbsent(symbol) {
- 			if aliasedSymbol := c.GetAliasedSymbol(symbol); aliasedSymbol != c.GetUnknownSymbol() {
- 				aliasLevel++
--				writeSymbol(aliasedSymbol)
-+				// Strada: when the resolved symbol's first declaration has no
-+				// name (e.g. `export default 42`), only the import line shows.
-+				if resolvedNode := core.FirstOrNil(aliasedSymbol.Declarations); resolvedNode == nil || ast.GetNameOfDeclaration(resolvedNode) != nil {
-+					writeSymbol(aliasedSymbol)
-+				}
- 				aliasLevel--
-+				if aliasLevel == 0 {
-+					writeImportLine(symbol)
-+				}
-+				return
- 			}
- 		}
- 		var flags ast.SymbolFlags
-@@ -521,11 +590,13 @@ func getQuickInfoAndDeclarationAtLocation(c *checker.Checker, symbol *ast.Symbol
- 				case flags&ast.SymbolFlagsProperty != 0:
- 					dpw.WritePunctuation("(")
- 					dpw.Write("property")
--					dpw.WritePunctuation(") ")
-+					dpw.WritePunctuation(")")
-+					dpw.WriteSpace(" ")
- 				case flags&ast.SymbolFlagsAccessor != 0:
- 					dpw.WritePunctuation("(")
- 					dpw.Write("accessor")
--					dpw.WritePunctuation(") ")
-+					dpw.WritePunctuation(")")
-+					dpw.WriteSpace(" ")
- 				default:
- 					decl := symbol.ValueDeclaration
- 					if decl != nil {
-@@ -534,18 +605,25 @@ func getQuickInfoAndDeclarationAtLocation(c *checker.Checker, symbol *ast.Symbol
- 						case ast.IsParameterDeclaration(decl):
- 							dpw.WritePunctuation("(")
- 							dpw.Write("parameter")
--							dpw.WritePunctuation(") ")
-+							dpw.WritePunctuation(")")
-+							dpw.WriteSpace(" ")
- 						case ast.IsVarLet(decl):
--							dpw.WriteKeyword("let ")
-+							dpw.WriteKeyword("let")
-+							dpw.WriteSpace(" ")
- 						case ast.IsVarConst(decl):
--							dpw.WriteKeyword("const ")
-+							dpw.WriteKeyword("const")
-+							dpw.WriteSpace(" ")
- 						case ast.IsVarUsing(decl):
--							dpw.WriteKeyword("using ")
-+							dpw.WriteKeyword("using")
-+							dpw.WriteSpace(" ")
- 						case ast.IsVarAwaitUsing(decl):
--							dpw.WriteKeyword("await ")
--							dpw.WriteKeyword("using ")
-+							dpw.WriteKeyword("await")
-+							dpw.WriteSpace(" ")
-+							dpw.WriteKeyword("using")
-+							dpw.WriteSpace(" ")
- 						default:
--							dpw.WriteKeyword("var ")
-+							dpw.WriteKeyword("var")
-+							dpw.WriteSpace(" ")
- 						}
- 					}
- 				}
-@@ -557,7 +635,8 @@ func getQuickInfoAndDeclarationAtLocation(c *checker.Checker, symbol *ast.Symbol
- 				if symbol.Flags&ast.SymbolFlagsOptional != 0 {
- 					dpw.WritePunctuation("?")
- 				}
--				dpw.WritePunctuation(": ")
-+				dpw.WritePunctuation(":")
-+				dpw.WriteSpace(" ")
- 			}
- 			if callNode := getCallOrNewExpression(node); callNode != nil {
- 				flags := typeFormatFlags | checker.TypeFormatFlagsWriteTypeArgumentsOfSignature | checker.TypeFormatFlagsWriteArrowStyleSignature
-@@ -565,6 +644,13 @@ func getQuickInfoAndDeclarationAtLocation(c *checker.Checker, symbol *ast.Symbol
- 					flags |= checker.TypeFormatFlagsWriteCallStyleSignature
- 				}
- 				writeSignatureClassified(c.GetResolvedSignature(callNode), container, flags)
-+				// Strada: resolved signature plus " (+N overloads)" when the
-+				// symbol's type has further call signatures.
-+				if t := c.GetTypeOfSymbolAtLocation(symbol, node); t != nil {
-+					if sigs := c.GetCallSignatures(c.GetNonNullableType(t)); len(sigs) > 1 {
-+						writeOverloadSuffix(len(sigs))
-+					}
-+				}
- 			} else {
- 				t := c.GetTypeOfSymbolAtLocation(symbol, node)
- 				// If the type is a constrained type parameter, support expansion:
-@@ -593,30 +679,52 @@ func getQuickInfoAndDeclarationAtLocation(c *checker.Checker, symbol *ast.Symbol
- 			writeNewLine()
- 			dpw.WritePunctuation("(")
- 			dpw.Write("enum member")
--			dpw.WritePunctuation(") ")
-+			dpw.WritePunctuation(")")
-+			dpw.WriteSpace(" ")
- 			t := c.GetTypeOfSymbol(symbol)
- 			writeTypeClassified(t, container, typeFormatFlags)
- 			if t.Flags()&checker.TypeFlagsLiteral != 0 {
--				dpw.WriteOperator(" = ")
-+				dpw.WriteSpace(" ")
-+				dpw.WriteOperator("=")
-+				dpw.WriteSpace(" ")
- 				dpw.WriteLiteral(t.AsLiteralType().String())
- 			}
- 			setDeclaration(symbol.ValueDeclaration)
- 		}
- 		if flags&(ast.SymbolFlagsFunction|ast.SymbolFlagsMethod) != 0 {
- 			isMethod := flags&ast.SymbolFlagsMethod != 0
--			prefix := core.IfElse(isMethod, "method", "function ")
--			if ast.IsIdentifier(node) && (ast.IsFunctionLikeDeclaration(node.Parent) || ast.IsMethodSignatureDeclaration(node.Parent)) && node.Parent.Name() == node && slices.Contains(symbol.Declarations, node.Parent) {
--				setDeclaration(node.Parent)
--				signatures := []*checker.Signature{c.GetSignatureFromDeclaration(node.Parent)}
--				writeSignatures(signatures, prefix, isMethod, symbol)
--			} else {
--				signatures := getSignaturesAtLocation(c, symbol, checker.SignatureKindCall, node)
--				if len(signatures) == 1 {
--					if d := signatures[0].Declaration(); d != nil && d.Flags&ast.NodeFlagsJSDoc == 0 {
--						setDeclaration(d)
-+			prefix := core.IfElse(isMethod, "method", "function")
-+			parenthesized := isMethod
-+			// Strada: in the alias recursion, a call that resolves to a single
-+			// signature displays the bare resolved signature (no kind keyword).
-+			handled := false
-+			if aliasLevel != 0 {
-+				if callNode := getCallOrNewExpression(node); callNode != nil {
-+					if sig := c.GetResolvedSignature(callNode); sig != nil {
-+						writeNewLine()
-+						writeSymbolClassified(symbol, container, ast.SymbolFlagsNone, symbolFormatFlags)
-+						writeSignatureClassified(sig, container, typeFormatFlags|checker.TypeFormatFlagsWriteCallStyleSignature|checker.TypeFormatFlagsWriteTypeArgumentsOfSignature)
-+						if sigs := getSignaturesAtLocation(c, symbol, checker.SignatureKindCall, node); len(sigs) > 1 {
-+							writeOverloadSuffix(len(sigs))
-+						}
-+						handled = true
-+					}
-+				}
-+			}
-+			if !handled {
-+				if ast.IsIdentifier(node) && (ast.IsFunctionLikeDeclaration(node.Parent) || ast.IsMethodSignatureDeclaration(node.Parent)) && node.Parent.Name() == node && slices.Contains(symbol.Declarations, node.Parent) {
-+					setDeclaration(node.Parent)
-+					signatures := []*checker.Signature{c.GetSignatureFromDeclaration(node.Parent)}
-+					writeSignatures(signatures, prefix, parenthesized, symbol)
-+				} else {
-+					signatures := getSignaturesAtLocation(c, symbol, checker.SignatureKindCall, node)
-+					if len(signatures) == 1 {
-+						if d := signatures[0].Declaration(); d != nil && d.Flags&ast.NodeFlagsJSDoc == 0 {
-+							setDeclaration(d)
-+						}
- 					}
-+					writeSignatures(signatures, prefix, parenthesized, symbol)
- 				}
--				writeSignatures(signatures, prefix, isMethod, symbol)
- 			}
- 			setDeclaration(symbol.ValueDeclaration)
- 		}
-@@ -627,7 +735,7 @@ func getQuickInfoAndDeclarationAtLocation(c *checker.Checker, symbol *ast.Symbol
- 			} else if node.Kind == ast.KindConstructorKeyword && (ast.IsConstructorDeclaration(node.Parent) || ast.IsConstructSignatureDeclaration(node.Parent)) {
- 				setDeclaration(node.Parent)
- 				signatures := []*checker.Signature{c.GetSignatureFromDeclaration(node.Parent)}
--				writeSignatures(signatures, "constructor ", false, symbol)
-+				writeSignatures(signatures, "constructor", false, symbol)
- 			} else {
- 				var signatures []*checker.Signature
- 				if flags&ast.SymbolFlagsClass != 0 && getCallOrNewExpression(node) != nil {
-@@ -637,7 +745,12 @@ func getQuickInfoAndDeclarationAtLocation(c *checker.Checker, symbol *ast.Symbol
- 					if d := signatures[0].Declaration(); d != nil && d.Flags&ast.NodeFlagsJSDoc == 0 {
- 						setDeclaration(d)
- 					}
--					writeSignatures(signatures, "constructor ", false, symbol)
-+					ctorPrefix := "constructor"
-+					if aliasLevel != 0 {
-+						// Strada writes alias construct signatures with "new ".
-+						ctorPrefix = "new"
-+					}
-+					writeSignatures(signatures, ctorPrefix, false, symbol)
- 				} else {
- 					writeNewLine()
- 					if flags&ast.SymbolFlagsClass != 0 {
-@@ -646,16 +759,19 @@ func getQuickInfoAndDeclarationAtLocation(c *checker.Checker, symbol *ast.Symbol
- 							// Local class expression: show "(local class)" prefix
- 							dpw.WritePunctuation("(")
- 							dpw.Write("local class")
--							dpw.WritePunctuation(") ")
-+							dpw.WritePunctuation(")")
-+							dpw.WriteSpace(" ")
- 						}
- 						if !tryExpandSymbol(symbol, flags) {
- 							if classExpression == nil {
- 								if core.Some(symbol.Declarations, func(d *ast.Node) bool {
- 									return ast.IsClassDeclaration(d) && ast.HasAbstractModifier(d)
- 								}) {
--									dpw.WriteKeyword("abstract ")
-+									dpw.WriteKeyword("abstract")
-+									dpw.WriteSpace(" ")
- 								}
--								dpw.WriteKeyword("class ")
-+								dpw.WriteKeyword("class")
-+								dpw.WriteSpace(" ")
- 							}
- 							writeSymbolClassified(symbol, container, ast.SymbolFlagsNone, symbolFormatFlags)
- 							params := c.GetDeclaredTypeOfSymbol(symbol).AsInterfaceType().LocalTypeParameters()
-@@ -663,7 +779,8 @@ func getQuickInfoAndDeclarationAtLocation(c *checker.Checker, symbol *ast.Symbol
- 						}
- 					} else {
- 						if !tryExpandSymbol(symbol, flags) {
--							dpw.WriteKeyword("interface ")
-+							dpw.WriteKeyword("interface")
-+							dpw.WriteSpace(" ")
- 							writeSymbolClassified(symbol, container, ast.SymbolFlagsNone, symbolFormatFlags)
- 							params := c.GetDeclaredTypeOfSymbol(symbol).AsInterfaceType().LocalTypeParameters()
- 							writeTypeParams(params)
-@@ -683,9 +800,11 @@ func getQuickInfoAndDeclarationAtLocation(c *checker.Checker, symbol *ast.Symbol
- 				if core.Some(symbol.Declarations, func(d *ast.Node) bool {
- 					return ast.IsEnumDeclaration(d) && ast.IsEnumConst(d)
- 				}) {
--					dpw.WriteKeyword("const ")
-+					dpw.WriteKeyword("const")
-+					dpw.WriteSpace(" ")
- 				}
--				dpw.WriteKeyword("enum ")
-+				dpw.WriteKeyword("enum")
-+				dpw.WriteSpace(" ")
- 				writeSymbolClassified(symbol, container, ast.SymbolFlagsNone, symbolFormatFlags)
- 			}
- 			setDeclaration(core.Find(symbol.Declarations, ast.IsEnumDeclaration))
-@@ -694,7 +813,8 @@ func getQuickInfoAndDeclarationAtLocation(c *checker.Checker, symbol *ast.Symbol
- 			writeNewLine()
- 			if !tryExpandSymbol(symbol, flags) {
- 				isModule := symbol.ValueDeclaration != nil && (ast.IsSourceFile(symbol.ValueDeclaration) || ast.IsAmbientModule(symbol.ValueDeclaration))
--				dpw.WriteKeyword(core.IfElse(isModule, "module ", "namespace "))
-+				dpw.WriteKeyword(core.IfElse(isModule, "module", "namespace"))
-+				dpw.WriteSpace(" ")
- 				writeSymbolClassified(symbol, container, ast.SymbolFlagsNone, symbolFormatFlags)
- 			}
- 			setDeclaration(core.Find(symbol.Declarations, ast.IsModuleDeclaration))
-@@ -703,18 +823,23 @@ func getQuickInfoAndDeclarationAtLocation(c *checker.Checker, symbol *ast.Symbol
- 			writeNewLine()
- 			dpw.WritePunctuation("(")
- 			dpw.Write("type parameter")
--			dpw.WritePunctuation(") ")
-+			dpw.WritePunctuation(")")
-+			dpw.WriteSpace(" ")
- 			tp := c.GetDeclaredTypeOfSymbol(symbol)
- 			writeSymbolClassified(symbol, container, ast.SymbolFlagsNone, symbolFormatFlags)
- 			cons := c.GetConstraintOfTypeParameter(tp)
- 			if cons != nil {
--				dpw.WriteKeyword(" extends ")
-+				dpw.WriteSpace(" ")
-+				dpw.WriteKeyword("extends")
-+				dpw.WriteSpace(" ")
- 				writeTypeClassified(cons, container, typeFormatFlags)
- 			}
- 			// Show context: "in ClassName<T>" or "in funcName<T>(...)"
- 			if symbol.Parent != nil {
- 				// Class/Interface type parameter
--				dpw.WriteKeyword(" in ")
-+				dpw.WriteSpace(" ")
-+				dpw.WriteKeyword("in")
-+				dpw.WriteSpace(" ")
- 				writeSymbolClassified(symbol.Parent, container, ast.SymbolFlagsNone, symbolFormatFlags)
- 				if parentType := c.GetDeclaredTypeOfSymbol(symbol.Parent); parentType.AsInterfaceType() != nil {
- 					parentParams := parentType.AsInterfaceType().LocalTypeParameters()
-@@ -726,9 +851,12 @@ func getQuickInfoAndDeclarationAtLocation(c *checker.Checker, symbol *ast.Symbol
- 				if decl != nil && decl.Parent != nil {
- 					declaration := decl.Parent
- 					if ast.IsFunctionLike(declaration) {
--						dpw.WriteKeyword(" in ")
-+						dpw.WriteSpace(" ")
-+						dpw.WriteKeyword("in")
-+						dpw.WriteSpace(" ")
- 						if declaration.Kind == ast.KindConstructSignature {
--							dpw.WriteKeyword("new ")
-+							dpw.WriteKeyword("new")
-+							dpw.WriteSpace(" ")
- 						} else if declaration.Kind != ast.KindCallSignature && declaration.Name() != nil {
- 							writeSymbolClassified(declaration.Symbol(), container, ast.SymbolFlagsNone, symbolFormatFlags)
- 						}
-@@ -737,8 +865,11 @@ func getQuickInfoAndDeclarationAtLocation(c *checker.Checker, symbol *ast.Symbol
- 							writeSignatureClassified(sig, container, typeFormatFlags|checker.TypeFormatFlagsWriteTypeArgumentsOfSignature)
- 						}
- 					} else if ast.IsTypeAliasDeclaration(declaration) {
--						dpw.WriteKeyword(" in ")
--						dpw.WriteKeyword("type ")
-+						dpw.WriteSpace(" ")
-+						dpw.WriteKeyword("in")
-+						dpw.WriteSpace(" ")
-+						dpw.WriteKeyword("type")
-+						dpw.WriteSpace(" ")
- 						writeSymbolClassified(declaration.Symbol(), container, ast.SymbolFlagsNone, symbolFormatFlags)
- 						if declSymbol := declaration.Symbol(); declSymbol != nil {
- 							taParams := c.GetTypeAliasTypeParameters(declSymbol)
-@@ -751,10 +882,13 @@ func getQuickInfoAndDeclarationAtLocation(c *checker.Checker, symbol *ast.Symbol
- 		}
- 		if flags&ast.SymbolFlagsTypeAlias != 0 {
- 			writeNewLine()
--			dpw.WriteKeyword("type ")
-+			dpw.WriteKeyword("type")
-+			dpw.WriteSpace(" ")
- 			writeSymbolClassified(symbol, container, ast.SymbolFlagsNone, symbolFormatFlags)
- 			writeTypeParams(c.GetTypeAliasTypeParameters(symbol))
--			dpw.WriteOperator(" = ")
-+			dpw.WriteSpace(" ")
-+			dpw.WriteOperator("=")
-+			dpw.WriteSpace(" ")
- 			var typeAliasType *checker.Type
- 			if node.Parent != nil && ast.IsConstTypeReference(node.Parent) {
- 				typeAliasType = c.GetTypeAtLocation(node.Parent)
-@@ -851,6 +985,18 @@ func getJSDoc(node *ast.Node) *ast.Node {
- }
- 
- func getJSDocOrTag(c *checker.Checker, node *ast.Node) *ast.Node {
-+	return getJSDocOrTagWorker(c, node, true /*inheritBase*/)
-+}
-+
-+// getJSDocOrTagNoInherit mirrors getJSDocOrTag without the base-type walk:
-+// stock's @param/@template tags come only from the declaring function's own
-+// JSDoc (getJSDocParameterTagsWorker / getJSDocTagsWorker), never from an
-+// overridden base member.
-+func getJSDocOrTagNoInherit(c *checker.Checker, node *ast.Node) *ast.Node {
-+	return getJSDocOrTagWorker(c, node, false /*inheritBase*/)
-+}
-+
-+func getJSDocOrTagWorker(c *checker.Checker, node *ast.Node, inheritBase bool) *ast.Node {
- 	if jsdoc := getJSDoc(node); jsdoc != nil {
- 		return jsdoc
- 	}
-@@ -865,10 +1011,10 @@ func getJSDocOrTag(c *checker.Checker, node *ast.Node) *ast.Node {
- 	case ast.IsTypeParameterDeclaration(node):
- 		return getMatchingJSDocTag(c, node.Parent, node.Name().Text(), isMatchingTemplateTag)
- 	case ast.IsVariableDeclaration(node) && ast.IsVariableDeclarationList(node.Parent) && core.FirstOrNil(node.Parent.AsVariableDeclarationList().Declarations.Nodes) == node:
--		return getJSDocOrTag(c, node.Parent.Parent)
-+		return getJSDocOrTagWorker(c, node.Parent.Parent, inheritBase)
- 	case (ast.IsFunctionExpressionOrArrowFunction(node) || ast.IsClassExpression(node)) &&
- 		(ast.IsVariableDeclaration(node.Parent) || ast.IsPropertyDeclaration(node.Parent) || ast.IsPropertyAssignment(node.Parent)) && node.Parent.Initializer() == node:
--		return getJSDocOrTag(c, node.Parent)
-+		return getJSDocOrTagWorker(c, node.Parent, inheritBase)
- 	case ast.IsBindingElement(node) && ast.IsObjectBindingPattern(node.Parent):
- 		if name := node.PropertyNameOrName(); ast.IsIdentifier(name) {
- 			if objectType := c.GetTypeAtLocation(node.Parent); objectType != nil {
-@@ -886,12 +1032,12 @@ func getJSDocOrTag(c *checker.Checker, node *ast.Node) *ast.Node {
- 		if ast.IsFunctionDeclaration(node) || ast.IsMethodDeclaration(node) || ast.IsMethodSignatureDeclaration(node) || ast.IsConstructorDeclaration(node) || ast.IsConstructSignatureDeclaration(node) {
- 			firstSignature := core.Find(symbol.Declarations, ast.IsFunctionLike)
- 			if firstSignature != nil && node != firstSignature {
--				if jsDoc := getJSDocOrTag(c, firstSignature); jsDoc != nil {
-+				if jsDoc := getJSDocOrTagWorker(c, firstSignature, inheritBase); jsDoc != nil {
- 					return jsDoc
- 				}
- 			}
- 		}
--		if ast.IsClassOrInterfaceLike(node.Parent) {
-+		if inheritBase && ast.IsClassOrInterfaceLike(node.Parent) {
- 			isStatic := ast.HasStaticModifier(node)
- 			classType := c.GetDeclaredTypeOfSymbol(node.Parent.Symbol())
- 			if isStatic {
-@@ -919,7 +1065,7 @@ func getJSDocOrTag(c *checker.Checker, node *ast.Node) *ast.Node {
- }
- 
- func getMatchingJSDocTag(c *checker.Checker, node *ast.Node, name string, match func(*ast.Node, string) bool) *ast.Node {
--	if jsdoc := getJSDocOrTag(c, node); jsdoc != nil && jsdoc.Kind == ast.KindJSDoc {
-+	if jsdoc := getJSDocOrTagNoInherit(c, node); jsdoc != nil && jsdoc.Kind == ast.KindJSDoc {
- 		if tags := jsdoc.AsJSDoc().Tags; tags != nil {
- 			for _, tag := range tags.Nodes {
- 				if match(tag, name) {
-@@ -953,7 +1099,7 @@ func getJSDocParameterTagByPosition(c *checker.Checker, param *ast.Node) *ast.No
- 	}
- 
- 	// Get the JSDoc for the parent function/method
--	jsdoc := getJSDocOrTag(c, parent)
-+	jsdoc := getJSDocOrTagNoInherit(c, parent)
- 	if jsdoc == nil || jsdoc.Kind != ast.KindJSDoc {
- 		return nil
- 	}
 diff --git a/internal/ls/inlay_hints.go b/internal/ls/inlay_hints.go
 index a1923826c..aa562b80d 100644
 --- a/internal/ls/inlay_hints.go
@@ -3317,31 +2595,6 @@ index a1923826c..aa562b80d 100644
  func identifierOrAccessExpressionPostfixMatchesParameterName(expr *ast.Expression, parameterName string) bool {
  	if ast.IsIdentifier(expr) {
  		return expr.Text() == parameterName
-diff --git a/internal/ls/jsdoc.go b/internal/ls/jsdoc.go
-index a5992fa73..ddc807e95 100644
---- a/internal/ls/jsdoc.go
-+++ b/internal/ls/jsdoc.go
-@@ -82,6 +82,20 @@ func (l *LanguageService) GetSymbolJSDocTags(symbol *ast.Symbol) []JSDocTagInfo
- // declarationJSDocTags returns the JSDoc tags associated with a declaration, walking the
- // JSDoc comment location chain like the checker's getAllJSDocTags.
- func declarationJSDocTags(node *ast.Node) []*ast.Node {
-+	if ast.IsParameterDeclaration(node) {
-+		// getJSDocCommentsAndTags: a parameter owns the matching @param tags of
-+		// its declaring function's JSDoc (not the function's whole tag list).
-+		if fn := node.Parent; fn != nil && ast.IsFunctionLikeDeclaration(fn) && node.Name() != nil {
-+			name := node.Name().Text()
-+			var out []*ast.Node
-+			for _, tag := range declarationJSDocTags(fn) {
-+				if tag.Kind == ast.KindJSDocParameterTag && tag.Name() != nil && tag.Name().Text() == name {
-+					out = append(out, tag)
-+				}
-+			}
-+			return out
-+		}
-+	}
- 	if node.Flags&ast.NodeFlagsJSDoc == 0 {
- 		for current := node; current != nil; current = ast.GetNextJSDocCommentLocation(current) {
- 			jsdocs := current.JSDoc(nil)
 diff --git a/internal/ls/languageservice.go b/internal/ls/languageservice.go
 index 7c7e1aced..b6d587aba 100644
 --- a/internal/ls/languageservice.go

@@ -377,19 +377,6 @@ func (l *LanguageService) quickInfoDocumentation(c *checker.Checker, symbol *ast
 			return []DisplayPart{{Text: doc, Kind: "text"}}
 		}
 	}
-	// Stock's getDocumentationComment reads JSDoc from every declaration of the
-	// symbol — a transient member symbol can have a nil ValueDeclaration while
-	// Declarations still names the real one (e.g. volar template-typed props).
-	if symbol != nil {
-		for _, decl := range symbol.Declarations {
-			if decl == nil || decl == declaration {
-				continue
-			}
-			if doc := l.getDocumentationFromDeclaration(c, symbol, decl, node, lsproto.MarkupKindPlainText, true /*commentOnly*/); doc != "" {
-				return []DisplayPart{{Text: doc, Kind: "text"}}
-			}
-		}
-	}
 	if symbol != nil && symbol.Flags&ast.SymbolFlagsAlias != 0 {
 		if aliased := c.GetAliasedSymbol(symbol); aliased != nil && aliased != c.GetUnknownSymbol() {
 			candidates := []*ast.Symbol{aliased}
