@@ -3,6 +3,13 @@
 // success=false ("No content available.") but TNB historically returned
 // success=true. Sweep-fixture witnesses: comment interiors, template-literal
 // interiors, import-keyword column-1 tokens.
+//
+// v5 classification: success/emptiness parity is bridge-contract surface
+// (stock services behavior depends on it) and stays stock-gated; the
+// displayString comparison is engine display behavior (pristine tsgo
+// reference) — currently byte-identical on these positions, so it stays
+// inline; if it ever diffs, register a KNOWN entry instead of reverting to
+// stock parity.
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { tnbHarnessEnv, withTsserver } from './tsserver-harness.mjs';

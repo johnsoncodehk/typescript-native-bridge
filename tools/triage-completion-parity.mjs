@@ -2,6 +2,12 @@
 // Witness: TNB vs stock completionInfo parity on name/kind/kindModifiers/sortText.
 // Sites: main.vue script global, plain .ts global, import-specifier.
 // BASELINE_OUT=/tmp/... writes a snapshot; COMPARE_BASELINE=/tmp/... fails on regression.
+//
+// v5 classification: candidate SET semantics (name/kind/kindModifiers
+// membership) is bridge-contract surface and stays stock-gated; sortText is
+// ordering/display behavior (pristine tsgo reference) — currently identical,
+// so it stays in the compare key; if it ever diffs alone, split it out and
+// register a KNOWN entry instead of failing the set comparison.
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { resolveVolarRoot } from './volar-root.mjs';
