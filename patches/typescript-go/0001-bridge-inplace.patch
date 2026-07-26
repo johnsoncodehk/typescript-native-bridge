@@ -2525,6 +2525,149 @@ index 5e62661fc..7552798c1 100644
  			}
  		}
  		current = current.Parent
+diff --git a/internal/ls/displaypartswriter.go b/internal/ls/displaypartswriter.go
+index eaced7b9a..a26fec22f 100644
+--- a/internal/ls/displaypartswriter.go
++++ b/internal/ls/displaypartswriter.go
+@@ -16,21 +16,37 @@ var _ printer.EmitTextWriter = &displayPartsWriter{}
+ // displayPartsWriter implements EmitTextWriter and captures classified text runs
+ // for VS colorized labels, while also building a plain string.
+ // When vsCapability is false, only the plain string is built; runs are skipped.
++// Indent is tracked like printer.textWriter so multiline displays (object type
++// literals) keep their indentation.
+ type displayPartsWriter struct {
+ 	builder      strings.Builder
+ 	runs         []*lsproto.VSClassifiedTextRun
+ 	vsCapability bool
+ 	lastWritten  string
++	indent       int
++	lineStart    bool
++	lineCount    int
++	linePos      int
+ }
+ 
+ func newDisplayPartsWriter(vsCapability bool) *displayPartsWriter {
+-	return &displayPartsWriter{vsCapability: vsCapability}
++	return &displayPartsWriter{vsCapability: vsCapability, lineStart: true}
+ }
+ 
+ func (w *displayPartsWriter) addRun(classification lsproto.ClassificationTypeName, text string) {
+ 	if text == "" {
+ 		return
+ 	}
++	if w.lineStart {
++		if ind := strings.Repeat(" ", w.indent*printer.GetDefaultIndentSize()); ind != "" {
++			w.appendRun(lsproto.ClassificationTypeNameWhiteSpace, ind)
++		}
++		w.lineStart = false
++	}
++	w.appendRun(classification, text)
++}
++
++func (w *displayPartsWriter) appendRun(classification lsproto.ClassificationTypeName, text string) {
+ 	if w.vsCapability {
+ 		w.runs = append(w.runs, &lsproto.VSClassifiedTextRun{
+ 			ClassificationTypeName: string(classification),
+@@ -39,6 +55,24 @@ func (w *displayPartsWriter) addRun(classification lsproto.ClassificationTypeNam
+ 	}
+ 	w.lastWritten = text
+ 	w.builder.WriteString(text)
++	w.updateLineCountAndPosFor(text)
++}
++
++func (w *displayPartsWriter) updateLineCountAndPosFor(s string) {
++	var count int
++	var lastLineStart core.TextPos
++	for lineStart := range core.ComputeECMALineStartsSeq(s) {
++		count++
++		lastLineStart = lineStart
++	}
++	if count > 1 {
++		w.lineCount += count - 1
++		curLen := w.builder.Len()
++		w.linePos = curLen - len(s) + int(lastLineStart)
++		w.lineStart = (w.linePos - curLen) == 0
++		return
++	}
++	w.lineStart = false
+ }
+ 
+ // WriteClassified writes text with an explicit classification type.
+@@ -71,13 +105,34 @@ func (w *displayPartsWriter) Clear() {
+ 	w.runs = nil
+ }
+ 
+-func (w displayPartsWriter) DecreaseIndent() {}
++// dropTrailingSemicolon removes a trailing punctuation ";" run (and its text
++// from the flat string): body-less signature declarations print with a trailing
++// ';' that stock's signature display never includes.
++func (w *displayPartsWriter) dropTrailingSemicolon() {
++	if len(w.runs) == 0 {
++		return
++	}
++	last := w.runs[len(w.runs)-1]
++	if last.Text == ";" && last.ClassificationTypeName == string(lsproto.ClassificationTypeNamePunctuation) {
++		w.runs = w.runs[:len(w.runs)-1]
++		s := w.builder.String()
++		w.builder.Reset()
++		w.builder.WriteString(strings.TrimSuffix(s, ";"))
++	}
++}
++
++func (w *displayPartsWriter) DecreaseIndent() { w.indent-- }
+ 
+-func (w displayPartsWriter) GetColumn() core.UTF16Offset { return 0 }
++func (w *displayPartsWriter) GetColumn() core.UTF16Offset {
++	if w.lineStart {
++		return core.UTF16Offset(w.indent * printer.GetDefaultIndentSize())
++	}
++	return core.UTF16Len(w.builder.String()[w.linePos:])
++}
+ 
+-func (w displayPartsWriter) GetIndent() int { return 0 }
++func (w *displayPartsWriter) GetIndent() int { return w.indent }
+ 
+-func (w displayPartsWriter) GetLine() int { return 0 }
++func (w *displayPartsWriter) GetLine() int { return w.lineCount }
+ 
+ func (w displayPartsWriter) GetTextPos() int {
+ 	return w.builder.Len()
+@@ -96,9 +151,9 @@ func (w displayPartsWriter) HasTrailingWhitespace() bool {
+ 	return stringutil.IsWhiteSpaceLike(ch)
+ }
+ 
+-func (w displayPartsWriter) IncreaseIndent() {}
++func (w *displayPartsWriter) IncreaseIndent() { w.indent++ }
+ 
+-func (w displayPartsWriter) IsAtStartOfLine() bool { return false }
++func (w *displayPartsWriter) IsAtStartOfLine() bool { return w.lineStart }
+ 
+ func (w *displayPartsWriter) RawWrite(s string) {
+ 	w.addRun(lsproto.ClassificationTypeNameText, s)
+@@ -118,11 +173,21 @@ func (w *displayPartsWriter) WriteKeyword(text string) {
+ }
+ 
+ func (w *displayPartsWriter) WriteLine() {
+-	w.addRun(lsproto.ClassificationTypeNameWhiteSpace, " ")
++	// Stock lineBreakPart(): multiline displays (e.g. object type literals in
++	// quickinfo) carry real newlines, not spaces.
++	if !w.lineStart {
++		w.writeLineRaw()
++	}
+ }
+ 
+ func (w *displayPartsWriter) WriteLineForce(force bool) {
+-	w.addRun(lsproto.ClassificationTypeNameWhiteSpace, " ")
++	if !w.lineStart || force {
++		w.writeLineRaw()
++	}
++}
++
++func (w *displayPartsWriter) writeLineRaw() {
++	w.appendRun(lsproto.ClassificationTypeNameWhiteSpace, "\n")
+ }
+ 
+ func (w *displayPartsWriter) WriteLiteral(s string) {
 diff --git a/internal/ls/findallreferences.go b/internal/ls/findallreferences.go
 index 28043f859..beb9638d4 100644
 --- a/internal/ls/findallreferences.go
@@ -2541,7 +2684,7 @@ index 28043f859..beb9638d4 100644
  				if ast.IsDeclaration(declOrStatement) {
  					return getContextNode(declOrStatement)
 diff --git a/internal/ls/hover.go b/internal/ls/hover.go
-index da4f11883..71a8dbcee 100644
+index da4f11883..fdc8bc0f3 100644
 --- a/internal/ls/hover.go
 +++ b/internal/ls/hover.go
 @@ -15,6 +15,7 @@ import (
@@ -2552,19 +2695,49 @@ index da4f11883..71a8dbcee 100644
  )
  
  const (
-@@ -390,13 +391,24 @@ func getQuickInfoAndDeclarationAtLocation(c *checker.Checker, symbol *ast.Symbol
- 			dpw.WritePunctuation(") ")
+@@ -347,6 +348,9 @@ func getQuickInfoAndDeclarationAtLocation(c *checker.Checker, symbol *ast.Symbol
+ 		p.IdToSymbol = idToSymbol
+ 		tempDpw := newDisplayPartsWriter(true)
+ 		p.Write(sigNode, sourceFile, tempDpw, nil)
++		// A body-less signature declaration prints with a trailing ';'
++		// (`function f(x: T): U;`); stock's signature display never includes it.
++		tempDpw.dropTrailingSemicolon()
+ 		dpw.WriteFrom(tempDpw)
+ 	}
+ 
+@@ -362,7 +366,8 @@ func getQuickInfoAndDeclarationAtLocation(c *checker.Checker, symbol *ast.Symbol
+ 	}
+ 	if node.Kind == ast.KindThisKeyword && ast.IsInExpressionContext(node) || ast.IsThisInTypeQuery(node) {
+ 		dpw.WriteKeyword("this")
+-		dpw.WritePunctuation(": ")
++		dpw.WritePunctuation(":")
++		dpw.WriteSpace(" ")
+ 		writeTypeClassified(c.GetTypeAtLocation(node), container, typeFormatFlags)
+ 		return symbolDisplayInfo{displayParts: dpw}
+ 	}
+@@ -387,22 +392,41 @@ func getQuickInfoAndDeclarationAtLocation(c *checker.Checker, symbol *ast.Symbol
+ 		if aliasLevel != 0 {
+ 			dpw.WritePunctuation("(")
+ 			dpw.Write("alias")
+-			dpw.WritePunctuation(") ")
++			dpw.WritePunctuation(")")
++			dpw.WriteSpace(" ")
  		}
  	}
-+	// writeOverloadSuffix appends Strada's " (+N overload(s))" suffix.
++	// writeOverloadSuffix appends Strada's " (+N overload(s))" suffix, with stock's
++	// part segmentation: space, "(", "+", numericLiteral, space, text, ")".
 +	writeOverloadSuffix := func(total int) {
-+		dpw.WritePunctuation(" (+")
-+		dpw.Write(strconv.Itoa(total - 1))
++		dpw.WriteSpace(" ")
++		dpw.WritePunctuation("(")
++		dpw.WriteOperator("+")
++		dpw.WriteLiteral(strconv.Itoa(total - 1))
++		dpw.WriteSpace(" ")
 +		if total == 2 {
-+			dpw.Write(" overload)")
++			dpw.Write("overload")
 +		} else {
-+			dpw.Write(" overloads)")
++			dpw.Write("overloads")
 +		}
++		dpw.WritePunctuation(")")
 +	}
  	writeSignatures := func(signatures []*checker.Signature, prefix string, parenthesized bool, symbol *ast.Symbol) {
 -		for i, sig := range signatures {
@@ -2582,7 +2755,16 @@ index da4f11883..71a8dbcee 100644
  			if parenthesized {
  				dpw.WritePunctuation("(")
  				dpw.Write(prefix)
-@@ -410,6 +422,9 @@ func getQuickInfoAndDeclarationAtLocation(c *checker.Checker, symbol *ast.Symbol
+-				dpw.WritePunctuation(") ")
++				dpw.WritePunctuation(")")
++				dpw.WriteSpace(" ")
+ 			} else {
+ 				dpw.WriteKeyword(prefix)
++				dpw.WriteSpace(" ")
+ 			}
+ 			writeSymbolClassified(symbol, container, ast.SymbolFlagsNone, symbolFormatFlags)
+ 			if symbol.Flags&ast.SymbolFlagsOptional != 0 {
+@@ -410,23 +434,31 @@ func getQuickInfoAndDeclarationAtLocation(c *checker.Checker, symbol *ast.Symbol
  			}
  			writeSignatureClassified(sig, container, typeFormatFlags|checker.TypeFormatFlagsWriteCallStyleSignature|checker.TypeFormatFlagsWriteTypeArgumentsOfSignature)
  		}
@@ -2592,7 +2774,32 @@ index da4f11883..71a8dbcee 100644
  	}
  	writeTypeParams := func(params []*checker.Type) {
  		if len(params) > 0 {
-@@ -481,14 +496,47 @@ func getQuickInfoAndDeclarationAtLocation(c *checker.Checker, symbol *ast.Symbol
+ 			dpw.WritePunctuation("<")
+ 			for i, tp := range params {
+ 				if i != 0 {
+-					dpw.WritePunctuation(", ")
++					dpw.WritePunctuation(",")
++					dpw.WriteSpace(" ")
+ 				}
+ 				writeSymbolClassified(tp.Symbol(), nil, ast.SymbolFlagsNone, symbolFormatFlags)
+ 				cons := c.GetConstraintOfTypeParameter(tp)
+ 				if cons != nil {
+-					dpw.WriteKeyword(" extends ")
++					dpw.WriteSpace(" ")
++					dpw.WriteKeyword("extends")
++					dpw.WriteSpace(" ")
+ 					writeTypeClassified(cons, nil, typeFormatFlags)
+ 				}
+ 				def := c.GetDefaultFromTypeParameter(tp)
+ 				if def != nil {
+-					dpw.WriteOperator(" = ")
++					dpw.WriteSpace(" ")
++					dpw.WriteOperator("=")
++					dpw.WriteSpace(" ")
+ 					writeTypeClassified(def, nil, typeFormatFlags)
+ 				}
+ 			}
+@@ -481,14 +513,51 @@ func getQuickInfoAndDeclarationAtLocation(c *checker.Checker, symbol *ast.Symbol
  		}
  		return false
  	}
@@ -2603,20 +2810,24 @@ index da4f11883..71a8dbcee 100644
 +			dpw.Write("\n")
 +		}
 +		dpw.WriteKeyword("import")
-+		dpw.WritePunctuation(" ")
++		dpw.WriteSpace(" ")
 +		writeSymbolClassified(symbol, container, ast.SymbolFlagsNone, symbolFormatFlags)
 +		for _, declaration := range symbol.Declarations {
 +			if !ast.IsImportEqualsDeclaration(declaration) {
 +				continue
 +			}
 +			if ast.IsExternalModuleImportEqualsDeclaration(declaration) {
-+				dpw.WritePunctuation(" = ")
++				dpw.WriteSpace(" ")
++				dpw.WriteOperator("=")
++				dpw.WriteSpace(" ")
 +				dpw.WriteKeyword("require")
 +				dpw.WritePunctuation("(")
 +				dpw.WriteLiteral(scanner.GetTextOfNode(ast.GetExternalModuleImportEqualsDeclarationExpression(declaration)))
 +				dpw.WritePunctuation(")")
 +			} else if internalAlias := c.GetSymbolAtLocation(declaration.AsImportEqualsDeclaration().ModuleReference); internalAlias != nil {
-+				dpw.WritePunctuation(" = ")
++				dpw.WriteSpace(" ")
++				dpw.WriteOperator("=")
++				dpw.WriteSpace(" ")
 +				writeSymbolClassified(internalAlias, container, ast.SymbolFlagsNone, symbolFormatFlags)
 +			}
 +		}
@@ -2641,7 +2852,66 @@ index da4f11883..71a8dbcee 100644
  			}
  		}
  		var flags ast.SymbolFlags
-@@ -565,6 +613,13 @@ func getQuickInfoAndDeclarationAtLocation(c *checker.Checker, symbol *ast.Symbol
+@@ -521,11 +590,13 @@ func getQuickInfoAndDeclarationAtLocation(c *checker.Checker, symbol *ast.Symbol
+ 				case flags&ast.SymbolFlagsProperty != 0:
+ 					dpw.WritePunctuation("(")
+ 					dpw.Write("property")
+-					dpw.WritePunctuation(") ")
++					dpw.WritePunctuation(")")
++					dpw.WriteSpace(" ")
+ 				case flags&ast.SymbolFlagsAccessor != 0:
+ 					dpw.WritePunctuation("(")
+ 					dpw.Write("accessor")
+-					dpw.WritePunctuation(") ")
++					dpw.WritePunctuation(")")
++					dpw.WriteSpace(" ")
+ 				default:
+ 					decl := symbol.ValueDeclaration
+ 					if decl != nil {
+@@ -534,18 +605,25 @@ func getQuickInfoAndDeclarationAtLocation(c *checker.Checker, symbol *ast.Symbol
+ 						case ast.IsParameterDeclaration(decl):
+ 							dpw.WritePunctuation("(")
+ 							dpw.Write("parameter")
+-							dpw.WritePunctuation(") ")
++							dpw.WritePunctuation(")")
++							dpw.WriteSpace(" ")
+ 						case ast.IsVarLet(decl):
+-							dpw.WriteKeyword("let ")
++							dpw.WriteKeyword("let")
++							dpw.WriteSpace(" ")
+ 						case ast.IsVarConst(decl):
+-							dpw.WriteKeyword("const ")
++							dpw.WriteKeyword("const")
++							dpw.WriteSpace(" ")
+ 						case ast.IsVarUsing(decl):
+-							dpw.WriteKeyword("using ")
++							dpw.WriteKeyword("using")
++							dpw.WriteSpace(" ")
+ 						case ast.IsVarAwaitUsing(decl):
+-							dpw.WriteKeyword("await ")
+-							dpw.WriteKeyword("using ")
++							dpw.WriteKeyword("await")
++							dpw.WriteSpace(" ")
++							dpw.WriteKeyword("using")
++							dpw.WriteSpace(" ")
+ 						default:
+-							dpw.WriteKeyword("var ")
++							dpw.WriteKeyword("var")
++							dpw.WriteSpace(" ")
+ 						}
+ 					}
+ 				}
+@@ -557,7 +635,8 @@ func getQuickInfoAndDeclarationAtLocation(c *checker.Checker, symbol *ast.Symbol
+ 				if symbol.Flags&ast.SymbolFlagsOptional != 0 {
+ 					dpw.WritePunctuation("?")
+ 				}
+-				dpw.WritePunctuation(": ")
++				dpw.WritePunctuation(":")
++				dpw.WriteSpace(" ")
+ 			}
+ 			if callNode := getCallOrNewExpression(node); callNode != nil {
+ 				flags := typeFormatFlags | checker.TypeFormatFlagsWriteTypeArgumentsOfSignature | checker.TypeFormatFlagsWriteArrowStyleSignature
+@@ -565,6 +644,13 @@ func getQuickInfoAndDeclarationAtLocation(c *checker.Checker, symbol *ast.Symbol
  					flags |= checker.TypeFormatFlagsWriteCallStyleSignature
  				}
  				writeSignatureClassified(c.GetResolvedSignature(callNode), container, flags)
@@ -2655,10 +2925,27 @@ index da4f11883..71a8dbcee 100644
  			} else {
  				t := c.GetTypeOfSymbolAtLocation(symbol, node)
  				// If the type is a constrained type parameter, support expansion:
-@@ -605,18 +660,37 @@ func getQuickInfoAndDeclarationAtLocation(c *checker.Checker, symbol *ast.Symbol
+@@ -593,30 +679,52 @@ func getQuickInfoAndDeclarationAtLocation(c *checker.Checker, symbol *ast.Symbol
+ 			writeNewLine()
+ 			dpw.WritePunctuation("(")
+ 			dpw.Write("enum member")
+-			dpw.WritePunctuation(") ")
++			dpw.WritePunctuation(")")
++			dpw.WriteSpace(" ")
+ 			t := c.GetTypeOfSymbol(symbol)
+ 			writeTypeClassified(t, container, typeFormatFlags)
+ 			if t.Flags()&checker.TypeFlagsLiteral != 0 {
+-				dpw.WriteOperator(" = ")
++				dpw.WriteSpace(" ")
++				dpw.WriteOperator("=")
++				dpw.WriteSpace(" ")
+ 				dpw.WriteLiteral(t.AsLiteralType().String())
+ 			}
+ 			setDeclaration(symbol.ValueDeclaration)
+ 		}
  		if flags&(ast.SymbolFlagsFunction|ast.SymbolFlagsMethod) != 0 {
  			isMethod := flags&ast.SymbolFlagsMethod != 0
- 			prefix := core.IfElse(isMethod, "method", "function ")
+-			prefix := core.IfElse(isMethod, "method", "function ")
 -			if ast.IsIdentifier(node) && (ast.IsFunctionLikeDeclaration(node.Parent) || ast.IsMethodSignatureDeclaration(node.Parent)) && node.Parent.Name() == node && slices.Contains(symbol.Declarations, node.Parent) {
 -				setDeclaration(node.Parent)
 -				signatures := []*checker.Signature{c.GetSignatureFromDeclaration(node.Parent)}
@@ -2668,6 +2955,7 @@ index da4f11883..71a8dbcee 100644
 -				if len(signatures) == 1 {
 -					if d := signatures[0].Declaration(); d != nil && d.Flags&ast.NodeFlagsJSDoc == 0 {
 -						setDeclaration(d)
++			prefix := core.IfElse(isMethod, "method", "function")
 +			parenthesized := isMethod
 +			// Strada: in the alias recursion, a call that resolves to a single
 +			// signature displays the bare resolved signature (no kind keyword).
@@ -2703,20 +2991,223 @@ index da4f11883..71a8dbcee 100644
  			}
  			setDeclaration(symbol.ValueDeclaration)
  		}
-@@ -637,7 +711,12 @@ func getQuickInfoAndDeclarationAtLocation(c *checker.Checker, symbol *ast.Symbol
+@@ -627,7 +735,7 @@ func getQuickInfoAndDeclarationAtLocation(c *checker.Checker, symbol *ast.Symbol
+ 			} else if node.Kind == ast.KindConstructorKeyword && (ast.IsConstructorDeclaration(node.Parent) || ast.IsConstructSignatureDeclaration(node.Parent)) {
+ 				setDeclaration(node.Parent)
+ 				signatures := []*checker.Signature{c.GetSignatureFromDeclaration(node.Parent)}
+-				writeSignatures(signatures, "constructor ", false, symbol)
++				writeSignatures(signatures, "constructor", false, symbol)
+ 			} else {
+ 				var signatures []*checker.Signature
+ 				if flags&ast.SymbolFlagsClass != 0 && getCallOrNewExpression(node) != nil {
+@@ -637,7 +745,12 @@ func getQuickInfoAndDeclarationAtLocation(c *checker.Checker, symbol *ast.Symbol
  					if d := signatures[0].Declaration(); d != nil && d.Flags&ast.NodeFlagsJSDoc == 0 {
  						setDeclaration(d)
  					}
 -					writeSignatures(signatures, "constructor ", false, symbol)
-+					ctorPrefix := "constructor "
++					ctorPrefix := "constructor"
 +					if aliasLevel != 0 {
 +						// Strada writes alias construct signatures with "new ".
-+						ctorPrefix = "new "
++						ctorPrefix = "new"
 +					}
 +					writeSignatures(signatures, ctorPrefix, false, symbol)
  				} else {
  					writeNewLine()
  					if flags&ast.SymbolFlagsClass != 0 {
+@@ -646,16 +759,19 @@ func getQuickInfoAndDeclarationAtLocation(c *checker.Checker, symbol *ast.Symbol
+ 							// Local class expression: show "(local class)" prefix
+ 							dpw.WritePunctuation("(")
+ 							dpw.Write("local class")
+-							dpw.WritePunctuation(") ")
++							dpw.WritePunctuation(")")
++							dpw.WriteSpace(" ")
+ 						}
+ 						if !tryExpandSymbol(symbol, flags) {
+ 							if classExpression == nil {
+ 								if core.Some(symbol.Declarations, func(d *ast.Node) bool {
+ 									return ast.IsClassDeclaration(d) && ast.HasAbstractModifier(d)
+ 								}) {
+-									dpw.WriteKeyword("abstract ")
++									dpw.WriteKeyword("abstract")
++									dpw.WriteSpace(" ")
+ 								}
+-								dpw.WriteKeyword("class ")
++								dpw.WriteKeyword("class")
++								dpw.WriteSpace(" ")
+ 							}
+ 							writeSymbolClassified(symbol, container, ast.SymbolFlagsNone, symbolFormatFlags)
+ 							params := c.GetDeclaredTypeOfSymbol(symbol).AsInterfaceType().LocalTypeParameters()
+@@ -663,7 +779,8 @@ func getQuickInfoAndDeclarationAtLocation(c *checker.Checker, symbol *ast.Symbol
+ 						}
+ 					} else {
+ 						if !tryExpandSymbol(symbol, flags) {
+-							dpw.WriteKeyword("interface ")
++							dpw.WriteKeyword("interface")
++							dpw.WriteSpace(" ")
+ 							writeSymbolClassified(symbol, container, ast.SymbolFlagsNone, symbolFormatFlags)
+ 							params := c.GetDeclaredTypeOfSymbol(symbol).AsInterfaceType().LocalTypeParameters()
+ 							writeTypeParams(params)
+@@ -683,9 +800,11 @@ func getQuickInfoAndDeclarationAtLocation(c *checker.Checker, symbol *ast.Symbol
+ 				if core.Some(symbol.Declarations, func(d *ast.Node) bool {
+ 					return ast.IsEnumDeclaration(d) && ast.IsEnumConst(d)
+ 				}) {
+-					dpw.WriteKeyword("const ")
++					dpw.WriteKeyword("const")
++					dpw.WriteSpace(" ")
+ 				}
+-				dpw.WriteKeyword("enum ")
++				dpw.WriteKeyword("enum")
++				dpw.WriteSpace(" ")
+ 				writeSymbolClassified(symbol, container, ast.SymbolFlagsNone, symbolFormatFlags)
+ 			}
+ 			setDeclaration(core.Find(symbol.Declarations, ast.IsEnumDeclaration))
+@@ -694,7 +813,8 @@ func getQuickInfoAndDeclarationAtLocation(c *checker.Checker, symbol *ast.Symbol
+ 			writeNewLine()
+ 			if !tryExpandSymbol(symbol, flags) {
+ 				isModule := symbol.ValueDeclaration != nil && (ast.IsSourceFile(symbol.ValueDeclaration) || ast.IsAmbientModule(symbol.ValueDeclaration))
+-				dpw.WriteKeyword(core.IfElse(isModule, "module ", "namespace "))
++				dpw.WriteKeyword(core.IfElse(isModule, "module", "namespace"))
++				dpw.WriteSpace(" ")
+ 				writeSymbolClassified(symbol, container, ast.SymbolFlagsNone, symbolFormatFlags)
+ 			}
+ 			setDeclaration(core.Find(symbol.Declarations, ast.IsModuleDeclaration))
+@@ -703,18 +823,23 @@ func getQuickInfoAndDeclarationAtLocation(c *checker.Checker, symbol *ast.Symbol
+ 			writeNewLine()
+ 			dpw.WritePunctuation("(")
+ 			dpw.Write("type parameter")
+-			dpw.WritePunctuation(") ")
++			dpw.WritePunctuation(")")
++			dpw.WriteSpace(" ")
+ 			tp := c.GetDeclaredTypeOfSymbol(symbol)
+ 			writeSymbolClassified(symbol, container, ast.SymbolFlagsNone, symbolFormatFlags)
+ 			cons := c.GetConstraintOfTypeParameter(tp)
+ 			if cons != nil {
+-				dpw.WriteKeyword(" extends ")
++				dpw.WriteSpace(" ")
++				dpw.WriteKeyword("extends")
++				dpw.WriteSpace(" ")
+ 				writeTypeClassified(cons, container, typeFormatFlags)
+ 			}
+ 			// Show context: "in ClassName<T>" or "in funcName<T>(...)"
+ 			if symbol.Parent != nil {
+ 				// Class/Interface type parameter
+-				dpw.WriteKeyword(" in ")
++				dpw.WriteSpace(" ")
++				dpw.WriteKeyword("in")
++				dpw.WriteSpace(" ")
+ 				writeSymbolClassified(symbol.Parent, container, ast.SymbolFlagsNone, symbolFormatFlags)
+ 				if parentType := c.GetDeclaredTypeOfSymbol(symbol.Parent); parentType.AsInterfaceType() != nil {
+ 					parentParams := parentType.AsInterfaceType().LocalTypeParameters()
+@@ -726,9 +851,12 @@ func getQuickInfoAndDeclarationAtLocation(c *checker.Checker, symbol *ast.Symbol
+ 				if decl != nil && decl.Parent != nil {
+ 					declaration := decl.Parent
+ 					if ast.IsFunctionLike(declaration) {
+-						dpw.WriteKeyword(" in ")
++						dpw.WriteSpace(" ")
++						dpw.WriteKeyword("in")
++						dpw.WriteSpace(" ")
+ 						if declaration.Kind == ast.KindConstructSignature {
+-							dpw.WriteKeyword("new ")
++							dpw.WriteKeyword("new")
++							dpw.WriteSpace(" ")
+ 						} else if declaration.Kind != ast.KindCallSignature && declaration.Name() != nil {
+ 							writeSymbolClassified(declaration.Symbol(), container, ast.SymbolFlagsNone, symbolFormatFlags)
+ 						}
+@@ -737,8 +865,11 @@ func getQuickInfoAndDeclarationAtLocation(c *checker.Checker, symbol *ast.Symbol
+ 							writeSignatureClassified(sig, container, typeFormatFlags|checker.TypeFormatFlagsWriteTypeArgumentsOfSignature)
+ 						}
+ 					} else if ast.IsTypeAliasDeclaration(declaration) {
+-						dpw.WriteKeyword(" in ")
+-						dpw.WriteKeyword("type ")
++						dpw.WriteSpace(" ")
++						dpw.WriteKeyword("in")
++						dpw.WriteSpace(" ")
++						dpw.WriteKeyword("type")
++						dpw.WriteSpace(" ")
+ 						writeSymbolClassified(declaration.Symbol(), container, ast.SymbolFlagsNone, symbolFormatFlags)
+ 						if declSymbol := declaration.Symbol(); declSymbol != nil {
+ 							taParams := c.GetTypeAliasTypeParameters(declSymbol)
+@@ -751,10 +882,13 @@ func getQuickInfoAndDeclarationAtLocation(c *checker.Checker, symbol *ast.Symbol
+ 		}
+ 		if flags&ast.SymbolFlagsTypeAlias != 0 {
+ 			writeNewLine()
+-			dpw.WriteKeyword("type ")
++			dpw.WriteKeyword("type")
++			dpw.WriteSpace(" ")
+ 			writeSymbolClassified(symbol, container, ast.SymbolFlagsNone, symbolFormatFlags)
+ 			writeTypeParams(c.GetTypeAliasTypeParameters(symbol))
+-			dpw.WriteOperator(" = ")
++			dpw.WriteSpace(" ")
++			dpw.WriteOperator("=")
++			dpw.WriteSpace(" ")
+ 			var typeAliasType *checker.Type
+ 			if node.Parent != nil && ast.IsConstTypeReference(node.Parent) {
+ 				typeAliasType = c.GetTypeAtLocation(node.Parent)
+@@ -851,6 +985,18 @@ func getJSDoc(node *ast.Node) *ast.Node {
+ }
+ 
+ func getJSDocOrTag(c *checker.Checker, node *ast.Node) *ast.Node {
++	return getJSDocOrTagWorker(c, node, true /*inheritBase*/)
++}
++
++// getJSDocOrTagNoInherit mirrors getJSDocOrTag without the base-type walk:
++// stock's @param/@template tags come only from the declaring function's own
++// JSDoc (getJSDocParameterTagsWorker / getJSDocTagsWorker), never from an
++// overridden base member.
++func getJSDocOrTagNoInherit(c *checker.Checker, node *ast.Node) *ast.Node {
++	return getJSDocOrTagWorker(c, node, false /*inheritBase*/)
++}
++
++func getJSDocOrTagWorker(c *checker.Checker, node *ast.Node, inheritBase bool) *ast.Node {
+ 	if jsdoc := getJSDoc(node); jsdoc != nil {
+ 		return jsdoc
+ 	}
+@@ -865,10 +1011,10 @@ func getJSDocOrTag(c *checker.Checker, node *ast.Node) *ast.Node {
+ 	case ast.IsTypeParameterDeclaration(node):
+ 		return getMatchingJSDocTag(c, node.Parent, node.Name().Text(), isMatchingTemplateTag)
+ 	case ast.IsVariableDeclaration(node) && ast.IsVariableDeclarationList(node.Parent) && core.FirstOrNil(node.Parent.AsVariableDeclarationList().Declarations.Nodes) == node:
+-		return getJSDocOrTag(c, node.Parent.Parent)
++		return getJSDocOrTagWorker(c, node.Parent.Parent, inheritBase)
+ 	case (ast.IsFunctionExpressionOrArrowFunction(node) || ast.IsClassExpression(node)) &&
+ 		(ast.IsVariableDeclaration(node.Parent) || ast.IsPropertyDeclaration(node.Parent) || ast.IsPropertyAssignment(node.Parent)) && node.Parent.Initializer() == node:
+-		return getJSDocOrTag(c, node.Parent)
++		return getJSDocOrTagWorker(c, node.Parent, inheritBase)
+ 	case ast.IsBindingElement(node) && ast.IsObjectBindingPattern(node.Parent):
+ 		if name := node.PropertyNameOrName(); ast.IsIdentifier(name) {
+ 			if objectType := c.GetTypeAtLocation(node.Parent); objectType != nil {
+@@ -886,12 +1032,12 @@ func getJSDocOrTag(c *checker.Checker, node *ast.Node) *ast.Node {
+ 		if ast.IsFunctionDeclaration(node) || ast.IsMethodDeclaration(node) || ast.IsMethodSignatureDeclaration(node) || ast.IsConstructorDeclaration(node) || ast.IsConstructSignatureDeclaration(node) {
+ 			firstSignature := core.Find(symbol.Declarations, ast.IsFunctionLike)
+ 			if firstSignature != nil && node != firstSignature {
+-				if jsDoc := getJSDocOrTag(c, firstSignature); jsDoc != nil {
++				if jsDoc := getJSDocOrTagWorker(c, firstSignature, inheritBase); jsDoc != nil {
+ 					return jsDoc
+ 				}
+ 			}
+ 		}
+-		if ast.IsClassOrInterfaceLike(node.Parent) {
++		if inheritBase && ast.IsClassOrInterfaceLike(node.Parent) {
+ 			isStatic := ast.HasStaticModifier(node)
+ 			classType := c.GetDeclaredTypeOfSymbol(node.Parent.Symbol())
+ 			if isStatic {
+@@ -919,7 +1065,7 @@ func getJSDocOrTag(c *checker.Checker, node *ast.Node) *ast.Node {
+ }
+ 
+ func getMatchingJSDocTag(c *checker.Checker, node *ast.Node, name string, match func(*ast.Node, string) bool) *ast.Node {
+-	if jsdoc := getJSDocOrTag(c, node); jsdoc != nil && jsdoc.Kind == ast.KindJSDoc {
++	if jsdoc := getJSDocOrTagNoInherit(c, node); jsdoc != nil && jsdoc.Kind == ast.KindJSDoc {
+ 		if tags := jsdoc.AsJSDoc().Tags; tags != nil {
+ 			for _, tag := range tags.Nodes {
+ 				if match(tag, name) {
+@@ -953,7 +1099,7 @@ func getJSDocParameterTagByPosition(c *checker.Checker, param *ast.Node) *ast.No
+ 	}
+ 
+ 	// Get the JSDoc for the parent function/method
+-	jsdoc := getJSDocOrTag(c, parent)
++	jsdoc := getJSDocOrTagNoInherit(c, parent)
+ 	if jsdoc == nil || jsdoc.Kind != ast.KindJSDoc {
+ 		return nil
+ 	}
 diff --git a/internal/ls/inlay_hints.go b/internal/ls/inlay_hints.go
 index a1923826c..aa562b80d 100644
 --- a/internal/ls/inlay_hints.go

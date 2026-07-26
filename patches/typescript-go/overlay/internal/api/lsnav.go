@@ -76,6 +76,7 @@ type QuickinfoResponse struct {
 	Start                     uint32                `json:"start"`
 	Length                    uint32                `json:"length"`
 	DisplayString             string                `json:"displayString"`
+	DisplayParts              []DisplayPartResponse `json:"displayParts,omitempty"`
 	Documentation             []DisplayPartResponse `json:"documentation,omitempty"`
 	Tags                      []JSDocTagResponse    `json:"tags,omitempty"`
 	CanIncreaseVerbosityLevel *bool                 `json:"canIncreaseVerbosityLevel,omitzero"`
@@ -225,6 +226,7 @@ func (s *Session) handleQuickinfo(ctx context.Context, params *QuickinfoParams) 
 		Start:                     start,
 		Length:                    length,
 		DisplayString:             qi.DisplayString,
+		DisplayParts:              displayParts(qi.DisplayParts),
 		Documentation:             displayParts(qi.Documentation),
 		Tags:                      tags,
 		CanIncreaseVerbosityLevel: qi.CanIncreaseVerbosityLevel,

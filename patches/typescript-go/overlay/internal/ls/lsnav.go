@@ -9,6 +9,7 @@ package ls
 
 import (
 	"context"
+	"strings"
 
 	"github.com/microsoft/typescript-go/internal/ast"
 	"github.com/microsoft/typescript-go/internal/astnav"
@@ -36,14 +37,15 @@ type JSDocTagPayload struct {
 	Text []DisplayPart
 }
 
-// QuickInfoPayload mirrors Strada's QuickInfo (services/types.ts), with displayParts
-// pre-flattened into DisplayString (the session flattens parts unconditionally, so
-// part segmentation is not observable downstream).
+// QuickInfoPayload mirrors Strada's QuickInfo (services/types.ts). DisplayString is
+// the flattened display; DisplayParts carries the stock-style classified segments
+// (the tsserver quickinfo protocol reports parts, not just the flattened string).
 type QuickInfoPayload struct {
 	Kind                      string
 	KindModifiers             string
 	Span                      core.TextRange
 	DisplayString             string
+	DisplayParts              []DisplayPart
 	Documentation             []DisplayPart
 	Tags                      []JSDocTagPayload
 	CanIncreaseVerbosityLevel *bool
@@ -375,6 +377,19 @@ func (l *LanguageService) quickInfoDocumentation(c *checker.Checker, symbol *ast
 			return []DisplayPart{{Text: doc, Kind: "text"}}
 		}
 	}
+	// Stock's getDocumentationComment reads JSDoc from every declaration of the
+	// symbol — a transient member symbol can have a nil ValueDeclaration while
+	// Declarations still names the real one (e.g. volar template-typed props).
+	if symbol != nil {
+		for _, decl := range symbol.Declarations {
+			if decl == nil || decl == declaration {
+				continue
+			}
+			if doc := l.getDocumentationFromDeclaration(c, symbol, decl, node, lsproto.MarkupKindPlainText, true /*commentOnly*/); doc != "" {
+				return []DisplayPart{{Text: doc, Kind: "text"}}
+			}
+		}
+	}
 	if symbol != nil && symbol.Flags&ast.SymbolFlagsAlias != 0 {
 		if aliased := c.GetAliasedSymbol(symbol); aliased != nil && aliased != c.GetUnknownSymbol() {
 			candidates := []*ast.Symbol{aliased}
@@ -448,18 +463,28 @@ func (l *LanguageService) GetQuickInfoForAPI(ctx context.Context, file *ast.Sour
 	}
 
 	vc := &checker.VerbosityContext{Level: level, MaxTruncationLength: maxTruncLen}
-	info := getQuickInfoAndDeclarationAtLocation(c, symbol, nodeForQuickInfo, vc, false /*vsCapability*/, getMeaningFromLocation(nodeForQuickInfo))
+	info := getQuickInfoAndDeclarationAtLocation(c, symbol, nodeForQuickInfo, vc, true /*vsCapability*/, getMeaningFromLocation(nodeForQuickInfo))
 	display := info.displayParts.String()
 	var canIncrease *bool
 	if verbosityLevel >= 0 {
 		v := vc.CanIncreaseVerbosity && !vc.Truncated
 		canIncrease = &v
 	}
+	displayParts := make([]DisplayPart, 0, len(info.displayParts.GetRuns()))
+	for _, run := range info.displayParts.GetRuns() {
+		kind := classificationToPartKind(lsproto.ClassificationTypeName(run.ClassificationTypeName))
+		// Stock uses a distinct "lineBreak" part kind for newlines.
+		if kind == "space" && strings.Contains(run.Text, "\n") {
+			kind = "lineBreak"
+		}
+		displayParts = append(displayParts, DisplayPart{Text: run.Text, Kind: kind})
+	}
 	return &QuickInfoPayload{
 		Kind:                      symbolKindString(c, symbol, nodeForQuickInfo),
 		KindModifiers:             symbolModifiersString(c, symbol),
 		Span:                      span,
 		DisplayString:             display,
+		DisplayParts:              displayParts,
 		Documentation:             l.quickInfoDocumentation(c, symbol, nodeForQuickInfo, info.declaration),
 		Tags:                      l.jsDocTagPayloads(symbol),
 		CanIncreaseVerbosityLevel: canIncrease,
@@ -565,6 +590,8 @@ func classificationToPartKind(c lsproto.ClassificationTypeName) string {
 		return "typeParameterName"
 	case lsproto.ClassificationTypeNameString:
 		return "stringLiteral"
+	case lsproto.ClassificationTypeNameNumber:
+		return "numericLiteral"
 	case lsproto.ClassificationTypeNameOperator:
 		return "operator"
 	case lsproto.ClassificationTypeNamePunctuation:
@@ -572,6 +599,9 @@ func classificationToPartKind(c lsproto.ClassificationTypeName) string {
 	case lsproto.ClassificationTypeNameWhiteSpace:
 		return "space"
 	case lsproto.ClassificationTypeNameIdentifier:
+		// classificationForSymbol only emits Identifier for TypeAlias/Alias
+		// symbols — Strada maps both to aliasName.
+		return "aliasName"
 		// classificationForSymbol only emits Identifier for TypeAlias/Alias
 		// symbols — Strada maps both to aliasName.
 		return "aliasName"

@@ -455,7 +455,7 @@ func (a *arena) encodeSignatureResponse(r *SignatureResponse) {
 // unconditionally (stale bytes must never read back as data).
 
 const (
-	quickinfoRecordSize        = 40
+	quickinfoRecordSize        = 48
 	displayPartRecordSize      = 8
 	tagRecordSize              = 12
 	definitionRecordSize       = 48
@@ -479,7 +479,7 @@ func (a *arena) displayParts(off int, parts []DisplayPartResponse) {
 	}
 }
 
-// encodeQuickinfoResponse writes a QuickinfoResponse record (40 bytes fixed).
+// encodeQuickinfoResponse writes a QuickinfoResponse record (48 bytes fixed).
 func (a *arena) encodeQuickinfoResponse(r *QuickinfoResponse) {
 	off := a.rec(quickinfoRecordSize)
 	a.u32(off+0, a.str(r.Kind))
@@ -509,9 +509,11 @@ func (a *arena) encodeQuickinfoResponse(r *QuickinfoResponse) {
 	a.b(off+37, 0)
 	a.b(off+38, 0)
 	a.b(off+39, 0)
+	a.displayParts(off+40, r.DisplayParts)
 	// offset map (u32 unless noted):
 	//   0 kind / 4 kindModifiers / 8 start / 12 length / 16 displayString
 	//   20 documentation (ptr,count) / 28 tags (ptr,count) / 36 flags u8 / 37-39 pad
+	//   40 displayParts (ptr,count)
 }
 
 // encodeDefinitionInfoResponse writes a DefinitionInfoResponse record (48 bytes)

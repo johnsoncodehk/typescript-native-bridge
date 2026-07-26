@@ -1259,7 +1259,7 @@ class ArenaClient {
         symbols: { read: o => this.readSymbol(o), stride: 72, singular: false },
         signature: { read: o => this.readSignature(o), stride: 64, singular: true },
         signatures: { read: o => this.readSignature(o), stride: 64, singular: false },
-        quickinfo: { read: o => this.readQuickinfo(o), stride: 40, singular: true },
+        quickinfo: { read: o => this.readQuickinfo(o), stride: 48, singular: true },
         referencedSymbols: { read: o => this.readReferencedSymbol(o), stride: 56, singular: false },
         definitionAndBoundSpan: { read: o => this.readDefinitionAndBoundSpan(o), stride: 16, singular: true },
         jsdocTags: { read: o => this.readJsDocTag(o), stride: 8, singular: false },
@@ -1310,6 +1310,8 @@ class ArenaClient {
         }
         const flags = v.getUint8(off + 36);
         if (flags & 1) d.canIncreaseVerbosityLevel = (flags & 2) !== 0;
+        const displayParts = this.readDisplayParts(off + 40);
+        if (displayParts) d.displayParts = displayParts;
         return d;
     }
 
@@ -6898,11 +6900,13 @@ export function createTsgoProgram(
                 kind: r.kind,
                 kindModifiers: r.kindModifiers,
                 textSpan: { start: r.start, length: r.length },
-                // The session flattens displayParts unconditionally, so a single
-                // text part round-trips the same displayString.
-                displayParts: r.displayString === "" ? [] : [{ text: r.displayString, kind: "text" }],
-                documentation: r.documentation,
-                tags: r.tags?.map((t: any) => ({ name: t.name, text: t.text })),
+                // Stock segments displayParts by kind; the bridge ships them
+                // classified. (Older payloads without the field fall back to the
+                // flattened displayString as a single text part.)
+                displayParts: r.displayParts ?? (r.displayString === "" ? [] : [{ text: r.displayString, kind: "text" }]),
+                // Stock always reports documentation/tags as arrays (possibly empty).
+                documentation: r.documentation ?? [],
+                tags: r.tags?.map((t: any) => ({ name: t.name, text: t.text })) ?? [],
                 canIncreaseVerbosityLevel: r.canIncreaseVerbosityLevel,
             };
         },
