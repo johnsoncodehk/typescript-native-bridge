@@ -20,6 +20,14 @@
  * Fields that cross lazily by design (typeArguments, constraint) are
  * cross-checked through the RPC path instead of being exempted blind.
  *
+ * Two issue-#35 additions: (1) a bridge-side shape assertion per visited
+ * type — every field that crosses as a wire handle must read back as an
+ * object/array-of-objects, never a raw id, no matter which RPC delivered
+ * the type (reading the field forces the bridge's lazy resolution); (2) a
+ * getBaseTypes walk per site — typescript-eslint's containsAllTypesByName
+ * recurses into base types and reads .target on each, and those types never
+ * passed an adapter method (the leak the issue hit).
+ *
  * Out of scope: signature payloads (triage-adv6b-generic-sig) and
  * transport differential (triage-arena-parity). No reliable source-level
  * trigger for SubstitutionType was found (`T[number]` / `T[keyof T]` both
@@ -82,6 +90,11 @@ declare function fu<T extends string>(x: T): Uppercase<T>;
 declare function ftp<T extends string>(x: T): T;
 declare function fia<T extends { a: string }>(x: T): T["a"];
 interface ThisI { m(): this; }
+interface AuditBase<T> { x: T; }
+interface AuditDerived extends AuditBase<string> { y: number; }
+declare const derived: AuditDerived;
+type Pair<T> = [T, T];
+declare const pair: Pair<string>;
 `;
 fs.writeFileSync(path.join(dir, 'tsconfig.json'), JSON.stringify({
 	compilerOptions: { strict: true, noEmit: true, target: 'es2022', module: 'esnext', moduleResolution: 'bundler' },
@@ -125,6 +138,8 @@ const SITES = [
 	{ label: 'type-parameter', kind: 'ret', name: 'ftp' },
 	{ label: 'indexed-access', kind: 'ret', name: 'fia' },
 	{ label: 'this-type', kind: 'thisRet' },
+	{ label: 'derived-interface', kind: 'decl', name: 'derived' },
+	{ label: 'alias-args', kind: 'decl', name: 'pair' },
 ];
 
 function makeStock() {
@@ -221,6 +236,8 @@ const STOCK_INTERNAL_KEYS = new Map(Object.entries({
 	labeledElementDeclarations: 'syntax back-references; declarations cross on symbols, not types',
 	escapedName: 'internal name storage; symbol (audited) carries the name',
 	thisType: "polymorphic-this mechanics on class/interface targets; no wire field by design — the this-type itself is audited via the 'this-type' site",
+	resolvedBaseTypes: 'base-type resolution cache; the resolved bases are audited via the per-site getBaseTypes walk',
+	baseTypesResolved: 'base-type resolution cache; the resolved bases are audited via the per-site getBaseTypes walk',
 	pattern: 'destructuring internals',
 }));
 
@@ -319,6 +336,22 @@ function auditPair(s, b, pathLabel) {
 			failures.push(`${pathLabel}: unaudited stock own key '${k}' (value ${summarize(s[k], 0)}) — add it to AUDITED_FIELDS or exempt it in STOCK_INTERNAL_KEYS with a reason`);
 		}
 	}
+
+	// Bridge-side nested-field shape (issue #35 class): every field that
+	// crosses as a wire handle must read back as an object (or be absent),
+	// never a raw id — no matter which RPC delivered the type. Reading the
+	// field here also forces the bridge's lazy resolution, so a raw number
+	// can only be a leak.
+	for (const f of ['target', 'freshType', 'regularType', 'objectType', 'indexType', 'checkType', 'extendsType', 'baseType', 'substConstraint']) {
+		if (typeof b[f] === 'number') failures.push(`${pathLabel}.${f}: raw wire id ${b[f]} exposed as an own property (issue #35 class)`);
+	}
+	for (const f of ['typeParameters', 'outerTypeParameters', 'localTypeParameters', 'aliasTypeArguments']) {
+		const v = b[f];
+		if (Array.isArray(v) && v.length > 0 && typeof v[0] === 'number') {
+			failures.push(`${pathLabel}.${f}: raw wire id array [${v.slice(0, 4)}${v.length > 4 ? ',…' : ''}] exposed as an own property (issue #35 class)`);
+		}
+	}
+	if (typeof b.aliasSymbol === 'number') failures.push(`${pathLabel}.aliasSymbol: raw wire id ${b.aliasSymbol} exposed as an own property (issue #35 class)`);
 
 	// Scalars.
 	if (s.flags !== b.flags) failures.push(`${pathLabel}.flags: stock=${s.flags} tnb=${b.flags}`);
@@ -505,6 +538,19 @@ for (const spec of SITES) {
 			}
 		} catch (e) {
 			failures.push(`${spec.label}.getTypeArguments() threw: ${e.message}`);
+		}
+	}
+	// Base-type walk (issue #35 path: typescript-eslint's containsAllTypesByName
+	// recurses into type.getBaseTypes() and reads .target on each base — types
+	// that never passed an adapter method). Bases pair positionally and go
+	// through the same audit as any other nested field.
+	if (typeof sT.isClassOrInterface === 'function' && sT.isClassOrInterface()) {
+		let sBases, bBases;
+		try { sBases = stock.checker.getBaseTypes(sT); } catch (e) { failures.push(`${spec.label}: stock getBaseTypes threw: ${e.message}`); }
+		try { bBases = bT.getBaseTypes?.() ?? []; } catch (e) { failures.push(`${spec.label}: tnb getBaseTypes threw: ${e.message}`); }
+		if (sBases !== undefined && bBases !== undefined) {
+			if (sBases.length !== bBases.length) failures.push(`${spec.label}.getBaseTypes(): stock ${sBases.length} bases, tnb ${bBases.length}`);
+			for (let i = 0; i < Math.min(sBases.length, bBases.length); i++) auditPair(sBases[i], bBases[i], `${spec.label}.baseTypes[${i}]`);
 		}
 	}
 	// Informational: display parity. Union-constituent order is a known tsgo

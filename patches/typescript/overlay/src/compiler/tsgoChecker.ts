@@ -121,6 +121,10 @@ type TnbBridgeProcessState = {
     /** ProjectObjectRegistry.getOrCreateSignature is wrapped exactly once per
      * process — a second wrap would remap SignatureFlags values twice. */
     sigFlagsRemapApplied?: boolean;
+    /** Registry getOrCreateType/getOrCreateSymbol are wrapped exactly once per
+     * process — the wrap converts raw nested wire handles to lazy accessors,
+     * and a second wrap would bury the first one's memoized reads. */
+    wireShapeWrapApplied?: boolean;
     /** NodeHandle.prototype hooks are installed exactly once per process —
      * the prototype is shared across lib/typescript.js and lib/_tsc.js bundles. */
     nodeHandlePatched?: boolean;
@@ -7946,6 +7950,7 @@ export function createTsgoChecker(program: any): any {
             patchSymbolProto(sync);
             patchSignatureProto(sync);
             patchSignatureFlagsRemap(sync, project);
+            patchRegistryWireShapes(project);
             installNodeHandleHooks(sync);
             installTsgoBackedSourceFileLoader(() => project);
             return project;
@@ -8095,6 +8100,7 @@ export function createTsgoChecker(program: any): any {
         patchSymbolProto(sync);
         patchSignatureProto(sync);
         patchSignatureFlagsRemap(sync, project);
+        patchRegistryWireShapes(project);
         installNodeHandleHooks(sync);
         // Patch kind remapping using a sample source file from the tsgo project.
         // One-time per process (kindRemapApplied) — skip the sample-file RPC on
@@ -9187,6 +9193,163 @@ export function createTsgoChecker(program: any): any {
         }
     }
 
+    // ── Nested wire handles → lazy registry-backed accessors ─────────
+    // The vendored TypeObject/Symbol constructors copy nested handles off the
+    // wire payload as raw ids (`type.target` is the literal 73, not the
+    // TypeObject with id 73). Stock semantics for those fields are object
+    // references (ts.TypeReference.target is a Type), and rule code reads the
+    // property directly — typescript-eslint's containsAllTypesByName does
+    // `if (isTypeReference(type)) type = type.target; type.getSymbol()`
+    // (issue #35). Resolving them in the adapter's fixup pass only covered
+    // types that crossed an adapter method; base types out of the vendored
+    // TypeObject.getBaseTypes() (and any other RPC-delivered type) leaked the
+    // raw ids. Convert at the single creation site instead: each raw handle
+    // becomes a lazy accessor that resolves through the id-keyed registry
+    // (so `type.target === anyOtherResultForTheSameId` holds), memoizes by
+    // redefining the property as a plain writable value, and costs no RPC
+    // unless a consumer actually reads the field — the eager pass it replaces
+    // paid one RPC per field per type up front. A failed resolution (stale
+    // snapshot under an edit) memoizes undefined/[]: stock property reads
+    // never throw, so neither do these.
+    const convertedWireObjects = new WeakSet<object>();
+
+    // [own property, registry fetch method] — method names mirror the
+    // vendored TypeObject getters (and the Go dispatcher).
+    const NESTED_TYPE_SINGLE: ReadonlyArray<readonly [string, string]> = [
+        ["target", "getTargetOfType"],
+        ["freshType", "getFreshTypeOfType"],
+        ["regularType", "getRegularTypeOfType"],
+        ["objectType", "getObjectTypeOfType"],
+        ["indexType", "getIndexedAccessIndexType"],
+        ["checkType", "getCheckTypeOfType"],
+        ["extendsType", "getExtendsTypeOfType"],
+        ["baseType", "getBaseTypeOfType"],
+        ["substConstraint", "getConstraintOfType"],
+    ];
+    const NESTED_TYPE_ARRAY: ReadonlyArray<readonly [string, string]> = [
+        ["typeParameters", "getTypeParametersOfType"],
+        ["outerTypeParameters", "getOuterTypeParametersOfType"],
+        ["localTypeParameters", "getLocalTypeParametersOfType"],
+        ["aliasTypeArguments", "getAliasTypeArgumentsOfType"],
+    ];
+
+    function memoizedOwnValue(obj: any, prop: string, value: any): any {
+        Object.defineProperty(obj, prop, { configurable: true, enumerable: true, writable: true, value });
+        return value;
+    }
+
+    function convertTypeWireShape(t: any): void {
+        if (convertedWireObjects.has(t)) return;
+        convertedWireObjects.add(t);
+        // ObjectFlags cross in the tsgo bit layout; fork consumers read the
+        // fork layout. Remap here (once per type) rather than per adapter
+        // pass, so types that never touch the adapter (getBaseTypes
+        // elements) get the same treatment.
+        if (typeof t.objectFlags === "number") t.objectFlags = remapObjectFlags(t.objectFlags);
+        const registry = t.objectRegistry;
+        if (!registry) return;
+        const descs: Record<string, PropertyDescriptor> = {};
+        for (const [prop, method] of NESTED_TYPE_SINGLE) {
+            const raw = t[prop];
+            if (typeof raw !== "number") continue;
+            descs[prop] = {
+                configurable: true,
+                enumerable: true,
+                get() {
+                    let resolved: any;
+                    try { resolved = registry.fetchType(t, method, raw); } catch { resolved = undefined; }
+                    if (resolved) fixupType(resolved);
+                    return memoizedOwnValue(t, prop, resolved);
+                },
+            };
+        }
+        for (const [prop, method] of NESTED_TYPE_ARRAY) {
+            const raw = t[prop];
+            if (!Array.isArray(raw)) continue;
+            if (raw.length === 0) {
+                // tsgo emits aliasTypeArguments: [] on reference/array types
+                // where stock leaves the property absent. Rule helpers
+                // (no-unnecessary-type-assertion's containsAny) branch on
+                // `type.aliasTypeArguments ?? checker.getTypeArguments(type)`
+                // — an empty array is truthy for ?? and suppresses the
+                // fallback, misclassifying any[]. Drop the empty slot; the
+                // other array props keep the wire [] (consumers and the
+                // field audit treat empty ≡ absent there).
+                if (prop === "aliasTypeArguments") delete t[prop];
+                continue;
+            }
+            if (typeof raw[0] !== "number") continue;
+            descs[prop] = {
+                configurable: true,
+                enumerable: true,
+                get() {
+                    let resolved: any[];
+                    try { resolved = registry.fetchTypes(t, method, raw); } catch { resolved = []; }
+                    for (const c of resolved) fixupType(c);
+                    return memoizedOwnValue(t, prop, resolved);
+                },
+            };
+        }
+        const aliasSym = t.aliasSymbol;
+        if (typeof aliasSym === "number") {
+            descs.aliasSymbol = {
+                configurable: true,
+                enumerable: true,
+                get() {
+                    let resolved: any;
+                    try { resolved = registry.fetchSymbol(t, "getAliasSymbolOfType", aliasSym); } catch { resolved = undefined; }
+                    return memoizedOwnValue(t, "aliasSymbol", resolved);
+                },
+            };
+        }
+        Object.defineProperties(t, descs);
+    }
+
+    function convertSymbolWireShape(sym: any): void {
+        if (convertedWireObjects.has(sym)) return;
+        convertedWireObjects.add(sym);
+        const raw = sym.exportSymbol;
+        if (typeof raw !== "number") return;
+        const registry = sym.objectRegistry;
+        if (!registry) return;
+        Object.defineProperty(sym, "exportSymbol", {
+            configurable: true,
+            enumerable: true,
+            get() {
+                let resolved: any;
+                try { resolved = registry.fetchSymbol(sym, "getExportSymbolOfSymbol", raw, sym.canonicalProject?.id); } catch { resolved = undefined; }
+                return memoizedOwnValue(sym, "exportSymbol", resolved);
+            },
+        });
+    }
+
+    // Wrap the two registry creation sites so every bridge object is
+    // converted no matter which RPC delivered it — one path, no reliance on
+    // consumers passing through an adapter method first. The registry
+    // classes are not exported; reach their prototypes through live
+    // instances (same pattern as patchSignatureFlagsRemap).
+    function patchRegistryWireShapes(project: any): void {
+        const proc = tnbBridgeProcessState();
+        if (proc.wireShapeWrapApplied) return;
+        const registry = project?.checker?.objectRegistry;
+        const registryProto = registry ? Object.getPrototypeOf(registry) : undefined;
+        const snapshotRegistryProto = registry?.snapshotRegistry ? Object.getPrototypeOf(registry.snapshotRegistry) : undefined;
+        if (!registryProto?.getOrCreateType || !snapshotRegistryProto?.getOrCreateSymbol) return;
+        proc.wireShapeWrapApplied = true;
+        const origGetOrCreateType = registryProto.getOrCreateType;
+        registryProto.getOrCreateType = function (this: any, data: any) {
+            const t = origGetOrCreateType.call(this, data);
+            if (t) convertTypeWireShape(t);
+            return t;
+        };
+        const origGetOrCreateSymbol = snapshotRegistryProto.getOrCreateSymbol;
+        snapshotRegistryProto.getOrCreateSymbol = function (this: any, data: any) {
+            const s = origGetOrCreateSymbol.call(this, data);
+            if (s) convertSymbolWireShape(s);
+            return s;
+        };
+    }
+
     function patchSymbolProto(s: any): void {
         if (symbolProtoPatched) return;
         const SymbolCtor = s.Symbol;
@@ -9404,98 +9567,15 @@ export function createTsgoChecker(program: any): any {
         };
     }
 
-    // Resolve raw type-ID properties on TypeObject to full TypeObject
-    // instances. tsgo stores IDs (numbers) in fields like `aliasTypeArguments`,
-    // `target`, `typeParameters`, etc. Rule code reads these directly and
-    // expects Type objects, so we eagerly resolve them via the corresponding
-    // getter methods (which read the raw IDs before we overwrite them).
-    const TYPE_ARRAY_PROPS: [string, string][] = [
-        ["aliasTypeArguments", "getAliasTypeArguments"],
-        ["typeParameters", "getTypeParameters"],
-        ["outerTypeParameters", "getOuterTypeParameters"],
-        ["localTypeParameters", "getLocalTypeParameters"],
-    ];
-    const TYPE_SINGLE_PROPS: [string, string][] = [
-        ["target", "getTarget"],
-        ["freshType", "getFreshType"],
-        ["regularType", "getRegularType"],
-        ["objectType", "getObjectType"],
-        ["indexType", "getIndexType"],
-        ["checkType", "getCheckType"],
-        ["extendsType", "getExtendsType"],
-        ["baseType", "getBaseType"],
-    ];
-
-    function resolveRawTypeProps(obj: any): void {
-        for (const [prop, method] of TYPE_ARRAY_PROPS) {
-            const raw = obj[prop];
-            if (Array.isArray(raw) && raw.length > 0 && typeof raw[0] === "number") {
-                try {
-                    const resolved = obj[method]();
-                    if (resolved) { fixupType(resolved); obj[prop] = resolved; }
-                } catch { /* best-effort */ }
-            }
-        }
-        for (const [prop, method] of TYPE_SINGLE_PROPS) {
-            const raw = obj[prop];
-            if (typeof raw === "number") {
-                try {
-                    const resolved = obj[method]();
-                    if (resolved) { fixupType(resolved); obj[prop] = resolved; }
-                } catch { /* best-effort */ }
-            }
-        }
-    }
-
+    // Raw nested wire handles (type.target = id 73, not the TypeObject) and
+    // the tsgo-layout objectFlags are converted at the registry creation site
+    // (patchRegistryWireShapes → convertTypeWireShape), so every TypeObject is
+    // already stock-shaped here no matter which RPC delivered it — including
+    // the getBaseTypes()/getTarget() results that never pass an adapter method
+    // (issue #35). What remains per adapter pass is the prototype hook.
     function fixupType(t: any): any {
         if (Array.isArray(t)) { for (const i of t) fixupType(i); return t; }
-        if (t && typeof t === "object") {
-            const obj = t;
-            if (!obj.__tsgoFixupDone) {
-                obj.__tsgoFixupDone = true;
-                // Remap tsgo ObjectFlags bit layout → fork layout before the
-                // value reaches consumers (e.g. no-misused-spread reads
-                // `type.objectFlags & ts.ObjectFlags.InstantiationExpressionType`).
-                if (typeof obj.objectFlags === "number") {
-                    obj.objectFlags = remapObjectFlags(obj.objectFlags);
-                }
-                if (typeof obj.aliasSymbol === "number" && typeof obj.getAliasSymbol === "function") {
-                    try { obj.aliasSymbol = obj.getAliasSymbol(); } catch { obj.aliasSymbol = undefined; }
-                }
-                // Do NOT eagerly resolve obj.symbol: the vendored TypeObject
-                // already has a lazy memoized `symbol` accessor, and resolving
-                // every type's symbol up front costs one getSymbolOfType RPC
-                // per type object — 92K calls on the 1000-file eslint corpus,
-                // 84% of which no consumer ever read (issue #11 perf).
-                resolveRawTypeProps(obj);
-                // tsgo may expose `aliasTypeArguments: []` on reference/array
-
-                // types. Rule helpers (no-unnecessary-type-assertion's
-                // containsAny) use `type.aliasTypeArguments ??
-                // checker.getTypeArguments(type)` — an empty array is
-                // truthy for ?? so getTypeArguments is never consulted and
-                // `any[]` is misclassified as not containing `any`.
-                const aliasArgs = obj.aliasTypeArguments;
-                if (Array.isArray(aliasArgs) && aliasArgs.length === 0) {
-                    try {
-                        const resolved = typeof obj.getAliasTypeArguments === "function"
-                            ? obj.getAliasTypeArguments()
-                            : undefined;
-                        if (Array.isArray(resolved) && resolved.length > 0) {
-                            fixupType(resolved);
-                            obj.aliasTypeArguments = resolved;
-                        }
-                        else {
-                            delete obj.aliasTypeArguments;
-                        }
-                    }
-                    catch {
-                        delete obj.aliasTypeArguments;
-                    }
-                }
-            }
-            patchTypeProto(obj, sync);
-        }
+        if (t && typeof t === "object") patchTypeProto(t, sync);
         return t;
     }
 
