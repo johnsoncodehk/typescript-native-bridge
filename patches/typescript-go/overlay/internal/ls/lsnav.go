@@ -602,9 +602,6 @@ func classificationToPartKind(c lsproto.ClassificationTypeName) string {
 		// classificationForSymbol only emits Identifier for TypeAlias/Alias
 		// symbols — Strada maps both to aliasName.
 		return "aliasName"
-		// classificationForSymbol only emits Identifier for TypeAlias/Alias
-		// symbols — Strada maps both to aliasName.
-		return "aliasName"
 	default:
 		return "text"
 	}
