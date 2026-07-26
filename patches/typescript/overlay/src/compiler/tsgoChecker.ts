@@ -3542,6 +3542,7 @@ function collectNamedExportsFromModuleSymbol(moduleSymbol: any): any[] {
     // empty for those so every caller falls through to the RPC merge, which
     // mirrors the stock worker (same fall-through contract as
     // tryGetMemberInModuleExportsImpl's host-table miss).
+    // Ledger(getExportsOfModule) — README behavior table row.
     if (exports.get("export=") || exports.get("__export")) return [];
     const result: any[] = [];
     exports.forEach((exported: any, key: string) => {
