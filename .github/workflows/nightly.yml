@@ -9,8 +9,8 @@ permissions:
   contents: read
 
 env:
-  VOLAR_BRANCH: master
-  VOLAR_SHA: e51956947 # vuejs/language-tools@master, pinned for reproducibility
+  VOLAR_BRANCH: feat/tsgo-diagnostic-codes
+  VOLAR_SHA: 943f5984b # vuejs/language-tools@feat/tsgo-diagnostic-codes, pinned for reproducibility
   BASELINE: test/baselines/nav-results-12f752a-t16.json
 
 jobs:
