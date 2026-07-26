@@ -1,18 +1,28 @@
 #!/usr/bin/env node
 /**
- * pristine-tsgo attribution gate (v5): prove that the behaviors TNB carries
- * stopgap patches or KNOWN_DIVERGENCES registrations for are UPSTREAM tsgo
- * behaviors, not bridge-introduced divergences.
+ * pristine-tsgo attribution gate, dual-side (v5): proves that every stopgap
+ * TNB carries is (a) still WORKING on the patched tree and (b) still NEEDED
+ * because pristine upstream tsgo has not fixed the behavior.
  *
- * How: clone pristine microsoft/typescript-go at the submodule's pinned tag,
- * inject each repro test extracted from the submodule's repro/* branches,
- * and assert every test FAILS on pristine with its known signature. A test
- * that PASSES on pristine means upstream fixed the behavior — the gate
- * fails loud so the stopgap / registration / README ledger row gets removed.
+ * Per entry, one of four quadrants:
+ *   OK               patched=PASS  pristine=FAIL  — stopgap alive, upstream open
+ *   STOPGAP-BROKEN   patched=FAIL                  — the stopgap rotted; gate fails
+ *   UPSTREAM-FIXED   pristine=PASS                 — remove the stopgap, its README
+ *                                                    ledger row, and this repro
+ *   (both pass is unreachable: a test can't assert the bug on one side and not
+ *    the other without one of the two above firing first)
+ *
+ * ARCHIVAL entries have no stopgap (reverted — the behavior is pristine
+ * tsgo's by policy): only the pristine FAIL assertion remains, so an
+ * upstream fix surfaces as CLOSABLE and the leftover registrations
+ * (volar filter lines, baselines, KNOWN entries) get cleaned up.
+ *
+ * Patched-side runner: inject the repro test into the patched submodule and
+ * `go test` (the stopgap lives in the Go patches, e.g. #30's checker arm).
  *
  * Usage: node tools/check-pristine-attribution.mjs
  * Env:   TNB_PRISTINE_CACHE — clone cache dir (default /tmp/tnb-pristine-tsgo)
- * Exit:  0 = every repro still fails on pristine (attribution holds).
+ * Exit:  0 = every entry in its expected quadrant.
  */
 import { execFileSync } from 'node:child_process';
 import * as fs from 'node:fs';
@@ -24,29 +34,32 @@ const submodule = path.join(repoRoot, 'typescript-go');
 const cache = process.env.TNB_PRISTINE_CACHE ?? '/tmp/tnb-pristine-tsgo';
 const UPSTREAM = 'https://github.com/microsoft/typescript-go.git';
 
-// branch (submodule ref holding the repro) → test file, package, test name,
-// and the failure signature that must appear in the pristine run.
-const REPROS = [
+// ── Dual-side entries (a stopgap exists and must stay alive) ───────────────
+// NOTE: getExportsOfModule was removed — its "stopgap" premise was wrong.
+// Stock 6.0.3 returns the same raw table as pristine tsgo for class export=
+// ([prototype]) and namespace export= ([foo, bar]); 5a45799's host-table
+// guard is bridge-contract parity, not a tsgo-behavior stopgap. (Verified
+// against stock typescript.js + pristine tsgo, 2026-07-27.)
+const DUAL = [
 	{
-		branch: 'repro/export-equals-exports-merge',
-		file: 'internal/checker/zz_repro_export_equals_test.go',
-		pkg: './internal/checker/',
-		test: 'TestGetExportsOfModuleResolvesExportEqualsTarget',
-		signature: /missing "foo"/,
-	},
-	{
+		key: 'getTypeFromTypeNodeWorker',
 		branch: 'repro/type-position-entity-reads-any',
 		file: 'internal/checker/zz_repro_type_position_entity_test.go',
 		pkg: './internal/checker/',
 		test: 'TestTypePositionEntityInIndexedAccess',
 		signature: /resolved to any/,
 	},
+];
+
+// ── Archival entries (no stopgap: reverted to pristine behavior by policy) ──
+const ARCHIVAL = [
 	{
 		branch: 'repro/far-module-specifier-context',
 		file: 'internal/ls/zz_repro_far_context_test.go',
 		pkg: './internal/ls/',
 		test: 'TestModuleSpecifierContextNode',
 		signature: /= nil/,
+		note: 'reverted in 1234c83 — pristine behavior kept, upstream issue F3',
 	},
 	{
 		branch: 'repro/unused-type-param-diagnostic-code',
@@ -54,13 +67,25 @@ const REPROS = [
 		pkg: './internal/checker/',
 		test: 'TestUnusedTypeParameterDiagnosticCode',
 		signature: /TS6196/,
+		note: 'reverted in 1234c83 — pristine behavior kept, upstream issue F4',
 	},
 ];
 
 const git = (cwd, args) => execFileSync('git', args, { cwd, encoding: 'utf8' }).trim();
 
-// The pin: the exact upstream tag at the submodule HEAD when one exists
-// (clone --depth 1 --branch needs a ref), else the raw commit.
+function runGoTest(cwd, r) {
+	let out = '';
+	let code = 0;
+	try {
+		out = execFileSync('go', ['test', r.pkg, '-run', `^${r.test}$`, '-count=1', '-v'], { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+	} catch (e) {
+		code = e.status ?? 1;
+		out = (e.stdout ?? '') + (e.stderr ?? '');
+	}
+	return { pass: code === 0, out };
+}
+
+// ── Pristine clone (pin-verified) ──────────────────────────────────────────
 let pin = git(submodule, ['describe', '--tags', '--exact-match', 'HEAD']);
 let pinIsTag = true;
 if (!pin) {
@@ -69,8 +94,6 @@ if (!pin) {
 }
 console.log(`pin: ${pin} (${pinIsTag ? 'tag' : 'commit'})`);
 
-// Fresh, verified-pristine clone in the cache. A cached clone whose HEAD is
-// not the pin is discarded — attribution must never be judged on drift.
 if (fs.existsSync(path.join(cache, '.git'))) {
 	const head = git(cache, ['rev-parse', 'HEAD']);
 	const want = pinIsTag ? git(cache, ['rev-list', '-n', '1', `tags/${pin}`]) : pin;
@@ -89,48 +112,63 @@ if (!fs.existsSync(path.join(cache, '.git'))) {
 	}
 }
 
-// Pristine proof: no injected file may already exist upstream.
-for (const r of REPROS) {
-	if (fs.existsSync(path.join(cache, r.file))) {
-		console.error(`FAIL: ${r.file} exists in the pristine clone — cache is not pristine`);
-		process.exit(1);
-	}
-}
-
 let bad = 0;
-const injected = [];
+const injectedPristine = [];
+const injectedPatched = [];
 try {
-	for (const r of REPROS) {
+	// Pristine proof: no injected file may already exist upstream.
+	for (const r of [...DUAL, ...ARCHIVAL]) {
+		if (fs.existsSync(path.join(cache, r.file))) {
+			console.error(`FAIL: ${r.file} exists in the pristine clone — cache is not pristine`);
+			process.exit(1);
+		}
 		const src = git(submodule, ['show', `${r.branch}:${r.file}`]);
 		const dest = path.join(cache, r.file);
 		fs.mkdirSync(path.dirname(dest), { recursive: true });
 		fs.writeFileSync(dest, src);
-		injected.push(dest);
+		injectedPristine.push(dest);
 	}
-	for (const r of REPROS) {
-		let out = '';
-		let code = 0;
-		try {
-			out = execFileSync('go', ['test', r.pkg, '-run', `^${r.test}$`, '-count=1', '-v'], { cwd: cache, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
-		} catch (e) {
-			code = e.status ?? 1;
-			out = (e.stdout ?? '') + (e.stderr ?? '');
-		}
-		if (code === 0) {
+
+	// ── Dual-side: patched PASS + pristine FAIL ──────────────────────────────
+	for (const r of DUAL) {
+		const src = git(submodule, ['show', `${r.branch}:${r.file}`]);
+		const dest = path.join(submodule, r.file);
+		fs.writeFileSync(dest, src);
+		injectedPatched.push(dest);
+		const patched = runGoTest(submodule, r);
+		const pristine = runGoTest(cache, r);
+		const pristineFails = !pristine.pass && r.signature.test(pristine.out);
+		if (!patched.pass) {
 			bad++;
-			console.error(`FIXED-UPSTREAM? ${r.test} PASSED on pristine ${pin} — remove the stopgap/registration and this repro (${r.branch})`);
-			continue;
-		}
-		if (!r.signature.test(out)) {
+			console.error(`STOPGAP-BROKEN ${r.key}: patched side FAILS (${patched.out.split('\n').find(l => l.trim()) ?? ''})`);
+		} else if (pristine.pass) {
 			bad++;
-			console.error(`FAIL ${r.test}: failed on pristine but without the expected signature ${r.signature}`);
-			console.error(out.split('\n').slice(0, 15).join('\n'));
-			continue;
+			console.error(`UPSTREAM-FIXED ${r.key}: pristine ${pin} PASSES — remove the stopgap, its README ledger row, and ${r.branch}`);
+		} else if (!pristineFails) {
+			bad++;
+			console.error(`FAIL ${r.key}: pristine failed without signature ${r.signature}`);
+			console.error(pristine.out.split('\n').slice(0, 10).join('\n'));
+		} else {
+			console.log(`ok ${r.key} — patched=PASS pristine=FAIL (stopgap alive, upstream open)`);
 		}
-		console.log(`ok ${r.test} — reproduces on pristine ${pin} (attribution: upstream)`);
+	}
+
+	// ── Archival: pristine FAIL only (no stopgap) ────────────────────────────
+	for (const r of ARCHIVAL) {
+		const pristine = runGoTest(cache, r);
+		if (pristine.pass) {
+			bad++;
+			console.error(`CLOSABLE ${r.test}: pristine ${pin} PASSES — upstream fixed it; clean up registrations (${r.note})`);
+		} else if (!r.signature.test(pristine.out)) {
+			bad++;
+			console.error(`FAIL ${r.test}: pristine failed without signature ${r.signature}`);
+		} else {
+			console.log(`ok ${r.test} — pristine=FAIL (archival; ${r.note})`);
+		}
 	}
 } finally {
-	for (const f of injected) fs.rmSync(f, { force: true });
+	for (const f of injectedPristine) fs.rmSync(f, { force: true });
+	for (const f of injectedPatched) fs.rmSync(f, { force: true });
 }
 
 console.log(bad === 0 ? 'VERDICT: PASS' : 'VERDICT: FAIL');
