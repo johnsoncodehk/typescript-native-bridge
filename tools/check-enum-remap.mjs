@@ -29,6 +29,7 @@ const repoRoot = path.resolve(__dirname, "..");
 
 const FORK_TYPES = path.join(repoRoot, "typescript", "src", "compiler", "types.ts");
 const TSGO_ENUM_DIR = path.join(repoRoot, "typescript-go", "_packages", "native-preview", "src", "enums");
+const TSGO_COMPILEROPTIONS = path.join(repoRoot, "typescript-go", "internal", "core", "compileroptions.go");
 const OVERLAY = path.join(repoRoot, "patches", "typescript", "overlay", "src", "compiler", "tsgoChecker.ts");
 const NODE_GEN = path.join(repoRoot, "typescript-go", "_packages", "native-preview", "src", "api", "node", "node.generated.ts");
 const NODE_INFRA = path.join(repoRoot, "typescript-go", "_packages", "native-preview", "src", "api", "node", "node.infrastructure.ts");
@@ -291,6 +292,89 @@ for (const g of discovered) {
             `Add { field: "node.${g}", enum: "SyntaxKind", status: "remapped", wire: 'patchKindGetter("${g}")' } ` +
             `(and wire patchKindGetter("${g}") in the overlay) or mark it exempt with a reason.`,
         );
+    }
+}
+
+// ── Part C: compiler-option wire enums (JS → Go options on updateSnapshot) ──
+// updateSnapshot carries the host's effective compiler options to Go in the
+// core.CompilerOptions JSON shape, so every enum-valued option crosses the
+// fork↔tsgo boundary BY NUMBER. The overlay remaps the diverging ones in
+// `_wireOptionEnumRemap` and passes the rest through. This part makes that
+// table machine-checked: for every member of every enum-typed option, the
+// value the overlay produces must be the value Go unmarshals for the SAME
+// member. tsgo values are parsed from the Go source (authoritative — the
+// generated native-preview enums drop deprecated members like ScriptTargetES5).
+//
+// Name aliases where the two sources spell a member differently.
+const OPTION_ENUM_NAME_ALIAS = {
+    NewLineKind: { CarriageReturnLineFeed: "CRLF", LineFeed: "LF" },
+};
+const OPTION_ENUMS = [
+    // [compilerOptions key, fork enum, tsgo Go enum type]
+    ["jsx", "JsxEmit", "JsxEmit"],
+    ["module", "ModuleKind", "ModuleKind"],
+    ["moduleResolution", "ModuleResolutionKind", "ModuleResolutionKind"],
+    ["moduleDetection", "ModuleDetectionKind", "ModuleDetectionKind"],
+    ["newLine", "NewLineKind", "NewLineKind"],
+    ["target", "ScriptTarget", "ScriptTarget"],
+];
+
+/** Parse Go `Name EnumType = <number>` consts → Map<enumType, Map<memberName, value>>. */
+function parseGoOptionEnums() {
+    const src = stripComments(fs.readFileSync(TSGO_COMPILEROPTIONS, "utf8"));
+    const re = /^\s*(\w+)\s+(JsxEmit|ModuleKind|ModuleResolutionKind|ModuleDetectionKind|NewLineKind|ScriptTarget)\s*=\s*(-?\d+)\s*$/gm;
+    const out = new Map();
+    let m;
+    while ((m = re.exec(src)) !== null) {
+        const [, fullName, enumType, num] = m;
+        if (!fullName.startsWith(enumType)) continue;
+        const member = fullName.slice(enumType.length);
+        if (!member) continue;
+        if (!out.has(enumType)) out.set(enumType, new Map());
+        out.get(enumType).set(member, Number(num));
+    }
+    return out;
+}
+
+/** Extract the overlay's `_wireOptionEnumRemap` object literal (trusted in-repo source). */
+function readOverlayOptionRemap() {
+    const src = fs.readFileSync(OVERLAY, "utf8");
+    const m = /const _wireOptionEnumRemap[^=]*=\s*(\{[\s\S]*?\n\});/.exec(src);
+    if (!m) return undefined;
+    // eslint-disable-next-line no-new-func
+    return new Function(`"use strict"; return (${m[1]});`)();
+}
+
+{
+    const goEnums = parseGoOptionEnums();
+    const overlayRemap = readOverlayOptionRemap();
+    if (!overlayRemap) {
+        failures.push("Part C: `_wireOptionEnumRemap` not found in the overlay — the option-enum wire remap is unguarded.");
+    }
+    for (const [optionKey, forkEnumName, goEnumName] of OPTION_ENUMS) {
+        const fork = parseEnum(forkSrc, forkEnumName);
+        const go = goEnums.get(goEnumName);
+        if (!fork) { failures.push(`Part C: fork enum ${forkEnumName} not found.`); continue; }
+        if (!go) { failures.push(`Part C: tsgo enum ${goEnumName} not found in compileroptions.go.`); continue; }
+        const remap = overlayRemap?.[optionKey] ?? {};
+        const alias = OPTION_ENUM_NAME_ALIAS[forkEnumName] ?? {};
+        for (const [rawName, forkVal] of fork) {
+            const name = alias[rawName] ?? rawName;
+            const wireVal = remap[forkVal] ?? forkVal;
+            if (go.has(name)) {
+                if (go.get(name) !== wireVal) {
+                    failures.push(
+                        `Part C: options.${optionKey} (${forkEnumName}.${rawName}=${forkVal}) crosses the wire as ${wireVal}, ` +
+                        `but tsgo's ${goEnumName}.${name} is ${go.get(name)} — fix _wireOptionEnumRemap["${optionKey}"].`,
+                    );
+                }
+            } else if (![...go.values()].includes(wireVal)) {
+                failures.push(
+                    `Part C: options.${optionKey} (${forkEnumName}.${rawName}=${forkVal}) crosses the wire as ${wireVal}, ` +
+                    `which is not a member of tsgo's ${goEnumName} — fix _wireOptionEnumRemap["${optionKey}"].`,
+                );
+            }
+        }
     }
 }
 

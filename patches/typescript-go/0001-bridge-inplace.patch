@@ -339,10 +339,42 @@ index edea7d5ca..95b1cb9b4 100644
  
      get text(): string {
 diff --git a/_packages/native-preview/src/api/proto.ts b/_packages/native-preview/src/api/proto.ts
-index 1aba5087e..bd622023a 100644
+index 1aba5087e..72b331708 100644
 --- a/_packages/native-preview/src/api/proto.ts
 +++ b/_packages/native-preview/src/api/proto.ts
-@@ -144,6 +144,13 @@ export interface ProjectFileChanges {
+@@ -24,6 +24,19 @@ export type { CompilerOptions } from "./compilerOptions.ts";
+  */
+ export type DocumentIdentifier = string | { uri: string; };
+ 
++/**
++ * A tsconfig to open/load. The object form may carry the client's effective
++ * compiler options (its merged CLI + tsconfig + extends parse); when present
++ * they replace the project's disk-parsed options, while file expansion still
++ * comes from the disk config. CLI-only flags never appear in the on-disk
++ * tsconfig, so clients whose options can outrun the tsconfig (tsc) must send
++ * them; clients whose options live entirely in the tsconfig (LSP) may send a
++ * plain DocumentIdentifier as before.
++ */
++export type OpenProjectIdentifier = DocumentIdentifier | {
++    fileName: string;
++    compilerOptions?: Record<string, unknown>;
++};
+ /**
+  * A position within a document, combining a document identifier with an offset.
+  */
+@@ -80,8 +93,10 @@ export interface LSPUpdateSnapshotParams {
+     /**
+      * tsconfig.json files to open/load in the new snapshot. Opens are ref-counted
+      * and persist across snapshots until closed via {@link closeProjects}.
++     * Entries carrying `compilerOptions` replace the project's disk-parsed
++     * options with the client's effective options (see OpenProjectIdentifier).
+      */
+-    openProjects?: DocumentIdentifier[];
++    openProjects?: OpenProjectIdentifier[];
+     /**
+      * tsconfig.json files to release in the new snapshot. A project is only unloaded
+      * once every API client that opened it closes it.
+@@ -144,6 +159,13 @@ export interface ProjectFileChanges {
      changedFiles?: string[];
      /** Source file paths removed from the project's program */
      deletedFiles?: string[];
@@ -356,7 +388,7 @@ index 1aba5087e..bd622023a 100644
  }
  
  /**
-@@ -194,8 +201,11 @@ export interface SymbolResponse {
+@@ -194,8 +216,11 @@ export interface SymbolResponse {
       * The project the symbol was first observed in. Used as the default project for
       * follow-up lookups that need a project context (e.g. members/exports), since symbols
       * are shared snapshot-wide and such lookups can vary by project.
@@ -369,7 +401,7 @@ index 1aba5087e..bd622023a 100644
      name: __String;
      flags: number;
      checkFlags: number;
-@@ -205,6 +215,36 @@ export interface SymbolResponse {
+@@ -205,6 +230,36 @@ export interface SymbolResponse {
      exportSymbol?: number;
  }
  
@@ -406,7 +438,7 @@ index 1aba5087e..bd622023a 100644
  export interface TypeResponse {
      id: number;
      flags: number;
-@@ -234,6 +274,35 @@ export interface TypeResponse {
+@@ -234,6 +289,35 @@ export interface TypeResponse {
      symbol?: number;
  }
  
@@ -3271,10 +3303,10 @@ index 4659530ff..dfcd64020 100644
  		assert.Assert(t, result.Changed.Has(testURI1), "close then open should mark as changed")
  		// Should have the new content
 diff --git a/internal/project/project.go b/internal/project/project.go
-index 39c77aa78..16fb2c8af 100644
+index 39c77aa78..a7c1805b3 100644
 --- a/internal/project/project.go
 +++ b/internal/project/project.go
-@@ -85,6 +85,12 @@ type Project struct {
+@@ -85,6 +85,28 @@ type Project struct {
  	installedTypingsInfo *ata.TypingsInfo
  	// typingsFiles are the root files added by the typings installer.
  	typingsFiles []string
@@ -3284,18 +3316,35 @@ index 39c77aa78..16fb2c8af 100644
 +	// script file list — not the tsconfig — defines the program root set.
 +	// Kept sorted for deterministic comparison.
 +	apiRootFiles []string
++	// apiOptionsWrap memoizes the WithCompilerOptions wrap of the registry
++	// command line with the client's effective options (fork-added). See
++	// updateProgram — an unmemoized wrap would force a program rebuild on
++	// every snapshot.
++	apiOptionsWrap apiOptionsWrapMemo
++}
++
++// apiOptionsWrapMemo keys a ParsedCommandLine.WithCompilerOptions result by
++// the exact (registry command line, client options) pointer pair it was
++// built from. Both pointers are stable while their sources are unchanged:
++// the registry reparses on tsconfig change, and HandleAPIRequest dedups the
++// client options by value.
++type apiOptionsWrapMemo struct {
++	source  *tsoptions.ParsedCommandLine
++	options *core.CompilerOptions
++	wrapped *tsoptions.ParsedCommandLine
  }
  
  var _ ls.Project = (*Project)(nil)
-@@ -264,6 +270,7 @@ func (p *Project) Clone() *Project {
+@@ -264,6 +286,8 @@ func (p *Project) Clone() *Project {
  
  		installedTypingsInfo: p.installedTypingsInfo,
  		typingsFiles:         p.typingsFiles,
 +		apiRootFiles:         p.apiRootFiles,
++		apiOptionsWrap:       p.apiOptionsWrap,
  	}
  }
  
-@@ -283,40 +290,46 @@ func (p *Project) SetCommandLine(commandLine *tsoptions.ParsedCommandLine) {
+@@ -283,40 +307,46 @@ func (p *Project) SetCommandLine(commandLine *tsoptions.ParsedCommandLine) {
  	p.dirtyFilePath = ""
  }
  
@@ -3365,16 +3414,23 @@ index 39c77aa78..16fb2c8af 100644
  	if p.potentialProjectReferences == nil {
  		p.potentialProjectReferences = &collections.Set[tspath.Path]{}
 diff --git a/internal/project/projectcollection.go b/internal/project/projectcollection.go
-index e38812bc4..94a931b2d 100644
+index e38812bc4..ed707447f 100644
 --- a/internal/project/projectcollection.go
 +++ b/internal/project/projectcollection.go
-@@ -50,17 +50,40 @@ type APIState struct {
+@@ -50,17 +50,50 @@ type APIState struct {
  	// keyed by file path. Files with no configured project are loaded into the
  	// inferred project.
  	openFiles map[tspath.Path]apiOpenedFile
 +	// additionalFiles is the set of API-supplied extra program roots, keyed by
 +	// config file path. Entries persist while the project stays API-open.
 +	additionalFiles map[tspath.Path][]string
++	// projectOptions is the set of API-supplied effective compiler options,
++	// keyed by config file path. Entries persist while the project stays
++	// API-open and replace the project's disk-parsed options (fork-added:
++	// CLI-only flags never reach the on-disk tsconfig). Pointers are kept
++	// stable across snapshots (see HandleAPIRequest's DeepEqual dedup) so
++	// updateProgram's wrap memo can key on them.
++	projectOptions map[tspath.Path]*core.CompilerOptions
  }
  
  func (s APIState) clone() APIState {
@@ -3391,6 +3447,7 @@ index e38812bc4..94a931b2d 100644
 +		openProjects:    maps.Clone(s.openProjects),
 +		openFiles:       maps.Clone(s.openFiles),
 +		additionalFiles: additionalFiles,
++		projectOptions:  maps.Clone(s.projectOptions),
  	}
  }
  
@@ -3408,15 +3465,25 @@ index e38812bc4..94a931b2d 100644
 +			return false
 +		}
 +	}
-+	return true
++	// Pointer equality is sufficient: writers dedup by DeepEqual and keep the
++	// prior pointer while the options are unchanged.
++	return maps.Equal(s.projectOptions, other.projectOptions)
  }
  
  // apiOpenedFile tracks a file kept open by API clients along with its ref count.
 diff --git a/internal/project/projectcollectionbuilder.go b/internal/project/projectcollectionbuilder.go
-index 3355b6887..e47ac0813 100644
+index 3355b6887..50935fe5c 100644
 --- a/internal/project/projectcollectionbuilder.go
 +++ b/internal/project/projectcollectionbuilder.go
-@@ -63,6 +63,7 @@ func newProjectCollectionBuilder(
+@@ -4,6 +4,7 @@ import (
+ 	"context"
+ 	"fmt"
+ 	"maps"
++	"reflect"
+ 	"slices"
+ 	"time"
+ 
+@@ -63,6 +64,7 @@ func newProjectCollectionBuilder(
  	compilerOptionsForInferredProjects *core.CompilerOptions,
  	sessionOptions *SessionOptions,
  	customConfigFileName string,
@@ -3424,7 +3491,7 @@ index 3355b6887..e47ac0813 100644
  	parseCache *ParseCache,
  	extendedConfigCache *ExtendedConfigCache,
  	client Client,
-@@ -76,7 +77,7 @@ func newProjectCollectionBuilder(
+@@ -76,7 +78,7 @@ func newProjectCollectionBuilder(
  		parseCache:                         parseCache,
  		extendedConfigCache:                extendedConfigCache,
  		base:                               oldProjectCollection,
@@ -3433,15 +3500,62 @@ index 3355b6887..e47ac0813 100644
  		newSnapshotID:                      newSnapshotID,
  		configuredProjects:                 dirty.NewSyncMap(oldProjectCollection.configuredProjects),
  		inferredProject:                    dirty.NewBox(oldProjectCollection.inferredProject),
-@@ -153,6 +154,7 @@ func (b *ProjectCollectionBuilder) HandleAPIRequest(apiRequest *APISnapshotReque
+@@ -143,6 +145,45 @@ func (b *ProjectCollectionBuilder) forEachProject(fn func(entry dirty.Value[*Pro
+ 	}
+ }
+ 
++// resolveWireOptionPaths normalizes the path-valued compiler options a client
++// may legitimately send in relative form (a hand-rolled LanguageService host
++// passes tsconfig text values verbatim — e.g. tsBuildInfoFile "./.tsbuildinfo")
++// against the config directory, mirroring what Go's own tsconfig parse does
++// with IsFilePath options (normalizeNonListOptionValue). Stock parseCommandLine
++// output is already absolute and passes through unchanged. Field list mirrors
++// the IsFilePath declarations in tsoptions (scalar + list-element paths);
++// mapRoot/sourceRoot stay verbatim, as in both parsers.
++func resolveWireOptionPaths(options *core.CompilerOptions, configFileName string) *core.CompilerOptions {
++	configDir := tspath.GetDirectoryPath(configFileName)
++	abs := func(value string) string {
++		if value == "" {
++			return value
++		}
++		return tspath.GetNormalizedAbsolutePath(value, configDir)
++	}
++	absAll := func(values []string) []string {
++		if values == nil {
++			return nil
++		}
++		out := make([]string, len(values))
++		for i, v := range values {
++			out[i] = abs(v)
++		}
++		return out
++	}
++	options.ConfigFilePath = tspath.GetNormalizedAbsolutePath(configFileName, configDir)
++	options.OutDir = abs(options.OutDir)
++	options.RootDir = abs(options.RootDir)
++	options.DeclarationDir = abs(options.DeclarationDir)
++	options.OutFile = abs(options.OutFile)
++	options.TsBuildInfoFile = abs(options.TsBuildInfoFile)
++	options.BaseUrl = abs(options.BaseUrl)
++	options.PathsBasePath = abs(options.PathsBasePath)
++	options.TypeRoots = absAll(options.TypeRoots)
++	options.RootDirs = absAll(options.RootDirs)
++	return options
++}
++
+ func (b *ProjectCollectionBuilder) HandleAPIRequest(apiRequest *APISnapshotRequest, logger *logging.LogTree) error {
+ 	var projectsToClose map[tspath.Path]struct{}
+ 	if apiRequest.CloseProjects != nil {
+@@ -153,6 +194,8 @@ func (b *ProjectCollectionBuilder) HandleAPIRequest(apiRequest *APISnapshotReque
  				b.apiState.openProjects[projectPath] = count - 1
  			} else if count == 1 {
  				delete(b.apiState.openProjects, projectPath)
 +				delete(b.apiState.additionalFiles, projectPath)
++				delete(b.apiState.projectOptions, projectPath)
  				if projectsToClose == nil {
  					projectsToClose = make(map[tspath.Path]struct{})
  				}
-@@ -177,6 +179,19 @@ func (b *ProjectCollectionBuilder) HandleAPIRequest(apiRequest *APISnapshotReque
+@@ -177,6 +220,40 @@ func (b *ProjectCollectionBuilder) HandleAPIRequest(apiRequest *APISnapshotReque
  		}
  	}
  
@@ -3458,10 +3572,31 @@ index 3355b6887..e47ac0813 100644
 +		b.apiState.additionalFiles[configPath] = extra
 +	}
 +
++	// ProjectOptions: refresh the effective-options mapping for any API-opened
++	// project named by the request (same ride-every-open rule as
++	// AdditionalFiles — a later snapshot may carry new CLI flags for an
++	// already-held project). Freshly decoded options arrive on every request;
++	// keep the prior pointer while the values are unchanged so updateProgram's
++	// wrap memo and apiState.equals (both pointer-keyed) stay stable.
++	for configFileName, options := range apiRequest.ProjectOptions {
++		configPath := b.toPath(configFileName)
++		if _, isAPIOpen := b.apiState.openProjects[configPath]; !isAPIOpen {
++			continue
++		}
++		options = resolveWireOptionPaths(options, configFileName)
++		if existing, ok := b.apiState.projectOptions[configPath]; ok && reflect.DeepEqual(existing, options) {
++			continue
++		}
++		if b.apiState.projectOptions == nil {
++			b.apiState.projectOptions = make(map[tspath.Path]*core.CompilerOptions)
++		}
++		b.apiState.projectOptions[configPath] = options
++	}
++
  	if apiRequest.CloseFiles != nil {
  		for path := range apiRequest.CloseFiles.Keys() {
  			// Ref-counted close mirroring projects above.
-@@ -213,6 +228,14 @@ func (b *ProjectCollectionBuilder) HandleAPIRequest(apiRequest *APISnapshotReque
+@@ -213,6 +290,14 @@ func (b *ProjectCollectionBuilder) HandleAPIRequest(apiRequest *APISnapshotReque
  		}
  	}
  
@@ -3476,7 +3611,7 @@ index 3355b6887..e47ac0813 100644
  	for _, overlay := range b.fs.overlays {
  		if entry := b.findDefaultConfiguredProject(overlay.FileName(), b.toPath(overlay.FileName())); entry != nil {
  			delete(projectsToClose, entry.Value().configFilePath)
-@@ -251,8 +274,81 @@ func (b *ProjectCollectionBuilder) HandleAPIRequest(apiRequest *APISnapshotReque
+@@ -251,8 +336,81 @@ func (b *ProjectCollectionBuilder) HandleAPIRequest(apiRequest *APISnapshotReque
  	return nil
  }
  
@@ -3559,7 +3694,7 @@ index 3355b6887..e47ac0813 100644
  
  	changedFiles := make([]tspath.Path, 0, summary.Changed.Len())
  	for uri := range summary.Changed.Keys() {
-@@ -320,9 +416,17 @@ func (b *ProjectCollectionBuilder) DidChangeFiles(summary FileChangeSummary, log
+@@ -320,9 +478,17 @@ func (b *ProjectCollectionBuilder) DidChangeFiles(summary FileChangeSummary, log
  		return true
  	})
  
@@ -3580,7 +3715,32 @@ index 3355b6887..e47ac0813 100644
  		path := b.toPath(fileName)
  		openFileResult := b.ensureConfiguredProjectAndAncestorsForFile(fileName, path, logger)
  		b.cleanupConfiguredProjects(&openFileResult.retain, logger)
-@@ -1137,7 +1241,11 @@ func (b *ProjectCollectionBuilder) updateProgram(entry dirty.Value[*Project], lo
+@@ -1105,6 +1271,24 @@ func (b *ProjectCollectionBuilder) updateProgram(entry dirty.Value[*Project], lo
+ 				filesChanged = true
+ 				return
+ 			}
++			// Client-supplied effective options (CLI + tsconfig + extends,
++			// merged by the client host's own parse) replace the disk-parsed
++			// options; file expansion stays the disk config's. Memoize the
++			// wrap: updateProgram runs once per snapshot, and an unmemoized
++			// WithCompilerOptions would mint a new CommandLine pointer every
++			// time, tripping the pointer-inequality rebuild trigger below on
++			// every snapshot even when nothing changed.
++			if options := b.apiState.projectOptions[entry.Value().configFilePath]; options != nil {
++				if memo := entry.Value().apiOptionsWrap; memo.source == commandLine && memo.options == options {
++					commandLine = memo.wrapped
++				} else {
++					wrapped := commandLine.WithCompilerOptions(options)
++					entry.Change(func(p *Project) {
++						p.apiOptionsWrap = apiOptionsWrapMemo{source: commandLine, options: options, wrapped: wrapped}
++					})
++					commandLine = wrapped
++				}
++			}
+ 			if entry.Value().CommandLine != commandLine {
+ 				updateProgram = true
+ 				entry.Change(func(p *Project) {
+@@ -1137,7 +1321,11 @@ func (b *ProjectCollectionBuilder) updateProgram(entry dirty.Value[*Project], lo
  				project.host = newCompilerHost(project.currentDirectory, project, b, logger.Fork("CompilerHost"))
  				result := project.CreateProgram()
  				project.Program = result.Program
@@ -3738,10 +3898,10 @@ index 00f4056e5..2e2a332af 100644
  // snapshot so future requests benefit from the work already done. If the
  // session has moved on, the snapshot is discarded; the next request needing
 diff --git a/internal/project/snapshot.go b/internal/project/snapshot.go
-index 61af433d3..a45d3a81f 100644
+index 61af433d3..eb8efd8e1 100644
 --- a/internal/project/snapshot.go
 +++ b/internal/project/snapshot.go
-@@ -161,6 +161,11 @@ type APISnapshotRequest struct {
+@@ -161,6 +161,17 @@ type APISnapshotRequest struct {
  	CloseProjects *collections.Set[tspath.Path]
  	OpenFiles     *collections.Set[lsproto.DocumentUri]
  	CloseFiles    *collections.Set[tspath.Path]
@@ -3750,10 +3910,16 @@ index 61af433d3..a45d3a81f 100644
 +	// misses — e.g. LanguageService getScriptFileNames shim d.ts). Applied
 +	// regardless of the default-project search's node_modules boundary.
 +	AdditionalFiles map[string][]string
++	// ProjectOptions maps an opened project's config file name to the client's
++	// effective compiler options (see api.OpenProjectParams). When set, they
++	// replace the project's disk-parsed options; file expansion still comes
++	// from the disk config. Fork-added: CLI-only flags never reach the on-disk
++	// tsconfig, so the disk parse alone diverges from the client's program.
++	ProjectOptions map[string]*core.CompilerOptions
  }
  
  type ProjectTreeRequest struct {
-@@ -265,7 +270,7 @@ func (s *Snapshot) Clone(ctx context.Context, change SnapshotChange, overlays ma
+@@ -265,7 +276,7 @@ func (s *Snapshot) Clone(ctx context.Context, change SnapshotChange, overlays ma
  		}
  		switch change.reason {
  		case UpdateReasonDidOpenFile:
@@ -3762,7 +3928,7 @@ index 61af433d3..a45d3a81f 100644
  		case UpdateReasonDidCloseFile:
  			logger.Logf("Reason: DidCloseFile - %v", change.fileChanges.Closed)
  		case UpdateReasonDidChangeCompilerOptionsForInferredProjects:
-@@ -333,6 +338,7 @@ func (s *Snapshot) Clone(ctx context.Context, change SnapshotChange, overlays ma
+@@ -333,6 +344,7 @@ func (s *Snapshot) Clone(ctx context.Context, change SnapshotChange, overlays ma
  		compilerOptionsForInferredProjects,
  		s.sessionOptions,
  		customConfigFileName,
@@ -3770,7 +3936,7 @@ index 61af433d3..a45d3a81f 100644
  		session.parseCache,
  		session.extendedConfigCache,
  		session.client,
-@@ -381,8 +387,8 @@ func (s *Snapshot) Clone(ctx context.Context, change SnapshotChange, overlays ma
+@@ -381,8 +393,8 @@ func (s *Snapshot) Clone(ctx context.Context, change SnapshotChange, overlays ma
  	// Clean cached disk files not touched by any open project on file open, close, delete,
  	// or when explicitly requested (e.g. by an idle timer).
  	shouldCleanDiskCache := change.cleanDiskCache ||

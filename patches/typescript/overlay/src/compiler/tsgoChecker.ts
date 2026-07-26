@@ -662,6 +662,51 @@ function projectEpoch(configFilePath: string): number | undefined {
     return _projectEpochByConfig.get(canonicalSourceFilePath(configFilePath))?.epoch;
 }
 
+// ── Effective-options wire serialization ─────────────────────────────
+// updateSnapshot carries the host's effective compiler options (stock's merged
+// CLI + tsconfig + extends parse) to Go, where they replace the disk-parsed
+// options: CLI-only flags (--strict over a "strict": false tsconfig,
+// --emitDeclarationOnly, …) never appear in the on-disk tsconfig, so the disk
+// parse alone diverges from the client's program. One options source — every
+// openProject entry sends them; forgetting to bridge a flag is impossible by
+// construction.
+//
+// tsgo numbers three compiler-option enums differently from the fork (the
+// remaining option enums — ModuleKind, ModuleResolutionKind, ScriptTarget —
+// are identical and pass through). Guarded by tools/check-enum-remap.mjs,
+// which diffs both enum sources and fails when these tables go stale:
+//   jsx (JsxEmit):                       fork React=2/ReactNative=3  ↔ tsgo ReactNative=2/React=3
+//   newLine (NewLineKind):               fork CRLF=0/LF=1 (no None)  → tsgo None=0/CRLF=1/LF=2
+//   moduleDetection (ModuleDetectionKind): fork Legacy=1/Auto=2      ↔ tsgo Auto=1/Legacy=2
+const _wireOptionEnumRemap: Record<string, Record<number, number>> = {
+    jsx: { 2: 3, 3: 2 },
+    newLine: { 0: 1, 1: 2 },
+    moduleDetection: { 1: 2, 2: 1 },
+};
+
+/** Effective options → Go core.CompilerOptions JSON. Only explicitly-set
+ * fields cross (undefined dropped): tsgo applies strict-family implications
+ * and defaults at use time exactly like its own tsconfig parse. Path options
+ * (outDir/rootDir/pathsBasePath/…) are already absolute in stock's parse —
+ * the same form Go's own config parse produces. */
+function toWireCompilerOptions(options: any): Record<string, any> {
+    const out: Record<string, any> = {};
+    for (const key of Object.keys(options)) {
+        // configFile is a SourceFile (circular); tscBuild is the fork's marker.
+        if (key === "configFile" || key === "tscBuild") continue;
+        const value = options[key];
+        if (value === undefined) continue;
+        const remap = _wireOptionEnumRemap[key];
+        out[key] = remap !== undefined ? (remap[value] ?? value) : value;
+    }
+    return out;
+}
+
+/** openProject wire entry: file name + effective options (see above). */
+function openProjectParam(configFilePath: string, options: any): { fileName: string; compilerOptions: Record<string, any> } {
+    return { fileName: configFilePath, compilerOptions: toWireCompilerOptions(options) };
+}
+
 /** Last updateSnapshot params fingerprint + project per config — identical repeat calls are skipped (watch-lint generations reissue the same params ~1000×). */
 const _lastUpdateParamsByConfig = new Map<string, { paramsJson: string; project: any }>();
 
@@ -1942,7 +1987,9 @@ function ensureBridgeSession(): void {
             // build mode (closeParams) keeps its own lifecycle via
             // releaseStaleBuildSnapshots. structureIsReused compares shape data
             // (not the old snapshot), so disposing here is safe.
-            const key = merged?.length === 1 ? merged[0] : undefined;
+            // Entries are string | { fileName, compilerOptions } — key by name.
+            const only = merged?.length === 1 ? merged[0] : undefined;
+            const key = typeof only === "string" ? only : only?.fileName;
             if (key) {
                 const prev = _lastSnapshotByProject.get(key);
                 if (prev && prev !== snapshot) {
@@ -6906,18 +6953,12 @@ export function createTsgoProgram(
         // through the caller's writeFile (or the host's) so --noEmit, Volar output
         // redirection, and build-mode writeFile wrapping stay in the host's control.
         emit: (targetSourceFile?: any, writeFile?: any, _ct?: any, emitOnlyDtsFiles?: boolean, _customTransformers?: any, forceDtsEmit?: boolean) => {
-            // Respect --noEmit: never produce output during a type-check-only run.
-            // tsgo parses options from the tsconfig on disk and may not see the CLI
-            // flag, so gate here on the JS-side compiler options.
-            if (options.noEmit && !forceDtsEmit) {
-                return { emitSkipped: true, diagnostics: [], emittedFiles: undefined, sourceMaps: undefined };
-            }
+            // --noEmit / --emitDeclarationOnly are gated Go-side in handleEmit
+            // from the wire options (stock program.emit parity) — the JS side
+            // only maps the per-call emitOnlyDtsFiles builder state.
             // DocumentIdentifier wire format is plain path string or { uri }, not { fileName }.
             const file = targetSourceFile?.fileName ? tsgoFileArg(targetSourceFile.fileName) : undefined;
-            // emitDeclarationOnly is an emit-time-only option (like noEmit above): the
-            // CLI flag never reaches Go, so map it to EmitOnly=Dts here — same gate
-            // stock applies inside the emitter (program.ts:4235).
-            const emitOnly = forceDtsEmit ? 3 : (emitOnlyDtsFiles || options.emitDeclarationOnly ? 2 : undefined);
+            const emitOnly = forceDtsEmit ? 3 : (emitOnlyDtsFiles ? 2 : undefined);
             const res = project?.program?.emit?.({ file, emitOnly, forceDtsEmit: !!forceDtsEmit });
             const outputs = res?.outputFiles ?? [];
             const write = typeof writeFile === "function" ? writeFile : host?.writeFile?.bind(host);
@@ -7988,7 +8029,7 @@ export function createTsgoChecker(program: any): any {
         // every value that can alter the response (open files, overlay
         // contents, extras, close params, prefetch).
         const updateParams = {
-            openProject: configFilePath!,
+            openProject: openProjectParam(configFilePath!, options),
             ...(openFiles.length > 0 ? { openFiles } : {}),
             ...(closedTabs?.length ? { closeFiles: closedTabs } : {}),
             ...(openFilesWithContent.length > 0 ? { openFilesWithContent } : {}),
@@ -8044,7 +8085,7 @@ export function createTsgoChecker(program: any): any {
             }
             if (lateOverlays.length > 0) {
                 const lateSnapshot: any = _api.updateSnapshot({
-                    openProject: configFilePath!,
+                    openProject: openProjectParam(configFilePath!, options),
                     openFilesWithContent: lateOverlays,
                     ...(extraFileExtensions ? { extraFileExtensions } : {}),
                 });
@@ -8393,7 +8434,7 @@ export function createTsgoChecker(program: any): any {
         if (!openFiles.length && !openFilesWithContent.length) return;
 
         const snapshot: any = _api.updateSnapshot({
-            openProject: ctx.configFilePath,
+            openProject: openProjectParam(ctx.configFilePath, ctx.options),
             ...(openFiles.length > 0 ? { openFiles } : {}),
             openFilesWithContent,
             ...(_lastExtraFileExtensions ? { extraFileExtensions: _lastExtraFileExtensions } : {}),

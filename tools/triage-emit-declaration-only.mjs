@@ -1,9 +1,10 @@
 #!/usr/bin/env node
 /**
- * `tsc --emitDeclarationOnly` must suppress JS outputs (issue #33). The CLI
- * flag never reaches Go (tsgo parses options from the tsconfig on disk), so
- * the bridge emit adapter maps the JS-side option to EmitOnly=Dts — before
- * that, plain tsc emitted .js files next to the sources.
+ * `tsc --emitDeclarationOnly` must suppress JS outputs (issue #33). The
+ * effective options ride updateSnapshot to Go (CLI flags never appear in the
+ * on-disk tsconfig), and handleEmit narrows the default EmitOnly to
+ * declarations from the wire options — before that, plain tsc emitted .js
+ * files next to the sources.
  *
  * Usage: node tools/triage-emit-declaration-only.mjs
  */
