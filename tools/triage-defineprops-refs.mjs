@@ -68,3 +68,12 @@ for (const r of [tnb, stock]) {
 const hasRt = items => items.some(s => s.includes('runtime-core.d.ts'));
 console.log(`\nruntime-core in refs: TNB=${hasRt(tnb.refs.items)} STOCK=${hasRt(stock.refs.items)}`);
 console.log(`runtime-core in defs: TNB=${hasRt(tnb.def.items)} STOCK=${hasRt(stock.def.items)}`);
+
+// Gate (v5): result-set parity is bridge-contract surface — runtime-core
+// membership and item sets must match stock exactly.
+const eqSet = (a, b) => JSON.stringify([...a].sort()) === JSON.stringify([...b].sort());
+const bad =
+	tnb.refs.success !== stock.refs.success || tnb.def.success !== stock.def.success
+	|| !eqSet(tnb.refs.items, stock.refs.items) || !eqSet(tnb.def.items, stock.def.items);
+console.log(`\nVERDICT: ${bad ? 'FAIL' : 'PASS'}`);
+process.exit(bad ? 1 : 0);

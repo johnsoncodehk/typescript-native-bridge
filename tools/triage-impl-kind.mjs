@@ -16,13 +16,26 @@ fs.writeFileSync(aTs, content);
 fs.writeFileSync(path.join(FIXTURE_ROOT, 'tsconfig.json'), '{"files":["a.ts"]}');
 
 const stockPath = process.env.STOCK_TSSERVER_PATH ?? '/tmp/stock-ts-p3/package/lib/tsserver.js';
+const results = {};
 for (const [label, tsserverPath, env] of [['TNB', tnbPath, tnbHarnessEnv()], ['STOCK', stockPath, process.env]]) {
 	if (label === 'STOCK' && !fs.existsSync(stockPath)) { console.log('STOCK missing, skip'); continue; }
+	results[label] = [];
 	await withTsserver({ tsserverPath, args: ['--disableAutomaticTypingAcquisition'], env, deadlineMs: 90_000 }, async ({ send }) => {
 		await send('updateOpen', { changedFiles: [], closedFiles: [], openFiles: [{ file: aTs, fileContent: content, projectRootPath: FIXTURE_ROOT }] });
 		for (const offset of [4, 27]) {
 			const r = await send('implementation', { file: aTs, line: 1, offset }, 30_000);
-			console.log(`${label} offset=${offset} success=${r?.success} msg=${(r?.message ?? '').split('\n')[0]}`);
+			const entry = `success=${r?.success} msg=${(r?.message ?? '').split('\n')[0]}`;
+			results[label].push(entry);
+			console.log(`${label} offset=${offset} ${entry}`);
 		}
 	});
+}
+
+// Gate (v5): the implementation response shape (success flag + message) must
+// match stock at both offsets — including stock's own 'kind' error, which is
+// engine parity, not a license for TNB-only failure modes.
+if (results.STOCK) {
+	const bad = JSON.stringify(results.TNB) !== JSON.stringify(results.STOCK);
+	console.log(`\nVERDICT: ${bad ? 'FAIL' : 'PASS'}`);
+	process.exit(bad ? 1 : 0);
 }

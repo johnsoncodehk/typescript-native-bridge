@@ -4,6 +4,13 @@
  * V1: in-memory value export/import (no type-only) under component-meta paths
  * V2: same files WITHOUT vue plugin
  * V3: /tmp minimal two-file project, no plugin
+ *
+ * Gate (v5): refs loc SETS and success flags must be byte-equal between TNB
+ * and stock for every variant/request — references structure is
+ * bridge-contract surface. All variants MATCH as of the gate-ification;
+ * a future divergence fails here (register a KNOWN entry with attribution
+ * rather than deleting the variant).
+ * Exit: 0 = all variants byte-equal.
  */
 import * as fs from 'node:fs';
 import * as os from 'node:os';
@@ -137,3 +144,18 @@ await bothSides('V4_diskMyProps_vue_defOnly', (label, tsserverPath, env) =>
 
 fs.writeFileSync('/tmp/tnb-xrefs-diag-variants.json', JSON.stringify({ tmpRoot, cases }, null, 2));
 console.log('\nwrote /tmp/tnb-xrefs-diag-variants.json tmpRoot=', tmpRoot);
+
+let bad = 0;
+for (const c of cases) {
+	for (const k of Object.keys(c.stock)) {
+		const s = JSON.stringify([...(c.stock[k].locs ?? [])].sort());
+		const t = JSON.stringify([...(c.tnb[k].locs ?? [])].sort());
+		const successEq = c.stock[k].success === c.tnb[k].success;
+		if (s !== t || !successEq) {
+			bad++;
+			console.log(`DIFF ${c.name} ${k}\n  stock: ${s} (success=${c.stock[k].success})\n  tnb  : ${t} (success=${c.tnb[k].success})`);
+		}
+	}
+}
+console.log(`\nVERDICT: ${bad === 0 ? 'PASS' : 'FAIL'} (${cases.length} variants)`);
+process.exit(bad === 0 ? 0 : 1);
