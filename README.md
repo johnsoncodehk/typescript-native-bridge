@@ -71,7 +71,8 @@ overrides:
 Use the alias **and** the `$typescript` override reference as shown — putting
 `npm:typescript-native-bridge@…` directly inside `overrides` is rejected or mis-resolved
 by some npm versions (issue #8). `<version>` is an exact version
-(e.g. `^6.0.3-bridge.0.tsgo.7.0.2`) or the `latest` dist-tag.
+(e.g. `6.0.3-bridge.6.tsgo.7.0.2` — pin exactly; caret ranges don't match
+prerelease versions) or the `latest` dist-tag.
 
 ### yarn
 
@@ -133,13 +134,14 @@ the [known differences](#known-differences-from-stock-typescript)).
 | `svelte-check` | ✅ | fixture project: output identical to stock (incl. `svelteHTML` ambient shims) |
 | `glint` | ✅ | fixture project: same error set as stock (transformed `.gts` virtual files) |
 | ESLint + typescript-eslint (type-aware rules) | ✅ | 1,000-file type-aware corpus: lint output byte-identical to stock |
-| `tsserver` + `@vue/typescript-plugin` | ✅ | volar language-tools test suite: 205/205 pass |
+| `tsserver` + `@vue/typescript-plugin` | ✅ | volar language-tools test suite: 205/209 pass (4 skipped) |
 | `tsslint` | ✅ | runs as the volar repo's own linter |
 
-Continuous verification: a nightly CI gate replays **19,028 language-service probe
-units** (quickinfo / definition / references / diagnostics) against the same stock
-build — no new divergences allowed. If your tool isn't listed, try it and file an issue;
-the fork covers any tool that drives the standard `typescript` Compiler API.
+Continuous verification: a nightly CI gate replays the language-service probe
+corpus (quickinfo / definition / references / diagnostics, ~19k units) against the
+same stock build — no new divergences allowed. If your tool isn't listed, try it and
+file an issue; the fork covers any tool that drives the standard `typescript`
+Compiler API.
 
 ### Framework specifics
 
@@ -168,6 +170,13 @@ Measured on this repo's benchmarks (Apple Silicon; your repo will differ — mea
 **The rule is simple: wherever the time is in the checker, TNB is faster.** The Go
 engine does the whole-program semantic pass ~10× faster than the JS checker — the
 question for any workload is how much of its time that phase is.
+
+**Editor / LS path (Volar + tsserver):** the V8-arena transport (fixed-layout
+records written straight into V8 memory) plus a binary blob codec for the
+auto-import export map keep per-keystroke work near the transport floor. Measured
+on a 5,537-request roam over the volar corpus: completionInfo **0.3ms** mean with
+**290 bytes and 1.0 RPC** per request; quickinfo **0.5ms**; references **4.8ms**;
+total JSON transport **7.7MB**.
 
 **`vue-tsc -b` (checker-dominated — the big win):**
 
@@ -223,14 +232,17 @@ as a tsserver LS Plugin on this fork.
 ## Known differences from stock TypeScript
 
 The checker is tsgo, so behavior is not yet bit-for-bit identical to the JS checker.
-Across **19,028** replayed language-service probe units (quickinfo / go-to-definition /
-find-all-references / diagnostics on a real-world Vue fixture corpus), **1,097 (5.8%)**
-currently differ from the pinned stock build — all triaged and attributed (display
-formatting, result ordering, cross-file reference residuals, intentional deviations).
-The breakdown is tracked in
-[#2 — known differences](https://github.com/johnsoncodehk/typescript-native-bridge/issues/2).
-**Emitted-error parity on a large real-world Vue monorepo is exact.** If you hit a
-difference not listed in the tracker, please file an issue with a minimal repro.
+Current state, continuously enforced by a nightly CI gate against the pinned stock
+build (live baseline in `test/baselines/`):
+
+- **Exact**: emitted errors on a large real-world Vue monorepo; quickinfo display.
+- **~1,170 / 18,825 (6.2%) of probe units** (quickinfo / definition / references /
+  diagnostics on a Vue fixture corpus): display-kind classification, and position
+  shifts into `lib.*.d.ts` — tsgo 7.0.2's bundled lib declarations are not 6.0.3's,
+  so declaration locations inside lib files point at 7.0.2 text.
+
+If you hit a difference not reflected in the baseline, please file an issue with a
+minimal repro.
 
 ---
 
