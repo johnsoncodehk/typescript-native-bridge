@@ -175,6 +175,21 @@ func startOrphanWatchdog() {
 	})
 }
 
+// BridgeSetLibPath hands the JS host's bundled-lib dir to Go — the only
+// channel that reaches Go from every host thread (issue #37: worker
+// process.env writes never touch the environ Go reads, so an env-var
+// handoff is structurally dead there). The loader calls it right after
+// require("bridge.node"), before any session. Returns NULL, or a malloc'd
+// error message the shim frees after throwing.
+//
+//export BridgeSetLibPath
+func BridgeSetLibPath(dir *C.char) *C.char {
+	if err := bundled.SetLibPath(C.GoString(dir)); err != nil {
+		return C.CString(err.Error())
+	}
+	return nil
+}
+
 // BridgeNewSession creates a project session + api session rooted at cwd.
 // Returns the session handle.
 //

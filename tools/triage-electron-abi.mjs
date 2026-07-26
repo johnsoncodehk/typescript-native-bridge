@@ -35,7 +35,7 @@ if (!process.env.ELECTRON_RUN_AS_NODE) {
 		console.log('SKIP: no Electron binary (set TNB_ELECTRON_BIN or npm i --no-save electron)');
 		process.exit(0);
 	}
-	const env = { ...process.env, ELECTRON_RUN_AS_NODE: '1', TNB_LIB_PATH: process.env.TNB_LIB_PATH ?? path.join(repoRoot, 'lib'), GODEBUG: 'asyncpreemptoff=1' };
+	const env = { ...process.env, ELECTRON_RUN_AS_NODE: '1', GODEBUG: 'asyncpreemptoff=1' };
 	const r = spawnSync(bin, [fileURLToPath(import.meta.url)], { env, stdio: 'inherit' });
 	if (r.status !== 0) process.exit(r.status ?? 1);
 	// The arena transport is the other sandbox-sensitive surface (Go writes
@@ -49,6 +49,7 @@ if (!process.env.ELECTRON_RUN_AS_NODE) {
 // ── Electron side ──
 const require2 = createRequire(import.meta.url);
 const addon = require2(path.join(repoRoot, 'native', 'bridge.node'));
+addon.setLibPath(path.join(repoRoot, 'lib'));
 const session = addon.newSession(repoRoot);
 const handle = BigInt(session);
 

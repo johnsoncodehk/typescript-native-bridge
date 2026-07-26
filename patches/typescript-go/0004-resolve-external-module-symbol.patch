@@ -5879,7 +5879,7 @@ index 0917c385d..05254fbe8 100644
  type GetProjectDiagnosticsParams struct {
  	Snapshot SnapshotID `json:"snapshot"`
 diff --git a/internal/api/session.go b/internal/api/session.go
-index 7e29c44b6..d72844eff 100644
+index 7e29c44b6..baaf99f74 100644
 --- a/internal/api/session.go
 +++ b/internal/api/session.go
 @@ -3,6 +3,7 @@ package api
@@ -6760,7 +6760,7 @@ index 7e29c44b6..d72844eff 100644
 +// IsDiskStableDeclarationFileName reports whether fileName names a
 +// declaration file whose on-disk content is stable for the life of the
 +// process: node_modules .d.ts and the shipped lib set (bundled:// in embed
-+// builds, real TNB_LIB_PATH files in noembed builds). The parse and encode
++// builds, LibPath() files on disk in noembed builds). The parse and encode
 +// caches key off this single predicate — a changed file re-parses into a
 +// new AST and misses both caches under its new identity.
 +func IsDiskStableDeclarationFileName(fileName string) bool {

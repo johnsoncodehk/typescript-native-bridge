@@ -1,0 +1,83 @@
+diff --git a/internal/bundled/noembed.go b/internal/bundled/noembed.go
+index 39b204b45..5f0052499 100644
+--- a/internal/bundled/noembed.go
++++ b/internal/bundled/noembed.go
+@@ -6,6 +6,7 @@ import (
+ 	"fmt"
+ 	"os"
+ 	"sync"
++	"sync/atomic"
+ 	"testing"
+ 
+ 	"github.com/microsoft/typescript-go/internal/tspath"
+@@ -29,19 +30,65 @@ var executableDir = sync.OnceValue(func() string {
+ 	return tspath.GetDirectoryPath(exe)
+ })
+ 
+-var libPath = sync.OnceValue(func() string {
++// The JS host hands the bundled-lib dir to Go through the NAPI bridge
++// (SetLibPath, right after require("bridge.node")) — the only channel that
++// reaches Go from every host thread: worker_threads never propagate
++// process.env writes to the environ Go reads (issue #37), so an env-var
++// handoff is structurally dead there. executableDir is the fallback for a
++// pure tsgo binary with no JS host.
++var libPathState = struct {
++	mu       sync.Mutex
++	explicit string
++}{}
++
++var libPathResolved atomic.Value // string
++
++// SetLibPath records the JS host's bundled-lib dir. Idempotent for the same
++// dir; a conflicting or lib-less dir is a host bug and reported, never
++// silently ignored. The dir is realpath'd so symlink and real spellings of
++// one directory converge instead of false-conflicting (CI symlinks lib/
++// into isolated tools copies).
++func SetLibPath(dir string) error {
++	dir = osvfs.FS().Realpath(tspath.NormalizeSlashes(dir))
++	libdts := tspath.CombinePaths(dir, "lib.d.ts")
++	if info := osvfs.FS().Stat(libdts); info == nil {
++		return fmt.Errorf("bundled: %v does not contain lib.d.ts (missing %v)", dir, libdts)
++	}
++	libPathState.mu.Lock()
++	defer libPathState.mu.Unlock()
++	if libPathState.explicit != "" && libPathState.explicit != dir {
++		return fmt.Errorf("bundled: SetLibPath(%v) conflicts with earlier SetLibPath(%v)", dir, libPathState.explicit)
++	}
++	if resolved, _ := libPathResolved.Load().(string); resolved != "" && resolved != dir {
++		return fmt.Errorf("bundled: SetLibPath(%v) came after the lib path resolved to %v", dir, resolved)
++	}
++	libPathState.explicit = dir
++	return nil
++}
++
++func libPath() string {
+ 	if testing.Testing() {
+ 		return TestingLibPath()
+ 	}
+-	dir := executableDir()
+-
++	if resolved, _ := libPathResolved.Load().(string); resolved != "" {
++		return resolved
++	}
++	libPathState.mu.Lock()
++	defer libPathState.mu.Unlock()
++	if resolved, _ := libPathResolved.Load().(string); resolved != "" {
++		return resolved
++	}
++	dir := libPathState.explicit
++	if dir == "" {
++		dir = executableDir()
++	}
+ 	libdts := tspath.CombinePaths(dir, "lib.d.ts")
+ 	if info := osvfs.FS().Stat(libdts); info == nil {
+ 		panic(fmt.Sprintf("bundled: %v does not exist; this executable may be misplaced", libdts))
+ 	}
+-
++	libPathResolved.Store(dir)
+ 	return dir
+-})
++}
+ 
+ func IsBundled(path string) bool {
+ 	return false

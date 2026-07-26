@@ -19,7 +19,10 @@ import { Worker, isMainThread, threadId, workerData, parentPort } from "node:wor
 
 const require = createRequire(import.meta.url);
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-process.env.TNB_LIB_PATH ??= path.join(repoRoot, "lib");
+// Every require(bridge.node) site hands the lib dir to Go right after —
+// idempotent across threads, and the only channel workers can receive
+// (issue #37).
+const libDir = path.join(repoRoot, "lib");
 
 const WORKERS = 6;
 const ITERS = 5000;
@@ -46,6 +49,7 @@ if (isMainThread) {
 	// Affinity guard: a session created here must not be callable from a
 	// worker — the answer must be the loud guard error, never torn data.
 	const addon = require(bridgePath);
+	addon.setLibPath(libDir);
 	const foreignSession = addon.newSession(process.cwd());
 	const misuse = await new Promise((resolve, reject) => {
 		const w = new Worker(fileURLToPath(import.meta.url), { workerData: { bridgePath, mode: "misuse", foreignSession } });
@@ -60,6 +64,7 @@ if (isMainThread) {
 	process.exit(bad === 0 && misuseOk ? 0 : 1);
 } else if (workerData.mode === "misuse") {
 	const addon = require(workerData.bridgePath);
+	addon.setLibPath(libDir);
 	let message = "";
 	try {
 		addon.call(BigInt(workerData.foreignSession), "ping", null);
@@ -69,6 +74,7 @@ if (isMainThread) {
 	parentPort.postMessage({ message });
 } else {
 	const addon = require(workerData.bridgePath);
+	addon.setLibPath(libDir);
 	const session = addon.newSession(process.cwd());
 	const tag = `nosuchmethod_t${threadId}`;
 	let corrupt = 0;

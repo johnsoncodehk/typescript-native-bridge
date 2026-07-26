@@ -65,6 +65,7 @@ static void pin_module_in_process(void) {
 // cgo-exported Go entry points (bridge.go).
 struct BridgeText { char* data; long long kind; };
 struct BridgeBinary { void* data; long long len; unsigned long long handle; long long kind; };
+extern char* BridgeSetLibPath(char* dir);
 extern long long BridgeNewSession(char* cwd);
 extern struct BridgeText BridgeCall(int64_t session, char* method, char* paramsJson);
 extern struct BridgeBinary BridgeCallBinary(int64_t session, char* method, char* paramsJson);
@@ -221,6 +222,29 @@ static napi_value js_string(napi_env env, const char* s) {
 	napi_value out = NULL;
 	napi_create_string_utf8(env, s, NAPI_AUTO_LENGTH, &out);
 	return out;
+}
+
+// setLibPath(dir): undefined — hands the bundled-lib dir to Go before any
+// session (issue #37: the only lib-path channel that works from worker
+// threads). Go validates the dir and rejects conflicts; the error message
+// comes back malloc'd and is freed after the throw.
+static napi_value fn_set_lib_path(napi_env env, napi_callback_info info) {
+	napi_value argv[1];
+	size_t argc = 1;
+	napi_get_cb_info(env, info, &argc, argv, NULL, NULL);
+	bool ok;
+	char* dir = arg_string(env, argv[0], &ok);
+	if (!ok) return NULL;
+	char* err = BridgeSetLibPath(dir);
+	free(dir);
+	if (err != NULL) {
+		napi_throw_error(env, NULL, err);
+		free(err);
+		return NULL;
+	}
+	napi_value undef;
+	napi_get_undefined(env, &undef);
+	return undef;
 }
 
 // newSession(cwd: string): number (session handle)
@@ -424,6 +448,7 @@ NAPI_MODULE_INIT() {
 		napi_throw_error(env, NULL, "tnb bridge: out of memory");
 		return NULL;
 	}
+	set_fn(env, exports, "setLibPath", fn_set_lib_path);
 	set_fn(env, exports, "newSession", fn_new_session);
 	set_fn(env, exports, "call", fn_call);
 	set_fn(env, exports, "callBinary", fn_call_binary);

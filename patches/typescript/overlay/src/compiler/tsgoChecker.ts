@@ -359,19 +359,18 @@ function loadBridgeDeps(): void {
             ? `${process.env.GODEBUG},asyncpreemptoff=1`
             : "asyncpreemptoff=1";
     }
-    // noembed: point tsgo at TNB lib/ before dlopen. Go may snapshot environ at
-    // runtime init; noembed.go's getenvLive therefore checks os.Getenv (Win32
-    // block — the only channel that sees SetEnvironmentVariableW on Windows)
-    // and libc getenv (live CRT environ for POSIX setenv) — both see this write
-    // as long as it happens before require() of the addon below.
-    // External non-empty override wins — do not clobber a pre-set path.
-    if (!process.env.TNB_LIB_PATH) {
-        process.env.TNB_LIB_PATH = path.join(packageRoot, "lib");
-    }
     // The bridge is a NAPI addon (bridge.node) — Node dlopens it directly via
     // require(); no FFI library. napi_shim.c exposes plain JS functions
     // (strings/Buffer/bool/null/int64 in and out; errors are thrown).
     _bridgeAddon = require(resolvedBridge);
+    // Hand the bundled lib dir to Go over NAPI — the only channel that
+    // reaches Go from every host thread (issue #37: worker_threads never
+    // propagate process.env writes to the environ Go reads, so an env-var
+    // handoff is structurally dead there). Must run before the first
+    // newSession; Go validates the dir and throws on a conflicting repeat.
+    // packageRoot comes from this bundle's own realpath'd __dirname, so
+    // symlinked layouts (isolated tools copies) hand over the real lib dir.
+    _bridgeAddon.setLibPath(path.join(packageRoot, "lib"));
     _bridgeFns = {
         BridgeNewSession: _bridgeAddon.newSession,
         BridgeCall: _bridgeAddon.call,

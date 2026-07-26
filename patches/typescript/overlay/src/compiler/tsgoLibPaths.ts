@@ -1,5 +1,6 @@
-// Host↔tsgo lib path helpers. Under noembed, tsgo reads packageRoot/lib from disk
-// (TNB_LIB_PATH); toTsgoFileName is identity. bundled:/// helpers remain defensive.
+// Host↔tsgo lib path helpers. Under noembed, tsgo reads packageRoot/lib from
+// disk (handed over via the bridge's setLibPath); toTsgoFileName is identity.
+// bundled:/// helpers remain defensive.
 
 /* eslint-disable @typescript-eslint/no-require-imports */
 
@@ -66,7 +67,7 @@ export function resolveHostFileName(fileName: string, host?: { getCurrentDirecto
     return path.posix.normalize(path.posix.resolve(cwd, normalized));
 }
 
-/** Identity under noembed — tsgo reads packageRoot/lib (or TNB_LIB_PATH) from disk. */
+/** Identity under noembed — tsgo reads packageRoot/lib from disk (setLibPath handoff). */
 export function toTsgoFileName(fileName: string): string {
     return fileName;
 }

@@ -21,7 +21,7 @@ import { createRequire } from 'node:module';
 const require2 = createRequire(import.meta.url);
 const repoRoot = path.resolve(import.meta.dirname, '..');
 const addon = require2(process.argv[2] ?? path.join(repoRoot, 'native', 'bridge.node'));
-process.env.TNB_LIB_PATH ??= path.join(repoRoot, 'lib');
+addon.setLibPath(path.join(repoRoot, 'lib'));
 
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'tnb-prefetch-inferred-'));
 for (const proj of ['a', 'b']) {

@@ -57,4 +57,4 @@ function saveFilesPatch(rels, patchName) {
 
 saveSingleFilePatch(osvfsRel, "0002-osvfs-executable-fallback.patch");
 saveFilesPatch(resolveExternalModuleSymbolRel, "0004-resolve-external-module-symbol.patch");
-saveSingleFilePatch(noembedRel, "0005-noembed-tnb-lib-path.patch");
+saveSingleFilePatch(noembedRel, "0005-noembed-lib-path.patch");

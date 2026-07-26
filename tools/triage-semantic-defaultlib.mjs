@@ -10,7 +10,6 @@ import * as path from 'node:path';
 
 const require = createRequire(import.meta.url);
 const repoRoot = path.resolve(import.meta.dirname, '..');
-process.env.TNB_LIB_PATH ??= path.join(repoRoot, 'lib');
 const ts = require(path.join(repoRoot, 'lib', 'typescript.js'));
 
 const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'tnb-semantic-defaultlib-')));
@@ -57,9 +56,9 @@ if (!program || !dependencySourceFile) {
 	throw new Error(`dependency source file was not loaded into the program: ${JSON.stringify(program?.getSourceFileNames?.())}`);
 }
 
-// Locate the default lib from the program's own file list: ts.getDefaultLibFilePath
-// resolves through the typescript.js realpath, but the program registers libs
-// under the TNB_LIB_PATH form — the two diverge in CI's symlinked layout.
+// Locate the default lib from the program's own file list rather than a
+// computed path — the registered spelling is whatever the loader handed to
+// Go (realpath'd packageRoot/lib), and the witness should not hard-code it.
 const defaultLibName = program.getSourceFileNames().find(n => /\/lib\.es\d+\.d\.ts$/.test(n));
 const defaultLibFile = defaultLibName && program.getSourceFile(defaultLibName);
 if (!defaultLibFile || !program.isSourceFileDefaultLibrary(defaultLibFile)) {

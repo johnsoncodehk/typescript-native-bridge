@@ -15,9 +15,8 @@ const require2 = createRequire(import.meta.url);
 const repoRoot = path.resolve(import.meta.dirname, '..');
 const bridgePath = path.join(repoRoot, 'native', 'bridge.node');
 
-process.env.TNB_LIB_PATH ??= path.join(repoRoot, 'lib');
-
 const addon = require2(bridgePath);
+addon.setLibPath(path.join(repoRoot, 'lib'));
 const cwd = repoRoot;
 
 const deep = (() => { let o = {}; let cur = o; for (let i = 0; i < 200; i++) { cur.n = {}; cur = cur.n; } cur.end = true; return o; })();
