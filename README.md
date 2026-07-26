@@ -302,9 +302,10 @@ then `npm run setup`; requires Go + a C toolchain).
 
 ### Type errors differ from stock
 
-The checker's behavior is tsgo's — see [Behavior and differences from
-tsgo](#behavior-and-differences-from-tsgo). If a difference isn't listed there,
-pin a version, diff results, and file an issue.
+Expected — the checker's behavior is tsgo 7.0.2's, not stock 6.0.3's, so output
+can differ from stock (see [Behavior and differences from
+tsgo](#behavior-and-differences-from-tsgo)). What **is** a bug: output that
+differs from tsgo itself — file an issue with a minimal repro.
 
 ### Missing native bridge
 
