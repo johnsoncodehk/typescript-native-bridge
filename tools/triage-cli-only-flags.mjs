@@ -25,7 +25,10 @@ import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const forkTsc = path.join(repoRoot, 'bin', 'tsc');
+// lib/tsc.js, not bin/tsc: CI's isolated witness layout symlinks only
+// vendor/lib/native into the tools copy — bin/ does not exist there.
+// bin/tsc's tnb-godebug re-exec is replicated via GODEBUG in run()'s env.
+const forkTsc = path.join(repoRoot, 'lib', 'tsc.js');
 const stockTsPath = process.env.STOCK_TYPESCRIPT_PATH
 	?? (process.env.STOCK_TSSERVER_PATH ? path.join(path.dirname(process.env.STOCK_TSSERVER_PATH), 'typescript.js') : undefined)
 	?? '/tmp/stock-ts-p3/package/lib/typescript.js';
@@ -82,7 +85,7 @@ const cases = [
 ];
 
 function run(tscJs, cwd, args) {
-	const r = spawnSync(process.execPath, [tscJs, '-p', 'tsconfig.json', ...args], { cwd, encoding: 'utf8' });
+	const r = spawnSync(process.execPath, [tscJs, '-p', 'tsconfig.json', ...args], { cwd, encoding: 'utf8', env: { ...process.env, GODEBUG: 'asyncpreemptoff=1' } });
 	// Diagnostics print to stdout; normalize to relative, forward-slash paths.
 	return (r.stdout ?? '').replaceAll(cwd.replaceAll('\\', '/'), '.').replaceAll('\\', '/');
 }
