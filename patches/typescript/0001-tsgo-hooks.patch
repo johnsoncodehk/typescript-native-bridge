@@ -496,7 +496,7 @@ index 6034c9dfc3..0c9a6178db 100644
      let computedWithoutCacheCount = 0;
      const fixes = flatMap(exportInfo, (exportInfo, i) => {
 diff --git a/src/services/completions.ts b/src/services/completions.ts
-index 28d29136da..a806bae867 100644
+index 28d29136da..e267aa7847 100644
 --- a/src/services/completions.ts
 +++ b/src/services/completions.ts
 @@ -175,6 +175,7 @@ import {
@@ -773,18 +773,18 @@ index 28d29136da..a806bae867 100644
 +        let moduleSpecifiersBatchCache: Map<number, moduleSpecifiers.ModuleSpecifierResult> | undefined;
 +        if (needsFullModuleSpecifierResolution) {
 +            type TsgoProgramBatch = Program & {
-+                getModuleExportMap?: (importingFileName?: string) => { modules: readonly { moduleSymbol: Symbol; }[]; } | undefined;
 +                getModuleSpecifiersBatch?: (
 +                    importingFileName: string,
-+                    moduleSymbols: readonly Symbol[],
++                    moduleSymbols: readonly Symbol[] | undefined,
 +                    preferences: UserPreferences,
 +                ) => { results: readonly { moduleSymbol: Symbol; kind?: moduleSpecifiers.ModuleSpecifierResult["kind"]; moduleSpecifiers: readonly string[]; }[]; } | undefined;
 +            };
 +            const tsgoProgram = program as TsgoProgramBatch;
-+            const exportMap = tsgoProgram.getModuleExportMap?.(sourceFile.fileName);
-+            const moduleSymbols = exportMap?.modules?.map(m => m.moduleSymbol);
-+            if (moduleSymbols?.length && tsgoProgram.getModuleSpecifiersBatch) {
-+                const batch = tsgoProgram.getModuleSpecifiersBatch(sourceFile.fileName, moduleSymbols, preferences);
++            if (tsgoProgram.getModuleSpecifiersBatch) {
++                // undefined moduleSymbols = the export map's whole module set,
++                // enumerated Go-side — shipping the map here just to feed its
++                // moduleSymbol ids back in was 64% of completion JSON bytes.
++                const batch = tsgoProgram.getModuleSpecifiersBatch(sourceFile.fileName, /*moduleSymbols*/ undefined, preferences);
 +                if (batch?.results?.length) {
 +                    moduleSpecifiersBatchCache = new Map();
 +                    for (const entry of batch.results) {
@@ -902,7 +902,7 @@ index 28d29136da..a806bae867 100644
   * True if the first character of `lowercaseCharacters` is the first character
   * of some "word" in `identiferString` (where the string is split into "words"
 diff --git a/src/services/exportInfoMap.ts b/src/services/exportInfoMap.ts
-index dfd00ce2e9..39766f55f1 100644
+index dfd00ce2e9..fd7f6d47af 100644
 --- a/src/services/exportInfoMap.ts
 +++ b/src/services/exportInfoMap.ts
 @@ -4,7 +4,9 @@ import {
@@ -1174,7 +1174,7 @@ index dfd00ce2e9..39766f55f1 100644
  /**
   * Don't include something from a `node_modules` that isn't actually reachable by a global import.
   * A relative import to node_modules is usually a bad idea.
-@@ -441,15 +550,114 @@ function isImportablePath(
+@@ -441,15 +550,106 @@ function isImportablePath(
      host: ModuleSpecifierResolutionHost,
  ): boolean {
      // If it's in a `node_modules` but is not reachable from here via a global import, don't bother.
@@ -1207,14 +1207,6 @@ index dfd00ce2e9..39766f55f1 100644
 -        || startsWith(getCanonicalFileName(fromPath), toNodeModulesParent)
 -        || (!!globalCachePath && startsWith(getCanonicalFileName(globalCachePath), toNodeModulesParent));
 +    return !foundNodeModules || reachable === true;
-+}
-+
-+function isModuleFileCoveredByBatch(program: Program, importingFileName: string | undefined, moduleFileName: string): boolean {
-+    if (!importingFileName) return false;
-+    const getBatch = (program as Program & { getModuleExportMap?: (importingFileName?: string) => { modules: readonly { moduleFileName?: string; }[]; } | undefined }).getModuleExportMap;
-+    if (!getBatch) return false;
-+    const batch = getBatch.call(program, importingFileName);
-+    return !!batch?.modules?.some((m: { moduleFileName?: string; }) => m.moduleFileName === moduleFileName);
 +}
 +
 +function getBatchCoveredModuleFileNames(program: Program, importingFileName: string | undefined): Set<string> | undefined {
@@ -1260,16 +1252,16 @@ index dfd00ce2e9..39766f55f1 100644
 +    mainProgram: Program,
 +    autoImportProvider: Program,
 +    importingFileName: string | undefined,
-+): { graphSourceFiles: readonly SourceFile[]; externalModuleFiles: readonly SourceFile[]; } {
++): { graphSourceFiles: readonly SourceFile[]; externalModuleFiles: readonly SourceFile[]; batchCovered: Set<string> | undefined; } {
 +    const allSourceFiles = autoImportProvider.getSourceFiles();
 +    const batchCovered = getBatchCoveredModuleFileNames(mainProgram, importingFileName);
 +    if (!(mainProgram as any).isTsgoBackedProgram || !importingFileName || !batchCovered?.size) {
-+        return { graphSourceFiles: allSourceFiles, externalModuleFiles: allSourceFiles };
++        return { graphSourceFiles: allSourceFiles, externalModuleFiles: allSourceFiles, batchCovered };
 +    }
 +    const rootNames = autoImportProvider.getRootFileNames();
 +    if (!rootNames.length) {
 +        const externalModuleFiles = allSourceFiles.filter(sf => isExternalOrCommonJsModule(sf) && !batchCovered.has(sf.fileName));
-+        return { graphSourceFiles: allSourceFiles, externalModuleFiles };
++        return { graphSourceFiles: allSourceFiles, externalModuleFiles, batchCovered };
 +    }
 +    const checker = autoImportProvider.getTypeChecker();
 +    const visited = new Set<Path>();
@@ -1291,11 +1283,11 @@ index dfd00ce2e9..39766f55f1 100644
 +            if (!visited.has(dep.path)) queue.push(dep);
 +        }
 +    }
-+    return { graphSourceFiles, externalModuleFiles };
++    return { graphSourceFiles, externalModuleFiles, batchCovered };
  }
  
  /** @internal */
-@@ -459,24 +667,39 @@ export function forEachExternalModuleToImportFrom(
+@@ -459,24 +659,42 @@ export function forEachExternalModuleToImportFrom(
      preferences: UserPreferences,
      useAutoImportProvider: boolean,
      cb: (module: Symbol, moduleFile: SourceFile | undefined, program: Program, isFromPackageJson: boolean) => void,
@@ -1322,12 +1314,15 @@ index dfd00ce2e9..39766f55f1 100644
 -                cb(module, file, autoImportProvider, /*isFromPackageJson*/ true);
 +        const providerGraph = (program as any).isTsgoBackedProgram && importingFileName
 +            ? collectAutoImportProviderGraphForSupplement(program, autoImportProvider, importingFileName)
-+            : { graphSourceFiles: autoImportProvider.getSourceFiles(), externalModuleFiles: autoImportProvider.getSourceFiles() };
++            : { graphSourceFiles: autoImportProvider.getSourceFiles(), externalModuleFiles: autoImportProvider.getSourceFiles(), batchCovered: undefined };
 +        const autoImportModuleSymbols = buildModuleSymbolBySourceFileMap(autoImportProvider, providerGraph.graphSourceFiles);
 +        forEachExternalModule(autoImportProvider.getTypeChecker(), providerGraph.externalModuleFiles, excludePatterns, host, autoImportModuleSymbols, (module, file) => {
 +            if (file) {
 +                if ((program as any).isTsgoBackedProgram) {
-+                    if (isModuleFileCoveredByBatch(program, importingFileName, file.fileName)) {
++                    // Membership check against the same covered-file Set the
++                    // supplement graph already built — previously this pulled the
++                    // whole export map across the wire once per provider module.
++                    if (providerGraph.batchCovered?.has(file.fileName)) {
 +                        return;
 +                    }
 +                }
@@ -1344,7 +1339,7 @@ index dfd00ce2e9..39766f55f1 100644
          host.log?.(`forEachExternalModuleToImportFrom autoImportProvider: ${timestamp() - start}`);
      }
  }
-@@ -490,7 +713,92 @@ function getIsExcludedPatterns(preferences: UserPreferences, useCaseSensitiveFil
+@@ -490,7 +708,92 @@ function getIsExcludedPatterns(preferences: UserPreferences, useCaseSensitiveFil
      });
  }
  
@@ -1438,7 +1433,7 @@ index dfd00ce2e9..39766f55f1 100644
      const isExcluded = excludePatterns && getIsExcluded(excludePatterns, host);
  
      for (const ambient of checker.getAmbientModules()) {
-@@ -500,7 +808,10 @@ function forEachExternalModule(checker: TypeChecker, allSourceFiles: readonly So
+@@ -500,7 +803,10 @@ function forEachExternalModule(checker: TypeChecker, allSourceFiles: readonly So
      }
      for (const sourceFile of allSourceFiles) {
          if (isExternalOrCommonJsModule(sourceFile) && !isExcluded?.(sourceFile)) {
@@ -1450,7 +1445,7 @@ index dfd00ce2e9..39766f55f1 100644
          }
      }
  }
-@@ -533,6 +844,548 @@ export function getIsFileExcluded(host: LanguageServiceHost, preferences: UserPr
+@@ -533,6 +839,548 @@ export function getIsFileExcluded(host: LanguageServiceHost, preferences: UserPr
      return getIsExcluded(getIsExcludedPatterns(preferences, hostUsesCaseSensitiveFileNames(host)), host);
  }
  
@@ -1999,7 +1994,7 @@ index dfd00ce2e9..39766f55f1 100644
  /** @internal */
  export function getExportInfoMap(importingFile: SourceFile | FutureSourceFile, host: LanguageServiceHost, program: Program, preferences: UserPreferences, cancellationToken: CancellationToken | undefined): ExportInfoMap {
      const start = timestamp();
-@@ -552,42 +1405,17 @@ export function getExportInfoMap(importingFile: SourceFile | FutureSourceFile, h
+@@ -552,42 +1400,17 @@ export function getExportInfoMap(importingFile: SourceFile | FutureSourceFile, h
      }
  
      host.log?.("getExportInfoMap: cache miss or empty; calculating new results");

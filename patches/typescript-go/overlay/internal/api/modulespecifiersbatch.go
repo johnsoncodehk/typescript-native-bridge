@@ -19,11 +19,14 @@ type ModuleSpecifiersBatchPreferences struct {
 
 // GetModuleSpecifiersBatchParams are parameters for getModuleSpecifiersBatch.
 type GetModuleSpecifiersBatchParams struct {
-	Snapshot      SnapshotID                        `json:"snapshot"`
-	Project       ProjectID                         `json:"project"`
-	File          *DocumentIdentifier               `json:"file"`
-	ModuleSymbols []SymbolID                        `json:"moduleSymbols"`
-	Preferences   *ModuleSpecifiersBatchPreferences `json:"preferences,omitempty"`
+	Snapshot      SnapshotID          `json:"snapshot"`
+	Project       ProjectID           `json:"project"`
+	File          *DocumentIdentifier `json:"file"`
+	ModuleSymbols []SymbolID          `json:"moduleSymbols"`
+	// AllModules resolves specifiers for every module in the program's export
+	// map (ModuleSymbols ignored) — the export map stays on the Go side.
+	AllModules  bool                              `json:"allModules,omitempty"`
+	Preferences *ModuleSpecifiersBatchPreferences `json:"preferences,omitempty"`
 }
 
 // ModuleSpecifiersBatchEntry is one module's auto-import specifier candidates.

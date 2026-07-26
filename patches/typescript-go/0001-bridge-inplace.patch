@@ -475,7 +475,7 @@ index 1aba5087e..72b331708 100644
      id: number;
      flags: number;
 diff --git a/_packages/native-preview/src/api/sync/types.ts b/_packages/native-preview/src/api/sync/types.ts
-index 658d07806..fdf13a1a0 100644
+index 658d07806..8c37e4232 100644
 --- a/_packages/native-preview/src/api/sync/types.ts
 +++ b/_packages/native-preview/src/api/sync/types.ts
 @@ -12,6 +12,7 @@ import type { ElementFlags } from "#enums/elementFlags";
@@ -486,7 +486,7 @@ index 658d07806..fdf13a1a0 100644
  import type {
      NodeHandle,
      Symbol,
-@@ -334,6 +335,212 @@ export interface CompletionInfo {
+@@ -334,6 +335,190 @@ export interface CompletionInfo {
      readonly entries: readonly CompletionEntry[];
  }
  
@@ -629,34 +629,12 @@ index 658d07806..fdf13a1a0 100644
 +    }[];
 +}
 +
-+/** Wire response for {@link Program.getModuleExportMap}. */
-+export interface ModuleExportMapWireResponse {
-+    readonly modules: readonly {
-+        readonly moduleFileName?: string;
-+        readonly moduleName: string;
-+        readonly moduleSymbol: LightSymbolWire;
-+        readonly importableFrom?: boolean;
-+        readonly defaultExport?: {
-+            readonly symbol: LightSymbolWire;
-+            readonly tableKey: string;
-+            readonly exportKind: number;
-+            readonly targetFlags: number;
-+        };
-+        readonly namedExports: readonly {
-+            readonly symbol: LightSymbolWire;
-+            readonly key: string;
-+            readonly targetFlags: number;
-+        }[];
-+    }[];
-+}
-+
 +/** Materialized auto-import export index from {@link Program.getModuleExportMap}. */
 +export interface ModuleExportMapBatch {
 +    readonly modules: readonly {
 +        readonly moduleFileName?: string | undefined;
 +        readonly moduleName: string;
 +        readonly moduleSymbol: Symbol;
-+        readonly importableFrom?: boolean | undefined;
 +        readonly defaultExport?: {
 +            readonly symbol: Symbol;
 +            readonly tableKey: string;

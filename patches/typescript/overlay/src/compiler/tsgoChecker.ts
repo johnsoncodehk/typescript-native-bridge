@@ -6849,17 +6849,19 @@ export function createTsgoProgram(
         // block above.
         tnbBuilderFileMetas: () => getBuilderMetaState()?.byPath,
         // Batch auto-import export index (exportInfoMap cold populate).
-        getModuleExportMap: (importingFileName?: string) => {
+        getModuleExportMap: () => {
             const proj = project;
             if (!proj?.checker) return undefined;
             try {
-                return normalizeExportMapWireNames(proj.checker.getModuleExportMap(importingFileName ? tsgoFileArg(importingFileName) : undefined));
+                return normalizeExportMapWireNames(proj.checker.getModuleExportMap());
             } catch {
                 return undefined;
             }
         },
         // Batch auto-import module specifier resolution (collectAutoImports cold path).
-        getModuleSpecifiersBatch: (importingFileName: string, moduleSymbols: readonly any[], preferences: any) => {
+        // moduleSymbols === undefined resolves the export map's whole module set
+        // Go-side, so the map itself never crosses the wire just to feed ids back.
+        getModuleSpecifiersBatch: (importingFileName: string, moduleSymbols: readonly any[] | undefined, preferences: any) => {
             const proj = project;
             if (!proj?.checker) return undefined;
             try {
