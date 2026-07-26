@@ -239,7 +239,8 @@ TNB's own changes to tsgo behavior — the complete list, enforced by CI:
 
 | Change | Why | Upstream | Removal |
 |---|---|---|---|
-| `getImmediateRootSymbols` / `getTypeOfMappedSymbol` nil-containingType guards | Prevents a SIGSEGV on the volar/.vue corpus (headline-path crasher) | (PR pending) | When the upstream fix lands |
+| `getExportsOfModule` merges an `export =` target's members (TS-side RPC merge over the raw binder table) | Silent wrong result on the headline path: completions/auto-import on an `export =` class saw only `prototype` (issue #29) | repro branch `repro/export-equals-exports-merge` (issue pending) | When the upstream fix lands |
+| `getTypeFromTypeNodeWorker` resolves type-position entity names (identifier / qualified name / property access) | Silent wrong result on the headline path: hover on `P` in `[P, (typeof OBJ)[P][number]]` read `any` instead of the type parameter (issue #30) | repro branch `repro/type-position-entity-reads-any` (issue pending) | When the upstream fix lands |
 
 Anything that looks like a difference from stock 6.0.3 but isn't listed here is
 tsgo's own behavior, not TNB's. Found an actual TNB-only divergence? File an
