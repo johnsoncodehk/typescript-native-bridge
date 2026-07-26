@@ -4,6 +4,18 @@
  * a REAL abstract construct signature must still print `abstract new`
  * after the remap that removes the spurious one, and rest-parameter
  * display must survive the bit relayout.
+ *
+ * v5 classification:
+ *   GATE  — TNB must not throw, and must answer every site stock answers
+ *           (success-semantics contract); sites where stock itself has no
+ *           content are exempt.
+ *   INFO  — displayString diffs vs stock are engine display behavior
+ *           (pristine tsgo reference: T-SEMI trailing ';', T-ALIAS alias
+ *           form without the stock import line). Informational, non-gating.
+ *           Note: tsgo's alias display form no longer prints `abstract new`
+ *           at the Abs sites, so the remap's abstract-bit survival is not
+ *           observable through quickinfo here — the enum-remap gate
+ *           (check:enums) covers the bit mapping directly.
  */
 import * as fs from 'node:fs';
 import * as path from 'node:path';
@@ -57,14 +69,22 @@ async function run(label, serverPath, env) {
 const tnb = await run('TNB', tnbPath, tnbHarnessEnv());
 const stock = fs.existsSync(stockPath) ? await run('STOCK', stockPath, process.env) : new Map();
 
-let diffs = 0;
+let diffs = 0, bad = 0;
 for (const site of SITES) {
 	const a = tnb.get(site.label) ?? '<none>';
 	const b = stock.get(site.label) ?? '<no-stock>';
 	const same = a === b;
 	if (!same) diffs++;
+	const tnbFailed = a.startsWith('<throw:') || a === '<fail>' || a === '<none>'
+		|| (a.startsWith('<unsuccessful:') && !b.startsWith('<unsuccessful:'));
+	if (tnbFailed) {
+		bad++;
+		console.log(`FAIL  ${site.label} — TNB did not answer: ${a.slice(0, 140)}`);
+		continue;
+	}
 	console.log(`${same ? 'MATCH' : 'DIFF '} ${site.label}`);
 	console.log(`   tnb  : ${a.slice(0, 140)}`);
-	if (!same) console.log(`   stock: ${b.slice(0, 140)}`);
+	if (!same) console.log(`   stock: ${b.slice(0, 140)}  (display diff = tsgo reference, informational)`);
 }
-console.log(`\nsites=${SITES.length} diffs=${diffs}`);
+console.log(`\nsites=${SITES.length} diffs=${diffs} (informational) bad=${bad}`);
+process.exit(bad === 0 ? 0 : 1);
