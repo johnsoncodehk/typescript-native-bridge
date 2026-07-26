@@ -55,6 +55,10 @@ jobs:
       - name: Build bridge (cgo dylib)
         run: npm run build:bridge
 
+      - name: go vet
+        run: go vet ./internal/...
+        working-directory: typescript-go
+
       - name: Gates
         run: |
           npm run check:lib
