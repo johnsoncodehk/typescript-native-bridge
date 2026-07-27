@@ -72,6 +72,10 @@ const ARCHIVAL = [
 ];
 
 const git = (cwd, args) => execFileSync('git', args, { cwd, encoding: 'utf8' }).trim();
+const gitOk = (cwd, args) => {
+	try { return git(cwd, args); }
+	catch { return ''; }
+};
 
 function runGoTest(cwd, r) {
 	let out = '';
@@ -86,7 +90,9 @@ function runGoTest(cwd, r) {
 }
 
 // ── Pristine clone (pin-verified) ──────────────────────────────────────────
-let pin = git(submodule, ['describe', '--tags', '--exact-match', 'HEAD']);
+// git describe tolerates failure: shallow submodule checkouts (CI fetch-depth
+// 1) carry no tag refs, so the tag form may be unavailable — fall back to SHA.
+let pin = gitOk(submodule, ['describe', '--tags', '--exact-match', 'HEAD']);
 let pinIsTag = true;
 if (!pin) {
 	pin = git(submodule, ['rev-parse', 'HEAD']);
