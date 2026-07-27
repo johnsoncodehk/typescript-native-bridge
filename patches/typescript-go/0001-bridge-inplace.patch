@@ -3577,7 +3577,7 @@ index 909b5aa4b..2237d958c 100644
  	existing, loaded := c.entries.LoadOrStore(key, entry)
  	if loaded {
 diff --git a/internal/project/session.go b/internal/project/session.go
-index 00f4056e5..2e2a332af 100644
+index 00f4056e5..46f5bdb43 100644
 --- a/internal/project/session.go
 +++ b/internal/project/session.go
 @@ -26,6 +26,7 @@ import (
@@ -3597,7 +3597,23 @@ index 00f4056e5..2e2a332af 100644
  
  	// snapshotID is the counter for snapshot IDs. It does not necessarily
  	// equal the `snapshot.ID`. It is stored on Session instead of globally
-@@ -261,6 +264,14 @@ func (s *Session) GetCurrentDirectory() string {
+@@ -256,11 +259,30 @@ func (s *Session) FS() vfs.FS {
+ 	return s.fs.fs
+ }
+ 
++// OverlayContent returns the session's current overlay text for path —
++// the base a delta push (openFilesWithContent edits) splices into.
++func (s *Session) OverlayContent(path tspath.Path) (string, bool) {
++	s.fs.mu.RLock()
++	defer s.fs.mu.RUnlock()
++	if o, ok := s.fs.overlays[path]; ok {
++		return o.Content(), true
++	}
++	return "", false
++}
++
+ // GetCurrentDirectory implements module.ResolutionHost
+ func (s *Session) GetCurrentDirectory() string {
  	return s.options.CurrentDirectory
  }
  
@@ -3612,7 +3628,7 @@ index 00f4056e5..2e2a332af 100644
  // Gets copy of current configuration
  func (s *Session) Config() lsutil.UserPreferences {
  	s.userConfigRWMu.Lock()
-@@ -329,6 +340,21 @@ func (s *Session) DidCloseFile(ctx context.Context, uri lsproto.DocumentUri) {
+@@ -329,6 +351,21 @@ func (s *Session) DidCloseFile(ctx context.Context, uri lsproto.DocumentUri) {
  	s.ScheduleSnapshotUpdate(UpdateReasonDidCloseFile)
  }
  
@@ -3634,7 +3650,7 @@ index 00f4056e5..2e2a332af 100644
  func (s *Session) DidChangeFile(ctx context.Context, uri lsproto.DocumentUri, version int32, changes []lsproto.TextDocumentContentChangePartialOrWholeDocument) {
  	s.cancelDiagnosticsRefresh()
  	s.cancelWarmAutoImportCache()
-@@ -1153,6 +1179,37 @@ func (s *Session) GetLanguageServiceWithAutoImports(ctx context.Context, baseSna
+@@ -1153,6 +1190,37 @@ func (s *Session) GetLanguageServiceWithAutoImports(ctx context.Context, baseSna
  	return ls.NewLanguageService(project.configFilePath, project.GetProgram(), newSnapshot, uri.FileName()), nil
  }
  

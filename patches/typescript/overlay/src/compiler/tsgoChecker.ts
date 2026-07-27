@@ -134,6 +134,10 @@ type TnbBridgeProcessState = {
     signalExitBypassInstalled?: boolean;
     /** Host text last pushed to the (process-wide) tsgo session per file. */
     syncedOverlayContentByFile?: Map<string, string>;
+    /** Delta-push count per file the bridge session has applied. */
+    syncedOverlayVersionByFile?: Map<string, number>;
+    /** Host edit deltas (ScriptInfo.editContent) awaiting the next overlay sync. */
+    pendingOverlayEditsByFile?: Map<string, { start: number; deleteLength: number; insertText: string }[]>;
     /** Solution-build (tsc -b / vue-tsc -b) active-project tracker. The build
      * orchestrator finishes each project completely before the next program is
      * created, so the previously opened tsgo project can be closed when the
@@ -2091,6 +2095,87 @@ let _tnbParentMemoEpoch = 0;
 /** Host text last pushed to tsgo per file — skip redundant updateSnapshot.
  * Process-global: it mirrors the shared tsgo session's overlay state. */
 const _syncedOverlayContentByFile: Map<string, string> = tnbBridgeProcessState().syncedOverlayContentByFile ??= new Map();
+/** Delta-push count per file the bridge has applied (0 after a full-content
+ * push) — mirrored to the Go session's overlayVersions as baseVersion. */
+const _syncedOverlayVersionByFile: Map<string, number> = tnbBridgeProcessState().syncedOverlayVersionByFile ??= new Map();
+/** Host edit deltas captured from ScriptInfo.editContent since the last
+ * overlay push, keyed by host fileName (resolved at capture time). */
+const _pendingOverlayEditsByFile: Map<string, { start: number; deleteLength: number; insertText: string }[]> = tnbBridgeProcessState().pendingOverlayEditsByFile ??= new Map();
+
+/**
+ * Record one host edit delta (stock tsserver `change` → ScriptInfo.editContent)
+ * for the next overlay sync. The wire then carries `{edits, baseVersion}`
+ * instead of full content for synced plain-TS files; .vue-class virtual files
+ * keep the full-content path (their TS is regenerated, not edited through).
+ */
+export function tnbNoteHostEdit(fileName: string, start: number, end: number, newText: string): void {
+	// Normalize at capture so the key matches the send side's resolvedFn
+	// (editContent's fileName is always absolute — host cwd is irrelevant).
+	const key = resolveHostFileName(fileName);
+	const pending = _pendingOverlayEditsByFile.get(key);
+	const edit = { start, deleteLength: end - start, insertText: newText };
+	if (pending) pending.push(edit);
+	else _pendingOverlayEditsByFile.set(key, [edit]);
+}
+
+/** Splice recorded edit deltas into a base text (UTF-16 code units — JS strings' native domain). */
+function applyOverlayEdits(base: string, edits: readonly { start: number; deleteLength: number; insertText: string }[]): string {
+	let text = base;
+	for (const e of edits) {
+		text = text.slice(0, e.start) + e.insertText + text.slice(e.start + e.deleteLength);
+	}
+	return text;
+}
+
+/** Commit the overlay mirror after a successful updateSnapshot send: full
+ * pushes reset the file's version to 0, delta pushes splice + bump. */
+function commitSyncedOverlay(f: { fileName: string; content: string; edits?: { start: number; deleteLength: number; insertText: string }[] }): void {
+	if (f.edits?.length) {
+		const base = _syncedOverlayContentByFile.get(f.fileName) ?? "";
+		_syncedOverlayContentByFile.set(f.fileName, applyOverlayEdits(base, f.edits));
+		_syncedOverlayVersionByFile.set(f.fileName, (_syncedOverlayVersionByFile.get(f.fileName) ?? 0) + 1);
+	}
+	else {
+		_syncedOverlayContentByFile.set(f.fileName, f.content);
+		_syncedOverlayVersionByFile.set(f.fileName, 0);
+	}
+}
+
+/** Drop all overlay bookkeeping for a file (mirror, version, pending edits). */
+function forgetSyncedOverlay(fileName: string): void {
+	_syncedOverlayContentByFile.delete(fileName);
+	_syncedOverlayVersionByFile.delete(fileName);
+	_pendingOverlayEditsByFile.delete(fileName);
+}
+
+/** Per-file overlay push decision: undefined = Go already holds exactly the
+ * host text (nothing to send); an `{edits, baseVersion}` delta when splicing
+ * the recorded host edits into the synced base reproduces the host text
+ * (plain TS only — .vue-class virtual TS is regenerated per host change,
+ * never edit-shaped, so it always takes the full-content path); full content
+ * otherwise. Consumes the file's pending edits either way. */
+function decideOverlayPush(fileName: string, hostText: string, scriptKind: number): any | undefined {
+	const synced = _syncedOverlayContentByFile.get(fileName);
+	if (synced === hostText) {
+		_pendingOverlayEditsByFile.delete(fileName);
+		return undefined;
+	}
+	const pendingEdits = _pendingOverlayEditsByFile.get(fileName);
+	_pendingOverlayEditsByFile.delete(fileName);
+	if (synced !== undefined && pendingEdits?.length && !isExtraExtensionFileName(fileName)
+		&& applyOverlayEdits(synced, pendingEdits) === hostText) {
+		return { fileName, content: "", scriptKind, edits: pendingEdits, baseVersion: _syncedOverlayVersionByFile.get(fileName) ?? 0 };
+	}
+	return { fileName, content: hostText, scriptKind };
+}
+
+/** overlay.sync trace line for a send batch (witness + perf A/B read this). */
+function traceOverlaySync(openFilesWithContent: readonly any[], deduped: boolean): void {
+	if (openFilesWithContent.length === 0) return;
+	const deltaFiles = openFilesWithContent.filter(f => f.edits?.length);
+	const edits = deltaFiles.reduce((n, f) => n + f.edits.length, 0);
+	_rpcTraceEvent("overlay.sync", `files=${openFilesWithContent.length} deltaFiles=${deltaFiles.length} edits=${edits} bytes=${JSON.stringify(openFilesWithContent).length} deduped=${deduped} names=${openFilesWithContent.map(f => f.fileName.split("/").slice(-2).join("/") + (f.edits?.length ? "(d)" : "")).join(",")}`);
+}
 
 // Overlay-path cache: only files missing on disk are fed to tsgo as overlays
 // (typically Volar virtual documents).
@@ -2154,7 +2239,7 @@ function beginBuildProject(configFilePath: string): { closeParams: any; staleSna
     _projectCache.delete(prev.configFilePath);
     // The overlays are being closed in tsgo — forget the synced-content memo
     // so a later re-push of identical content is not skipped.
-    for (const f of prev.openedFiles) _syncedOverlayContentByFile.delete(f);
+    for (const f of prev.openedFiles) forgetSyncedOverlay(f);
     return {
         closeParams: {
             closeProjects: [prev.configFilePath],
@@ -5795,20 +5880,22 @@ export function createTsgoProgram(
                 // so tsgo does not keep checking stale overlay content.
                 const synced = _syncedOverlayContentByFile.get(resolvedFn);
                 if (synced !== undefined && synced !== content.text) {
-                    _syncedOverlayContentByFile.delete(resolvedFn);
+                    forgetSyncedOverlay(resolvedFn);
                     overlays.push({ fileName: resolvedFn, content: content.text, scriptKind: content.scriptKind });
                 }
                 else if (synced !== undefined) {
-                    _syncedOverlayContentByFile.delete(resolvedFn);
+                    forgetSyncedOverlay(resolvedFn);
                 }
                 continue;
             }
+            const entry = decideOverlayPush(resolvedFn, content.text, content.scriptKind);
+            if (!entry) continue;
             const snapSf = sourceFileFromHostSnapshot(programCtx.lsHost, resolvedFn, fn, options.target ?? 99);
             if (snapSf?.statements?.length) {
                 parsedHostSourceFiles.set(resolvedFn, snapSf);
             }
             hostContentByFile.set(resolvedFn, content);
-            overlays.push({ fileName: resolvedFn, content: content.text, scriptKind: content.scriptKind });
+            overlays.push(entry);
             }
         }
     }
@@ -8009,6 +8096,10 @@ export function createTsgoChecker(program: any): any {
             if (closed.length) closedTabs = closed;
             _sessionSentOpenTabs.clear();
             for (const f of openTabs) _sessionSentOpenTabs.add(f);
+            // Go drops these overlays with the close — the synced-content memo
+            // must forget them too, or the mirror==host skip stops re-pushing a
+            // file the bridge no longer has (cross-project "not a module").
+            for (const f of closed) forgetSyncedOverlay(f);
         }
         // Build mode: close the previous solution-build project in the same
         // updateSnapshot call that opens this one (see beginBuildProject).
@@ -8041,6 +8132,7 @@ export function createTsgoChecker(program: any): any {
         const updateParamsJson = (options as any).tscBuild ? undefined : JSON.stringify(updateParams);
         const prevUpdate = updateParamsJson !== undefined ? _lastUpdateParamsByConfig.get(configFilePath!) : undefined;
         const deduped = prevUpdate !== undefined && prevUpdate.paramsJson === updateParamsJson;
+        traceOverlaySync(openFilesWithContent, deduped);
         const snapshot: any = deduped ? undefined : _api.updateSnapshot(updateParams);
         if (programCtx) programCtx.pendingReferencedProjects = undefined;
         project = deduped ? prevUpdate!.project : snapshot.getProject(configFilePath!);
@@ -8058,7 +8150,7 @@ export function createTsgoChecker(program: any): any {
         }
         releaseStaleBuildSnapshots(buildClose.staleSnapshots);
         for (const f of openFilesWithContent) {
-            _syncedOverlayContentByFile.set(f.fileName, f.content);
+            commitSyncedOverlay(f);
         }
         // Cross-project extra-extension imports (e.g. ../other/foo.vue): the
         // program can include host-virtual files that were not in this
@@ -8096,7 +8188,7 @@ export function createTsgoChecker(program: any): any {
                 if (refreshed) {
                     project = refreshed;
                     trackBuildProjectSnapshot(configFilePath!, lateSnapshot, lateOverlays.map(f => f.fileName));
-                    for (const f of lateOverlays) _syncedOverlayContentByFile.set(f.fileName, f.content);
+                    for (const f of lateOverlays) commitSyncedOverlay(f);
                 }
             }
         }
@@ -8421,19 +8513,25 @@ export function createTsgoChecker(program: any): any {
             if (!hostOnly && inTsgo && !shouldSendHostOverlay(hostFileName, content.text)) {
                 const synced = _syncedOverlayContentByFile.get(hostFileName);
                 if (synced !== undefined && synced !== content.text) {
-                    _syncedOverlayContentByFile.delete(hostFileName);
+                    forgetSyncedOverlay(hostFileName);
                     openFilesWithContent.push({ fileName: hostFileName, content: content.text, scriptKind: content.scriptKind });
                 }
                 else if (synced !== undefined) {
-                    _syncedOverlayContentByFile.delete(hostFileName);
+                    forgetSyncedOverlay(hostFileName);
                 }
                 continue;
             }
-            if (!hostOnly && _syncedOverlayContentByFile.get(hostFileName) === content.text) continue;
+            if (!hostOnly) {
+                const entry = decideOverlayPush(hostFileName, content.text, content.scriptKind);
+                if (!entry) continue;
+                openFilesWithContent.push(entry);
+                continue;
+            }
             openFilesWithContent.push({ fileName: hostFileName, content: content.text, scriptKind: content.scriptKind });
         }
         if (!openFiles.length && !openFilesWithContent.length) return;
 
+        traceOverlaySync(openFilesWithContent, /*deduped*/ false);
         const snapshot: any = _api.updateSnapshot({
             openProject: openProjectParam(ctx.configFilePath, ctx.options),
             ...(openFiles.length > 0 ? { openFiles } : {}),
@@ -8454,7 +8552,7 @@ export function createTsgoChecker(program: any): any {
         _currentProjectRef.project = refreshed;
         installTsgoBackedSourceFileLoader(() => project);
         for (const f of openFilesWithContent) {
-            _syncedOverlayContentByFile.set(f.fileName, f.content);
+            commitSyncedOverlay(f);
             tsgoSfCache.delete(f.fileName);
             nodeIndexCache.delete(f.fileName);
             nodeAtPosCache.delete(f.fileName);

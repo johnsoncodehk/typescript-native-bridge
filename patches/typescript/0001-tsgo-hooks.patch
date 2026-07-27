@@ -473,6 +473,29 @@ index aa578c7ed0..487d472af3 100644
              // We want to retain the projects for open file if they are pending updates so deferredClosed projects are ok
              const result = this.tryFindDefaultConfiguredProjectAndLoadAncestorsForOpenScriptInfo(
                  info,
+diff --git a/src/server/scriptInfo.ts b/src/server/scriptInfo.ts
+index 8635d543cd..1b6e9e6115 100644
+--- a/src/server/scriptInfo.ts
++++ b/src/server/scriptInfo.ts
+@@ -34,6 +34,7 @@ import {
+     SourceFile,
+     SourceFileLike,
+     TextSpan,
++    tnbNoteHostEdit,
+ } from "./_namespaces/ts.js";
+ import {
+     AbsolutePositionAndLineText,
+@@ -675,6 +676,10 @@ export class ScriptInfo {
+ 
+     editContent(start: number, end: number, newText: string): void {
+         this.textStorage.edit(start, end, newText);
++        // Forward the delta to the tsgo overlay sync — the bridge then receives
++        // `{edits, baseVersion}` for this file instead of its full text on the
++        // next updateSnapshot. O(1) append; the sync decides delta vs full.
++        tnbNoteHostEdit(this.fileName, start, end, newText);
+         this.markContainingProjectsAsDirty();
+     }
+ 
 diff --git a/src/services/codefixes/importFixes.ts b/src/services/codefixes/importFixes.ts
 index 6034c9dfc3..0c9a6178db 100644
 --- a/src/services/codefixes/importFixes.ts
