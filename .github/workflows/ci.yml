@@ -10,7 +10,7 @@ permissions:
 
 env:
   VOLAR_BRANCH: feat/tsgo-diagnostic-codes
-  VOLAR_SHA: 943f5984b # vuejs/language-tools@feat/tsgo-diagnostic-codes, pinned for reproducibility
+  VOLAR_SHA: 0ec2d1935 # vuejs/language-tools@feat/tsgo-diagnostic-codes, pinned for reproducibility
 
 jobs:
   regression:
