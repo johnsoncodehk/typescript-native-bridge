@@ -192,6 +192,9 @@ jobs:
           GOOS: windows
           GOARCH: amd64
           CC: x86_64-w64-mingw32-gcc
+          TNB_NODE_LIB: /tmp/node.lib
+          CGO_ENABLED: 1
+          TNB_STRIP: 1
 
       - name: Upload lib payload
         uses: actions/upload-artifact@v4
