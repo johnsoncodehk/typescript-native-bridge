@@ -56,7 +56,10 @@ jobs:
         run: npm run build:bridge
 
       - name: go vet
-        run: go vet ./internal/...
+        # Scoped to packages TNB patches touch — vetting all of typescript-go
+        # (plus every test file) costs ~6min/run; upstream code is not our
+        # surface. Keep in sync with patches/typescript-go/.
+        run: go vet ./internal/api/... ./internal/ls/... ./internal/checker/... ./internal/compiler/... ./internal/bundled/... ./internal/project/... ./internal/module/...
         working-directory: typescript-go
 
       - name: Gates

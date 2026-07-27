@@ -388,6 +388,98 @@ jobs:
           echo "OVERLAY-MODULE-EXIT=$LASTEXITCODE"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+      - name: Cache astro-check deps
+        # astro's dependency tree is large; the npm cache keeps the win32
+        # install to seconds. Deps are pinned exactly in the fixture
+        # package.json below, so a plain version key is enough.
+        uses: actions/cache@v4
+        with:
+          path: ~/.npm
+          key: astro38-npm-v1
+          restore-keys: astro38-npm-
+
+      - name: astro-check (ambient Astro namespace + Fragment, issue #38 class)
+        # #38 (Windows): astro ambient types failed to resolve — "Cannot use
+        # namespace 'Astro'" / "Cannot find name 'Fragment'" across all files.
+        # Prime suspect: a Windows path-family bug keeping astro/client types
+        # (or .astro/types.d.ts) out of the program. This probe mirrors the
+        # reporter's pattern (Astro.site/Astro.url in frontmatter,
+        # <Fragment set:html>, an imported .astro component, strictest +
+        # react-jsx) and asserts the signatures never appear and the run is
+        # clean. The typescript under test is the CI staging lib + win32
+        # bridge, materialized into the fixture's node_modules.
+        run: |
+          mkdir astro-fixture/src/components | Out-Null
+          @'
+          {
+            "name": "tnb-astro38",
+            "private": true,
+            "dependencies": {
+              "astro": "7.0.8",
+              "@astrojs/check": "0.9.9",
+              "react": "19.2.8",
+              "@types/react": "19.2.17"
+            }
+          }
+          '@ | Set-Content -Encoding ascii astro-fixture/package.json
+          @'
+          {
+            "extends": "astro/tsconfigs/strictest",
+            "include": [".astro/types.d.ts", "src/**/*"],
+            "compilerOptions": {
+              "jsx": "react-jsx",
+              "jsxImportSource": "react",
+              "baseUrl": ".",
+              "types": []
+            }
+          }
+          '@ | Set-Content -Encoding ascii astro-fixture/tsconfig.json
+          @'
+          ---
+          export interface Props { title: string }
+          const { title } = Astro.props;
+          ---
+          <strong>{title}</strong>
+          '@ | Set-Content -Encoding ascii astro-fixture/src/components/Card.astro
+          @'
+          ---
+          import Card from './components/Card.astro';
+          const baseUrl = Astro.site;
+          const targetUrl = new URL('/x', baseUrl);
+          const pagePath = Astro.url.pathname;
+          ---
+          <Fragment set:html={targetUrl.href} />
+          <Card title={pagePath} />
+          '@ | Set-Content -Encoding ascii astro-fixture/src/Example.astro
+          npm install --prefix astro-fixture --no-audit --no-fund --legacy-peer-deps
+          # The typescript under test: staging lib + the win32 bridge binary.
+          mkdir astro-fixture/node_modules/typescript | Out-Null
+          cp -Recurse staging/* astro-fixture/node_modules/typescript/
+          mkdir astro-fixture/node_modules/typescript/native -ErrorAction SilentlyContinue | Out-Null
+          cp native/bridge.* astro-fixture/node_modules/typescript/native/
+          @'
+          const { execFileSync } = require('child_process');
+          const fs = require('fs');
+          fs.writeSync(1, 'node ' + process.version + '\n');
+          const sig38 = /Cannot find name 'Fragment'|Cannot use namespace 'Astro'|Cannot find name 'Astro'/;
+          let out;
+          try {
+            out = execFileSync(process.execPath, ['node_modules/@astrojs/check/bin/astro-check.js'], { cwd: 'astro-fixture', encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+          } catch (e) {
+            out = (e.stdout ?? '') + (e.stderr ?? '');
+            fs.writeSync(1, out + '\n');
+            fs.writeSync(2, (sig38.test(out) ? 'FAIL: #38 signature present in astro-check output\n' : 'FAIL: astro-check exited non-zero (' + (e.status ?? '?') + ')\n'));
+            process.exit(1);
+          }
+          fs.writeSync(1, out + '\n');
+          if (sig38.test(out)) { fs.writeSync(2, 'FAIL: #38 signature present in astro-check output\n'); process.exit(1); }
+          if (!/- 0 errors/.test(out)) { fs.writeSync(2, 'FAIL: expected "- 0 errors" in astro-check output\n'); process.exit(1); }
+          fs.writeSync(1, 'ASTRO-CHECK-OK\n');
+          '@ | Set-Content -Encoding ascii astro-check.js
+          node astro-check.js
+          echo "ASTRO-CHECK-EXIT=$LASTEXITCODE"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
       - name: Collect crash evidence
         # A silent load failure is a hard crash before V8 can report; Windows
         # Error Reporting still records the exception code and faulting module.
