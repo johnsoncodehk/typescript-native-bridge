@@ -267,7 +267,7 @@ jobs:
           mkdir sol/a/src, sol/b/src
           '{ "files": [], "references": [{ "path": "./a" }, { "path": "./b" }] }' | Set-Content sol/tsconfig.json
           '{ "compilerOptions": { "composite": true, "strict": true, "outDir": "dist", "declaration": true }, "include": ["src/**/*.ts"] }' | Set-Content sol/a/tsconfig.json
-          '{ "compilerOptions": { "composite": true, "strict": true, "outDir": "dist", "declaration": true, "references": [{ "path": "../a" }], "include": ["src/**/*.ts"] }' | Set-Content sol/b/tsconfig.json
+          '{ "compilerOptions": { "composite": true, "strict": true, "outDir": "dist", "declaration": true }, "references": [{ "path": "../a" }], "include": ["src/**/*.ts"] }' | Set-Content sol/b/tsconfig.json
           'export const a: number = 1;' | Set-Content sol/a/src/index.ts
           'import { a } from "../../a/src/index"; export const b: number = a;' | Set-Content sol/b/src/index.ts
           node staging/lib/_tsc.js -b sol/tsconfig.json

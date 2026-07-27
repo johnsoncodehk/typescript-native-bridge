@@ -128,7 +128,7 @@ try {
 			console.error(`FAIL: ${r.file} exists in the pristine clone — cache is not pristine`);
 			process.exit(1);
 		}
-		const src = git(submodule, ['show', `${r.branch}:${r.file}`]);
+		const src = fs.readFileSync(path.join(repoRoot, 'tools/pristine-attribution', path.basename(r.file)), 'utf8');
 		const dest = path.join(cache, r.file);
 		fs.mkdirSync(path.dirname(dest), { recursive: true });
 		fs.writeFileSync(dest, src);
@@ -137,7 +137,7 @@ try {
 
 	// ── Dual-side: patched PASS + pristine FAIL ──────────────────────────────
 	for (const r of DUAL) {
-		const src = git(submodule, ['show', `${r.branch}:${r.file}`]);
+		const src = fs.readFileSync(path.join(repoRoot, 'tools/pristine-attribution', path.basename(r.file)), 'utf8');
 		const dest = path.join(submodule, r.file);
 		fs.writeFileSync(dest, src);
 		injectedPatched.push(dest);
