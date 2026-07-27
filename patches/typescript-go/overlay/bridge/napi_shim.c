@@ -2,6 +2,11 @@
 //
 // Node loads bridge.node directly via require(); no FFI library needed.
 //
+// Must precede every system header: glibc only exposes Dl_info (dladdr, used
+// by pin_module_in_process) under _GNU_SOURCE, and features.h freezes the
+// choice at its first inclusion.
+#define _GNU_SOURCE
+
 // Marshalling contract (deliberately tiny — see the design discussion):
 //   - Shapes: strings in, string-or-Buffer-or-bool-or-null out, int64 session
 //     handle. Nothing else ever crosses the boundary.
