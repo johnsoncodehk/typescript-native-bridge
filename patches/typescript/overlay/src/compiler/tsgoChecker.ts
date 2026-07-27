@@ -5617,10 +5617,28 @@ function tnbComputeNamedDeclarations(sourceFile: any): Map<string, any[]> {
 // Wire (flat) → stock (nested) span mapping for the LS nav bridge results.
 
 /** @internal — LS bridge entry for services-layer interception (issue #12 batch 2). */
+/** Per-config overlay-sync hooks, registered at thin-program creation so the
+ * module-level lsnav wire entry (tsgoLsApiRequest) can sync on demand. */
+const _overlaySyncByConfig = new Map<string, (requestedFileName?: string) => void>();
+
 export function tsgoLsApiRequest(program: any, method: string, params: any): any {
     const configFilePath = program?.getCompilerOptions?.()?.configFilePath;
-    const proj = configFilePath && _projectCache.get(configFilePath);
+    let proj = configFilePath && _projectCache.get(configFilePath);
     if (!proj?.checker) return undefined;
+    // The RPC reads the cached project's snapshotId, which only advances on
+    // thin-program rebuilds; a host edit that hasn't triggered one yet serves
+    // the stale overlay (volar #5847: completions overtook the fixture.ts
+    // content push and the export map rebuilt from the empty era). Sync the
+    // requesting file's overlay first (skip when already synced; delta when
+    // edit-shaped). Checker-adapter queries already do this via
+    // pushHostOverlayToTsgo; the lsnav wire path was the gap.
+    if (params?.file != null && isOverlayCandidatePath(params.file)) {
+        _overlaySyncByConfig.get(configFilePath!)?.(params.file);
+        // The sync swaps in a fresh project (and disposes the stale snapshot
+        // the captured proj references) — re-read before the RPC.
+        proj = _projectCache.get(configFilePath) ?? proj;
+        if (!proj?.checker) return undefined;
+    }
     return proj.checker.client.apiRequest(method, {
         snapshot: proj.checker.snapshotId,
         project: proj.checker.project.id,
@@ -8193,6 +8211,7 @@ export function createTsgoChecker(program: any): any {
             }
         }
         _projectCache.set(configFilePath!, project);
+        _overlaySyncByConfig.set(configFilePath!, pushHostOverlayToTsgo);
         _currentProjectRef.project = project;
         patchSymbolProto(sync);
         patchSignatureProto(sync);

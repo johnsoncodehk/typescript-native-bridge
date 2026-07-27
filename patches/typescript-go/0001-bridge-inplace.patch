@@ -1955,7 +1955,7 @@ index dc0a1db7e..ceb098328 100644
  
  	if symbol.Name == ast.InternalSymbolNameDefault || symbol.Name == ast.InternalSymbolNameExportEquals {
 diff --git a/internal/ls/autoimport/registry.go b/internal/ls/autoimport/registry.go
-index 6c6468095..a618ccd85 100644
+index 6c6468095..5e9b8e56e 100644
 --- a/internal/ls/autoimport/registry.go
 +++ b/internal/ls/autoimport/registry.go
 @@ -244,6 +244,12 @@ type RegistryBucket struct {
@@ -1971,14 +1971,28 @@ index 6c6468095..a618ccd85 100644
  	// AmbientModuleNames is only defined for node_modules buckets. It is the set of
  	// ambient module names found while extracting exports in the bucket.
  	//
-@@ -271,6 +277,7 @@ func (b *RegistryBucket) Clone() *RegistryBucket {
- 		PackageFiles:         b.PackageFiles,
- 		ResolvedPackageNames: b.ResolvedPackageNames,
- 		DependencyNames:      b.DependencyNames,
+@@ -266,13 +272,14 @@ func newRegistryBucket() *RegistryBucket {
+ 
+ func (b *RegistryBucket) Clone() *RegistryBucket {
+ 	return &RegistryBucket{
+-		state:                b.state.Clone(),
+-		Paths:                b.Paths,
+-		PackageFiles:         b.PackageFiles,
+-		ResolvedPackageNames: b.ResolvedPackageNames,
+-		DependencyNames:      b.DependencyNames,
+-		AmbientModuleNames:   b.AmbientModuleNames,
+-		Index:                b.Index,
++		state:                      b.state.Clone(),
++		Paths:                      b.Paths,
++		PackageFiles:               b.PackageFiles,
++		ResolvedPackageNames:       b.ResolvedPackageNames,
++		DependencyNames:            b.DependencyNames,
 +		PackageJsonDependencyNames: b.PackageJsonDependencyNames,
- 		AmbientModuleNames:   b.AmbientModuleNames,
- 		Index:                b.Index,
++		AmbientModuleNames:         b.AmbientModuleNames,
++		Index:                      b.Index,
  	}
+ }
+ 
 @@ -549,10 +556,10 @@ func (b *registryBuilder) updateBucketAndDirectoryExistence(change RegistryChang
  	start := time.Now()
  	neededProjects := make(map[tspath.Path]struct{})
@@ -2016,14 +2030,49 @@ index 6c6468095..a618ccd85 100644
  		neededProjects[core.FirstResult(b.host.GetDefaultProject(change.RequestedFile))] = struct{}{}
  		if !b.specifierCache.Has(change.RequestedFile) {
  			b.specifierCache.Set(change.RequestedFile, &collections.SyncMap[tspath.Path, string]{})
-@@ -783,6 +799,7 @@ func (b *registryBuilder) updateIndexes(ctx context.Context, change RegistryChan
- 	type nodeModulesBucketTask struct {
- 		entry           *dirty.MapEntry[tspath.Path, *RegistryBucket]
- 		dependencyNames *collections.Set[string]
-+		packageJsonDependencyNames *collections.Set[string]
- 		dirName         string
- 		dirPath         tspath.Path
+@@ -738,7 +754,7 @@ func (b *registryBuilder) markBucketsDirty(change RegistryChange, logger *loggin
+ 						// Look up the package name for granular updates
+ 						packageName := entry.Value().Paths[path]
+ 						entry.Change(func(bucket *RegistryBucket) { bucket.markNodeModulesDirty(packageName) })
+-						if !entry.Value().state.multipleFilesDirty {
++						if entry.Value().state.multipleFilesDirty {
+ 							delete(cleanNodeModulesBuckets, dirPath)
+ 						}
+ 					}
+@@ -750,7 +766,7 @@ func (b *registryBuilder) markBucketsDirty(change RegistryChange, logger *loggin
+ 						if packageName, ok := entry.Value().Paths[path]; ok {
+ 							// Use the package name for granular updates
+ 							entry.Change(func(bucket *RegistryBucket) { bucket.markNodeModulesDirty(packageName) })
+-							if !entry.Value().state.multipleFilesDirty {
++							if entry.Value().state.multipleFilesDirty {
+ 								delete(cleanNodeModulesBuckets, bucketDirPath)
+ 							}
+ 						}
+@@ -766,7 +782,7 @@ func (b *registryBuilder) markBucketsDirty(change RegistryChange, logger *loggin
+ 				if _, ok := entry.Value().Paths[path]; ok {
+ 					// Project buckets don't use package-based granular updates
+ 					entry.Change(func(bucket *RegistryBucket) { bucket.markProjectFileDirty(path) })
+-					if !entry.Value().state.multipleFilesDirty {
++					if entry.Value().state.multipleFilesDirty {
+ 						delete(cleanProjectBuckets, projectDirPath)
+ 					}
+ 				}
+@@ -781,10 +797,11 @@ func (b *registryBuilder) markBucketsDirty(change RegistryChange, logger *loggin
  
+ func (b *registryBuilder) updateIndexes(ctx context.Context, change RegistryChange, logger *logging.LogTree) {
+ 	type nodeModulesBucketTask struct {
+-		entry           *dirty.MapEntry[tspath.Path, *RegistryBucket]
+-		dependencyNames *collections.Set[string]
+-		dirName         string
+-		dirPath         tspath.Path
++		entry                      *dirty.MapEntry[tspath.Path, *RegistryBucket]
++		dependencyNames            *collections.Set[string]
++		packageJsonDependencyNames *collections.Set[string]
++		dirName                    string
++		dirPath                    tspath.Path
+ 
+ 		// For granular updates.
+ 		isUpdate       bool
 @@ -842,7 +859,7 @@ func (b *registryBuilder) updateIndexes(ctx context.Context, change RegistryChan
  	tspath.ForEachAncestorDirectoryPath(change.RequestedFile, func(dirPath tspath.Path) (any, bool) {
  		if nodeModulesBucket, ok := b.nodeModules.Get(dirPath); ok {
@@ -2033,22 +2082,40 @@ index 6c6468095..a618ccd85 100644
  			bucketState := nodeModulesBucket.Value().state
  			// !!! Optimization: handle different dependency set via granular updates
  			needsFullRebuild := bucketState.multipleFilesDirty ||
-@@ -856,6 +873,7 @@ func (b *registryBuilder) updateIndexes(ctx context.Context, change RegistryChan
+@@ -854,20 +871,22 @@ func (b *registryBuilder) updateIndexes(ctx context.Context, change RegistryChan
+ 
+ 			if needsFullRebuild {
  				nodeModulesTasks = append(nodeModulesTasks, &nodeModulesBucketTask{
- 					entry:           nodeModulesBucket,
- 					dependencyNames: dependencies,
+-					entry:           nodeModulesBucket,
+-					dependencyNames: dependencies,
+-					dirName:         dirName,
+-					dirPath:         dirPath,
++					entry:                      nodeModulesBucket,
++					dependencyNames:            dependencies,
 +					packageJsonDependencyNames: packageJsonDependencies,
- 					dirName:         dirName,
- 					dirPath:         dirPath,
++					dirName:                    dirName,
++					dirPath:                    dirPath,
  				})
-@@ -863,6 +881,7 @@ func (b *registryBuilder) updateIndexes(ctx context.Context, change RegistryChan
+ 			} else if canDoGranularUpdate {
  				nodeModulesTasks = append(nodeModulesTasks, &nodeModulesBucketTask{
- 					entry:           nodeModulesBucket,
- 					dependencyNames: dependencies,
+-					entry:           nodeModulesBucket,
+-					dependencyNames: dependencies,
+-					dirName:         dirName,
+-					dirPath:         dirPath,
+-					isUpdate:        true,
+-					existingBucket:  nodeModulesBucket.Value(),
+-					dirtyPackages:   dirtyPackages,
++					entry:                      nodeModulesBucket,
++					dependencyNames:            dependencies,
 +					packageJsonDependencyNames: packageJsonDependencies,
- 					dirName:         dirName,
- 					dirPath:         dirPath,
- 					isUpdate:        true,
++					dirName:                    dirName,
++					dirPath:                    dirPath,
++					isUpdate:                   true,
++					existingBucket:             nodeModulesBucket.Value(),
++					dirtyPackages:              dirtyPackages,
+ 				})
+ 			}
+ 		}
 @@ -1004,7 +1023,7 @@ func (b *registryBuilder) updateIndexes(ctx context.Context, change RegistryChan
  				)
  			} else {
@@ -2113,22 +2180,42 @@ index 6c6468095..a618ccd85 100644
  	dirPath tspath.Path,
  	discovered []*discoveredPackage,
  	directoryPackageNames *collections.Set[string],
-@@ -1634,6 +1661,7 @@ func (b *registryBuilder) buildNodeModulesBucket(
+@@ -1632,11 +1659,12 @@ func (b *registryBuilder) buildNodeModulesBucket(
+ 	}
+ 
  	result.bucket = &RegistryBucket{
- 		Index:              &Index[*Export]{},
- 		DependencyNames:    dependencies,
+-		Index:              &Index[*Export]{},
+-		DependencyNames:    dependencies,
+-		PackageFiles:       allPackageFiles,
+-		AmbientModuleNames: extraction.ambientModuleNames,
+-		Paths:              paths,
++		Index:                      &Index[*Export]{},
++		DependencyNames:            dependencies,
 +		PackageJsonDependencyNames: packageJsonDependencies,
- 		PackageFiles:       allPackageFiles,
- 		AmbientModuleNames: extraction.ambientModuleNames,
- 		Paths:              paths,
-@@ -1781,6 +1809,7 @@ func (b *registryBuilder) updateNodeModulesBucket(
++		PackageFiles:               allPackageFiles,
++		AmbientModuleNames:         extraction.ambientModuleNames,
++		Paths:                      paths,
+ 		state: BucketState{
+ 			buildPreferences:        bucketBuildPreferencesFromUserPreferences(b.userPreferences),
+ 			recursiveSearchPackages: recursiveSearchPackages.Clone(),
+@@ -1779,11 +1807,12 @@ func (b *registryBuilder) updateNodeModulesBucket(
+ 	}
+ 
  	result.bucket = &RegistryBucket{
- 		Index:              newIndex,
- 		DependencyNames:    existingBucket.DependencyNames,
+-		Index:              newIndex,
+-		DependencyNames:    existingBucket.DependencyNames,
+-		PackageFiles:       newPackageFiles,
+-		AmbientModuleNames: newAmbientModuleNames,
+-		Paths:              newPaths,
++		Index:                      newIndex,
++		DependencyNames:            existingBucket.DependencyNames,
 +		PackageJsonDependencyNames: existingBucket.PackageJsonDependencyNames,
- 		PackageFiles:       newPackageFiles,
- 		AmbientModuleNames: newAmbientModuleNames,
- 		Paths:              newPaths,
++		PackageFiles:               newPackageFiles,
++		AmbientModuleNames:         newAmbientModuleNames,
++		Paths:                      newPaths,
+ 		state: BucketState{
+ 			buildPreferences:        bucketBuildPreferencesFromUserPreferences(b.userPreferences),
+ 			recursiveSearchPackages: recursiveSearchPackages.Clone(),
 diff --git a/internal/ls/autoimport/view.go b/internal/ls/autoimport/view.go
 index 9f8b144fa..fb0eb38a2 100644
 --- a/internal/ls/autoimport/view.go

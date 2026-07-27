@@ -5973,7 +5973,7 @@ index 0917c385d..a45028437 100644
  type GetProjectDiagnosticsParams struct {
  	Snapshot SnapshotID `json:"snapshot"`
 diff --git a/internal/api/session.go b/internal/api/session.go
-index 7e29c44b6..8cb6b2e4c 100644
+index 7e29c44b6..f2a0bba67 100644
 --- a/internal/api/session.go
 +++ b/internal/api/session.go
 @@ -3,6 +3,7 @@ package api
@@ -12117,10 +12117,10 @@ index 7e29c44b6..8cb6b2e4c 100644
 -		Entries:      entries,
 -	}, nil
 +	resp := &CompletionInfoResponse{
-+		IsIncomplete:           result.IsIncomplete,
-+		Entries:                entries,
-+		IsGlobalCompletion:     result.IsGlobalCompletion,
-+		IsMemberCompletion:     result.IsMemberCompletion,
++		IsIncomplete:            result.IsIncomplete,
++		Entries:                 entries,
++		IsGlobalCompletion:      result.IsGlobalCompletion,
++		IsMemberCompletion:      result.IsMemberCompletion,
 +		IsNewIdentifierLocation: result.IsNewIdentifierLocation,
 +	}
 +	if result.OptionalReplacementSpan != nil {
