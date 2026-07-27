@@ -2129,7 +2129,7 @@ index 0a45cc3e3e..d296a01666 100644
      const classElement = findAncestor(node, isClassElement);
      if (!(classElement && classElement.name)) return;
 diff --git a/src/services/services.ts b/src/services/services.ts
-index 9885093ed6..c079f66f6f 100644
+index 9885093ed6..b0a6e5b278 100644
 --- a/src/services/services.ts
 +++ b/src/services/services.ts
 @@ -330,6 +330,9 @@ import {
@@ -2200,27 +2200,34 @@ index 9885093ed6..c079f66f6f 100644
              program = undefined!; // TODO: GH#18217
          }
      }
-@@ -2232,6 +2259,9 @@ export function createLanguageService(
+@@ -2232,6 +2259,14 @@ export function createLanguageService(
      }
  
      function getCompletionsAtPosition(fileName: string, position: number, options: GetCompletionsAtPositionOptions = emptyOptions, formattingSettings?: FormatCodeSettings): CompletionInfo | undefined {
++        // synchronize first: `program` is undefined until the initial
++        // synchronizeHostData builds it (and again after project resets) —
++        // reading isTsgoBackedProgram before that crashes first-call
++        // completions (volar #5847's raw `completions` command path).
++        synchronizeHostData();
 +        if ((program as any).isTsgoBackedProgram === true) {
 +            return tsgoGetCompletionsAtPosition(program, fileName, position, options);
 +        }
          // Convert from deprecated options names to new names
          const fullPreferences: UserPreferences = {
              ...identity<UserPreferences>(options), // avoid excess property check
-@@ -2275,6 +2305,9 @@ export function createLanguageService(
+@@ -2275,7 +2310,11 @@ export function createLanguageService(
      }
  
      function getQuickInfoAtPosition(fileName: string, position: number, maximumLength?: number, verbosityLevel?: number): QuickInfo | undefined {
++        // synchronize first (same undefined-program crash class as completions).
+         synchronizeHostData();
 +        if ((program as any).isTsgoBackedProgram === true) {
 +            return (program as any).getQuickInfoAtPositionTsgo(fileName, position, maximumLength, verbosityLevel);
 +        }
-         synchronizeHostData();
  
          const sourceFile = getValidSourceFile(fileName);
-@@ -2402,6 +2435,9 @@ export function createLanguageService(
+         const node = getTouchingPropertyName(sourceFile, position);
+@@ -2402,6 +2441,9 @@ export function createLanguageService(
      }
  
      function getDefinitionAndBoundSpan(fileName: string, position: number): DefinitionInfoAndBoundSpan | undefined {
@@ -2230,7 +2237,7 @@ index 9885093ed6..c079f66f6f 100644
          synchronizeHostData();
          return GoToDefinition.getDefinitionAndBoundSpan(program, getValidSourceFile(fileName), position);
      }
-@@ -2430,6 +2466,10 @@ export function createLanguageService(
+@@ -2430,6 +2472,10 @@ export function createLanguageService(
      }
  
      function findRenameLocations(fileName: string, position: number, findInStrings: boolean, findInComments: boolean, preferences?: UserPreferences | boolean): RenameLocation[] | undefined {
@@ -2241,7 +2248,7 @@ index 9885093ed6..c079f66f6f 100644
          synchronizeHostData();
          const sourceFile = getValidSourceFile(fileName);
          const node = getAdjustedRenameLocation(getTouchingPropertyName(sourceFile, position));
-@@ -2469,6 +2509,9 @@ export function createLanguageService(
+@@ -2469,6 +2515,9 @@ export function createLanguageService(
      }
  
      function findReferences(fileName: string, position: number): ReferencedSymbol[] | undefined {
@@ -2251,7 +2258,7 @@ index 9885093ed6..c079f66f6f 100644
          synchronizeHostData();
          return FindAllReferences.findReferencedSymbols(program, cancellationToken, program.getSourceFiles(), getValidSourceFile(fileName), position);
      }
-@@ -2497,6 +2540,9 @@ export function createLanguageService(
+@@ -2497,6 +2546,9 @@ export function createLanguageService(
       * This is a semantic operation.
       */
      function getSignatureHelpItems(fileName: string, position: number, { triggerReason }: SignatureHelpItemsOptions = emptyOptions): SignatureHelpItems | undefined {
@@ -2261,7 +2268,7 @@ index 9885093ed6..c079f66f6f 100644
          synchronizeHostData();
  
          const sourceFile = getValidSourceFile(fileName);
-@@ -3255,6 +3301,9 @@ export function createLanguageService(
+@@ -3255,6 +3307,9 @@ export function createLanguageService(
      }
  
      function getRenameInfo(fileName: string, position: number, preferences: UserPreferences | RenameInfoOptions | undefined): RenameInfo {
