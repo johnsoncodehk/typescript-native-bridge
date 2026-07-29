@@ -23,7 +23,8 @@
 		"bin",
 		"lib",
 		"vendor",
-		"NOTICE"
+		"NOTICE",
+		"!**/*.map"
 	],
 	"scripts": {
 		"setup": "git submodule update --init && npm run build:js && npm run build:bridge && npm run build:ts",
