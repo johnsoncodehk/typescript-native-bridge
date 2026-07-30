@@ -84,7 +84,11 @@ func TestOverlayContentUpdateInvalidatesAutoImportRegistry(t *testing.T) {
 }
 
 // Sanity: the same flow through a didChange whole-document edit (the `change`
-// command path) already works and must keep working.
+// command path) already works and must keep working. A bare didOpen does not
+// prepare the registry, so era 1 prepares it explicitly via
+// GetCurrentLanguageServiceWithAutoImports; the era-2 edit must then
+// invalidate the prepared state (checked after a plain flush, before any
+// re-prepare) and the re-prepared registry must offer the new export.
 func TestDidChangeWholeDocumentInvalidatesAutoImportRegistry(t *testing.T) {
 	t.Parallel()
 	if !bundled.Embedded {
@@ -103,21 +107,36 @@ func TestDidChangeWholeDocumentInvalidatesAutoImportRegistry(t *testing.T) {
 	ctx := context.Background()
 
 	uri := lsconv.FileNameToDocumentURI(fixtureName)
-	projectSession.DidOpenFile(ctx, uri, 1, "", lsproto.LanguageKindTypeScript)
-	snapshot := projectSession.Snapshot()
-	defaultProject := snapshot.GetDefaultProject(lsconv.FileNameToDocumentURI(mainName))
-	assert.Assert(t, defaultProject != nil)
-	projectPath := defaultProject.ConfigFilePath()
+	mainURI := lsconv.FileNameToDocumentURI(mainName)
 	prefs := lsutil.NewDefaultUserPreferences()
 	prefs.IncludeCompletionsForModuleExports = core.TSTrue
+
+	projectSession.DidOpenFile(ctx, uri, 1, "", lsproto.LanguageKindTypeScript)
+	// Era 1: prepare the registry against the empty fixture.
+	_, err := projectSession.GetCurrentLanguageServiceWithAutoImports(ctx, mainURI)
+	assert.NilError(t, err)
+	snapshot := projectSession.Snapshot()
+	defaultProject := snapshot.GetDefaultProject(mainURI)
+	assert.Assert(t, defaultProject != nil)
+	projectPath := defaultProject.ConfigFilePath()
 	assert.Assert(t, snapshot.AutoImportRegistry().IsPreparedForImportingFile(mainName, projectPath, prefs))
 
 	projectSession.DidChangeFile(ctx, uri, 2, []lsproto.TextDocumentContentChangePartialOrWholeDocument{
 		{WholeDocument: &lsproto.TextDocumentContentChangeWholeDocument{Text: "export function testFn() { console.log('testFn'); }\n"}},
 	})
+	// Flush the pending edit without re-preparing; the registry must be stale.
+	_, err = projectSession.GetLanguageService(ctx, mainURI)
+	assert.NilError(t, err)
+	assert.Assert(t, !projectSession.Snapshot().AutoImportRegistry().IsPreparedForImportingFile(mainName, projectPath, prefs),
+		"registry must be invalidated by the didChange")
+
+	// Era 2: re-prepare; the new export must be offered.
+	_, err = projectSession.GetCurrentLanguageServiceWithAutoImports(ctx, mainURI)
+	assert.NilError(t, err)
 	snapshot = projectSession.Snapshot()
 	registry := snapshot.AutoImportRegistry()
 	assert.Assert(t, registry.IsPreparedForImportingFile(mainName, projectPath, prefs))
+	defaultProject = snapshot.GetDefaultProject(mainURI)
 	mainSF := defaultProject.GetProgram().GetSourceFile(mainName)
 	view := autoimport.NewView(registry, mainSF, projectPath, defaultProject.GetProgram(), prefs.ModuleSpecifierPreferences())
 	found := false
@@ -129,7 +148,63 @@ func TestDidChangeWholeDocumentInvalidatesAutoImportRegistry(t *testing.T) {
 	assert.Assert(t, found, "auto-import registry must offer testFn after didChange")
 }
 
-// Regression for the mark-eating bug at registry.go's cleanProjectBuckets
+// volar #5847 bug 2: fixture.ts changes ON DISK without any host event (the
+// "host==disk" channel — CLI tool or out-of-session editor write; no overlay
+// push, no editContent delta, no forwarded watch event). The next snapshot
+// build must detect the stale cached read (mtime pre-filter + content hash)
+// and fold it into Changed, or the auto-import registry built from the empty
+// era stays stale forever and completions never offer the new export.
+func TestDiskWriteWithoutHostEventInvalidatesAutoImportRegistry(t *testing.T) {
+	t.Parallel()
+	if !bundled.Embedded {
+		t.Skip("bundled files are not embedded")
+	}
+	const configFileName = "/home/projects/p/tsconfig.json"
+	const fixtureName = "/home/projects/p/fixture.ts"
+	const mainName = "/home/projects/p/main.ts"
+	files := map[string]any{
+		configFileName: `{ "compilerOptions": { "strict": true, "module": "esnext", "moduleResolution": "bundler" }, "include": ["**/*"] }`,
+		fixtureName:    ``,
+		mainName:       `testFn;`,
+	}
+	projectSession, _ := projecttestutil.Setup(files)
+	defer projectSession.Close()
+	ctx := context.Background()
+	mainURI := lsconv.FileNameToDocumentURI(mainName)
+	prefs := lsutil.NewDefaultUserPreferences()
+	prefs.IncludeCompletionsForModuleExports = core.TSTrue
+
+	// Era 1: prepare the registry against the empty fixture; testFn absent.
+	_, err := projectSession.GetCurrentLanguageServiceWithAutoImports(ctx, mainURI)
+	assert.NilError(t, err)
+	snapshot := projectSession.Snapshot()
+	defaultProject := snapshot.GetDefaultProject(mainURI)
+	assert.Assert(t, defaultProject != nil)
+	projectPath := defaultProject.ConfigFilePath()
+	assert.Assert(t, snapshot.AutoImportRegistry().IsPreparedForImportingFile(mainName, projectPath, prefs))
+
+	// Disk write with no host event of any kind.
+	assert.NilError(t, projectSession.FS().WriteFile(fixtureName, "export function testFn() { console.log('testFn'); }\n"))
+
+	// Era 2: the auto-imports request builds a fresh snapshot; the staleness
+	// probe must fold the fixture into Changed so the registry re-prepares
+	// with the new content.
+	_, err = projectSession.GetCurrentLanguageServiceWithAutoImports(ctx, mainURI)
+	assert.NilError(t, err)
+	snapshot = projectSession.Snapshot()
+	registry := snapshot.AutoImportRegistry()
+	assert.Assert(t, registry.IsPreparedForImportingFile(mainName, projectPath, prefs))
+	defaultProject = snapshot.GetDefaultProject(mainURI)
+	mainSF := defaultProject.GetProgram().GetSourceFile(mainName)
+	view := autoimport.NewView(registry, mainSF, projectPath, defaultProject.GetProgram(), prefs.ModuleSpecifierPreferences())
+	found := false
+	for _, e := range view.Search("testFn", autoimport.QueryKindExactMatch) {
+		if e.Name() == "testFn" {
+			found = true
+		}
+	}
+	assert.Assert(t, found, "auto-import registry must offer testFn after a host-less disk write")
+}
 // deletion: when TWO project files change in one update batch, the first mark
 // deleted the bucket from the clean set, so the second file's dirty mark was
 // eaten (map-order dependent — volar #5847's 50% flake). Both must land.

@@ -3664,7 +3664,7 @@ index 909b5aa4b..2237d958c 100644
  	existing, loaded := c.entries.LoadOrStore(key, entry)
  	if loaded {
 diff --git a/internal/project/session.go b/internal/project/session.go
-index 00f4056e5..46f5bdb43 100644
+index 00f4056e5..6912d0931 100644
 --- a/internal/project/session.go
 +++ b/internal/project/session.go
 @@ -26,6 +26,7 @@ import (
@@ -3684,7 +3684,22 @@ index 00f4056e5..46f5bdb43 100644
  
  	// snapshotID is the counter for snapshot IDs. It does not necessarily
  	// equal the `snapshot.ID`. It is stored on Session instead of globally
-@@ -256,11 +259,30 @@ func (s *Session) FS() vfs.FS {
+@@ -136,6 +139,14 @@ type Session struct {
+ 	pendingFileChanges   []FileChange
+ 	pendingFileChangesMu sync.Mutex
+ 
++	// diskContentMtimes records the last-validated mtime per cached disk file
++	// for the snapshot-build staleness probe: a disk write that produces no
++	// host event (plain fs write from a CLI tool or an editor outside the
++	// session) otherwise leaves the cached read — and the auto-import registry
++	// built from it — stale forever (volar #5847).
++	diskContentMtimes   map[tspath.Path]time.Time
++	diskContentMtimesMu sync.Mutex
++
+ 	// pendingATAChanges are produced by Automatic Type Acquisition (ATA)
+ 	// installations and applied to the next snapshot update.
+ 	pendingATAChanges   map[tspath.Path]*ATAStateChange
+@@ -256,11 +267,30 @@ func (s *Session) FS() vfs.FS {
  	return s.fs.fs
  }
  
@@ -3715,7 +3730,7 @@ index 00f4056e5..46f5bdb43 100644
  // Gets copy of current configuration
  func (s *Session) Config() lsutil.UserPreferences {
  	s.userConfigRWMu.Lock()
-@@ -329,6 +351,21 @@ func (s *Session) DidCloseFile(ctx context.Context, uri lsproto.DocumentUri) {
+@@ -329,6 +359,21 @@ func (s *Session) DidCloseFile(ctx context.Context, uri lsproto.DocumentUri) {
  	s.ScheduleSnapshotUpdate(UpdateReasonDidCloseFile)
  }
  
@@ -3737,7 +3752,7 @@ index 00f4056e5..46f5bdb43 100644
  func (s *Session) DidChangeFile(ctx context.Context, uri lsproto.DocumentUri, version int32, changes []lsproto.TextDocumentContentChangePartialOrWholeDocument) {
  	s.cancelDiagnosticsRefresh()
  	s.cancelWarmAutoImportCache()
-@@ -1153,6 +1190,37 @@ func (s *Session) GetLanguageServiceWithAutoImports(ctx context.Context, baseSna
+@@ -1153,6 +1198,37 @@ func (s *Session) GetLanguageServiceWithAutoImports(ctx context.Context, baseSna
  	return ls.NewLanguageService(project.configFilePath, project.GetProgram(), newSnapshot, uri.FileName()), nil
  }
  
@@ -3776,10 +3791,18 @@ index 00f4056e5..46f5bdb43 100644
  // snapshot so future requests benefit from the work already done. If the
  // session has moved on, the snapshot is discarded; the next request needing
 diff --git a/internal/project/snapshot.go b/internal/project/snapshot.go
-index 61af433d3..eb8efd8e1 100644
+index 61af433d3..77240f672 100644
 --- a/internal/project/snapshot.go
 +++ b/internal/project/snapshot.go
-@@ -161,6 +161,17 @@ type APISnapshotRequest struct {
+@@ -8,6 +8,7 @@ import (
+ 	"sync/atomic"
+ 	"time"
+ 
++	"github.com/microsoft/typescript-go/internal/bundled"
+ 	"github.com/microsoft/typescript-go/internal/collections"
+ 	"github.com/microsoft/typescript-go/internal/core"
+ 	"github.com/microsoft/typescript-go/internal/ls"
+@@ -161,6 +162,17 @@ type APISnapshotRequest struct {
  	CloseProjects *collections.Set[tspath.Path]
  	OpenFiles     *collections.Set[lsproto.DocumentUri]
  	CloseFiles    *collections.Set[tspath.Path]
@@ -3797,7 +3820,7 @@ index 61af433d3..eb8efd8e1 100644
  }
  
  type ProjectTreeRequest struct {
-@@ -265,7 +276,7 @@ func (s *Snapshot) Clone(ctx context.Context, change SnapshotChange, overlays ma
+@@ -265,7 +277,7 @@ func (s *Snapshot) Clone(ctx context.Context, change SnapshotChange, overlays ma
  		}
  		switch change.reason {
  		case UpdateReasonDidOpenFile:
@@ -3806,7 +3829,26 @@ index 61af433d3..eb8efd8e1 100644
  		case UpdateReasonDidCloseFile:
  			logger.Logf("Reason: DidCloseFile - %v", change.fileChanges.Closed)
  		case UpdateReasonDidChangeCompilerOptionsForInferredProjects:
-@@ -333,6 +344,7 @@ func (s *Snapshot) Clone(ctx context.Context, change SnapshotChange, overlays ma
+@@ -287,6 +299,18 @@ func (s *Snapshot) Clone(ctx context.Context, change SnapshotChange, overlays ma
+ 
+ 	start := time.Now()
+ 	fs := newSnapshotFSBuilder(session.fs.fs, s.fs.overlays, overlays, s.fs.diskFiles, s.fs.diskDirectories, s.fs.nodeModulesRealpathAliases, session.options.PositionEncoding, s.toPath)
++	// Disk staleness probe: fold on-disk content changes that produced no host
++	// event into the change feed (see SnapshotFS.detectStaleDiskFiles).
++	{
++		session.diskContentMtimesMu.Lock()
++		if session.diskContentMtimes == nil {
++			session.diskContentMtimes = make(map[tspath.Path]time.Time)
++		}
++		for _, path := range s.fs.detectStaleDiskFiles(session.fs.fs, session.diskContentMtimes, bundled.LibPath()) {
++			change.fileChanges.Changed.Add(lsconv.FileNameToDocumentURI(string(path)))
++		}
++		session.diskContentMtimesMu.Unlock()
++	}
+ 	if change.fileChanges.HasExcessiveWatchEvents() {
+ 		invalidateStart := time.Now()
+ 		if change.fileChanges.InvalidateAll {
+@@ -333,6 +357,7 @@ func (s *Snapshot) Clone(ctx context.Context, change SnapshotChange, overlays ma
  		compilerOptionsForInferredProjects,
  		s.sessionOptions,
  		customConfigFileName,
@@ -3814,7 +3856,7 @@ index 61af433d3..eb8efd8e1 100644
  		session.parseCache,
  		session.extendedConfigCache,
  		session.client,
-@@ -381,8 +393,8 @@ func (s *Snapshot) Clone(ctx context.Context, change SnapshotChange, overlays ma
+@@ -381,8 +406,8 @@ func (s *Snapshot) Clone(ctx context.Context, change SnapshotChange, overlays ma
  	// Clean cached disk files not touched by any open project on file open, close, delete,
  	// or when explicitly requested (e.g. by an idle timer).
  	shouldCleanDiskCache := change.cleanDiskCache ||
@@ -3826,10 +3868,56 @@ index 61af433d3..eb8efd8e1 100644
  		change.fileChanges.Deleted.Len() > 0
  	if shouldCleanDiskCache {
 diff --git a/internal/project/snapshotfs.go b/internal/project/snapshotfs.go
-index 0a9f391fa..e57659b88 100644
+index 0a9f391fa..582bb0de1 100644
 --- a/internal/project/snapshotfs.go
 +++ b/internal/project/snapshotfs.go
-@@ -619,17 +619,20 @@ func (s *snapshotFSBuilder) collectFilesRecursive(dirPath tspath.Path, files *co
+@@ -494,6 +494,45 @@ func (s *snapshotFSBuilder) markDirtyFiles(change FileChangeSummary) {
+ 	}
+ }
+ 
++// detectStaleDiskFiles returns cached disk files whose on-disk content
++// changed since the cached read (mtime pre-filter, xxh3 hash confirm). A disk
++// write that never surfaces as a host event — a plain fs write from a CLI
++// tool or an editor outside the session — leaves no Changed entry behind, so
++// without this probe the cached read and everything built on it (the
++// auto-import registry above all) stays stale forever (volar #5847).
++// node_modules and the bundled lib are skipped: both are stable on disk.
++func (s *SnapshotFS) detectStaleDiskFiles(fs vfs.FS, memo map[tspath.Path]time.Time, bundledLibRoot string) []tspath.Path {
++	var stale []tspath.Path
++	for path, cached := range s.diskFiles {
++		if cached == nil {
++			continue
++		}
++		if strings.Contains(string(path), "/node_modules/") || strings.HasPrefix(string(path), bundledLibRoot) {
++			continue
++		}
++		var mtime time.Time
++		if info := fs.Stat(string(path)); info != nil {
++			mtime = info.ModTime()
++		}
++		if prev, ok := memo[path]; ok && !mtime.After(prev) {
++			continue
++		}
++		contents, ok := fs.ReadFile(string(path))
++		if !ok {
++			// Vanished from disk: feed it into Changed so consumers re-resolve
++			// (the change feed has no Deleted path for this probe).
++			stale = append(stale, path)
++			memo[path] = mtime
++			continue
++		}
++		if xxh3.HashString128(contents) != cached.hash {
++			stale = append(stale, path)
++		}
++		memo[path] = mtime
++	}
++	return stale
++}
++
+ // expandRealpathAliases adds synthetic URIs to the Changed and Deleted sets for
+ // files that were accessed through node_modules symlinks. When a watch event arrives
+ // using a realpath, this expands it to include the symlink-based path so that
+@@ -619,17 +658,20 @@ func (s *snapshotFSBuilder) collectFilesRecursive(dirPath tspath.Path, files *co
  }
  
  func (s *snapshotFSBuilder) convertOpenAndCloseToChanges(change FileChangeSummary) FileChangeSummary {
