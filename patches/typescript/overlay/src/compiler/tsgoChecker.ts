@@ -6516,15 +6516,10 @@ export function createTsgoProgram(
     // deterministic per project object — this mirrors stock Program semantics,
     // where diagnostics are stable for the lifetime of a Program instance.
     //
-    // getGlobalDiagnostics matters most: the tsgo API handler forces a full
-    // semantic pass over the whole program (checker-pool parallel path) on
-    // every call, and the solution builder asks twice per project
-    // (emitFilesAndReportErrors + buildInfo hasSyntaxOrGlobalErrors).
     // getProgramDiagnostics is called once per source file by the builder's
     // ensureHasErrorsForState walk (the overlay intentionally surfaces the
     // whole-program result regardless of the file argument), so one RPC per
     // project replaces thousands of identical ones.
-    let globalDiagnosticsCache: { proj: any; result: readonly any[] } | undefined;
     let programDiagnosticsCache: { proj: any; result: readonly any[] } | undefined;
     // Declaration diagnostics: the builder asks per file (buildinfo state) and
     // once whole-program (emitFilesAndReportErrors). One whole-program RPC —
@@ -6899,13 +6894,20 @@ export function createTsgoProgram(
             if (sourceFile?.fileName) return getSyntacticDiagnosticsForFile(proj, sourceFile.fileName);
             return mapTsgoDiagnostics(proj.program.getSyntacticDiagnostics?.(), getDiagnosticSourceFile);
         },
-        getGlobalDiagnostics: () => {
-            const proj = liveProject();
-            if (!globalDiagnosticsCache || globalDiagnosticsCache.proj !== proj) {
-                globalDiagnosticsCache = { proj, result: mapTsgoDiagnostics(proj.program.getGlobalDiagnostics?.(), getDiagnosticSourceFile) };
-            }
-            return globalDiagnosticsCache.result;
-        },
+        // Stock contract: options/global-level diagnostics with NO per-file
+        // semantic pass — stock returns the checker's deferred global
+        // collection, which is options-level on a cold program and only grows
+        // with globals discovered by checks already run. The tsgo wire
+        // getGlobalDiagnostics forces a whole-program semantic pass (upstream
+        // engine design, api/session.go handleGetGlobalDiagnostics — not ours
+        // to override), and tsserver calls this on every cold configured-
+        // project load via sendConfigFileDiagEvent, so the full pass was paid
+        // on a path stock serves for free (~1.5s on hoppscotch-common). tsgo's
+        // cheap equivalent is GetProgramDiagnostics (options + program-level
+        // diagnostics), memoized by the sibling method. Residual gap: file-less
+        // globals tsgo discovers while checking files are not included — the
+        // wire has no cheap "pool globals so far" read.
+        getGlobalDiagnostics: () => thinProgram.getProgramDiagnostics(),
         getSuggestionDiagnostics: (sourceFile?: any) => {
             const raw = sourceFile?.fileName
                 ? liveProject().program?.getSuggestionDiagnostics?.(tsgoFileArg(sourceFile.fileName))
@@ -6922,7 +6924,7 @@ export function createTsgoProgram(
                 return mapTsgoDiagnostics(proj.program.getDeclarationDiagnostics?.(tsgoFileArg(sourceFile.fileName)), getDiagnosticSourceFile);
             }
             // Whole-program requests are memoized per tsgo project object
-            // (same invalidation rule as globalDiagnosticsCache).
+            // (same invalidation rule as programDiagnosticsCache).
             if (!declarationDiagnosticsCache || declarationDiagnosticsCache.proj !== proj) {
                 declarationDiagnosticsCache = { proj, result: mapTsgoDiagnostics(proj.program.getDeclarationDiagnostics?.(), getDiagnosticSourceFile) };
             }
@@ -7435,11 +7437,25 @@ export function createTsgoProgram(
         // BuilderProgram support
         structureIsChanged: () => false,
         getFilesWithInvalidatedResolutions: () => new Set(),
-        forEachResolvedModule: (callback: any) => {
-            // Feed Project.getSymlinkCache the pnpm symlink pairs stock
-            // resolution would have produced (see pnpmOriginalPathFor above).
-            // The seeding path only reads resolution.resolvedModule; the
-            // module-name argument is unused there.
+        forEachResolvedModule: (callback: any, file?: any) => {
+            // Stock contract (program.ts forEachResolution): with a file
+            // argument, iterate only THAT file's resolved modules. tsserver's
+            // auto-import scan (extractUnresolvedImportsFromSourceFile) calls
+            // this once per program file, so a whole-program sweep here is
+            // O(files²) with the pnpm path mapping in the inner loop (~2.6s on
+            // hoppscotch-common's 2722 files, measured 2026-07-31).
+            if (file) {
+                getProgramResolutions().modules.get(file.path)?.forEach(
+                    (resolution: any, moduleName: string, mode: any) => callback(resolution, moduleName, mode, file.path),
+                );
+                return;
+            }
+            // No file argument: the whole-program form only feeds
+            // Project.getSymlinkCache (setSymlinksFromResolutions reads just
+            // resolution.resolvedModule; the module-name argument is unused
+            // there). Seed it with the pnpm symlink pairs stock resolution
+            // would have produced (see pnpmOriginalPathFor above) — one sweep
+            // per program, not per caller.
             for (const fileName of getSourceFileNames()) {
                 const originalPath = pnpmOriginalPathFor(fileName);
                 if (originalPath === undefined) continue;
