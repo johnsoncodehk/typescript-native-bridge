@@ -6750,6 +6750,21 @@ export function createTsgoProgram(
     /** Per-program symlink cache for hosts without one (see getSymlinkCache). */
     let symlinkCache: any;
 
+    // Wire-query freshness: every lsnav call below reads the cached project's
+    // snapshotId, which only advances on thin-program rebuilds; a host edit
+    // that hasn't triggered one yet serves a stale (or disposed) snapshot —
+    // "snapshot N not found" (sim-xfile references on .vue, #5847
+    // completions). Sync the requesting file's overlay (via the checker's
+    // registered sync hook — same indirection as tsgoLsApiRequest) and
+    // re-read the project before the RPC.
+    const syncedProjectForQuery = (fileName: string): any => {
+        if (isOverlayCandidatePath(fileName)) {
+            _overlaySyncByConfig.get(configFilePath!)?.(fileName);
+            return _projectCache.get(configFilePath) ?? project;
+        }
+        return project;
+    };
+
     const thinProgram: any = {
         // Marks this as a tsgo-backed program: its SourceFiles come straight from
         // tsgo and are never acquired via the LanguageService document registry.
@@ -6990,7 +7005,7 @@ export function createTsgoProgram(
         // of dozens of inner checker RPCs. Services reroute here for tsgo-backed
         // programs; bridge errors propagate (no silent stock fallback).
         getQuickInfoAtPositionTsgo: (fileName: string, position: number, maximumHoverLength?: number, verbosityLevel?: number) => {
-            const proj = project;
+            const proj = syncedProjectForQuery(fileName);
             if (!proj?.checker) return undefined;
             const r = proj.checker.client.apiRequest("quickinfo", {
                 snapshot: proj.checker.snapshotId,
@@ -7016,7 +7031,7 @@ export function createTsgoProgram(
             };
         },
         findReferencesTsgo: (fileName: string, position: number) => {
-            const proj = project;
+            const proj = syncedProjectForQuery(fileName);
             if (!proj?.checker) return undefined;
             const symbols = proj.checker.client.apiRequest("references", {
                 snapshot: proj.checker.snapshotId,
@@ -7036,7 +7051,7 @@ export function createTsgoProgram(
             }));
         },
         getDefinitionAndBoundSpanTsgo: (fileName: string, position: number) => {
-            const proj = project;
+            const proj = syncedProjectForQuery(fileName);
             if (!proj?.checker) return undefined;
             const r = proj.checker.client.apiRequest("definitionAndBoundSpan", {
                 snapshot: proj.checker.snapshotId,
