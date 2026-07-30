@@ -5635,9 +5635,14 @@ export function tsgoLsApiRequest(program: any, method: string, params: any): any
     if (params?.file != null && isOverlayCandidatePath(params.file)) {
         _overlaySyncByConfig.get(configFilePath!)?.(params.file);
         // The sync swaps in a fresh project (and disposes the stale snapshot
-        // the captured proj references) — re-read before the RPC.
-        proj = _projectCache.get(configFilePath) ?? proj;
-        if (!proj?.checker) return undefined;
+        // the captured proj references) — re-read before the RPC. A miss here
+        // means the sync disposed the old snapshot without registering its
+        // replacement; serving the captured proj would fail with
+        // "snapshot N not found" deeper in, so fail loudly at the source.
+        proj = _projectCache.get(configFilePath);
+        if (!proj?.checker) {
+            throw new Error(`tsgoLsApiRequest(${method}): project for ${configFilePath} not found after overlay sync — refusing to serve a stale snapshot handle`);
+        }
     }
     return proj.checker.client.apiRequest(method, {
         snapshot: proj.checker.snapshotId,
@@ -5971,8 +5976,19 @@ export function createTsgoProgram(
     if (_tp0) _rpcTraceEvent("thinProgram.t", `afterCreateChecker ms=${Date.now()-_tp0}`);
 
     // The tsgo project is now created (ensureProject ran inside createTsgoChecker).
-    // Access it via the module-level cache.
-    const project = _projectCache.get(configFilePath);
+    // Every RPC below resolves it through the module-level cache (liveProject) —
+    // never a creation-time capture: the first overlay sync disposes that
+    // snapshot (updateSnapshot releases the previous generation), so a captured
+    // wrapper fails with "snapshot N not found". A cache miss after
+    // construction is a broken invariant — fail loudly instead of serving the
+    // stale handle.
+    const liveProject = (): any => {
+        const proj = _projectCache.get(configFilePath!);
+        if (!proj?.program) {
+            throw new Error(`tsgoChecker: project for ${configFilePath} not found — refusing to serve a stale snapshot handle`);
+        }
+        return proj;
+    };
 
     // Build a thin Program object that delegates to the tsgo project.
     // File-name list is a pure function of the Go program — memoized per
@@ -5982,25 +5998,22 @@ export function createTsgoProgram(
     // epoch is unknown. The membership set (both host-cased and canonical
     // forms) rides the same epoch.
     const getTsgoSourceFileNames = () => {
-        const proj = project;
-        if (!proj?.program) return [] as string[];
-        return tsgoSourceFileNames(configFilePath, proj).names;
+        return tsgoSourceFileNames(configFilePath, liveProject()).names;
     };
     // Fresh array per call (stock semantics); elements are already interned,
     // host-form names (see tsgoSourceFileNames).
     const getSourceFileNames = () => getTsgoSourceFileNames().slice();
-    const tsgoGetSourceFile = (fileName: string) => project?.program?.getSourceFile?.(toTsgoFileName(fileName));
+    const tsgoGetSourceFile = (fileName: string) => liveProject().program?.getSourceFile?.(toTsgoFileName(fileName));
 
     // ── Program-info payloads (module-level TnbProgramInfo store) ──
     // Stock-shaped Program state materialized from Go on first consultation.
     // Every wire file name decodes through wireFileNameToHost here, at the
     // fetch boundary; map keys are canonicalSourceFilePath'd so stock
     // consumers probing with file.path (canonical) hit.
-    const programInfo = () => tnbProgramInfo(configFilePath, project);
+    const programInfo = () => tnbProgramInfo(configFilePath, liveProject());
 
     const getMissingFilePaths = (): Map<string, string> => {
-        const proj = project;
-        if (!proj?.program) return new Map();
+        const proj = liveProject();
         const info = programInfo();
         if (!info.missingFilePaths) {
             const map = new Map<string, string>();
@@ -6015,8 +6028,7 @@ export function createTsgoProgram(
     };
 
     const getUsesUriStyleNodeCoreModules = (): boolean | undefined => {
-        const proj = project;
-        if (!proj?.program) return undefined;
+        const proj = liveProject();
         const info = programInfo();
         if (info.usesUriStyle === undefined) {
             const v = proj.program.getUsesUriStyleNodeCoreModules();
@@ -6026,8 +6038,7 @@ export function createTsgoProgram(
     };
 
     const getFileIncludeReasonsState = (): { map: any; referencingFiles: Set<string> } => {
-        const proj = project;
-        if (!proj?.program) return { map: ts.createMultiMap(), referencingFiles: new Set() };
+        const proj = liveProject();
         const info = programInfo();
         if (!info.includeReasons) {
             const map = ts.createMultiMap();
@@ -6065,7 +6076,7 @@ export function createTsgoProgram(
     // fileName case matches no other view of the file.
     const includeReasonReferencingHostName = (pathStr: string): string | undefined => {
         if (!programInfo().includeReasons?.referencingFiles.has(pathStr)) return undefined;
-        return tsgoSourceFileNames(configFilePath, project).canonicalToHost.get(canonicalSourceFilePath(pathStr)) ?? pathStr;
+        return tsgoSourceFileNames(configFilePath, liveProject()).canonicalToHost.get(canonicalSourceFilePath(pathStr)) ?? pathStr;
     };
 
     // One stock-shaped type-reference-directive resolution entry (also the
@@ -6092,10 +6103,7 @@ export function createTsgoProgram(
         automaticTypeDirectiveNames: string[];
         automaticTypeDirectiveResolutions: any;
     } => {
-        const proj = project;
-        if (!proj?.program) {
-            return { modules: new Map(), typeRefs: new Map(), automaticTypeDirectiveNames: [], automaticTypeDirectiveResolutions: ts.createModeAwareCache() };
-        }
+        const proj = liveProject();
         const info = programInfo();
         if (!info.resolutions) {
             const raw = proj.program.getProgramResolutionInfo();
@@ -6145,8 +6153,7 @@ export function createTsgoProgram(
     };
 
     const getClassifiableNames = (): Set<string> => {
-        const proj = project;
-        if (!proj?.program) return new Set();
+        const proj = liveProject();
         const info = programInfo();
         if (!info.classifiableNames) {
             info.classifiableNames = new Set(proj.program.getClassifiableNames() as string[]);
@@ -6184,7 +6191,7 @@ export function createTsgoProgram(
             _programShapeByHost.set(lsHost, shapes);
         }
         const shapeMap = shapes ?? _programShapeNoHost;
-        const shapeFileNames = project?.program ? tsgoSourceFileNames(configFilePath, project).sortedNames : ([] as string[]);
+        const shapeFileNames = tsgoSourceFileNames(configFilePath, liveProject()).sortedNames;
         const prevShape = shapeMap.get(configFilePath);
         if (
             prevShape
@@ -6489,8 +6496,7 @@ export function createTsgoProgram(
     // would fail with "source file not found". Names ride the shared epoch
     // entry (see getTsgoSourceFileNames).
     const programContainsFile = (fileName: string): boolean => {
-        const proj = project;
-        if (!proj?.program) return true; // project not ready yet — stay permissive
+        const proj = liveProject();
         const nameSet = tsgoSourceFileNames(configFilePath, proj).nameSet;
         // Callers pass raw user paths (stock program.getSourceFile normalizes
         // via toPath): a Windows backslash path must resolve to the same
@@ -6594,8 +6600,10 @@ export function createTsgoProgram(
     // stale type-aware lint results for dependents of an edited file).
     const getBuilderMetaState = () => {
         // Resolve the CURRENT generation's project: shared light stubs created
-        // by earlier generations call this through their version getter.
-        const proj = _projectCache.get(configFilePath) ?? project;
+        // by earlier generations call this through their version getter. Cache
+        // only — the creation-time capture is disposed by the first sync, and
+        // a version getter must degrade (undefined), never serve stale meta.
+        const proj = _projectCache.get(configFilePath);
         if (!proj?.program) return undefined;
         // Non-incremental build-mode projects (tsc -b / vue-tsc -b over plain
         // noEmit tsconfigs, e.g. Nuxt-generated ones): the graph has no
@@ -6621,7 +6629,7 @@ export function createTsgoProgram(
         const implied = getBuilderMetaState()?.byHostFile.get(hostFileName)?.impliedFormat;
         if (implied !== undefined) sf.impliedNodeFormat = implied;
     };
-    const goProgram = () => project?.program;
+    const goProgram = () => liveProject().program;
     const programFileId = (file: any) => {
         const name = file?.fileName ?? file?.originalFileName;
         return typeof name === "string" && name ? tsgoFileArg(name) : undefined;
@@ -6756,13 +6764,14 @@ export function createTsgoProgram(
     // "snapshot N not found" (sim-xfile references on .vue, #5847
     // completions). Sync the requesting file's overlay (via the checker's
     // registered sync hook — same indirection as tsgoLsApiRequest) and
-    // re-read the project before the RPC.
+    // re-read the project before the RPC. The live read is unconditional —
+    // the creation-time capture is disposed by the first sync, never a
+    // fallback.
     const syncedProjectForQuery = (fileName: string): any => {
         if (isOverlayCandidatePath(fileName)) {
             _overlaySyncByConfig.get(configFilePath!)?.(fileName);
-            return _projectCache.get(configFilePath) ?? project;
         }
-        return project;
+        return liveProject();
     };
 
     const thinProgram: any = {
@@ -6881,20 +6890,17 @@ export function createTsgoProgram(
         getConfigFileParsingDiagnostics: () => configDiags,
         getOptionsDiagnostics: () => [],
         getSemanticDiagnostics: (sourceFile?: any) => {
-            const proj = project;
-            if (!proj?.program) return [];
+            const proj = liveProject();
             if (sourceFile?.fileName) return getSemanticDiagnosticsForFile(proj, sourceFile.fileName);
             return mapTsgoDiagnostics(proj.program.getSemanticDiagnostics?.(), getDiagnosticSourceFile);
         },
         getSyntacticDiagnostics: (sourceFile?: any) => {
-            const proj = project;
-            if (!proj?.program) return [];
+            const proj = liveProject();
             if (sourceFile?.fileName) return getSyntacticDiagnosticsForFile(proj, sourceFile.fileName);
             return mapTsgoDiagnostics(proj.program.getSyntacticDiagnostics?.(), getDiagnosticSourceFile);
         },
         getGlobalDiagnostics: () => {
-            const proj = project;
-            if (!proj?.program) return [];
+            const proj = liveProject();
             if (!globalDiagnosticsCache || globalDiagnosticsCache.proj !== proj) {
                 globalDiagnosticsCache = { proj, result: mapTsgoDiagnostics(proj.program.getGlobalDiagnostics?.(), getDiagnosticSourceFile) };
             }
@@ -6902,13 +6908,12 @@ export function createTsgoProgram(
         },
         getSuggestionDiagnostics: (sourceFile?: any) => {
             const raw = sourceFile?.fileName
-                ? project?.program?.getSuggestionDiagnostics?.(tsgoFileArg(sourceFile.fileName))
-                : project?.program?.getSuggestionDiagnostics?.();
+                ? liveProject().program?.getSuggestionDiagnostics?.(tsgoFileArg(sourceFile.fileName))
+                : liveProject().program?.getSuggestionDiagnostics?.();
             return mapTsgoDiagnostics(raw, getDiagnosticSourceFile);
         },
         getDeclarationDiagnostics: (sourceFile?: any) => {
-            const proj = project;
-            if (!proj?.program) return [];
+            const proj = liveProject();
             // Per-file requests stay per-file: a whole-program declaration pass
             // covers files (shared includes, cross-project sources) whose decl
             // check the builder never asks for, and measures slower than the
@@ -6925,8 +6930,7 @@ export function createTsgoProgram(
         },
         getDiagnostics: () => [],
         getBindAndCheckDiagnostics: (sourceFile?: any) => {
-            const proj = project;
-            if (!proj?.program) return [];
+            const proj = liveProject();
             if (sourceFile?.fileName) {
                 return [
                     ...getSyntacticDiagnosticsForFile(proj, sourceFile.fileName),
@@ -6939,8 +6943,7 @@ export function createTsgoProgram(
             ];
         },
         getProgramDiagnostics: () => {
-            const proj = project;
-            if (!proj?.program) return [];
+            const proj = liveProject();
             if (!programDiagnosticsCache || programDiagnosticsCache.proj !== proj) {
                 programDiagnosticsCache = { proj, result: mapTsgoDiagnostics(proj.program.getProgramDiagnostics?.(), getDiagnosticSourceFile) };
             }
@@ -6971,34 +6974,28 @@ export function createTsgoProgram(
         // block above.
         tnbBuilderFileMetas: () => getBuilderMetaState()?.byPath,
         // Batch auto-import export index (exportInfoMap cold populate).
+        // RPC errors propagate: an "undefined = no batch data" result is only
+        // legitimate when Go says so — degrading a bridge failure to the
+        // per-module fallback once hid a disposed-snapshot read and surfaced
+        // downstream as a symbol-identity assert (completion details array).
         getModuleExportMap: () => {
-            const proj = project;
-            if (!proj?.checker) return undefined;
-            try {
-                return normalizeExportMapWireNames(proj.checker.getModuleExportMap());
-            } catch {
-                return undefined;
-            }
+            const proj = liveProject();
+            return normalizeExportMapWireNames(proj.checker.getModuleExportMap());
         },
         // Batch auto-import module specifier resolution (collectAutoImports cold path).
         // moduleSymbols === undefined resolves the export map's whole module set
         // Go-side, so the map itself never crosses the wire just to feed ids back.
         getModuleSpecifiersBatch: (importingFileName: string, moduleSymbols: readonly any[] | undefined, preferences: any) => {
-            const proj = project;
-            if (!proj?.checker) return undefined;
-            try {
-                return proj.checker.getModuleSpecifiersBatch(
-                    tsgoFileArg(importingFileName),
-                    moduleSymbols,
-                    preferences && {
-                        importModuleSpecifierPreference: preferences.importModuleSpecifierPreference,
-                        importModuleSpecifierEnding: preferences.importModuleSpecifierEnding,
-                        autoImportSpecifierExcludeRegexes: preferences.autoImportSpecifierExcludeRegexes,
-                    },
-                );
-            } catch {
-                return undefined;
-            }
+            const proj = liveProject();
+            return proj.checker.getModuleSpecifiersBatch(
+                tsgoFileArg(importingFileName),
+                moduleSymbols,
+                preferences && {
+                    importModuleSpecifierPreference: preferences.importModuleSpecifierPreference,
+                    importModuleSpecifierEnding: preferences.importModuleSpecifierEnding,
+                    autoImportSpecifierExcludeRegexes: preferences.autoImportSpecifierExcludeRegexes,
+                },
+            );
         },
         // LS nav bridge (issue #12 batch 1): Go-computed, stock-services-shaped
         // quickinfo / references / definitionAndBoundSpan — one arena call instead
@@ -7078,7 +7075,7 @@ export function createTsgoProgram(
             // DocumentIdentifier wire format is plain path string or { uri }, not { fileName }.
             const file = targetSourceFile?.fileName ? tsgoFileArg(targetSourceFile.fileName) : undefined;
             const emitOnly = forceDtsEmit ? 3 : (emitOnlyDtsFiles ? 2 : undefined);
-            const res = project?.program?.emit?.({ file, emitOnly, forceDtsEmit: !!forceDtsEmit });
+            const res = liveProject().program?.emit?.({ file, emitOnly, forceDtsEmit: !!forceDtsEmit });
             const outputs = res?.outputFiles ?? [];
             const write = typeof writeFile === "function" ? writeFile : host?.writeFile?.bind(host);
             // Match stock emitter.ts — see emitBuildInfo comment above.
@@ -7151,7 +7148,7 @@ export function createTsgoProgram(
             // Go path (build mode and non-builder callers): tsgo serializes its
             // incremental snapshot; tscBuild mirrors the `tsc -b` CLI flag for
             // build-mode buildinfo rules on non-incremental projects.
-            const res = project?.program?.emitBuildInfo?.({ build: !!(options as any).tscBuild });
+            const res = liveProject().program?.emitBuildInfo?.({ build: !!(options as any).tscBuild });
             const outputs = res?.outputFiles ?? [];
             for (const o of outputs) {
                 const outFileName = wireFileNameToHost(o.fileName);
