@@ -1,6 +1,7 @@
 package api
 
 import (
+	"slices"
 	"strings"
 
 	"github.com/microsoft/typescript-go/internal/ast"
@@ -61,7 +62,17 @@ func computeAmbientModules(program *compiler.Program, sd *snapshotData, project 
 		})
 	}
 
+	// Go map iteration order varies per run — sort so the wire order is
+	// deterministic (same class as moduleexportmap.go; issue #42).
+	ambients := make([]*ast.Symbol, 0, len(byName))
 	for _, ambient := range byName {
+		ambients = append(ambients, ambient)
+	}
+	slices.SortStableFunc(ambients, func(a, b *ast.Symbol) int {
+		return strings.Compare(a.Name, b.Name)
+	})
+
+	for _, ambient := range ambients {
 		addModule(ambient)
 
 		// Preserve the node: alias coverage of the previous export-map-backed
