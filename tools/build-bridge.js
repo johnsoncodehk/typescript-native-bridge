@@ -44,7 +44,12 @@ if (goos === "darwin") {
 	env.CGO_LDFLAGS = `${env.CGO_LDFLAGS ?? ""} -Wl,-undefined,dynamic_lookup`.trim();
 }
 if (process.env.TNB_NODE_LIB) {
-	env.CGO_LDFLAGS = `${env.CGO_LDFLAGS ?? ""} "${process.env.TNB_NODE_LIB}"`.trim();
+	// Delay-load node.exe: a static import binds by file name and breaks on
+	// renamed hosts (VS Code's Code.exe, electron.exe — issue #44). The
+	// delay-load notify hook in win_delay_load_hook_windows.c redirects the
+	// load to the running process image.
+	env.CGO_LDFLAGS =
+		`${env.CGO_LDFLAGS ?? ""} "${process.env.TNB_NODE_LIB}" -Wl,--delayload,node.exe -ldelayimp`.trim();
 }
 
 const r = spawnSync("go", args, { cwd: bridgeDir, stdio: "inherit", env });

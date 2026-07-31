@@ -354,3 +354,16 @@ jobs:
           echo "OVERLAY-MODULE-EXIT=$LASTEXITCODE"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+      - uses: actions/checkout@v4
+
+      - name: Electron-host load probe (issue #44 class)
+        # VS Code runs tsserver as Code.exe (ELECTRON_RUN_AS_NODE); a
+        # node.exe import only binds when the host image is literally named
+        # node.exe, so every step above (plain node) is blind to it. The
+        # probe loads bridge.node under Electron-as-node and round-trips a
+        # session — the exact #44 failure mode.
+        run: |
+          Copy-Item -Recurse staging/lib lib
+          npm i --no-save electron@42
+          node tools/triage-electron-abi.mjs
+
