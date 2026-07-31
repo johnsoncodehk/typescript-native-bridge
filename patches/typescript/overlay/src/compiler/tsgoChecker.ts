@@ -766,8 +766,27 @@ function openProjectParam(configFilePath: string, options: any): { fileName: str
     return { fileName: configFilePath, compilerOptions: toWireCompilerOptions(options) };
 }
 
-/** Last updateSnapshot params fingerprint + project per config — identical repeat calls are skipped (watch-lint generations reissue the same params ~1000×). */
-const _lastUpdateParamsByConfig = new Map<string, { paramsJson: string; project: any }>();
+/** Last updateSnapshot params + project per config — identical repeat calls are skipped (watch-lint generations reissue the same params ~1000×). The params OBJECT is the fingerprint: retaining a JSON copy duplicated every overlay text (~15MB per config at hoppscotch scale, issue #41 B-2), while the content strings here are shared references with hostContentByFile, so equality below is O(1) per unchanged file. */
+const _lastUpdateParamsByConfig = new Map<string, { params: any; project: any }>();
+
+/** Structural equality for updateSnapshot params (see _lastUpdateParamsByConfig). Small fields (compilerOptions, extraFileExtensions) compare via JSON; bulk texts compare by shared-reference string equality. */
+const sameUpdateParams = (a: any, b: any): boolean => {
+    const names = (x: readonly string[] | undefined, y: readonly string[] | undefined): boolean =>
+        x === y || (!!x && !!y && x.length === y.length && x.every((v, i) => v === y[i]));
+    const filesWithContent = (x: readonly any[] | undefined, y: readonly any[] | undefined): boolean =>
+        x === y || (!!x && !!y && x.length === y.length && x.every((f, i) => f.fileName === y[i].fileName && f.scriptKind === y[i].scriptKind && f.content === y[i].content
+            // Edit pushes carry content:"" plus the real change in edits — comparing content alone treats two different edits as equal and drops the push (sim-xfile s1 revert).
+            && f.baseVersion === y[i].baseVersion && JSON.stringify(f.edits) === JSON.stringify(y[i].edits)));
+    return names(a.openFiles, b.openFiles)
+        && names(a.closeFiles, b.closeFiles)
+        && names(a.closeProjects, b.closeProjects)
+        && names(a.additionalFiles, b.additionalFiles)
+        && filesWithContent(a.openFilesWithContent, b.openFilesWithContent)
+        && !!a.prefetchDiagnostics === !!b.prefetchDiagnostics
+        && a.openProject?.fileName === b.openProject?.fileName
+        && JSON.stringify(a.openProject?.compilerOptions) === JSON.stringify(b.openProject?.compilerOptions)
+        && JSON.stringify(a.extraFileExtensions) === JSON.stringify(b.extraFileExtensions);
+};
 
 /** Open client tabs mirrored to the per-process tsgo session. tsgo OpenFiles
  * is additive-only (ref-counted, session.go): a tab closed in the editor
@@ -8291,9 +8310,8 @@ export function createTsgoChecker(program: any): any {
             ...(buildClose.closeParams ?? {}),
             ...(prefetchDiagnostics ? { prefetchDiagnostics: true } : {}),
         };
-        const updateParamsJson = (options as any).tscBuild ? undefined : JSON.stringify(updateParams);
-        const prevUpdate = updateParamsJson !== undefined ? _lastUpdateParamsByConfig.get(configFilePath!) : undefined;
-        const deduped = prevUpdate !== undefined && prevUpdate.paramsJson === updateParamsJson;
+        const prevUpdate = (options as any).tscBuild ? undefined : _lastUpdateParamsByConfig.get(configFilePath!);
+        const deduped = prevUpdate !== undefined && sameUpdateParams(prevUpdate.params, updateParams);
         traceOverlaySync(openFilesWithContent, deduped);
         const snapshot: any = deduped ? undefined : _api.updateSnapshot(updateParams);
         if (programCtx) programCtx.pendingReferencedProjects = undefined;
@@ -8301,8 +8319,8 @@ export function createTsgoChecker(program: any): any {
         if (!project) {
             throw new Error(`tsgoChecker: project not found for ${configFilePath}`);
         }
-        if (!deduped && updateParamsJson !== undefined) {
-            _lastUpdateParamsByConfig.set(configFilePath!, { paramsJson: updateParamsJson, project });
+        if (!deduped && !(options as any).tscBuild) {
+            _lastUpdateParamsByConfig.set(configFilePath!, { params: updateParams, project });
         }
         if (snapshot) {
             trackBuildProjectSnapshot(configFilePath!, snapshot, [
