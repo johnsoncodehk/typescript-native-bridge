@@ -478,6 +478,16 @@ function isStableHostSfPath(p: string): boolean {
 const _nodeIndexBySf = new WeakMap<object, Map<number, any[]>>();
 const _nodeIndexGenStampByPath = new Map<string, number>();
 let _nodeIndexGenCounter = 0;
+/** Hot files that proved cross-generation index demand (see _nodeIndexBySf).
+ * Keyed by path — hot stays hot across content changes, and no shell object
+ * is pinned. The idle shell drain (dropDecodedAstExcept) spares exactly these. */
+const _nodeIndexPromotedPaths = new Set<string>();
+/** Idle drain for cross-generation shell decode populations (issue #11
+ * residue) — registered into the same B-3 eviction batch as the per-gen
+ * index drain, so both drop in one fire. */
+function dropUnpromotedShellDecodedAst(): void {
+    _sourceFileCache?.dropDecodedAstExcept(_nodeIndexPromotedPaths);
+}
 
 // ── Cross-generation program-file metadata (issue #11) ─────────────────
 // Watch-mode lint (typescript-estree) rebuilds the thin program per linted
@@ -2058,6 +2068,29 @@ class MiniSourceFileCache {
     }
     clear() { this.bySnap.clear(); this.paths.clear(); this.stableByPath.clear(); this.stableSrcByPath.clear(); }
     has(p: string) { return this.paths.has(p); }
+    /**
+     * Idle eviction of decoded-node populations on cross-generation shells
+     * (issue #11 residue): the wire blob stays cached (re-decode materializes
+     * per file on demand); only the lazily decoded RemoteNode objects are
+     * dropped. Node identity survives: ids are `index.kind.path` strings and
+     * the root (index 1, the file itself) is re-primed. Promoted (hot) files
+     * keep their population — their promoted WeakMap index references it, so
+     * dropping it there would reclaim nothing.
+     */
+    dropDecodedAstExcept(promotedPaths: ReadonlySet<string>): void {
+        const drop = (p: string, entry: { file: any } | undefined): void => {
+            const file = entry?.file;
+            if (!file || promotedPaths.has(p)) return;
+            const nodes = file.nodes;
+            if (!Array.isArray(nodes) || nodes.length <= 2) return;
+            file.nodes = Array(nodes.length);
+            file.nodes[1] = file;
+        };
+        for (const [p, e] of this.stableByPath) drop(p, e);
+        for (const [p, byScope] of this.stableSrcByPath) {
+            for (const e of byScope.values()) drop(p, e);
+        }
+    }
 }
 
 /**
@@ -8931,10 +8964,14 @@ export function createTsgoChecker(program: any): any {
             // Demand-gated promotion (see _nodeIndexBySf): only a file indexed
             // again in a later generation proves cross-generation demand.
             const stamped = _nodeIndexGenStampByPath.get(fileName);
-            if (stamped !== undefined && stamped !== nodeIndexGen) _nodeIndexBySf.set(sf, idx);
+            if (stamped !== undefined && stamped !== nodeIndexGen) {
+                _nodeIndexBySf.set(sf, idx);
+                _nodeIndexPromotedPaths.add(fileName);
+            }
             _nodeIndexGenStampByPath.set(fileName, nodeIndexGen);
         }
         scheduleScanSfEviction(evictScanIndexes);
+        scheduleScanSfEviction(dropUnpromotedShellDecodedAst);
         if (process.env.TSGO_PROFILE === "1") { _stats.indexBuildMs += Date.now() - t0; _stats.indexBuildCount++; }
         return idx;
     }
