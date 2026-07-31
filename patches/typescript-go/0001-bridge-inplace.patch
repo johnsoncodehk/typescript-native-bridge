@@ -1760,7 +1760,7 @@ index 5817fc6bb..698abd084 100644
  				missingFiles = append(missingFiles, task.normalizedFilePath)
  				continue
 diff --git a/internal/compiler/program.go b/internal/compiler/program.go
-index 74b2504d9..b3b598571 100644
+index 74b2504d9..d523103ef 100644
 --- a/internal/compiler/program.go
 +++ b/internal/compiler/program.go
 @@ -116,6 +116,30 @@ type Program struct {
@@ -1844,7 +1844,7 @@ index 74b2504d9..b3b598571 100644
  // collectCheckerDiagnosticsFromFiles collects checker diagnostics for a list of files.
  func (p *Program) collectCheckerDiagnosticsFromFiles(ctx context.Context, sourceFiles []*ast.SourceFile, collect func(context.Context, *checker.Checker, *ast.SourceFile) []*ast.Diagnostic) [][]*ast.Diagnostic {
  	diagnostics := make([][]*ast.Diagnostic, len(sourceFiles))
-@@ -585,11 +629,33 @@ func (p *Program) collectCheckerDiagnosticsFromFiles(ctx context.Context, source
+@@ -585,14 +629,61 @@ func (p *Program) collectCheckerDiagnosticsFromFiles(ctx context.Context, source
  			diagnostics[fileIndex] = collect(ctx, c, file)
  		})
  	} else {
@@ -1855,7 +1855,7 @@ index 74b2504d9..b3b598571 100644
 -				continue
 +			if !p.SkipTypeChecking(file, false) {
 +				checkable = append(checkable, i)
- 			}
++			}
 +		}
 +		// Micro programs (as produced by solution builds of many small
 +		// projects) pay more for checker construction than for checking:
@@ -1871,16 +1871,46 @@ index 74b2504d9..b3b598571 100644
 +			c, done := p.checkerPool.GetChecker(dctx, nil)
 +			for _, i := range checkable {
 +				diagnostics[i] = collect(dctx, c, sourceFiles[i])
-+			}
+ 			}
 +			done()
 +			return diagnostics
 +		}
++		// Larger programs: assign files to a fixed number of groups by
++		// original index stride (i % groups) — one task per group, one
++		// leased checker per task. Plain queue pickup (the old shape) bound
++		// files to checkers by goroutine scheduling, so checker-local lazy
++		// state (merged global heritage resolution, report dedup) varied
++		// run to run and per-file blame appeared/disappeared across
++		// identical programs (issue #42). The stride mirrors the compiler
++		// pool's fileAssociations (checkerCount == the default 4 whenever
++		// the program has >= 4 files), so the session's pass also matches
++		// the CLI's deterministic grouping instead of merely being stable.
++		// Which pool slot a group leases is irrelevant (checkers are
++		// symmetric) as long as no slot serves two groups, so groups never
++		// exceed the pool's query slots. The whole-program pass runs before
++		// query traffic on the paths that reach it (one-shot tsc/build,
++		// fresh snapshot), so the slots are free and pair 1:1.
++		groupCount := 4
++		if qp, ok := p.checkerPool.(interface{ QueryCheckerSlots() int }); ok {
++			groupCount = qp.QueryCheckerSlots()
++		}
++		groups := min(groupCount, len(checkable))
 +		wg := core.NewWorkGroup(p.SingleThreaded())
-+		for _, i := range checkable {
-+			file := sourceFiles[i]
++		for g := 0; g < groups; g++ {
++			g := g
  			wg.Queue(func() {
- 				c, done := p.checkerPool.GetChecker(ctx, file)
- 				diagnostics[i] = collect(ctx, c, file)
+-				c, done := p.checkerPool.GetChecker(ctx, file)
+-				diagnostics[i] = collect(ctx, c, file)
++				c, done := p.checkerPool.GetChecker(ctx, nil)
++				for _, i := range checkable {
++					if i%groups != g {
++						continue
++					}
++					diagnostics[i] = collect(ctx, c, sourceFiles[i])
++				}
+ 				done()
+ 			})
+ 		}
 diff --git a/internal/execute/incremental/programtosnapshot.go b/internal/execute/incremental/programtosnapshot.go
 index 44b9b4cbc..0a8aafd0d 100644
 --- a/internal/execute/incremental/programtosnapshot.go
@@ -2953,6 +2983,24 @@ index 52400dc2b..10546290b 100644
  		return continueSearching()
  	}
  }
+diff --git a/internal/project/checkerpool.go b/internal/project/checkerpool.go
+index 32f68d413..ea9872be8 100644
+--- a/internal/project/checkerpool.go
++++ b/internal/project/checkerpool.go
+@@ -215,6 +215,13 @@ func (p *checkerPool) tryReacquireForRequest(requestID string, sem chan<- struct
+ 	return nil, nil, false
+ }
+ 
++// QueryCheckerSlots returns the number of query checker slots (MaxCheckers-1).
++// compiler.Program's whole-program diagnostics pass shards files into at most
++// this many deterministic groups so no slot ever serves two groups (issue #42).
++func (p *checkerPool) QueryCheckerSlots() int {
++	return p.opts.MaxCheckers - 1
++}
++
+ // getDiagnosticsChecker returns the dedicated diagnostics checker (index 0).
+ // Creates it on first use. Blocks on diagSem if it's currently in use.
+ func (p *checkerPool) getDiagnosticsChecker(ctx context.Context, requestID string) (*checker.Checker, func()) {
 diff --git a/internal/project/compilerhost.go b/internal/project/compilerhost.go
 index 212601d4b..a34452b36 100644
 --- a/internal/project/compilerhost.go
