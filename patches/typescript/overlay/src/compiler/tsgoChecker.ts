@@ -548,20 +548,66 @@ function tnbSharedStubVersion(configFilePath: string, hostFileName: string): str
 }
 
 /**
+ * Live per-config full-SF materializer for light-stub delegation. Refreshed by
+ * each createTsgoProgram generation, so a delegated read always sees the
+ * current generation's content — never a pinned old one.
+ */
+const _lightStubMaterializerByConfig = new Map<string, (hostFileName: string) => any>();
+
+/**
  * Metadata-only SourceFile stub shared across program generations. Only
  * path-derived constants and primitives are captured — the version/text/line
  * getters read current stores, so the object never pins a generation's
- * closures. textIsLazyDisk (pure-disk LS lint mode) and metaEnabled (builder
- * meta consumed) mirror the per-program flags of the creating program; a stub
- * shared into a differently-flavored program keeps its creator's flags
- * (single-tool processes make this theoretical).
+ * closures. metaEnabled (builder meta consumed) and delegatesToLive mirror
+ * the creating program's flavor; a stub shared into a differently-flavored
+ * program keeps its creator's flags (single-tool processes make this
+ * theoretical).
+ *
+ * AST fields (imports/statements/referencedFiles…) are NOT empty the way a
+ * naive stub's would be: whole-program enumeration (auto-import scan,
+ * telemetry, resolution-cache finish) reads only path metadata, but the
+ * FAR/import-tracker family needs imports/referencedFiles with real positions.
+ * Those reads delegate to the live program's materializer, so a cold file
+ * upgrades to its full host SF only when a query actually inspects it — never
+ * at project load (issue #41: the cold-open heap is metadata-only).
+ *
+ * text/lineStarts are real too, lazily disk-read on first access: position →
+ * line/character mapping (definitionAndBoundSpan, references) runs against
+ * stubs for every closed file a query surfaces, and an empty text collapses
+ * every span to line 1. Only files surfaced in answers pay the read; the memo
+ * is the text itself, so an answer-surfaced file pins its text, not its AST.
  */
-function createSharedLightStub(hostFileName: string, configFilePath: string, textIsLazyDisk: boolean, metaEnabled: boolean, languageVersion: number): any {
+function createSharedLightStub(hostFileName: string, configFilePath: string, metaEnabled: boolean, languageVersion: number, delegatesToLive: boolean): any {
     const tsgoPath = canonicalSourceFilePath(hostFileName);
     let lazyText: string | undefined;
     let lazyLineStarts: readonly number[] | undefined;
-    const textOf = (): string => lazyText ??= (textIsLazyDisk ? hostForOverlaySync()?.readFile?.(hostFileName) ?? readDiskText(hostFileName) ?? "" : "");
+    const textOf = (): string => lazyText ??= hostForOverlaySync()?.readFile?.(hostFileName) ?? readDiskText(hostFileName) ?? "";
     const lineStartsOf = (): readonly number[] => lazyLineStarts ??= ts.computeLineStarts(textOf());
+    const full = (): any => {
+        if (!delegatesToLive) return undefined;
+        // A stale-generation read can race project replacement ("snapshot N
+        // not found") — degrade to inert (next read sees the new project).
+        // Anything else is a real bug: rethrow, never mask it (the c9fdf6c
+        // lesson — a swallowed snapshot error surfaced downstream as a
+        // Debug Failure).
+        try {
+            return _lightStubMaterializerByConfig.get(configFilePath)?.(hostFileName);
+        } catch (e) {
+            if (!/snapshot \d+ not found/.test(String((e as any)?.message ?? e))) throw e;
+            return undefined;
+            return undefined;
+        }
+    };
+    const delegate = (field: string) => full()?.[field];
+    const delegateOr = (field: string, fallback: any) => full()?.[field] ?? fallback;
+    const eofToken = {
+        kind: SyntaxKind.EndOfFileToken,
+        pos: 0,
+        end: 0,
+        getStart: () => 0,
+        getEnd: () => 0,
+        getFullStart: () => 0,
+    };
     return {
         kind: SyntaxKind.SourceFile,
         fileName: hostFileName,
@@ -589,34 +635,35 @@ function createSharedLightStub(hostFileName: string, configFilePath: string, tex
         scriptKind: inferScriptKind(hostFileName),
         isDeclarationFile: hostFileName.endsWith(".d.ts"),
         hasNoDefaultLib: false,
-        referencedFiles: [],
-        typeReferenceDirectives: [],
-        libReferenceDirectives: [],
+        get referencedFiles() { return delegateOr("referencedFiles", []); },
+        get typeReferenceDirectives() { return delegateOr("typeReferenceDirectives", []); },
+        get libReferenceDirectives() { return delegateOr("libReferenceDirectives", []); },
         amdDependencies: [],
         moduleAugmentations: [],
-        imports: [],
-        ambientModuleNames: [],
-        parseDiagnostics: [],
-        bindDiagnostics: [],
+        get imports() { return delegate("imports"); },
+        get ambientModuleNames() { return delegate("ambientModuleNames"); },
+        get externalModuleIndicator() { return delegate("externalModuleIndicator"); },
+        get parseDiagnostics() { return delegateOr("parseDiagnostics", []); },
+        get bindDiagnostics() { return delegateOr("bindDiagnostics", []); },
         commentDirectives: [],
-        statements: [],
-        endOfFileToken: {
-            kind: SyntaxKind.EndOfFileToken,
-            pos: 0,
-            end: 0,
-            getStart: () => 0,
-            getEnd: () => 0,
-            getFullStart: () => 0,
-        },
+        get statements() { return delegateOr("statements", []); },
+        get endOfFileToken() { return delegateOr("endOfFileToken", eofToken); },
         pos: 0,
         end: 0,
         get lineMap() { return lineStartsOf(); },
         getLineStarts: () => lineStartsOf(),
         getLineAndCharacterOfPosition: (position: number) => ts.computeLineAndCharacterOfPosition(lineStartsOf(), position),
         getPositionOfLineAndCharacter: (line: number, character: number) => ts.computePositionOfLineAndCharacter(lineStartsOf(), line, character, textOf()),
-        forEachChild: () => undefined,
-        // findAllReferences scans every program file; light stubs must not crash token walks.
-        getChildren: () => [],
+        forEachChild: (...args: any[]) => {
+            const sf = full();
+            return sf?.forEachChild ? sf.forEachChild(...args) : undefined;
+        },
+        getChildren: () => full()?.getChildren?.() ?? [],
+        // NavigateTo walks every project file's declarations (stock binds and
+        // caches this map on the SourceFile). Delegate like the AST getters;
+        // an inert empty Map keeps a stale-generation read from crashing the
+        // whole-project enumeration.
+        getNamedDeclarations: () => full()?.getNamedDeclarations?.() ?? new Map(),
     };
 }
 
@@ -5925,11 +5972,6 @@ export function createTsgoProgram(
     const preferHostSourceFiles = overlays.length > 0
         || parsedHostSourceFiles.size > 0
         || !!(lsHost as any)?.projectService;
-    // Soft-P′ FAR needs real `SourceFile.imports` for every program file, but that
-    // full materialization must be gated to tsserver (projectService). PreferHost
-    // alone also covers vue-tsc overlays — forcing getOrCreateSourceFile for the
-    // entire --build reference graph OOMs (~4–8GB) on packages/tsc typecheck.
-    const softPMaterializeAllForImportTracker = !!(lsHost as any)?.projectService;
     programCtx.pendingOverlays = overlays.length > 0 ? overlays : undefined;
     programCtx.pendingExtraFileExtensions = collectExtraFileExtensions(names, options);
     // Host-computed root set (rootNames + LS getScriptFileNames) — tsgo's
@@ -6230,12 +6272,25 @@ export function createTsgoProgram(
 
     const hostForLs = () => programCtx.lsHost;
 
+    // Presence form (vue-tsc / non-tsserver modes): any host-servable content
+    // keeps the full-SF path those modes were tuned for.
     const fileHasHostSourceContent = (name: string, hostFileName: string): boolean => {
         const ls = hostForLs();
         return hostHasScriptSnapshot(ls, name, hostFileName)
             || hostContentByFile.has(hostFileName)
             || parsedHostSourceFiles.has(hostFileName);
     };
+
+    // True-overlay gate for enumeration views (getSourceFiles /
+    // getSourceFileByPath): under tsserver the host can snapshot EVERY program
+    // file (disk-backed ScriptInfos), so a presence check is meaningless —
+    // only files whose content genuinely diverges from disk (Volar virtual
+    // .vue TS, unsaved buffers, pushed overlays) need a real AST in the walk.
+    // Everything else is a delegating light stub (issue #41).
+    const hasTrueOverlayContent = (hostFileName: string): boolean =>
+        parsedHostSourceFiles.has(hostFileName)
+        || hostContentByFile.has(hostFileName)
+        || _syncedOverlayContentByFile.has(hostFileName);
 
     /** Host-parsed AST for Language Service — never tsgo RemoteSourceFile. */
     const getLanguageServiceSourceFile = (hostFileName: string, requestFileName: string): any | undefined => {
@@ -6279,7 +6334,7 @@ export function createTsgoProgram(
         return sf;
     };
 
-    const getOrCreateSourceFile = (fileName: string): any => {
+    const getOrCreateSourceFileWorker = (fileName: string): any => {
         // hostNameForQuery: a folded-Path query (tsserver rootFilesMap,
         // builder byPath) must land on the SAME SourceFile as the host-cased
         // one — never a second materialization keyed by the variant spelling.
@@ -6421,6 +6476,20 @@ export function createTsgoProgram(
         return result;
     };
 
+    /** Latest full SF per host file name, per program instance. Stock has one
+     * SourceFile per file per program and reference search compares
+     * declaration.getSourceFile() by IDENTITY against the getSourceFiles()
+     * walk (addReferencesHere containment) — an enumeration that serves a
+     * stub for an already-materialized file silently drops that file's
+     * references (sim-xfile s3:implementation). Per-program like sfCache, so
+     * generations never share instances. */
+    const fullSfByName = new Map<string, any>();
+    const getOrCreateSourceFile = (fileName: string): any => {
+        const sf = getOrCreateSourceFileWorker(fileName);
+        if (sf) fullSfByName.set(hostNameForQuery(resolveHostFileName(fileName, host)), sf);
+        return sf;
+    };
+
     // Writable skeleton SourceFiles for diagnostics — Volar vue-tsc mutates
     // diagnostic.file.text during span remapping; tsgo RemoteSourceFile.text is read-only.
     const diagnosticSfCache = new Map<string, any>();
@@ -6458,6 +6527,13 @@ export function createTsgoProgram(
     // are served light stubs instead of materializing remote ASTs.
     const preferLightProgramFiles = !preferHostSourceFiles
         && typeof (programCtx.lsHost as any)?.getScriptSnapshot === "function";
+    // Interactive tsserver (projectService present): the light-walk mode where
+    // enumeration views serve delegating stubs for pure-disk files and stubs
+    // upgrade AST reads on demand (issue #41). Off in vue-tsc/lint modes —
+    // their memory profile and stub inertness are already tuned (build OOM
+    // history), and multi-project builders hold stale generations a live
+    // materializer must never be consulted for.
+    const tsserverWalk = !!(lsHost as any)?.projectService;
     // Mirror of the getBuilderMetaState fetch gate, for shared-stub version getters.
     const builderMetaEnabled = !((options as any).tscBuild && !options.incremental && !options.composite);
     const getOrCreateLightSourceFile = (fileName: string): any => {
@@ -6475,7 +6551,7 @@ export function createTsgoProgram(
             // fileInfos and to ask for referenced/imported files (empty here).
             // tsserver getScriptInfos() requires ScriptInfo for every returned file;
             // default libs are not opened as ScriptInfo — exclude them here.
-            sf = createSharedLightStub(hostFileName, configFilePath, preferLightProgramFiles, builderMetaEnabled, options.target ?? 99);
+            sf = createSharedLightStub(hostFileName, configFilePath, builderMetaEnabled, options.target ?? 99, tsserverWalk);
             ensureFileModuleMeta(sf);
             _lightSfSharedByFile.set(hostFileName, sf);
             _tnbLightStubCreations++;
@@ -6498,6 +6574,10 @@ export function createTsgoProgram(
         }
         return sf;
     };
+
+    // Live materializer for light-stub AST delegation (createSharedLightStub):
+    // refreshed per generation, so stub getters always read current content.
+    _lightStubMaterializerByConfig.set(configFilePath, getOrCreateSourceFile);
 
     const tsgoFileArg = (fileName: string | undefined) => fileName ? toTsgoFileName(fileName) : fileName;
 
@@ -6824,8 +6904,8 @@ export function createTsgoProgram(
                 return undefined;
             }
             // Pure-disk lint: the builder's affected-file drain calls this once
-            // per changed file (and per graph node on incremental runs). The
-            // fileHasHostSourceContent probe below would CREATE a host snapshot
+            // per changed file (and per graph node on incremental runs). A
+            // host-snapshot probe here would CREATE a host snapshot
             // (tsslint's getScriptSnapshot reads the file from disk and caches
             // it), turning every metadata lookup into a disk read + fs.stat +
             // remote-AST RPC via getOrCreateSourceFile. Builder machinery only
@@ -6840,19 +6920,27 @@ export function createTsgoProgram(
                 if (incHostName !== undefined) {
                     return getOrCreateSourceFile(incHostName);
                 }
-                return getLightSourceFileByRawPath(pathStr);
+                // Identity before stub: a file already materialized in this
+                // program must come back as THE same instance (fullSfByName).
+                return fullSfByName.get(hostNameForQuery(pathStr)) ?? getLightSourceFileByRawPath(pathStr);
             }
-            const hostFileName = toHostFileName(pathStr);
-            // Soft-P′: tsserver (projectService) must not hand import tracker light
-            // stubs with imports:[]. Full host-bound AST keeps forEachImport able
-            // to discover closed importer files. Do NOT key this on preferHost —
+            // True-overlay files (Volar virtual .vue, unsaved buffers) need the
+            // real host AST — their content exists nowhere else. Everything
+            // else is a light stub whose AST fields delegate to the live
+            // program on demand (createSharedLightStub), so import tracker
+            // still discovers closed importer files — upgraded per file
+            // inspected, not per project load. Do NOT key this on preferHost —
             // vue-tsc overlays set preferHost without projectService and OOM if
-            // the whole program is materialized (see softPMaterializeAllForImportTracker).
+            // the whole program is materialized.
             const incHostName = includeReasonReferencingHostName(pathStr);
-            if (softPMaterializeAllForImportTracker || fileHasHostSourceContent(pathStr, hostFileName) || incHostName !== undefined) {
+            const contentGated = tsserverWalk
+                ? hasTrueOverlayContent(hostNameForQuery(pathStr))
+                : fileHasHostSourceContent(pathStr, pathStr);
+            if (contentGated || incHostName !== undefined) {
                 return getOrCreateSourceFile(incHostName ?? pathStr);
             }
-            return getOrCreateLightSourceFile(pathStr);
+            // Identity before stub (see fullSfByName above).
+            return fullSfByName.get(hostNameForQuery(pathStr)) ?? getOrCreateLightSourceFile(pathStr);
         },
         getSourceFiles: () => {
             const names = getSourceFileNames();
@@ -6861,34 +6949,37 @@ export function createTsgoProgram(
             // no tsserver): whole-program consumers of getSourceFiles()
             // (BuilderState, buildinfo serialization, hasErrors scans) need only
             // metadata, so light stubs skip one remote-AST fetch per program
-            // file. Soft-P′: under tsserver projectService always materialize
-            // real host-bound SourceFiles so FAR import discovery sees imports
-            // on closed files. preferLightProgramFiles keeps stubs; vue-tsc
-            // (preferHost via overlays, no projectService) keeps content-gated
-            // materialization to avoid --build OOM.
+            // file. Under tsserver the walk is light too (issue #41): every
+            // cold-open enumerator (auto-import scan, telemetry, resolution-
+            // cache finish) reads only path metadata, and FAR/import-tracker
+            // upgrades files on demand through the stub's delegating getters.
+            // vue-tsc (preferHost via overlays, no projectService) keeps
+            // content-gated materialization to avoid --build OOM.
             for (const name of names) {
                 // Default libs join the LS walk view only under tsserver
                 // (projectService), where FAR/highlights/rename need their
                 // declaration entries (stock parity); other modes keep the
                 // exclusion — no token walks there, just wasted AST cost.
-                if (isHostLibFile(name) && !softPMaterializeAllForImportTracker) continue;
+                if (isHostLibFile(name) && !tsserverWalk) continue;
                 let sf: any;
                 if (preferLightProgramFiles) {
-                    sf = getOrCreateLightSourceFile(name);
+                    // Identity before stub (see fullSfByName).
+                    sf = fullSfByName.get(name) ?? getOrCreateLightSourceFile(name);
                 }
                 // name is host-form already (getSourceFileNames decode boundary).
-                else if (softPMaterializeAllForImportTracker || fileHasHostSourceContent(name, name)) {
+                else if (tsserverWalk ? hasTrueOverlayContent(name) : fileHasHostSourceContent(name, name)) {
                     sf = getOrCreateSourceFile(name);
                 }
                 else {
-                    sf = getOrCreateLightSourceFile(name);
+                    // Identity before stub (see fullSfByName).
+                    sf = fullSfByName.get(name) ?? getOrCreateLightSourceFile(name);
                 }
                 if (sf) result.push(sf);
             }
             if (process.env.TNB_SF_MATERIALIZE_STATS === "1") {
                 tnbLogSfMaterialize(
                     `[TNB_SF_MATERIALIZE] getSourceFiles n=${result.length} `
-                    + `preferHost=${preferHostSourceFiles} softPAll=${softPMaterializeAllForImportTracker} `
+                    + `preferHost=${preferHostSourceFiles} tsserverWalk=${tsserverWalk} `
                     + `preferLight=${preferLightProgramFiles} `
                     + `soft=${_tnbLightStubCreations} full=${_tnbFullSfMaterializations}`,
                 );
