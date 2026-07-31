@@ -581,7 +581,12 @@ function createSharedLightStub(hostFileName: string, configFilePath: string, met
     const tsgoPath = canonicalSourceFilePath(hostFileName);
     let lazyText: string | undefined;
     let lazyLineStarts: readonly number[] | undefined;
-    const textOf = (): string => lazyText ??= hostForOverlaySync()?.readFile?.(hostFileName) ?? readDiskText(hostFileName) ?? "";
+    // Overlay text first: extra-extension virtual files (Volar .vue TS) and
+    // unsaved buffers live in the synced-overlay mirror, not on disk — a disk
+    // read would serve the raw SFC as if it were the file's TS content. The
+    // mirror also covers the zero-statements edge (empty virtual TS parses to
+    // nothing; "" is a real value here, not a miss).
+    const textOf = (): string => lazyText ??= _syncedOverlayContentByFile.get(hostFileName) ?? hostForOverlaySync()?.readFile?.(hostFileName) ?? readDiskText(hostFileName) ?? "";
     const lineStartsOf = (): readonly number[] => lazyLineStarts ??= ts.computeLineStarts(textOf());
     const full = (): any => {
         if (!delegatesToLive) return undefined;
@@ -5887,8 +5892,6 @@ export function createTsgoProgram(
     // file on every watch generation instead of serving light stubs
     // (issue #11).
     const hostContentByFile = new Map<string, { text: string; scriptKind: number; fromHost?: boolean }>();
-    /** Parsed host SourceFiles captured during createProgram (Volar virtual .vue TS). */
-    const parsedHostSourceFiles = new Map<string, any>();
 
     // Collect host file content for tsgo overlays — makes the fork host the
     // single source of truth. Uses getSourceFile when present (vue-tsc / Volar
@@ -5963,9 +5966,12 @@ export function createTsgoProgram(
             if (!contentCanDiverge(fn, resolvedFn)) continue;
             const content = getHostScriptContentForOverlay(resolvedFn, options, host);
             if (!content) continue;
-            // Only parse host AST for true overlays (content differs from disk —
-            // Volar virtual .vue TS, unsaved edits). Pure disk lint skips this
-            // and uses tsgo-backed single-parse instead.
+            // Only true overlays (content differs from disk — Volar virtual
+            // .vue TS, unsaved edits) are retained and pushed. No AST parse
+            // here: the parse is lazy (getLanguageServiceSourceFile re-parses
+            // from the same host snapshot on first access), so program
+            // creation pays text only, not one JS AST per virtual file (B-1).
+            // Pure disk lint skips this and uses tsgo-backed single-parse.
             if (!shouldSendHostOverlay(resolvedFn, content.text)) {
                 // Host matches disk again after a prior overlay — re-push on-disk text
                 // so tsgo does not keep checking stale overlay content.
@@ -5981,17 +5987,12 @@ export function createTsgoProgram(
             }
             const entry = decideOverlayPush(resolvedFn, content.text, content.scriptKind);
             if (!entry) continue;
-            const snapSf = sourceFileFromHostSnapshot(programCtx.lsHost, resolvedFn, fn, options.target ?? 99);
-            if (snapSf?.statements?.length) {
-                parsedHostSourceFiles.set(resolvedFn, snapSf);
-            }
             hostContentByFile.set(resolvedFn, content);
             overlays.push(entry);
             }
         }
     }
     const preferHostSourceFiles = overlays.length > 0
-        || parsedHostSourceFiles.size > 0
         || !!(lsHost as any)?.projectService;
     programCtx.pendingOverlays = overlays.length > 0 ? overlays : undefined;
     programCtx.pendingExtraFileExtensions = collectExtraFileExtensions(names, options);
@@ -6298,29 +6299,12 @@ export function createTsgoProgram(
     const fileHasHostSourceContent = (name: string, hostFileName: string): boolean => {
         const ls = hostForLs();
         return hostHasScriptSnapshot(ls, name, hostFileName)
-            || hostContentByFile.has(hostFileName)
-            || parsedHostSourceFiles.has(hostFileName);
+            || hostContentByFile.has(hostFileName);
     };
-
-    // True-overlay gate for enumeration views (getSourceFiles /
-    // getSourceFileByPath): under tsserver the host can snapshot EVERY program
-    // file (disk-backed ScriptInfos), so a presence check is meaningless —
-    // only files whose content genuinely diverges from disk (Volar virtual
-    // .vue TS, unsaved buffers, pushed overlays) need a real AST in the walk.
-    // Everything else is a delegating light stub (issue #41).
-    const hasTrueOverlayContent = (hostFileName: string): boolean =>
-        parsedHostSourceFiles.has(hostFileName)
-        || hostContentByFile.has(hostFileName)
-        || _syncedOverlayContentByFile.has(hostFileName);
 
     /** Host-parsed AST for Language Service — never tsgo RemoteSourceFile. */
     const getLanguageServiceSourceFile = (hostFileName: string, requestFileName: string): any | undefined => {
         const ls = hostForLs();
-        const parsed = parsedHostSourceFiles.get(hostFileName);
-        if (parsed?.statements?.length) {
-            return parsed;
-        }
-
         const fromSnap = sourceFileFromHostSnapshot(ls, hostFileName, requestFileName, options.target ?? 99);
         if (fromSnap) return fromSnap;
 
@@ -6945,20 +6929,21 @@ export function createTsgoProgram(
                 // program must come back as THE same instance (fullSfByName).
                 return fullSfByName.get(hostNameForQuery(pathStr)) ?? getLightSourceFileByRawPath(pathStr);
             }
-            // True-overlay files (Volar virtual .vue, unsaved buffers) need the
-            // real host AST — their content exists nowhere else. Everything
-            // else is a light stub whose AST fields delegate to the live
-            // program on demand (createSharedLightStub), so import tracker
-            // still discovers closed importer files — upgraded per file
-            // inspected, not per project load. Do NOT key this on preferHost —
-            // vue-tsc overlays set preferHost without projectService and OOM if
-            // the whole program is materialized.
+            // Under tsserver every walk entry is a light stub whose AST fields
+            // delegate to the live program on demand (createSharedLightStub) —
+            // including extra-extension virtual files, whose text rides the
+            // synced-overlay mirror (no raw-SFC text). The full host AST for a
+            // file is created only by per-file getSourceFile or the
+            // include-reasons walk — no whole-program JS AST at project load
+            // (issue #41/B-1). Do NOT key this on preferHost — vue-tsc
+            // overlays set preferHost without projectService and OOM if the
+            // whole program is materialized.
             const incHostName = includeReasonReferencingHostName(pathStr);
-            const contentGated = tsserverWalk
-                ? hasTrueOverlayContent(hostNameForQuery(pathStr))
-                : fileHasHostSourceContent(pathStr, pathStr);
-            if (contentGated || incHostName !== undefined) {
-                return getOrCreateSourceFile(incHostName ?? pathStr);
+            if (incHostName !== undefined) {
+                return getOrCreateSourceFile(incHostName);
+            }
+            if (!tsserverWalk && fileHasHostSourceContent(pathStr, pathStr)) {
+                return getOrCreateSourceFile(pathStr);
             }
             // Identity before stub (see fullSfByName above).
             return fullSfByName.get(hostNameForQuery(pathStr)) ?? getOrCreateLightSourceFile(pathStr);
@@ -6988,7 +6973,9 @@ export function createTsgoProgram(
                     sf = fullSfByName.get(name) ?? getOrCreateLightSourceFile(name);
                 }
                 // name is host-form already (getSourceFileNames decode boundary).
-                else if (tsserverWalk ? hasTrueOverlayContent(name) : fileHasHostSourceContent(name, name)) {
+                // tsserverWalk: every file is a delegating light stub (B-1);
+                // other modes keep content-gated materialization.
+                else if (!tsserverWalk && fileHasHostSourceContent(name, name)) {
                     sf = getOrCreateSourceFile(name);
                 }
                 else {
