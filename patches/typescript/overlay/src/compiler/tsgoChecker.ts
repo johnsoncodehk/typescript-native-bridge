@@ -468,7 +468,16 @@ function isStableHostSfPath(p: string): boolean {
 // resolves module symbols through findTsgoNodeAtPosition on dozens of
 // node_modules .d.ts per keystroke; rebuilding those indexes per generation
 // dominated the getCodeFixes wall.
+// Promotion is demand-gated: an index enters the WeakMap only when the file
+// is indexed again in a LATER generation (the auto-import case). One-shot
+// whole-program walks (navto/FAR candidate resolution) index hundreds of
+// files once; without the gate their indexes pinned process-globally for
+// every stable shell the walk touched (+312MB post-navto idle, issue #11
+// residue). Scan losers stay per-generation and drain at idle
+// (scheduleScanSfEviction, same contract as B-3 scan SFs).
 const _nodeIndexBySf = new WeakMap<object, Map<number, any[]>>();
+const _nodeIndexGenStampByPath = new Map<string, number>();
+let _nodeIndexGenCounter = 0;
 
 // ── Cross-generation program-file metadata (issue #11) ─────────────────
 // Watch-mode lint (typescript-estree) rebuilds the thin program per linted
@@ -8555,6 +8564,14 @@ export function createTsgoChecker(program: any): any {
     // wall time (~8s → ~2s) — the hot path issues thousands of
     // getTypeAtLocation / getSymbolAtLocation queries per file.
     const nodeIndexCache = new Map<string, Map<number, any[]>>();
+    const nodeIndexGen = ++_nodeIndexGenCounter;
+    // Idle drain (B-3 contract): per-generation memos only — promoted indexes
+    // re-prime from _nodeIndexBySf, everything else rebuilds per file on
+    // demand. The 5s debounce keeps request bursts on the built indexes.
+    const evictScanIndexes = (): void => {
+        nodeIndexCache.clear();
+        nodeAtPosCache.clear();
+    };
 
     function resolveTsgoModuleSymbol(moduleSymbol: any, hostFileName: string): any {
         pushHostOverlayToTsgo(hostFileName);
@@ -8910,7 +8927,14 @@ export function createTsgoChecker(program: any): any {
             }
         };
         if (sf) visit(sf);
-        if (sf && typeof sf === "object") _nodeIndexBySf.set(sf, idx);
+        if (sf && typeof sf === "object") {
+            // Demand-gated promotion (see _nodeIndexBySf): only a file indexed
+            // again in a later generation proves cross-generation demand.
+            const stamped = _nodeIndexGenStampByPath.get(fileName);
+            if (stamped !== undefined && stamped !== nodeIndexGen) _nodeIndexBySf.set(sf, idx);
+            _nodeIndexGenStampByPath.set(fileName, nodeIndexGen);
+        }
+        scheduleScanSfEviction(evictScanIndexes);
         if (process.env.TSGO_PROFILE === "1") { _stats.indexBuildMs += Date.now() - t0; _stats.indexBuildCount++; }
         return idx;
     }
