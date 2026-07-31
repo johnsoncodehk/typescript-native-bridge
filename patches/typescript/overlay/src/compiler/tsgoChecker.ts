@@ -2621,6 +2621,10 @@ function nodeFs(): typeof import("fs") {
 }
 function isOverlayCandidatePath(fileName: string): boolean {
     if (isBundledLibPath(fileName)) return false;
+    // Extra extensions carry host-virtual content (SFC transforms) that only
+    // the host can serve, wherever the file lives — the disk shortcuts below
+    // must not shadow it (#47: vendor .vue under node_modules checked raw).
+    if (isExtraExtensionFileName(fileName)) return true;
     return !fileName.includes("/lib.") && !fileName.includes("/node_modules/");
 }
 /** Resolve tsconfig path for tsgo — relative paths from tsserver use the host cwd. */
@@ -2773,7 +2777,7 @@ function ensureHostSourceFileBound(sf: any, options: any): void {
     // FAR getReferencesAtExportSpecifier Debug.checkDefined crashes and
     // importTracker.getContainingModuleSymbol → getDirectImports(undefined)
     // reads .id on undefined. Bind those files for binder fields only — do NOT
-    // brand __tnbHostBound (disk/node_modules keep RPC symbol identity).
+    // brand __tnbHostBound (non-candidates keep RPC symbol identity).
     if (!isOverlayCandidatePath(sf.fileName)) {
         if (sf.__tnbSoftBound) return;
         sf.__tnbSoftBound = true;
