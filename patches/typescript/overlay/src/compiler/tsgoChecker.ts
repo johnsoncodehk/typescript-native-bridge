@@ -2079,6 +2079,16 @@ let _pendingExtraFileExtensions: any[] | undefined;
 let _pendingReferencedProjects: string[] | undefined;
 /** Last extraFileExtensions sent to tsgo — reused when syncing late host overlays. */
 let _lastExtraFileExtensions: any[] | undefined;
+/**
+ * Host-computed extra roots (LS getScriptFileNames shims — svelte2tsx globals,
+ * glint readDirectory extras) the tsconfig expansion may miss, persisted per
+ * config for the project's open lifetime. ensureProject consumes
+ * programCtx.pendingAdditionalFiles on first build; every later updateSnapshot
+ * (dedupe-miss re-ensure, overlay-sync hook) rebuilds the program's root set
+ * from its payload alone, so without persistence those roots are dropped from
+ * the rebuilt program — the svelteHTML-unresolved false positive (#5847).
+ */
+const _lastAdditionalFilesByConfig = new Map<string, string[]>();
 /** Host context for incremental overlay sync (Volar virtual TS after createProgram). */
 let _overlayHostCtx: { host: any; options: any; configFilePath: string } | undefined;
 let _languageServiceHost: any | undefined;
@@ -5668,6 +5678,17 @@ function tnbComputeNamedDeclarations(sourceFile: any): Map<string, any[]> {
  * module-level lsnav wire entry (tsgoLsApiRequest) can sync on demand. */
 const _overlaySyncByConfig = new Map<string, (requestedFileName?: string) => void>();
 
+/**
+ * Last pushed (openFiles, openFilesWithContent) key per config, for the
+ * no-change fast path in pushHostOverlayToTsgo. Every updateSnapshot REPLACES
+ * the Go snapshot and disposes the previous one's handle registry — a
+ * query-only sync with the same open set and no content to push must be a
+ * no-op, or every replayed lsnav query strands the reused thin program's
+ * cached handles in a disposed snapshot ("symbol handle N not found in
+ * snapshot registry", sim-nav #5986 class).
+ */
+const _lastOverlayPushKeyByConfig = new Map<string, string>();
+
 export function tsgoLsApiRequest(program: any, method: string, params: any): any {
     const configFilePath = program?.getCompilerOptions?.()?.configFilePath;
     let proj = configFilePath && _projectCache.get(configFilePath);
@@ -8223,9 +8244,12 @@ export function createTsgoChecker(program: any): any {
         // Host-computed root set the tsconfig expansion may miss (LS
         // getScriptFileNames shims, glint readDirectory extras) — Go adds them
         // as program roots (deduped by containment); persists per config while
-        // the project stays open.
-        const additionalFiles = programCtx?.pendingAdditionalFiles;
-        if (programCtx) programCtx.pendingAdditionalFiles = undefined;
+        // the project stays open (see _lastAdditionalFilesByConfig).
+        if (programCtx?.pendingAdditionalFiles) {
+            _lastAdditionalFilesByConfig.set(configFilePath!, programCtx.pendingAdditionalFiles);
+            programCtx.pendingAdditionalFiles = undefined;
+        }
+        const additionalFiles = _lastAdditionalFilesByConfig.get(configFilePath!);
 
         const syncHost = hostForOverlaySyncLocal();
         const openFiles = syncHost ? collectTsgoOpenFileNames(syncHost) : [];
@@ -8683,13 +8707,26 @@ export function createTsgoChecker(program: any): any {
         }
         if (!openFiles.length && !openFilesWithContent.length) return;
 
+        // No-change fast path: bumping the snapshot here would dispose the
+        // handle registry the reused thin program's caches still reference
+        // (see _lastOverlayPushKeyByConfig). Content changes are detected
+        // upstream (decideOverlayPush / shouldSendHostOverlay), so identical
+        // open set + nothing to push means Go state already matches host.
+        const pushKey = openFiles.join("\n") + "\n--\n" + openFilesWithContent.map(f => f.fileName).join("\n");
+        if (openFilesWithContent.length === 0 && _lastOverlayPushKeyByConfig.get(ctx.configFilePath) === pushKey) return;
+
         traceOverlaySync(openFilesWithContent, /*deduped*/ false);
         const snapshot: any = _api.updateSnapshot({
             openProject: openProjectParam(ctx.configFilePath, ctx.options),
             ...(openFiles.length > 0 ? { openFiles } : {}),
             openFilesWithContent,
             ...(_lastExtraFileExtensions ? { extraFileExtensions: _lastExtraFileExtensions } : {}),
+            // Host-injected extra roots (svelte2tsx/glint shims) — without them
+            // every hook-driven rebuild drops the ambient shim files from the
+            // program (#5847 svelteHTML false positive).
+            ...(_lastAdditionalFilesByConfig.get(ctx.configFilePath)?.length ? { additionalFiles: _lastAdditionalFilesByConfig.get(ctx.configFilePath) } : {}),
         });
+        _lastOverlayPushKeyByConfig.set(ctx.configFilePath, pushKey);
         // The push advanced Go state — the params dedupe must not skip the
         // next ensureProject's refresh for this config.
         _lastUpdateParamsByConfig.delete(ctx.configFilePath);
@@ -8709,10 +8746,14 @@ export function createTsgoChecker(program: any): any {
             nodeIndexCache.delete(f.fileName);
             nodeAtPosCache.delete(f.fileName);
         }
-        // Only invalidate symbol/type caches when host content actually changed.
-        // openFiles-only snapshot bumps (disk lint prefetch) must not wipe
-        // symByPos between per-file resolution bursts.
-        if (openFilesWithContent.length === 0) return;
+        // Every updateSnapshot REPLACES the Go snapshot and disposes the
+        // previous generation's handle registry — the caches below all hold
+        // snapshot-bound handles, so they must reset on ANY bump, content
+        // change or not. (The former "content-only" guard kept stale handles
+        // across openFiles-only bumps, which is how replayed queries faulted
+        // with "symbol handle N not found in snapshot registry", sim-nav
+        // #5986 class. The no-change fast path above is what keeps this from
+        // costing re-resolution on every query.)
         _rpcTraceEvent(
             "overlay.refresh.clearCaches",
             `files=${openFilesWithContent.length} paths=${openFilesWithContent.map(f => f.fileName).join(",")}`
