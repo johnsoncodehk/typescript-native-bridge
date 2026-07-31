@@ -6074,9 +6074,19 @@ export function createTsgoProgram(
     // Returns the host-cased name: Go's reason data carries folded Paths, and
     // materializing from the folded form would hand out a SourceFile whose
     // fileName case matches no other view of the file.
+    // Folded-Path → host-cased recovery for case-variant queries. Stock
+    // callers address program files by canonical Path (tsserver's
+    // rootFilesMap walk, builder byPath walks — lowercased on
+    // case-insensitive hosts), and stock's files-by-Path map returns the
+    // ONE SourceFile per file regardless of query casing. Without the same
+    // recovery here, every casing variant materialized its own SF plus host
+    // parse (issue #41: 389 duplicate SourceFiles on hoppscotch-common —
+    // 259 .vue and 130 .ts/.js — ~150MB of settled JS heap).
+    const hostNameForQuery = (name: string): string =>
+        tsgoSourceFileNames(configFilePath, liveProject()).canonicalToHost.get(canonicalSourceFilePath(name)) ?? name;
     const includeReasonReferencingHostName = (pathStr: string): string | undefined => {
         if (!programInfo().includeReasons?.referencingFiles.has(pathStr)) return undefined;
-        return tsgoSourceFileNames(configFilePath, liveProject()).canonicalToHost.get(canonicalSourceFilePath(pathStr)) ?? pathStr;
+        return hostNameForQuery(pathStr);
     };
 
     // One stock-shaped type-reference-directive resolution entry (also the
@@ -6270,7 +6280,10 @@ export function createTsgoProgram(
     };
 
     const getOrCreateSourceFile = (fileName: string): any => {
-        const hostFileName = resolveHostFileName(fileName, host);
+        // hostNameForQuery: a folded-Path query (tsserver rootFilesMap,
+        // builder byPath) must land on the SAME SourceFile as the host-cased
+        // one — never a second materialization keyed by the variant spelling.
+        const hostFileName = hostNameForQuery(resolveHostFileName(fileName, host));
         const scriptVersion = host?.getScriptVersion?.(fileName)
             ?? host?.getScriptVersion?.(hostFileName)
             ?? "1";
@@ -6449,11 +6462,12 @@ export function createTsgoProgram(
     const builderMetaEnabled = !((options as any).tscBuild && !options.incremental && !options.composite);
     const getOrCreateLightSourceFile = (fileName: string): any => {
         // Use the SAME host-name normalization as getOrCreateSourceFile
-        // (resolveHostFileName), not the weaker toHostFileName. Otherwise a
-        // relative / backslash / un-normalized input would give the light stub a
-        // different fileName+path than the full/host SF for the same logical
-        // file, silently drifting the BuilderState fileInfos key (Axis C).
-        const hostFileName = resolveHostFileNameMemoized(fileName, host);
+        // (resolveHostFileName + folded-Path recovery), not the weaker
+        // toHostFileName. Otherwise a relative / backslash / un-normalized /
+        // case-folded input would give the light stub a different
+        // fileName+path than the full/host SF for the same logical file,
+        // silently drifting the BuilderState fileInfos key (Axis C).
+        const hostFileName = hostNameForQuery(resolveHostFileNameMemoized(fileName, host));
         let sf = _lightSfSharedByFile.get(hostFileName);
         if (!sf) {
             // Metadata-only SourceFile stub: no host.readFile, no computeLineStarts,
