@@ -3334,7 +3334,7 @@ index e38812bc4..ed707447f 100644
  
  // apiOpenedFile tracks a file kept open by API clients along with its ref count.
 diff --git a/internal/project/projectcollectionbuilder.go b/internal/project/projectcollectionbuilder.go
-index 3355b6887..50935fe5c 100644
+index 3355b6887..c21b4d670 100644
 --- a/internal/project/projectcollectionbuilder.go
 +++ b/internal/project/projectcollectionbuilder.go
 @@ -4,6 +4,7 @@ import (
@@ -3473,7 +3473,7 @@ index 3355b6887..50935fe5c 100644
  	for _, overlay := range b.fs.overlays {
  		if entry := b.findDefaultConfiguredProject(overlay.FileName(), b.toPath(overlay.FileName())); entry != nil {
  			delete(projectsToClose, entry.Value().configFilePath)
-@@ -251,8 +336,81 @@ func (b *ProjectCollectionBuilder) HandleAPIRequest(apiRequest *APISnapshotReque
+@@ -251,8 +336,86 @@ func (b *ProjectCollectionBuilder) HandleAPIRequest(apiRequest *APISnapshotReque
  	return nil
  }
  
@@ -3504,7 +3504,12 @@ index 3355b6887..50935fe5c 100644
 +			continue
 +		}
 +		for _, f := range files {
-+			if slices.Contains(project.apiRootFiles, f) || project.containsFile(b.toPath(f)) {
++			// Keep while API-open: a file already added as an extra root must
++			// stay in desired or the setAPIRootFiles replacement below drops it
++			// on the very next snapshot (svelte2tsx shim d.ts, #5847). Skip
++			// only when the program covers the file without an extra root
++			// (tsconfig expansion or a normal dependency edge).
++			if project.containsFile(b.toPath(f)) && !slices.Contains(project.apiRootFiles, f) {
 +				continue
 +			}
 +			desired[configPath] = append(desired[configPath], f)
@@ -3556,7 +3561,7 @@ index 3355b6887..50935fe5c 100644
  
  	changedFiles := make([]tspath.Path, 0, summary.Changed.Len())
  	for uri := range summary.Changed.Keys() {
-@@ -320,9 +478,17 @@ func (b *ProjectCollectionBuilder) DidChangeFiles(summary FileChangeSummary, log
+@@ -320,9 +483,17 @@ func (b *ProjectCollectionBuilder) DidChangeFiles(summary FileChangeSummary, log
  		return true
  	})
  
@@ -3577,7 +3582,7 @@ index 3355b6887..50935fe5c 100644
  		path := b.toPath(fileName)
  		openFileResult := b.ensureConfiguredProjectAndAncestorsForFile(fileName, path, logger)
  		b.cleanupConfiguredProjects(&openFileResult.retain, logger)
-@@ -1105,6 +1271,24 @@ func (b *ProjectCollectionBuilder) updateProgram(entry dirty.Value[*Project], lo
+@@ -1105,6 +1276,24 @@ func (b *ProjectCollectionBuilder) updateProgram(entry dirty.Value[*Project], lo
  				filesChanged = true
  				return
  			}
@@ -3602,7 +3607,7 @@ index 3355b6887..50935fe5c 100644
  			if entry.Value().CommandLine != commandLine {
  				updateProgram = true
  				entry.Change(func(p *Project) {
-@@ -1137,7 +1321,11 @@ func (b *ProjectCollectionBuilder) updateProgram(entry dirty.Value[*Project], lo
+@@ -1137,7 +1326,11 @@ func (b *ProjectCollectionBuilder) updateProgram(entry dirty.Value[*Project], lo
  				project.host = newCompilerHost(project.currentDirectory, project, b, logger.Fork("CompilerHost"))
  				result := project.CreateProgram()
  				project.Program = result.Program
