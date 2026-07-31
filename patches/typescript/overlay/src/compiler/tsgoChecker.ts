@@ -555,6 +555,38 @@ function tnbSharedStubVersion(configFilePath: string, hostFileName: string): str
 const _lightStubMaterializerByConfig = new Map<string, (hostFileName: string) => any>();
 
 /**
+ * Idle-triggered eviction of scan-materialized full SFs. A whole-program scan
+ * (FAR / implementation / NavigateTo) upgrades cold stubs through the delegate
+ * materializer, which tags each created SF; the tag set is dropped once
+ * scanning goes idle. The 5s debounce keeps a scan BURST (NavigateTo per
+ * keystroke, FAR → click → FAR) on the materialized ASTs between requests —
+ * evicting per-request would re-parse the whole program on every navto
+ * keystroke, a regression stock's resident ASTs don't have. The timer can
+ * only fire between synchronous tsserver requests, never mid-walk, so
+ * intra-request identity (sfCache/fullSfByName serving the one instance) is
+ * untouched: eviction only returns files to the same stub-served state they
+ * had at cold open and after every generation change. Post-eviction reads
+ * re-materialize through the same delegate path; pinned (per-file
+ * getSourceFile / include-reason) materializations are never tagged.
+ */
+const _pendingScanSfEvictions = new Set<() => void>();
+let _scanSfEvictTimer: ReturnType<typeof setTimeout> | undefined;
+function scheduleScanSfEviction(evict: () => void): void {
+    _pendingScanSfEvictions.add(evict);
+    if (_scanSfEvictTimer) {
+        _scanSfEvictTimer.refresh();
+        return;
+    }
+    _scanSfEvictTimer = setTimeout(() => {
+        _scanSfEvictTimer = undefined;
+        for (const evictFn of _pendingScanSfEvictions) evictFn();
+        _pendingScanSfEvictions.clear();
+    }, 5000);
+    // Never hold a host process open for eviction alone.
+    _scanSfEvictTimer.unref?.();
+}
+
+/**
  * Metadata-only SourceFile stub shared across program generations. Only
  * path-derived constants and primitives are captured — the version/text/line
  * getters read current stores, so the object never pins a generation's
@@ -581,6 +613,7 @@ function createSharedLightStub(hostFileName: string, configFilePath: string, met
     const tsgoPath = canonicalSourceFilePath(hostFileName);
     let lazyText: string | undefined;
     let lazyLineStarts: readonly number[] | undefined;
+    let lazyNameTable: any;
     // Overlay text first: extra-extension virtual files (Volar .vue TS) and
     // unsaved buffers live in the synced-overlay mirror, not on disk — a disk
     // read would serve the raw SFC as if it were the file's TS content. The
@@ -669,6 +702,21 @@ function createSharedLightStub(hostFileName: string, configFilePath: string, met
         // an inert empty Map keeps a stale-generation read from crashing the
         // whole-project enumeration.
         getNamedDeclarations: () => full()?.getNamedDeclarations?.() ?? new Map(),
+        // Stock's getNameTable caches the map ON the SourceFile object
+        // (services.ts initializeNameTable) — on a process-global shared stub
+        // that pins a stale pre-edit table forever. Route the cache to the
+        // per-generation full SF so it is rebuilt after edits and dies with
+        // the SF; the per-stub slot only covers the inert stale-generation
+        // race, where getNameTable must read back what its assignment stored.
+        get nameTable() {
+            const sf = full();
+            return sf ? sf.nameTable : (lazyNameTable ??= new Map());
+        },
+        set nameTable(value: any) {
+            const sf = full();
+            if (sf) sf.nameTable = value;
+            else lazyNameTable = value;
+        },
     };
 }
 
@@ -2125,32 +2173,6 @@ let _languageServiceHost: any | undefined;
  * entirely — it would just iterate declarations and bail at getHostSf.
  */
 let _hasHostBoundFiles = false;
-/** Light-stub vs full SourceFile materialization counters (Soft-P′ proof). */
-let _tnbLightStubCreations = 0;
-let _tnbFullSfMaterializations = 0;
-
-/** @internal Dump / reset Soft-P′ materialization counters (env-gated readers). */
-export function tnbGetSourceFileMaterializeStats(reset = false): { lightStub: number; full: number } {
-    const out = { lightStub: _tnbLightStubCreations, full: _tnbFullSfMaterializations };
-    if (reset) {
-        _tnbLightStubCreations = 0;
-        _tnbFullSfMaterializations = 0;
-    }
-    return out;
-}
-
-/** tsserver fork pipes stderr — mirror Soft-P′ stats to a file the parent can read. */
-function tnbLogSfMaterialize(line: string): void {
-    if (process.env.TNB_SF_MATERIALIZE_STATS !== "1") return;
-    // eslint-disable-next-line no-console
-    console.error(line);
-    try {
-        const file = process.env.TNB_SF_MATERIALIZE_FILE || "/tmp/tnb-sf-materialize.jsonl";
-        const fs = require("fs") as typeof import("fs");
-        fs.appendFileSync(file, line + "\n");
-    }
-    catch { /* best-effort */ }
-}
 
 /** @internal */
 export function tnbSetLanguageServiceHost(host: any): void {
@@ -6311,6 +6333,35 @@ export function createTsgoProgram(
     // need path/resolvedPath/version on source files.
     const sfCache = new Map<string, any>();
 
+    /** Latest full SF per host file name, per program instance. Stock has one
+     * SourceFile per file per program and reference search compares
+     * declaration.getSourceFile() by IDENTITY against the getSourceFiles()
+     * walk (addReferencesHere containment) — an enumeration that serves a
+     * stub for an already-materialized file silently drops that file's
+     * references (sim-xfile s3:implementation). Per-program like sfCache, so
+     * generations never share instances. */
+    const fullSfByName = new Map<string, any>();
+
+    /** Scan-tagged materializations awaiting idle eviction
+     * (scheduleScanSfEviction): cacheKey -> hostFileName. Only stub-delegate
+     * (whole-program walk) materializations are tagged; per-file and
+     * include-reason materializations stay pinned per generation. A pinned
+     * hit on a tagged entry keeps the tag — the entry is evicted and
+     * re-created (pinned, stable-stored) on the next pinned access. */
+    const scanSfRecords = new Map<string, string>();
+    const evictScanSfs = (): void => {
+        for (const [key, name] of scanSfRecords) {
+            const sf = sfCache.get(key);
+            sfCache.delete(key);
+            // Compare-before-delete: fullSfByName is keyed by bare name, so a
+            // same-generation re-materialization (new scriptVersion) could
+            // have replaced the tagged SF — never drop a registration that
+            // isn't ours (the sim-xfile identity class).
+            if (sf !== undefined && fullSfByName.get(name) === sf) fullSfByName.delete(name);
+        }
+        scanSfRecords.clear();
+    };
+
     const hostForLs = () => programCtx.lsHost;
 
     // Presence form (vue-tsc / non-tsserver modes): any host-servable content
@@ -6358,7 +6409,7 @@ export function createTsgoProgram(
         return sf;
     };
 
-    const getOrCreateSourceFileWorker = (fileName: string): any => {
+    const getOrCreateSourceFileWorker = (fileName: string, forScan?: boolean): any => {
         // hostNameForQuery: a folded-Path query (tsserver rootFilesMap,
         // builder byPath) must land on the SAME SourceFile as the host-cased
         // one — never a second materialization keyed by the variant spelling.
@@ -6367,10 +6418,10 @@ export function createTsgoProgram(
             ?? host?.getScriptVersion?.(hostFileName)
             ?? "1";
         const cacheKey = `${hostFileName}@${scriptVersion}`;
-        if (sfCache.has(cacheKey)) return sfCache.get(cacheKey);
         // Disk-stable library declarations: reuse the bound host AST from the
         // previous program generation when the script version is unchanged.
         const stableSfCache = isStableHostSfPath(hostFileName) ? _hostSfStableGlobal : undefined;
+        if (sfCache.has(cacheKey)) return sfCache.get(cacheKey);
         if (stableSfCache) {
             const hit = stableSfCache.get(hostFileName);
             if (hit && hit.version === String(scriptVersion)) {
@@ -6381,14 +6432,19 @@ export function createTsgoProgram(
             }
         }
         const rememberStable = (sf: any): any => {
+            // Scan materialization (whole-program walk via stub delegates):
+            // tag for idle eviction (scheduleScanSfEviction) instead of
+            // pinning per generation / process-globally (B-3). The
+            // stable-store consult above still serves files a pinned path
+            // materialized earlier.
+            if (forScan) {
+                scanSfRecords.set(cacheKey, hostFileName);
+                scheduleScanSfEviction(evictScanSfs);
+                return sf;
+            }
             if (stableSfCache && sf) stableSfCache.set(hostFileName, { version: String(scriptVersion), sf });
             return sf;
         };
-        _tnbFullSfMaterializations++;
-        if (process.env.TNB_SF_MATERIALIZE_STATS === "1") {
-            tnbLogSfMaterialize(`[TNB_SF_MATERIALIZE] full+1 total soft=${_tnbLightStubCreations} full=${_tnbFullSfMaterializations} file=${hostFileName}`);
-        }
-
         // Language Service token walks need real TS AST (getChildren + parent).
         // tsgo RemoteSourceFile is for checker RPC only — never expose it here.
         // Pure disk lint (no overlay, no tsserver) uses tsgo-backed skeletons below.
@@ -6496,20 +6552,30 @@ export function createTsgoProgram(
             } catch {}
         }
         ensureFileModuleMeta(result);
+        // Lib shells wrap the shared (MiniSourceFileCache) RemoteSourceFile;
+        // a scan walk tags the per-program wrapper for eviction like any
+        // other scan materialization — re-wrapping is a cache hit, not a
+        // re-decode.
+        if (forScan) {
+            scanSfRecords.set(cacheKey, hostFileName);
+            scheduleScanSfEviction(evictScanSfs);
+        }
         sfCache.set(cacheKey, result);
         return result;
     };
 
-    /** Latest full SF per host file name, per program instance. Stock has one
-     * SourceFile per file per program and reference search compares
-     * declaration.getSourceFile() by IDENTITY against the getSourceFiles()
-     * walk (addReferencesHere containment) — an enumeration that serves a
-     * stub for an already-materialized file silently drops that file's
-     * references (sim-xfile s3:implementation). Per-program like sfCache, so
-     * generations never share instances. */
-    const fullSfByName = new Map<string, any>();
     const getOrCreateSourceFile = (fileName: string): any => {
         const sf = getOrCreateSourceFileWorker(fileName);
+        if (sf) fullSfByName.set(hostNameForQuery(resolveHostFileName(fileName, host)), sf);
+        return sf;
+    };
+
+    /** Scan entry for light-stub AST delegates under tsserverWalk: same
+     * one-instance registration as the pinned path (fullSfByName), but the
+     * worker tags the materialization for idle eviction
+     * (scheduleScanSfEviction). */
+    const getOrCreateScanSourceFile = (fileName: string): any => {
+        const sf = getOrCreateSourceFileWorker(fileName, /*forScan*/ true);
         if (sf) fullSfByName.set(hostNameForQuery(resolveHostFileName(fileName, host)), sf);
         return sf;
     };
@@ -6578,10 +6644,6 @@ export function createTsgoProgram(
             sf = createSharedLightStub(hostFileName, configFilePath, builderMetaEnabled, options.target ?? 99, tsserverWalk);
             ensureFileModuleMeta(sf);
             _lightSfSharedByFile.set(hostFileName, sf);
-            _tnbLightStubCreations++;
-            if (process.env.TNB_SF_MATERIALIZE_STATS === "1") {
-                tnbLogSfMaterialize(`[TNB_SF_MATERIALIZE] lightStub+1 total soft=${_tnbLightStubCreations} full=${_tnbFullSfMaterializations} file=${hostFileName}`);
-            }
         }
         return sf;
     };
@@ -6601,7 +6663,10 @@ export function createTsgoProgram(
 
     // Live materializer for light-stub AST delegation (createSharedLightStub):
     // refreshed per generation, so stub getters always read current content.
-    _lightStubMaterializerByConfig.set(configFilePath, getOrCreateSourceFile);
+    // Under tsserver the delegate goes through the scan entry (B-3): files a
+    // whole-program walk upgrades are tagged for idle eviction; other
+    // modes keep the pinned path (their stubs are inert anyway).
+    _lightStubMaterializerByConfig.set(configFilePath, tsserverWalk ? getOrCreateScanSourceFile : getOrCreateSourceFile);
 
     const tsgoFileArg = (fileName: string | undefined) => fileName ? toTsgoFileName(fileName) : fileName;
 
@@ -7002,14 +7067,6 @@ export function createTsgoProgram(
                     sf = fullSfByName.get(name) ?? getOrCreateLightSourceFile(name);
                 }
                 if (sf) result.push(sf);
-            }
-            if (process.env.TNB_SF_MATERIALIZE_STATS === "1") {
-                tnbLogSfMaterialize(
-                    `[TNB_SF_MATERIALIZE] getSourceFiles n=${result.length} `
-                    + `preferHost=${preferHostSourceFiles} tsserverWalk=${tsserverWalk} `
-                    + `preferLight=${preferLightProgramFiles} `
-                    + `soft=${_tnbLightStubCreations} full=${_tnbFullSfMaterializations}`,
-                );
             }
             return result;
         },
