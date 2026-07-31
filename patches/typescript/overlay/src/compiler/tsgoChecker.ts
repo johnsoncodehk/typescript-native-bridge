@@ -7305,7 +7305,18 @@ export function createTsgoProgram(
         // Emit via tsgo: the Go emitter produces the output text, which we write
         // through the caller's writeFile (or the host's) so --noEmit, Volar output
         // redirection, and build-mode writeFile wrapping stay in the host's control.
-        emit: (targetSourceFile?: any, writeFile?: any, _ct?: any, emitOnlyDtsFiles?: boolean, _customTransformers?: any, forceDtsEmit?: boolean) => {
+        emit: (targetSourceFile?: any, writeFile?: any, _ct?: any, emitOnlyDtsFiles?: boolean, customTransformers?: any, forceDtsEmit?: boolean) => {
+            // Issue #40: tsgo can't execute JS transformer functions, so a
+            // custom transformer would be silently dropped and the emit would
+            // diverge from stock (nest-cli's metadata plugin path) — fail
+            // loudly. Empty shells ({ before: [] } — no transformation either
+            // way) pass through.
+            const hasTransformers = customTransformers
+                && [customTransformers.before, customTransformers.after, customTransformers.afterDeclarations]
+                    .some((a: any) => a?.length);
+            if (hasTransformers) {
+                throw new Error("tsgoChecker: Program.emit does not support customTransformers — tsgo cannot execute JS transformer functions");
+            }
             // --noEmit / --emitDeclarationOnly are gated Go-side in handleEmit
             // from the wire options (stock program.emit parity) — the JS side
             // only maps the per-call emitOnlyDtsFiles builder state.
