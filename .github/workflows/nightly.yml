@@ -11,7 +11,7 @@ permissions:
 env:
   VOLAR_BRANCH: feat/tsgo-diagnostic-codes
   VOLAR_SHA: 996b89cbc # vuejs/language-tools@feat/tsgo-diagnostic-codes, pinned for reproducibility
-  BASELINE: test/baselines/nav-results-29564ee-t17.json
+  BASELINE: test/baselines/nav-results-996b89cb-t1.json
 
 jobs:
   sim-nav:
