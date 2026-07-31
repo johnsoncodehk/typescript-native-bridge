@@ -673,6 +673,9 @@ async function main() {
 	fs.writeFileSync(outJson, JSON.stringify(result, null, 2));
 	console.log('wrote', outJson);
 	if (total !== match + diff) { console.error('CONSERVATION FAIL'); process.exit(2); }
+	// Divergences must fail the gate — an exit-0 "✓" with diffs in the log is
+	// how the Phase A stub-surface gaps went green (sim-xfile diff=6, 2026-07-31).
+	if (diff > 0) { console.error(`DIVERGENCES: ${diff}`); process.exit(1); }
 	process.exit(0);
 }
 
