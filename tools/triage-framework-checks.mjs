@@ -78,12 +78,39 @@ export default class App extends Component<{ Args: Args }> {
 </script>
 <p>{double(count)}</p>
 `,
+			// #46 coverage: patterns that make svelte2tsx emit __sveltets_2_*
+			// helper references — component render (ensureComponent), {#each}
+			// (ensureArray), {#snippet}/{@render} (ensureSnippet). They resolve
+			// only while the svelte2tsx shim roots survive snapshot rebuilds.
+			'src/Child.svelte': `<script lang="ts">
+  let { label }: { label: string } = $props();
+</script>
+<span>{label}</span>
+`,
+			'src/Parent.svelte': `<script lang="ts">
+  import Child from './Child.svelte';
+  let items: string[] = ['a', 'b'];
+</script>
+<Child label={42} />
+{#each items as item}
+  <p>{item}</p>
+{/each}
+`,
+			'src/Snippets.svelte': `<script lang="ts">
+  let { name }: { name: string } = $props();
+</script>
+{#snippet row(text: string)}
+  <p>{text}: {name}</p>
+{/snippet}
+{@render row('hello')}
+`,
 		},
 		run: (dir) => execFileSync('npx', ['svelte-check', '--tsconfig', './tsconfig.json'], { cwd: dir, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }),
 		check(out) {
 			const t = stripAnsi(out);
 			if (t.includes("Cannot find name 'svelteHTML'")) return 'false positive: svelteHTML unresolved';
-			if (!/found 1 error/.test(t)) return `expected exactly 1 error, got: ${t.split('\n').pop()}`;
+			if (/Cannot find name '__sveltets_2_/.test(t)) return 'false positive: __sveltets_2_* shim helpers unresolved (#46)';
+			if (!/found 2 errors/.test(t)) return `expected exactly 2 errors, got: ${t.split('\n').pop()}`;
 			return undefined;
 		},
 	},
