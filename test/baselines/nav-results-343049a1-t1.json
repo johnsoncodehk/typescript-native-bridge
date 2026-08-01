@@ -1,12 +1,12 @@
 {
-  "summaryLine": "SUMMARY total=18894 match=17131 diff=1759 docdiff=3 diagmsg=1 skip=0",
-  "total": 18894,
-  "match": 17131,
-  "diff": 1759,
+  "summaryLine": "SUMMARY total=18777 match=17037 diff=1736 docdiff=3 diagmsg=1 skip=0",
+  "total": 18777,
+  "match": 17037,
+  "diff": 1736,
   "docdiff": 3,
   "diagmsg": 1,
   "skip": 0,
-  "compareKeys": 18894,
+  "compareKeys": 18777,
   "diffs": [
     {
       "key": "nav:component-meta/#4577/main.vue:3:16:quickinfo",
@@ -360,15 +360,6 @@
       "seqClass": "ALWAYS"
     },
     {
-      "key": "nav:tsc/_failed_#4569/main.vue:1:34:quickinfo",
-      "file": "tsc/_failed_#4569/main.vue",
-      "line": 1,
-      "offset": 34,
-      "cmd": "quickinfo",
-      "detail": "quickinfo-display/kind",
-      "seqClass": "ALWAYS"
-    },
-    {
       "key": "nav:tsc/_failed_#4569/main.vue:2:1:definitionAndBoundSpan",
       "file": "tsc/_failed_#4569/main.vue",
       "line": 2,
@@ -379,12 +370,13 @@
       "seqClass": "ALWAYS"
     },
     {
-      "key": "nav:tsc/_failed_#4569/main.vue:3:8:quickinfo",
+      "key": "nav:tsc/_failed_#4569/main.vue:3:8:references",
       "file": "tsc/_failed_#4569/main.vue",
       "line": 3,
       "offset": 8,
-      "cmd": "quickinfo",
-      "detail": "quickinfo-display/kind",
+      "cmd": "references",
+      "detail": "loc-set-mismatch",
+      "locClass": "mixed",
       "seqClass": "ALWAYS"
     },
     {
@@ -512,15 +504,6 @@
       "seqClass": "ALWAYS"
     },
     {
-      "key": "nav:tsc/#2472/generic.vue:1:34:quickinfo",
-      "file": "tsc/#2472/generic.vue",
-      "line": 1,
-      "offset": 34,
-      "cmd": "quickinfo",
-      "detail": "quickinfo-display/kind",
-      "seqClass": "ALWAYS"
-    },
-    {
       "key": "nav:tsc/#2472/generic.vue:3:3:quickinfo",
       "file": "tsc/#2472/generic.vue",
       "line": 3,
@@ -553,16 +536,6 @@
       "file": "tsc/#2472/generic.vue",
       "line": 3,
       "offset": 49,
-      "cmd": "references",
-      "detail": "loc-set-mismatch",
-      "locClass": "mixed",
-      "seqClass": "ALWAYS"
-    },
-    {
-      "key": "nav:tsc/#2472/generic.vue:5:1:references",
-      "file": "tsc/#2472/generic.vue",
-      "line": 5,
-      "offset": 1,
       "cmd": "references",
       "detail": "loc-set-mismatch",
       "locClass": "mixed",
@@ -756,15 +729,6 @@
       "seqClass": "ALWAYS"
     },
     {
-      "key": "nav:tsc/#2754/child.vue:1:34:quickinfo",
-      "file": "tsc/#2754/child.vue",
-      "line": 1,
-      "offset": 34,
-      "cmd": "quickinfo",
-      "detail": "quickinfo-display/kind",
-      "seqClass": "ALWAYS"
-    },
-    {
       "key": "nav:tsc/#2754/child.vue:2:1:quickinfo",
       "file": "tsc/#2754/child.vue",
       "line": 2,
@@ -778,15 +742,6 @@
       "file": "tsc/#2754/child.vue",
       "line": 3,
       "offset": 5,
-      "cmd": "quickinfo",
-      "detail": "quickinfo-display/kind",
-      "seqClass": "ALWAYS"
-    },
-    {
-      "key": "nav:tsc/#2754/child.vue:6:9:quickinfo",
-      "file": "tsc/#2754/child.vue",
-      "line": 6,
-      "offset": 9,
       "cmd": "quickinfo",
       "detail": "quickinfo-display/kind",
       "seqClass": "ALWAYS"
@@ -1101,24 +1056,6 @@
       "seqClass": "ALWAYS"
     },
     {
-      "key": "nav:tsc/#3318/child.vue:1:34:quickinfo",
-      "file": "tsc/#3318/child.vue",
-      "line": 1,
-      "offset": 34,
-      "cmd": "quickinfo",
-      "detail": "quickinfo-display/kind",
-      "seqClass": "ALWAYS"
-    },
-    {
-      "key": "nav:tsc/#3318/child.vue:2:1:quickinfo",
-      "file": "tsc/#3318/child.vue",
-      "line": 2,
-      "offset": 1,
-      "cmd": "quickinfo",
-      "detail": "quickinfo-display/kind",
-      "seqClass": "ALWAYS"
-    },
-    {
       "key": "nav:tsc/#3340/main.vue:2:8:quickinfo",
       "file": "tsc/#3340/main.vue",
       "line": 2,
@@ -1162,15 +1099,6 @@
       "cmd": "references",
       "detail": "loc-set-mismatch",
       "locClass": "mixed",
-      "seqClass": "ALWAYS"
-    },
-    {
-      "key": "nav:tsc/#3440/main.vue:1:34:quickinfo",
-      "file": "tsc/#3440/main.vue",
-      "line": 1,
-      "offset": 34,
-      "cmd": "quickinfo",
-      "detail": "quickinfo-display/kind",
       "seqClass": "ALWAYS"
     },
     {
@@ -2214,15 +2142,6 @@
       "file": "tsc/#4827/main.vue",
       "line": 2,
       "offset": 8,
-      "cmd": "quickinfo",
-      "detail": "quickinfo-display/kind",
-      "seqClass": "ALWAYS"
-    },
-    {
-      "key": "nav:tsc/#4890/main.vue:1:34:quickinfo",
-      "file": "tsc/#4890/main.vue",
-      "line": 1,
-      "offset": 34,
       "cmd": "quickinfo",
       "detail": "quickinfo-display/kind",
       "seqClass": "ALWAYS"
@@ -4490,74 +4409,37 @@
       "seqClass": "ALWAYS"
     },
     {
-      "key": "nav:component-meta/reference-type-props/my-props.ts:23:14:quickinfo",
+      "key": "nav:component-meta/reference-type-props/my-props.ts:32:1:definitionAndBoundSpan",
       "file": "component-meta/reference-type-props/my-props.ts",
-      "line": 23,
-      "offset": 14,
-      "cmd": "quickinfo",
-      "detail": "quickinfo-display/kind",
-      "seqClass": "ALWAYS"
-    },
-    {
-      "key": "nav:component-meta/reference-type-props/my-props.ts:35:6:quickinfo",
-      "file": "component-meta/reference-type-props/my-props.ts",
-      "line": 35,
-      "offset": 6,
-      "cmd": "quickinfo",
-      "detail": "quickinfo-display/kind",
-      "seqClass": "ALWAYS"
-    },
-    {
-      "key": "nav:component-meta/reference-type-props/my-props.ts:35:39:references",
-      "file": "component-meta/reference-type-props/my-props.ts",
-      "line": 35,
-      "offset": 39,
-      "cmd": "references",
+      "line": 32,
+      "offset": 1,
+      "cmd": "definitionAndBoundSpan",
       "detail": "loc-set-mismatch",
-      "locClass": "mixed",
+      "locClass": "extra",
       "seqClass": "ALWAYS"
     },
     {
-      "key": "nav:component-meta/reference-type-props/my-props.ts:55:8:references",
+      "key": "nav:component-meta/reference-type-props/my-props.ts:81:2:quickinfo",
       "file": "component-meta/reference-type-props/my-props.ts",
-      "line": 55,
-      "offset": 8,
-      "cmd": "references",
-      "detail": "loc-set-mismatch",
-      "locClass": "mixed",
-      "seqClass": "ALWAYS"
-    },
-    {
-      "key": "nav:component-meta/reference-type-props/my-props.ts:104:2:quickinfo",
-      "file": "component-meta/reference-type-props/my-props.ts",
-      "line": 104,
+      "line": 81,
       "offset": 2,
       "cmd": "quickinfo",
       "detail": "quickinfo-display/kind",
       "seqClass": "ALWAYS"
     },
     {
-      "key": "nav:component-meta/reference-type-props/my-props.ts:109:14:quickinfo",
+      "key": "nav:component-meta/reference-type-props/my-props.ts:115:2:quickinfo",
       "file": "component-meta/reference-type-props/my-props.ts",
-      "line": 109,
-      "offset": 14,
+      "line": 115,
+      "offset": 2,
       "cmd": "quickinfo",
       "detail": "quickinfo-display/kind",
       "seqClass": "ALWAYS"
     },
     {
-      "key": "nav:component-meta/reference-type-props/my-props.ts:112:6:quickinfo",
+      "key": "nav:component-meta/reference-type-props/my-props.ts:129:14:quickinfo",
       "file": "component-meta/reference-type-props/my-props.ts",
-      "line": 112,
-      "offset": 6,
-      "cmd": "quickinfo",
-      "detail": "quickinfo-display/kind",
-      "seqClass": "ALWAYS"
-    },
-    {
-      "key": "nav:component-meta/reference-type-props/my-props.ts:114:14:quickinfo",
-      "file": "component-meta/reference-type-props/my-props.ts",
-      "line": 114,
+      "line": 129,
       "offset": 14,
       "cmd": "quickinfo",
       "detail": "quickinfo-display/kind",
@@ -8427,22 +8309,6 @@
       "seqClass": "ALWAYS"
     },
     {
-      "key": "diag:component-meta/generic/component.vue",
-      "file": "component-meta/generic/component.vue",
-      "cmd": "geterr",
-      "detail": "diag-structure",
-      "seqClass": "ALWAYS"
-    },
-    {
-      "key": "nav:component-meta/generic/component.vue:1:34:quickinfo",
-      "file": "component-meta/generic/component.vue",
-      "line": 1,
-      "offset": 34,
-      "cmd": "quickinfo",
-      "detail": "quickinfo-display/kind",
-      "seqClass": "ALWAYS"
-    },
-    {
       "key": "nav:component-meta/generic/component.vue:2:1:quickinfo",
       "file": "component-meta/generic/component.vue",
       "line": 2,
@@ -9636,15 +9502,6 @@
       "seqClass": "ALWAYS"
     },
     {
-      "key": "nav:tsc/#3257/child.vue:1:34:quickinfo",
-      "file": "tsc/#3257/child.vue",
-      "line": 1,
-      "offset": 34,
-      "cmd": "quickinfo",
-      "detail": "quickinfo-display/kind",
-      "seqClass": "ALWAYS"
-    },
-    {
       "key": "nav:tsc/#3257/child.vue:2:8:definitionAndBoundSpan",
       "file": "tsc/#3257/child.vue",
       "line": 2,
@@ -9693,25 +9550,6 @@
       "seqClass": "ALWAYS"
     },
     {
-      "key": "nav:tsc/#3257/child.vue:8:1:references",
-      "file": "tsc/#3257/child.vue",
-      "line": 8,
-      "offset": 1,
-      "cmd": "references",
-      "detail": "loc-set-mismatch",
-      "locClass": "mixed",
-      "seqClass": "ALWAYS"
-    },
-    {
-      "key": "nav:tsc/#3289/child.vue:1:35:quickinfo",
-      "file": "tsc/#3289/child.vue",
-      "line": 1,
-      "offset": 35,
-      "cmd": "quickinfo",
-      "detail": "quickinfo-display/kind",
-      "seqClass": "ALWAYS"
-    },
-    {
       "key": "nav:tsc/#3289/child.vue:2:1:quickinfo",
       "file": "tsc/#3289/child.vue",
       "line": 2,
@@ -9735,16 +9573,6 @@
       "file": "tsc/#3289/child.vue",
       "line": 3,
       "offset": 32,
-      "cmd": "references",
-      "detail": "loc-set-mismatch",
-      "locClass": "mixed",
-      "seqClass": "ALWAYS"
-    },
-    {
-      "key": "nav:tsc/#3289/child.vue:5:1:references",
-      "file": "tsc/#3289/child.vue",
-      "line": 5,
-      "offset": 1,
       "cmd": "references",
       "detail": "loc-set-mismatch",
       "locClass": "mixed",
@@ -10358,15 +10186,6 @@
       "seqClass": "ALWAYS"
     },
     {
-      "key": "nav:tsc/#3819/component.vue:1:34:quickinfo",
-      "file": "tsc/#3819/component.vue",
-      "line": 1,
-      "offset": 34,
-      "cmd": "quickinfo",
-      "detail": "quickinfo-display/kind",
-      "seqClass": "ALWAYS"
-    },
-    {
       "key": "nav:tsc/#3819/component.vue:3:1:definitionAndBoundSpan",
       "file": "tsc/#3819/component.vue",
       "line": 3,
@@ -10386,19 +10205,20 @@
       "seqClass": "ALWAYS"
     },
     {
-      "key": "nav:tsc/#3819/component.vue:4:27:quickinfo",
+      "key": "nav:tsc/#3819/component.vue:4:27:references",
       "file": "tsc/#3819/component.vue",
       "line": 4,
       "offset": 27,
-      "cmd": "quickinfo",
-      "detail": "quickinfo-display/kind",
+      "cmd": "references",
+      "detail": "loc-set-mismatch",
+      "locClass": "mixed",
       "seqClass": "ALWAYS"
     },
     {
-      "key": "nav:tsc/#3819/component.vue:4:33:references",
+      "key": "nav:tsc/#3819/component.vue:4:38:references",
       "file": "tsc/#3819/component.vue",
       "line": 4,
-      "offset": 33,
+      "offset": 38,
       "cmd": "references",
       "detail": "loc-set-mismatch",
       "locClass": "mixed",
@@ -11387,15 +11207,6 @@
       "cmd": "references",
       "detail": "loc-set-mismatch",
       "locClass": "mixed",
-      "seqClass": "ALWAYS"
-    },
-    {
-      "key": "nav:tsc/#5120/comp.vue:3:34:quickinfo",
-      "file": "tsc/#5120/comp.vue",
-      "line": 3,
-      "offset": 34,
-      "cmd": "quickinfo",
-      "detail": "quickinfo-display/kind",
       "seqClass": "ALWAYS"
     },
     {
@@ -14195,15 +14006,6 @@
       "seqClass": "ALWAYS"
     },
     {
-      "key": "nav:tsc/#3379/child.vue:1:34:quickinfo",
-      "file": "tsc/#3379/child.vue",
-      "line": 1,
-      "offset": 34,
-      "cmd": "quickinfo",
-      "detail": "quickinfo-display/kind",
-      "seqClass": "ALWAYS"
-    },
-    {
       "key": "nav:tsc/#3379/child.vue:2:1:definitionAndBoundSpan",
       "file": "tsc/#3379/child.vue",
       "line": 2,
@@ -14338,16 +14140,6 @@
       "offset": 13,
       "cmd": "quickinfo",
       "detail": "quickinfo-display/kind",
-      "seqClass": "ALWAYS"
-    },
-    {
-      "key": "nav:tsc/#3379/child.vue:11:1:references",
-      "file": "tsc/#3379/child.vue",
-      "line": 11,
-      "offset": 1,
-      "cmd": "references",
-      "detail": "loc-set-mismatch",
-      "locClass": "mixed",
       "seqClass": "ALWAYS"
     },
     {

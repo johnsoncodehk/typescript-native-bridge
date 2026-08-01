@@ -9,9 +9,9 @@ permissions:
   contents: read
 
 env:
-  VOLAR_BRANCH: feat/tsgo-diagnostic-codes
-  VOLAR_SHA: 996b89cbc # vuejs/language-tools@feat/tsgo-diagnostic-codes, pinned for reproducibility
-  BASELINE: test/baselines/nav-results-996b89cb-t1.json
+  VOLAR_BRANCH: master
+  VOLAR_SHA: 343049a14 # vuejs/language-tools@master, pinned for reproducibility
+  BASELINE: test/baselines/nav-results-343049a1-t1.json
 
 jobs:
   sim-nav:
