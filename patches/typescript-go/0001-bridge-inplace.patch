@@ -1760,7 +1760,7 @@ index 5817fc6bb..698abd084 100644
  				missingFiles = append(missingFiles, task.normalizedFilePath)
  				continue
 diff --git a/internal/compiler/program.go b/internal/compiler/program.go
-index 74b2504d9..d523103ef 100644
+index 74b2504d9..5621c4657 100644
 --- a/internal/compiler/program.go
 +++ b/internal/compiler/program.go
 @@ -116,6 +116,30 @@ type Program struct {
@@ -1844,7 +1844,7 @@ index 74b2504d9..d523103ef 100644
  // collectCheckerDiagnosticsFromFiles collects checker diagnostics for a list of files.
  func (p *Program) collectCheckerDiagnosticsFromFiles(ctx context.Context, sourceFiles []*ast.SourceFile, collect func(context.Context, *checker.Checker, *ast.SourceFile) []*ast.Diagnostic) [][]*ast.Diagnostic {
  	diagnostics := make([][]*ast.Diagnostic, len(sourceFiles))
-@@ -585,14 +629,61 @@ func (p *Program) collectCheckerDiagnosticsFromFiles(ctx context.Context, source
+@@ -585,14 +629,92 @@ func (p *Program) collectCheckerDiagnosticsFromFiles(ctx context.Context, source
  			diagnostics[fileIndex] = collect(ctx, c, file)
  		})
  	} else {
@@ -1855,7 +1855,7 @@ index 74b2504d9..d523103ef 100644
 -				continue
 +			if !p.SkipTypeChecking(file, false) {
 +				checkable = append(checkable, i)
-+			}
+ 			}
 +		}
 +		// Micro programs (as produced by solution builds of many small
 +		// projects) pay more for checker construction than for checking:
@@ -1870,8 +1870,14 @@ index 74b2504d9..d523103ef 100644
 +			dctx := core.WithCheckerLifetime(ctx, core.CheckerLifetimeDiagnostics)
 +			c, done := p.checkerPool.GetChecker(dctx, nil)
 +			for _, i := range checkable {
++				if dctx.Err() != nil {
++					// Aborted (e.g. superseded-snapshot prefetch cancel):
++					// stop before the next collect — the checker is poisoned
++					// after cancellation and the pool disposes it on release.
++					break
++				}
 +				diagnostics[i] = collect(dctx, c, sourceFiles[i])
- 			}
++			}
 +			done()
 +			return diagnostics
 +		}
@@ -1902,9 +1908,34 @@ index 74b2504d9..d523103ef 100644
 -				c, done := p.checkerPool.GetChecker(ctx, file)
 -				diagnostics[i] = collect(ctx, c, file)
 +				c, done := p.checkerPool.GetChecker(ctx, nil)
++				// The nil lease names no file, so without this the group's
++				// files keep no file→checker affinity — queue pickup used to
++				// record it implicitly, and the per-file diagnostic RPCs
++				// after the pass (build-mode getDiagnosticsBatch,
++				// declaration emit) reacquire the warm checker through it.
++				// Without affinity every file re-resolved on a cold checker
++				// (~1.5s on elk's app project).
++				if ap, ok := p.checkerPool.(interface {
++					AssociateFiles(*checker.Checker, []*ast.SourceFile)
++				}); ok {
++					groupFiles := make([]*ast.SourceFile, 0, (len(checkable)+groups-1)/groups)
++					for _, i := range checkable {
++						if i%groups == g {
++							groupFiles = append(groupFiles, sourceFiles[i])
++						}
++					}
++					ap.AssociateFiles(c, groupFiles)
++				}
 +				for _, i := range checkable {
 +					if i%groups != g {
 +						continue
++					}
++					if ctx.Err() != nil {
++						// Aborted (e.g. superseded-snapshot prefetch
++						// cancel): stop before the next collect — the
++						// checker is poisoned after cancellation and the
++						// pool disposes it on release.
++						break
 +					}
 +					diagnostics[i] = collect(ctx, c, sourceFiles[i])
 +				}
@@ -2984,10 +3015,10 @@ index 52400dc2b..10546290b 100644
  	}
  }
 diff --git a/internal/project/checkerpool.go b/internal/project/checkerpool.go
-index 32f68d413..ea9872be8 100644
+index 32f68d413..2fe5c76b1 100644
 --- a/internal/project/checkerpool.go
 +++ b/internal/project/checkerpool.go
-@@ -215,6 +215,13 @@ func (p *checkerPool) tryReacquireForRequest(requestID string, sem chan<- struct
+@@ -215,6 +215,34 @@ func (p *checkerPool) tryReacquireForRequest(requestID string, sem chan<- struct
  	return nil, nil, false
  }
  
@@ -2996,6 +3027,27 @@ index 32f68d413..ea9872be8 100644
 +// this many deterministic groups so no slot ever serves two groups (issue #42).
 +func (p *checkerPool) QueryCheckerSlots() int {
 +	return p.opts.MaxCheckers - 1
++}
++
++// AssociateFiles records file→checker affinity for a currently leased query
++// checker. compiler.Program's whole-program diagnostics pass leases one
++// checker per stride group via GetChecker(nil), which names no file; without
++// this registration the pass leaves no affinity behind and the per-file
++// diagnostic RPCs that follow (build-mode getDiagnosticsBatch, declaration
++// emit) re-resolve every file on a cold checker instead of reacquiring the
++// warm one. Affinity never influences which checker checks which file during
++// the pass (the stride grouping decides that), so determinism is unaffected.
++func (p *checkerPool) AssociateFiles(c *checker.Checker, files []*ast.SourceFile) {
++	p.mu.Lock()
++	defer p.mu.Unlock()
++	for index, existing := range p.checkers {
++		if existing == c {
++			for _, file := range files {
++				p.fileAssociations[file] = index
++			}
++			return
++		}
++	}
 +}
 +
  // getDiagnosticsChecker returns the dedicated diagnostics checker (index 0).

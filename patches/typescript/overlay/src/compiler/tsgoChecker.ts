@@ -6743,6 +6743,12 @@ export function createTsgoProgram(
     // whole-program result regardless of the file argument), so one RPC per
     // project replaces thousands of identical ones.
     let programDiagnosticsCache: { proj: any; result: readonly any[] } | undefined;
+    // Build-mode (tsc -b) global diagnostics: the solution builder asks twice
+    // per project (emitFilesAndReportErrors + buildInfo hasSyntaxOrGlobalErrors).
+    // The wire call joins the whole-program pass updateSnapshot's prefetch
+    // already started (Go singleflight) and memoizes it — the warm memo is
+    // what getDiagnosticsBatch and emitBuildInfo then consume.
+    let globalDiagnosticsCache: { proj: any; result: readonly any[] } | undefined;
     // Declaration diagnostics: the builder asks per file (buildinfo state) and
     // once whole-program (emitFilesAndReportErrors). One whole-program RPC —
     // which tsgo computes with per-file concurrency — is memoized and per-file
@@ -7135,7 +7141,24 @@ export function createTsgoProgram(
         // diagnostics), memoized by the sibling method. Residual gap: file-less
         // globals tsgo discovers while checking files are not included — the
         // wire has no cheap "pool globals so far" read.
-        getGlobalDiagnostics: () => thinProgram.getProgramDiagnostics(),
+        //
+        // Build mode (tsc -b) takes the wire call instead: the builder's two
+        // asks per project arrive after updateSnapshot's prefetch has already
+        // started the whole-program pass, so the RPC joins it (singleflight)
+        // instead of running a second pass — and the memo it seeds is what
+        // getDiagnosticsBatch (warm ~3ms vs ~2s cold) and emitBuildInfo
+        // (seeded ~11ms vs ~900ms re-check) consume. Delegating here stranded
+        // that memo chain: the pass ran twice and elk's vue-tsc -b went 3.5s
+        // -> 5.8s wall (bridge.8 regression).
+        getGlobalDiagnostics: (options as any).tscBuild
+            ? () => {
+                const proj = liveProject();
+                if (!globalDiagnosticsCache || globalDiagnosticsCache.proj !== proj) {
+                    globalDiagnosticsCache = { proj, result: mapTsgoDiagnostics(proj.program.getGlobalDiagnostics?.(), getDiagnosticSourceFile) };
+                }
+                return globalDiagnosticsCache.result;
+            }
+            : () => thinProgram.getProgramDiagnostics(),
         getSuggestionDiagnostics: (sourceFile?: any) => {
             const raw = sourceFile?.fileName
                 ? liveProject().program?.getSuggestionDiagnostics?.(tsgoFileArg(sourceFile.fileName))
