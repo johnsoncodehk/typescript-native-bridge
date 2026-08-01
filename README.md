@@ -127,7 +127,7 @@ the [differences from tsgo](#behavior-and-differences-from-tsgo)).
 | Tool | Status | Verified on |
 |---|---|---|
 | `tsc` | ✅ | compiler test corpus |
-| `vue-tsc` | ✅ | elk.zone monorepo (~2,000 files): **emitted-error parity** with stock, ~3.1× faster |
+| `vue-tsc` | ✅ | elk.zone monorepo (~2,000 files): **emitted-error parity** with stock, ~1.8× faster |
 | `astro-check` | ✅ | fixture project: output identical to stock |
 | `svelte-check` | ✅ | fixture project: output identical to stock (incl. `svelteHTML` ambient shims) |
 | `glint` | ✅ | fixture project: same error set as stock (transformed `.gts` virtual files) |
@@ -161,37 +161,40 @@ Measured on this repo's benchmarks (Apple Silicon; your repo will differ — mea
 
 | Workload | Stock `typescript` | TNB | |
 |---|---|---|---|
-| `vue-tsc -b` full check (elk.zone, ~2000 files) | 9.7s | **3.1s** | ~3.1× |
-| type-aware ESLint, single-run (plain TS, one program) | 7.6s | 7.7s | parity |
-| JS heap peak (1000-file type-aware ESLint run) | 1.57GB | **0.90GB** | −43% |
+| `vue-tsc -b` full check (elk.zone, ~2,000 files) | 9.2s | **5.2s** | ~1.8× |
+| type-aware ESLint, single-run (1,000 plain-TS files, one program) | 2.1s | 2.4s | +13% |
+| same, 3,000 files | 6.9s | 7.4s | +6.4% |
+| JS heap peak (1,000-file ESLint fixture) | 762MB | 634MB | −17% |
+| peak RSS, whole-process (vue-tsc -b; TNB's includes the in-process Go checker) | 1.8GB | 3.3GB | ~1.9× — structural |
 
-**The rule is simple: wherever the time is in the checker, TNB is faster.** The Go
-engine does the whole-program semantic pass ~10× faster than the JS checker — the
-question for any workload is how much of its time that phase is.
+**The rule is simple: wherever the time is in the checker, TNB is faster.** The
+question for any workload is how much of its time that phase is — and how much of
+it pays the JS↔Go boundary instead.
+
+**`vue-tsc -b` (checker-dominated — the big win):** the whole-program semantic
+pass drops from ~5.7s (JS checker) to ~2.6s (Go checker, incl. per-file
+batches); the rest is Volar codegen and JS-side work both sides pay (~3.5s vs
+~2.6s). The Go checker's in-process program state is also why TNB's whole-process
+RSS runs higher than stock's on this workload — JS heap stays lower; RSS is the
+honest whole-process figure.
 
 **Editor / LS path (Volar + tsserver):** the V8-arena transport (fixed-layout
-records written straight into V8 memory) plus a binary blob codec for the
-auto-import export map keep per-keystroke work near the transport floor. Measured
-on a 5,537-request roam over the volar corpus: completionInfo **0.3ms** mean with
-**290 bytes and 1.0 RPC** per request; quickinfo **0.5ms**; references **4.8ms**;
-total JSON transport **7.7MB**.
+records written straight into V8 memory, DataView reads, interned strings) keeps
+per-keystroke work near the transport floor. Measured on a 5,537-request roam
+over the volar corpus (one long-lived session): **~1.0 bridge RPC per request**;
+p50 quickinfo **0.16ms**, completionInfo **0.23ms**, references **1.5ms** (p95
+7.4 / 9.0 / 48ms — means are tail-dominated). Per-request byte figures in older
+revisions of this section described the bridge-internal JS↔Go channel, not the
+editor-facing tsserver wire.
 
-**`vue-tsc -b` (checker-dominated — the big win):**
-
-| | Stock | TNB |
-|---|---|---|
-| Type-checking | ~5.6s (JS checker) | ~0.6s (Go checker) |
-| Tool overhead (Volar codegen, JS, transport) | ~4.1s | ~2.5s |
-| **Total** | **9.7s** | **3.1s** |
-
-The single-run ESLint row is the control case: its type-checking share is small (the
-tool spends its time on parsing, AST conversion and rule execution — work both sides
-pay), so the total lands at parity. Workloads dominated by transport volume rather
-than checker work (e.g. watch-mode ESLint issuing ~469K tiny queries — one program
-rebuild per linted file) measure the JS↔Go boundary, not the engine; the V8-arena
-transport (fixed-layout records written straight into V8 memory, DataView reads,
-interned strings) keeps that boundary near its floor, and memory stays well below
-stock either way.
+**The carve-out — single-run type-aware ESLint is the workload with the least to
+gain.** Its time is in parsing, AST conversion and rule execution (work both
+sides pay), and its type-aware queries arrive as tens of thousands of tiny calls
+(~44K checker RPCs per 1,000 files after the bridge's per-generation memoizing)
+that measure the JS↔Go boundary, not the engine. TNB lands within ~13% of stock
+at 1,000 files and ~6% at 3,000 — near parity, not a win; peak JS heap stays at
+or below stock. The memory wins live on the long-session editor path (see
+release notes).
 
 ---
 
