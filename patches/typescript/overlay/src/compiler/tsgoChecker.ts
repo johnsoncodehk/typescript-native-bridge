@@ -2557,9 +2557,10 @@ function collectTsgoOpenFileNames(syncHost: any, extra?: Iterable<string>): stri
     const add = (fn: string) => {
         if (typeof fn === "string" && fn.length) names.add(resolveHostFileName(fn, syncHost));
     };
-    if (extra) {
-        for (const fn of extra) add(fn);
-    }
+    // Extra (query-requested) names go LAST: hoisting them first makes the
+    // collected order depend on the query target, which alternates the
+    // overlay push key between sibling queries and re-fires an empty
+    // updateSnapshot on every other request (see _lastOverlayPushKeyByConfig).
     const scriptNames = syncHost?.getScriptFileNames?.();
     if (scriptNames) {
         for (const fn of scriptNames) add(fn);
@@ -2600,6 +2601,9 @@ function collectTsgoOpenFileNames(syncHost: any, extra?: Iterable<string>): stri
             }
             add(info.fileName);
         });
+    }
+    if (extra) {
+        for (const fn of extra) add(fn);
     }
     return [...names];
 }
@@ -5766,13 +5770,15 @@ function tnbComputeNamedDeclarations(sourceFile: any): Map<string, any[]> {
 const _overlaySyncByConfig = new Map<string, (requestedFileName?: string) => void>();
 
 /**
- * Last pushed (openFiles, openFilesWithContent) key per config, for the
- * no-change fast path in pushHostOverlayToTsgo. Every updateSnapshot REPLACES
- * the Go snapshot and disposes the previous one's handle registry — a
- * query-only sync with the same open set and no content to push must be a
+ * Last synced open-file set per config (join of the collected open names),
+ * for the no-change fast path in pushHostOverlayToTsgo. Every updateSnapshot
+ * REPLACES the Go snapshot and disposes the previous one's handle registry —
+ * a query-only sync with the same open set and no content to push must be a
  * no-op, or every replayed lsnav query strands the reused thin program's
  * cached handles in a disposed snapshot ("symbol handle N not found in
- * snapshot registry", sim-nav #5986 class).
+ * snapshot registry", sim-nav #5986 class). ensureProject records the same
+ * key after its own snapshot so the first query sync after a rebuild is a
+ * no-op too.
  */
 const _lastOverlayPushKeyByConfig = new Map<string, string>();
 
@@ -8478,6 +8484,12 @@ export function createTsgoChecker(program: any): any {
                 ...openFiles,
                 ...openFilesWithContent.map(f => f.fileName),
             ]);
+            // Go now holds exactly this open set with all host content
+            // synced — record the query-path no-change key so the first
+            // pushHostOverlayToTsgo after a rebuild is a no-op instead of
+            // one empty updateSnapshot (which would dispose the handle
+            // registry the fresh program's caches just warmed).
+            _lastOverlayPushKeyByConfig.set(configFilePath!, openFiles.join("\n"));
         }
         releaseStaleBuildSnapshots(buildClose.staleSnapshots);
         for (const f of openFilesWithContent) {
@@ -8511,6 +8523,13 @@ export function createTsgoChecker(program: any): any {
                     openProject: openProjectParam(configFilePath!, options),
                     openFilesWithContent: lateOverlays,
                     ...(extraFileExtensions ? { extraFileExtensions } : {}),
+                    // This push supersedes the snapshot that carried the
+                    // build-mode prefetch, and Go cancels a superseded
+                    // snapshot's in-flight pass — re-request it here so the
+                    // whole-program check restarts on the virtual-content
+                    // state and overlaps the remaining builder work instead
+                    // of running synchronously inside getGlobalDiagnostics.
+                    ...(prefetchDiagnostics ? { prefetchDiagnostics: true } : {}),
                 });
                 // The push advanced Go state — the params dedupe must not
                 // skip the next ensureProject's refresh for this config.
@@ -8876,7 +8895,13 @@ export function createTsgoChecker(program: any): any {
         // (see _lastOverlayPushKeyByConfig). Content changes are detected
         // upstream (decideOverlayPush / shouldSendHostOverlay), so identical
         // open set + nothing to push means Go state already matches host.
-        const pushKey = openFiles.join("\n") + "\n--\n" + openFilesWithContent.map(f => f.fileName).join("\n");
+        // The key covers the open set only: the fast path requires empty
+        // content, and after any successful push the mirror holds whatever
+        // was pushed — recording the no-content form lets a content push and
+        // a following query-only sync compare equal instead of churning one
+        // empty snapshot. ensureProject records the same key after its own
+        // snapshot so the first query sync after a rebuild is a no-op too.
+        const pushKey = openFiles.join("\n");
         if (openFilesWithContent.length === 0 && _lastOverlayPushKeyByConfig.get(ctx.configFilePath) === pushKey) return;
 
         traceOverlaySync(openFilesWithContent, /*deduped*/ false);
