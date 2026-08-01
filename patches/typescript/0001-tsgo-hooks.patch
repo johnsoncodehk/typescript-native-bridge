@@ -925,7 +925,7 @@ index 28d29136da..e267aa7847 100644
   * True if the first character of `lowercaseCharacters` is the first character
   * of some "word" in `identiferString` (where the string is split into "words"
 diff --git a/src/services/exportInfoMap.ts b/src/services/exportInfoMap.ts
-index dfd00ce2e9..fd7f6d47af 100644
+index dfd00ce2e9..db82cf9534 100644
 --- a/src/services/exportInfoMap.ts
 +++ b/src/services/exportInfoMap.ts
 @@ -4,7 +4,9 @@ import {
@@ -1169,14 +1169,14 @@ index dfd00ce2e9..fd7f6d47af 100644
 +
 +function hasImportableModulePath(
 +    program: Program,
-+    fromFile: SourceFile,
++    fromFileName: string,
 +    toFile: SourceFile,
 +    host: ModuleSpecifierResolutionHost,
 +): boolean {
 +    const getCanonicalFileName = hostGetCanonicalFileName(host);
 +    const globalTypingsCache = host.getGlobalTypingsCacheLocation?.();
 +    return !!moduleSpecifiers.forEachFileNameOfModule(
-+        fromFile.fileName,
++        fromFileName,
 +        toFile.fileName,
 +        host,
 +        /*preferSymlinks*/ false,
@@ -1184,7 +1184,7 @@ index dfd00ce2e9..fd7f6d47af 100644
 +            const file = program.getSourceFile(toPath);
 +            return (file === toFile || !file || file.fileName === toFile.fileName) &&
 +                isImportablePath(
-+                    fromFile.fileName,
++                    fromFileName,
 +                    toPath,
 +                    getCanonicalFileName,
 +                    globalTypingsCache,
@@ -1468,7 +1468,7 @@ index dfd00ce2e9..fd7f6d47af 100644
          }
      }
  }
-@@ -533,6 +839,548 @@ export function getIsFileExcluded(host: LanguageServiceHost, preferences: UserPr
+@@ -533,6 +839,555 @@ export function getIsFileExcluded(host: LanguageServiceHost, preferences: UserPr
      return getIsExcluded(getIsExcludedPatterns(preferences, hostUsesCaseSensitiveFileNames(host)), host);
  }
  
@@ -1506,6 +1506,13 @@ index dfd00ce2e9..fd7f6d47af 100644
 +    const moduleSpecifierResolutionHost = importingSourceFile
 +        ? createModuleSpecifierResolutionHost(program, host)
 +        : undefined;
++    // Batch module files cross the Go→JS boundary as realpaths while the
++    // importing file keeps the client-given path; a symlinked prefix
++    // (/tmp -> /private/tmp on macOS) then fails isImportablePath's ancestor
++    // walk. Stock never sees the mix: its resolver warms the symlink cache,
++    // so forEachFileNameOfModule yields a same-prefix candidate first.
++    // Compare from the real importing path instead.
++    const importingRealFileName = host.realpath?.(importingFileName) ?? importingFileName;
 +
 +    // tsgo batch export map uses disk-path moduleSymbol names for node_modules
 +    // files. Pre-resolve import specifiers once so export-info keys and
@@ -1553,7 +1560,7 @@ index dfd00ce2e9..fd7f6d47af 100644
 +        if (!moduleNameOverride) continue;
 +        if (!isNpmPackageSpecifier(stripQuotes(moduleNameOverride)) && !isProjectSource) continue;
 +        if (moduleFile && importingSourceFile && moduleSpecifierResolutionHost
-+            && !hasImportableModulePath(program, importingSourceFile, moduleFile, moduleSpecifierResolutionHost)) {
++            && !hasImportableModulePath(program, importingRealFileName, moduleFile, moduleSpecifierResolutionHost)) {
 +            continue;
 +        }
 +        const overrideSpecifier = stripQuotes(moduleNameOverride);
@@ -2017,7 +2024,7 @@ index dfd00ce2e9..fd7f6d47af 100644
  /** @internal */
  export function getExportInfoMap(importingFile: SourceFile | FutureSourceFile, host: LanguageServiceHost, program: Program, preferences: UserPreferences, cancellationToken: CancellationToken | undefined): ExportInfoMap {
      const start = timestamp();
-@@ -552,42 +1400,17 @@ export function getExportInfoMap(importingFile: SourceFile | FutureSourceFile, h
+@@ -552,42 +1407,17 @@ export function getExportInfoMap(importingFile: SourceFile | FutureSourceFile, h
      }
  
      host.log?.("getExportInfoMap: cache miss or empty; calculating new results");
