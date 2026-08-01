@@ -835,6 +835,8 @@ function openProjectParam(configFilePath: string, options: any): { fileName: str
 
 /** Last updateSnapshot params + project per config — identical repeat calls are skipped (watch-lint generations reissue the same params ~1000×). The params OBJECT is the fingerprint: retaining a JSON copy duplicated every overlay text (~15MB per config at hoppscotch scale, issue #41 B-2), while the content strings here are shared references with hostContentByFile, so equality below is O(1) per unchanged file. */
 const _lastUpdateParamsByConfig = new Map<string, { params: any; project: any }>();
+/** Per-generation getCompilerOptionsForFile memo, keyed by the live vendored project wrapper — see optionsForFile (no-project-references fast path). */
+const _optionsForFileMemo = new WeakMap<any, any>();
 
 /** Structural equality for updateSnapshot params (see _lastUpdateParamsByConfig). Small fields (compilerOptions, extraFileExtensions) compare via JSON; bulk texts compare by shared-reference string equality. */
 const sameUpdateParams = (a: any, b: any): boolean => {
@@ -6868,7 +6870,26 @@ export function createTsgoProgram(
         if (!file) return options;
         const id = programFileId(file);
         if (!id) return options;
-        try { return goProgram()?.getCompilerOptionsForFile?.(id) ?? options; } catch { return options; }
+        // Stock (program.ts:3800-3802) varies the answer per file only through
+        // project-reference redirects; with no references every file answers
+        // the program options, so one RPC per project generation suffices
+        // (module resolution asks once per program file — 1,064 RPCs on the
+        // 1k-file ESLint corpus). Keyed on the live project wrapper so the
+        // memo dies with its snapshot generation (#41); with references the
+        // per-file RPC stays (a redirected file answers its referenced
+        // project's options).
+        if (projectReferences?.length || options.projectReferences?.length) {
+            try { return goProgram()?.getCompilerOptionsForFile?.(id) ?? options; } catch { return options; }
+        }
+        try {
+            const proj = liveProject();
+            let memo = _optionsForFileMemo.get(proj);
+            if (memo === undefined) {
+                memo = proj.program?.getCompilerOptionsForFile?.(id) ?? options;
+                _optionsForFileMemo.set(proj, memo);
+            }
+            return memo;
+        } catch { return options; }
     };
     const shouldTransformImportCallForFile = (file: any): boolean => {
         if (!file) return false;
