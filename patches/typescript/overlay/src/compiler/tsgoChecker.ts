@@ -2112,17 +2112,10 @@ function ensureBridgeSession(): void {
         _tnbDebugAnnounced = true;
         proc.debugAnnounced = true;
         const tty = !!(process.stderr as any).isTTY;
-        const c = tty ? "\u001b[32m" : "";
+        const c = tty ? "\u001b[2m" : "";
         const off = tty ? "\u001b[0m" : "";
         const text = "\u2705  TNB ACTIVE \u2014 \`typescript\` is the tsgo-backed fork";
-        const inner = 57;
-        const top = "\u250c" + "\u2500".repeat(inner) + "\u2510";
-        const bottom = "\u2514" + "\u2500".repeat(inner) + "\u2518";
-        process.stderr.write(
-            `\n${c}${top}${off}\n`
-            + `${c}\u2502${off}  ${text}  ${c}\u2502${off}\n`
-            + `${c}${bottom}${off}\n\n`,
-        );
+        process.stderr.write(`${c}${text}${off}\n`);
     }
     const useCaseSensitive = !!init.useCaseSensitiveFileNames;
     _tsgoUseCaseSensitive = useCaseSensitive;

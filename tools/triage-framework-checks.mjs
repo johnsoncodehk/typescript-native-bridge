@@ -134,7 +134,7 @@ const wrong: string = double(count);
 		run: (dir) => execFileSync('npx', ['astro', 'check'], { cwd: dir, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }),
 		check(out, outStock) {
 			const norm = (s) => stripAnsi(s)
-				.replace(/┌[\s\S]*?┘\n?/g, '') // TNB banner box
+				.replace(/[^\n]*TNB ACTIVE[^\n]*\n?/g, '') // TNB banner line
 				.replace(/\d{2}:\d{2}:\d{2}/g, 'TT:TT:TT')
 				.replace(/\d+(?:\.\d+)?m?s\b/g, 'Xms');
 			const a = norm(out).trim(), b = norm(outStock).trim();
@@ -173,7 +173,7 @@ const { title } = Astro.props;
 			if (/ts\(2304\):\s*Cannot find name 'Fragment'/.test(t)) return "false positive: global Fragment unresolved (#38 — plugin ambient roots dropped on snapshot rebuild)";
 			if (/ts\(2708\):\s*Cannot use namespace 'Astro' as a value/.test(t)) return "false positive: global Astro value-side unresolved (#38)";
 			const norm = (s) => stripAnsi(s)
-				.replace(/┌[\s\S]*?┘\n?/g, '') // TNB banner box
+				.replace(/[^\n]*TNB ACTIVE[^\n]*\n?/g, '') // TNB banner line
 				.replace(/\d{2}:\d{2}:\d{2}/g, 'TT:TT:TT')
 				.replace(/\d+(?:\.\d+)?m?s\b/g, 'Xms');
 			const a = norm(out).trim(), b = norm(outStock).trim();

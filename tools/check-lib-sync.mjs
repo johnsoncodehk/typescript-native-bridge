@@ -28,11 +28,10 @@ if (!fs.existsSync(overlay)) {
 }
 
 // 2. lib bundles exist and share the same banner shape (compiled JS uses \u escapes)
-const stale = ["1;42;30", '\\u2501".repeat(56)'];
+const stale = ["1;42;30", '\\u2501".repeat(56)', '\\u2500".repeat(inner)', '\\u2514" + "\\u2500"', '\\x1B[32m'];
 const required = [
 	"TNB ACTIVE",
-	'\\u2500".repeat(inner)',
-	'\\u2514" + "\\u2500"',
+	'\\x1B[2m',
 ];
 
 for (const lib of [libTs, libTsc]) {
@@ -56,9 +55,9 @@ for (const lib of [libTs, libTsc]) {
 			fail(`${rel}: banner out of date (missing ${JSON.stringify(s)}) — run npm run build:lib`);
 		}
 	}
-	// top-left corner: compiler may emit \u250c or \u250C
-	if (!/\\u250[cC]/.test(text)) {
-		fail(`${rel}: banner out of date (missing box corner) — run npm run build:lib`);
+	// box corners are pre-#45 artifacts: the banner is a single dimmed line now
+	if (/\\u250[cC]/.test(text)) {
+		fail(`${rel}: stale banner artifact (box corner) — run npm run build:lib`);
 	}
 }
 
@@ -73,12 +72,12 @@ for (const lib of [libTs, libTsc]) {
 	}
 }
 
-// 3. both bundles use the same border style (not divergent hand patches)
+// 3. both bundles carry the same dimmed one-line banner (not divergent hand patches)
 if (fs.existsSync(libTs) && fs.existsSync(libTsc)) {
 	const ts = fs.readFileSync(libTs, "utf8");
 	const tsc = fs.readFileSync(libTsc, "utf8");
-	const borderRe = /const top = "\\u250[cC]" \+ "\\u2500"\.repeat\(inner\) \+ "\\u2510"/;
-	if (borderRe.test(ts) !== borderRe.test(tsc)) {
+	const bannerRe = /\\x1[bB]\[2m/;
+	if (bannerRe.test(ts) !== bannerRe.test(tsc)) {
 		fail("lib/typescript.js and lib/_tsc.js banner code diverged — run npm run build:lib");
 	}
 }
