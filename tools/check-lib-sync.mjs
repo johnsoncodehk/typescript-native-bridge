@@ -28,10 +28,11 @@ if (!fs.existsSync(overlay)) {
 }
 
 // 2. lib bundles exist and share the same banner shape (compiled JS uses \u escapes)
-const stale = ["1;42;30", '\\u2501".repeat(56)', '\\u2500".repeat(inner)', '\\u2514" + "\\u2500"', '\\x1B[32m'];
+const stale = ["1;42;30", '\\u2501".repeat(56)', '\\u2500".repeat(inner)', '\\u2514" + "\\u2500"', '\\x1B[32m', '\\u2705', '>>  TNB'];
 const required = [
 	"TNB ACTIVE",
 	'\\x1B[2m',
+	'\\u258E',
 ];
 
 for (const lib of [libTs, libTsc]) {

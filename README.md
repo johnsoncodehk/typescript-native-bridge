@@ -106,7 +106,7 @@ the fork.
 On the **first** type-check in a process, TNB prints one dimmed line to **stderr**:
 
 ```
-✅  TNB ACTIVE — `typescript` is the tsgo-backed fork
+▎ TNB ACTIVE — `typescript` is the tsgo-backed fork
 ```
 
 **No banner = stock `typescript` is still loaded.** See [Troubleshooting](#troubleshooting).

@@ -2114,7 +2114,7 @@ function ensureBridgeSession(): void {
         const tty = !!(process.stderr as any).isTTY;
         const c = tty ? "\u001b[2m" : "";
         const off = tty ? "\u001b[0m" : "";
-        const text = "\u2705  TNB ACTIVE \u2014 \`typescript\` is the tsgo-backed fork";
+        const text = "\u258e TNB ACTIVE \u2014 \`typescript\` is the tsgo-backed fork";
         process.stderr.write(`${c}${text}${off}\n`);
     }
     const useCaseSensitive = !!init.useCaseSensitiveFileNames;
