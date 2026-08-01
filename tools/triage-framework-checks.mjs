@@ -10,7 +10,10 @@
  *   - svelte: must NOT report the svelteHTML false positive (ambient shim
  *     d.ts reach tsgo via updateSnapshot additionalFiles)
  *   - astro: full text parity with stock (volar-based, control case)
- * Usage: node tools/triage-framework-checks.mjs [svelte|astro|glint...]
+ *   - astro7: astro@7 cross-directory typed-Props shape — no TS2304 'Fragment'
+ *     / TS2708 namespace-'Astro' false positives (#38: plugin ambient roots
+ *     must survive snapshot rebuilds), then full parity with stock
+ * Usage: node tools/triage-framework-checks.mjs [svelte|astro|astro7|glint...]
  * Exit: 0 = PASS, 1 = FAIL. Network required on first run (npm installs).
  *
  * v5 classification: the glint/svelte invariants are diagnostic-SET
@@ -130,6 +133,45 @@ const wrong: string = double(count);
 		},
 		run: (dir) => execFileSync('npx', ['astro', 'check'], { cwd: dir, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }),
 		check(out, outStock) {
+			const norm = (s) => stripAnsi(s)
+				.replace(/┌[\s\S]*?┘\n?/g, '') // TNB banner box
+				.replace(/\d{2}:\d{2}:\d{2}/g, 'TT:TT:TT')
+				.replace(/\d+(?:\.\d+)?m?s\b/g, 'Xms');
+			const a = norm(out).trim(), b = norm(outStock).trim();
+			if (a !== b) return `output mismatch vs stock:\n--- tnb ---\n${a}\n--- stock ---\n${b}`;
+			return undefined;
+		},
+	},
+	astro7: {
+		deps: { astro: '7.1.4', '@astrojs/check': '0.9.10' },
+		files: {
+			'tsconfig.json': JSON.stringify({ extends: 'astro/tsconfigs/strictest', compilerOptions: { noEmit: true }, include: ['.astro/types.d.ts', 'src/**/*'] }, null, 2),
+			// #38 coverage: a typed-Props .astro outside `include`, pulled in via
+			// a relative import, plus global `Astro` in value position and
+			// `<Fragment>` — all resolve only while astro's plugin-injected
+			// ambient roots (additionalFiles) survive snapshot rebuilds. On
+			// bridge.7 the first rebuild dropped them: TS2304 'Fragment' +
+			// TS2708 namespace-'Astro'-as-value on this file.
+			'src/page.astro': `---
+import Widget from '../packages/ui/Widget.astro';
+const base = Astro.site;
+const target = new URL(base ?? '/x', Astro.url);
+---
+<Widget title="hi" />
+<Fragment set:html={target} />
+`,
+			'packages/ui/Widget.astro': `---
+interface Props { title: string }
+const { title } = Astro.props;
+---
+<div>{title}</div>
+`,
+		},
+		run: (dir) => execFileSync('npx', ['astro', 'check'], { cwd: dir, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }),
+		check(out, outStock) {
+			const t = stripAnsi(out);
+			if (/ts\(2304\):\s*Cannot find name 'Fragment'/.test(t)) return "false positive: global Fragment unresolved (#38 — plugin ambient roots dropped on snapshot rebuild)";
+			if (/ts\(2708\):\s*Cannot use namespace 'Astro' as a value/.test(t)) return "false positive: global Astro value-side unresolved (#38)";
 			const norm = (s) => stripAnsi(s)
 				.replace(/┌[\s\S]*?┘\n?/g, '') // TNB banner box
 				.replace(/\d{2}:\d{2}:\d{2}/g, 'TT:TT:TT')
