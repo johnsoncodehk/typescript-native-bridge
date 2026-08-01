@@ -1,5 +1,5 @@
 diff --git a/src/server/project.ts b/src/server/project.ts
-index 88fa23c1bc..45b8d3d710 100644
+index 88fa23c1bc..59eaae37d6 100644
 --- a/src/server/project.ts
 +++ b/src/server/project.ts
 @@ -76,6 +76,7 @@ import {
@@ -67,7 +67,22 @@ index 88fa23c1bc..45b8d3d710 100644
                  info?.detachFromProject(this);
              });
  
-@@ -2646,7 +2660,8 @@ export class AutoImportProviderProject extends Project {
+@@ -1956,6 +1970,14 @@ export abstract class Project implements LanguageServiceHost, ModuleResolutionHo
+ 
+     /** @internal */
+     print(writeProjectFileNames: boolean, writeFileExplaination: boolean, writeFileVersionAndText: boolean): void {
++        // A disabled logger discards everything below (the Logger contract
++        // stock itself relies on to skip log construction). typescript-eslint's
++        // projectService logger answers hasLevel() === true with logging off,
++        // so the per-flag hasLevel gates do not fire and the file listing +
++        // explainFiles walk — program.getRootFileNames() per root reason, an
++        // O(open-files collect) on a tsgo-backed thin program — is built only
++        // to be thrown away (~950ms per 1k-file type-aware lint run).
++        if (!this.projectService.logger.loggingEnabled()) return;
+         this.writeLog(`Project '${this.projectName}' (${ProjectKind[this.projectKind]})`);
+         this.writeLog(this.filesToStringWorker(
+             writeProjectFileNames && this.projectService.logger.hasLevel(LogLevel.verbose),
+@@ -2646,7 +2668,8 @@ export class AutoImportProviderProject extends Project {
              }
          }
  
@@ -77,7 +92,7 @@ index 88fa23c1bc..45b8d3d710 100644
          let referencesAddded = 0;
          if (references?.length && hostProject.projectService.getHostPreferences().includeCompletionsForModuleExports) {
              // Add direct referenced projects to rootFiles names
-@@ -2729,6 +2744,27 @@ export class AutoImportProviderProject extends Project {
+@@ -2729,6 +2752,27 @@ export class AutoImportProviderProject extends Project {
                  }
              });
          }
@@ -105,7 +120,7 @@ index 88fa23c1bc..45b8d3d710 100644
      }
  
      /** @internal */
-@@ -2751,10 +2787,20 @@ export class AutoImportProviderProject extends Project {
+@@ -2751,10 +2795,20 @@ export class AutoImportProviderProject extends Project {
              return undefined;
          }
  
@@ -130,7 +145,7 @@ index 88fa23c1bc..45b8d3d710 100644
  
          const rootNames = this.getRootFileNames(dependencySelection, hostProject, host, compilerOptions);
          if (!rootNames.length) {
-@@ -2815,7 +2861,13 @@ export class AutoImportProviderProject extends Project {
+@@ -2815,7 +2869,13 @@ export class AutoImportProviderProject extends Project {
          this.rootFileNames = rootFileNames;
          const oldProgram = this.getCurrentProgram();
          const hasSameSetOfFiles = super.updateGraph();

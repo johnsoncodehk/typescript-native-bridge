@@ -400,7 +400,7 @@ index 04ca4db0fd..e1ed32c9eb 100644
          return {
              type: UpToDateStatusType.OutOfDateBuildInfoWithErrors,
 diff --git a/src/server/editorServices.ts b/src/server/editorServices.ts
-index aa578c7ed0..487d472af3 100644
+index aa578c7ed0..e81bb3296c 100644
 --- a/src/server/editorServices.ts
 +++ b/src/server/editorServices.ts
 @@ -2191,7 +2191,28 @@ export class ProjectService {
@@ -455,7 +455,19 @@ index aa578c7ed0..487d472af3 100644
      }
  
      /** @internal */
-@@ -4920,6 +4925,17 @@ export class ProjectService {
+@@ -2718,6 +2723,11 @@ export class ProjectService {
+     }
+ 
+     private printProjects() {
++        // A disabled logger discards everything below (see Project.print):
++        // typescript-eslint's projectService logger answers hasLevel() ===
++        // true with logging off, so the per-open-file listing is built and
++        // formatted only to be dropped.
++        if (!this.logger.loggingEnabled()) return;
+         if (!this.logger.hasLevel(LogLevel.normal)) {
+             return;
+         }
+@@ -4920,6 +4930,17 @@ export class ProjectService {
              const info = this.getScriptInfoForPath(path)!;
              // Part of external project
              if (find(info.containingProjects, isExternalProject)) return;
@@ -474,7 +486,7 @@ index aa578c7ed0..487d472af3 100644
              const result = this.tryFindDefaultConfiguredProjectAndLoadAncestorsForOpenScriptInfo(
                  info,
 diff --git a/src/server/scriptInfo.ts b/src/server/scriptInfo.ts
-index 8635d543cd..1b6e9e6115 100644
+index 8635d543cd..a052baadd8 100644
 --- a/src/server/scriptInfo.ts
 +++ b/src/server/scriptInfo.ts
 @@ -34,6 +34,7 @@ import {
@@ -485,7 +497,47 @@ index 8635d543cd..1b6e9e6115 100644
  } from "./_namespaces/ts.js";
  import {
      AbsolutePositionAndLineText,
-@@ -675,6 +676,10 @@ export class ScriptInfo {
+@@ -170,6 +171,30 @@ export class TextStorage {
+         return false;
+     }
+ 
++    /**
++     * reload() for a client open. tsgo-backed programs do not parse (and
++     * thereby snapshot-load) every project file at creation, so a disk-backed
++     * ScriptInfo commonly reaches its first open() with no content ever
++     * loaded; reload would then report a change (undefined !== newText) and
++     * dirty every containing project even when newText is byte-identical to
++     * the disk file the project already sees. For that never-loaded state,
++     * compare against the disk file itself: adopting the same content without
++     * a version bump is the stock outcome once the initial parse has loaded
++     * it, and keeps synchronizeHostData's projectVersion early return alive
++     * for openClientFile-driven hosts (typescript-eslint projectService).
++     */
++    public reloadForOpen(newText: string): boolean {
++        if (this.text === undefined && !this.svc && !this.pendingReloadFromDisk && !this.info.isDynamicOrHasMixedContent()) {
++            const diskText = this.host.readFile(this.info.fileName);
++            if (diskText !== undefined && diskText === newText) {
++                this.text = newText;
++                this.ownFileText = true;
++                return false;
++            }
++        }
++        return this.reload(newText);
++    }
++
+     /**
+      * Reads the contents from tempFile(if supplied) or own file and sets it as contents
+      * returns true if text changed
+@@ -440,7 +465,7 @@ export class ScriptInfo {
+         this.textStorage.isOpen = true;
+         if (
+             newText !== undefined &&
+-            this.textStorage.reload(newText)
++            this.textStorage.reloadForOpen(newText)
+         ) {
+             // reload new contents only if the existing contents changed
+             this.markContainingProjectsAsDirty();
+@@ -675,6 +700,10 @@ export class ScriptInfo {
  
      editContent(start: number, end: number, newText: string): void {
          this.textStorage.edit(start, end, newText);
