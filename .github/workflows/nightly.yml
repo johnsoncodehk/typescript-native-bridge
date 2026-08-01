@@ -225,6 +225,10 @@ jobs:
         with:
           node-version: 24
 
+      # Checkout must precede the artifact downloads: its default clean wipes
+      # untracked paths, which include the downloaded staging/ and native/.
+      - uses: actions/checkout@v4
+
       - uses: actions/download-artifact@v4
         with:
           name: bridge-win32-x64-nightly
@@ -353,8 +357,6 @@ jobs:
           node overlay-module.js
           echo "OVERLAY-MODULE-EXIT=$LASTEXITCODE"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-
-      - uses: actions/checkout@v4
 
       - name: Electron-host load probe (issue #44 class)
         # VS Code runs tsserver as Code.exe (ELECTRON_RUN_AS_NODE); a
