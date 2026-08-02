@@ -399,11 +399,102 @@ index 04ca4db0fd..e1ed32c9eb 100644
      ) {
          return {
              type: UpToDateStatusType.OutOfDateBuildInfoWithErrors,
+diff --git a/src/compiler/watchPublic.ts b/src/compiler/watchPublic.ts
+index 4bcedabb7e..5f2ce528d2 100644
+--- a/src/compiler/watchPublic.ts
++++ b/src/compiler/watchPublic.ts
+@@ -82,6 +82,7 @@ import {
+     StringLiteralLike,
+     sys,
+     System,
++    tnbNoteExternalFileChange,
+     toPath,
+     toPath as ts_toPath,
+     updateErrorForNoInputFiles,
+@@ -448,6 +449,15 @@ export function createWatchProgram<T extends BuilderProgram>(host: WatchCompiler
+     let reportFileChangeDetectedOnCreateProgram = false; // True if synchronizeProgram should report "File change detected..." when a new program is created
+ 
+     const sourceFilesCache = new Map<string, HostFileInfo>(); // Cache that stores the source file and version info
++    // #49: per-file watchers the tsgo bridge registers lazily for materialized
++    // source files (compilerHost.tnbWatchSourceFile). The thin program never
++    // pulls files through host getSourceFile, so sourceFilesCache stays empty
++    // and stock's per-file watcher (watchFilePath at 775/788) never exists —
++    // hosts that top-fire FileWatcherEventKind.Changed on watched files
++    // (typescript-estree getWatchProgramsForProjects) would never signal an
++    // external rewrite. Registration mirrors stock: same watchFilePath shape,
++    // skipped when the file already has a watcher.
++    const tnbSourceFileWatchers = new Map<Path, FileWatcher>();
+     let missingFilePathsRequestedForRelease: Path[] | undefined; // These paths are held temporarily so that we can remove the entry from source file cache if the file is not tracked by missing files
+     let hasChangedCompilerOptions = false; // True if the compiler options have changed between compilations
+ 
+@@ -516,6 +526,14 @@ export function createWatchProgram<T extends BuilderProgram>(host: WatchCompiler
+     compilerHost.getCurrentProgram = getCurrentProgram;
+     compilerHost.writeLog = writeLog;
+     compilerHost.getParsedCommandLine = getParsedCommandLine;
++    // #49: lazy per-file watch registration for the tsgo bridge's thin
++    // program (see tnbSourceFileWatchers above).
++    (compilerHost as any).tnbWatchSourceFile = (fileName: string) => {
++        const path = toPath(fileName);
++        const cached = sourceFilesCache.get(path);
++        if (tnbSourceFileWatchers.has(path) || (cached && (cached as FilePresentOnHost).fileWatcher)) return;
++        tnbSourceFileWatchers.set(path, watchFilePath(path, fileName, onSourceFileChange, PollingInterval.Low, watchOptions, WatchType.SourceFile));
++    };
+ 
+     // Cache for the module resolution
+     const resolutionCache = createResolutionCache(
+@@ -562,6 +580,7 @@ export function createWatchProgram<T extends BuilderProgram>(host: WatchCompiler
+     function close() {
+         clearInvalidateResolutionsOfFailedLookupLocations();
+         resolutionCache.clear();
++        clearMap(tnbSourceFileWatchers, closeFileWatcher);
+         clearMap(sourceFilesCache, value => {
+             if (value && value.fileWatcher) {
+                 value.fileWatcher.close();
+@@ -1054,6 +1073,9 @@ export function createWatchProgram<T extends BuilderProgram>(host: WatchCompiler
+     }
+ 
+     function onSourceFileChange(fileName: string, eventKind: FileWatcherEventKind, path: Path) {
++        // #49: forward the signal to the bridge — the next overlay collect
++        // decides the transport (overlay push vs fileChanges.changed).
++        tnbNoteExternalFileChange(fileName);
+         updateCachedSystemWithFile(fileName, path, eventKind);
+ 
+         // Update the source file cache
+@@ -1140,6 +1162,11 @@ export function createWatchProgram<T extends BuilderProgram>(host: WatchCompiler
+                     })
+                 ) return;
+ 
++                // #49: a program-relevant path changed under a watched
++                // directory — forward so the bridge re-reads it instead of
++                // rebuilding over its frozen first-read disk view.
++                tnbNoteExternalFileChange(fileOrDirectory);
++
+                 // Reload is pending, do the reload
+                 if (updateLevel !== ProgramUpdateLevel.Full) {
+                     updateLevel = ProgramUpdateLevel.RootNamesAndUpdate;
 diff --git a/src/server/editorServices.ts b/src/server/editorServices.ts
-index aa578c7ed0..e81bb3296c 100644
+index aa578c7ed0..0e49d57945 100644
 --- a/src/server/editorServices.ts
 +++ b/src/server/editorServices.ts
-@@ -2191,7 +2191,28 @@ export class ProjectService {
+@@ -121,6 +121,7 @@ import {
+     startsWith,
+     Ternary,
+     TextChange,
++    tnbNoteExternalFileChange,
+     toFileNameLowerCase,
+     toPath,
+     tracing,
+@@ -1900,6 +1901,9 @@ export class ProjectService {
+ 
+     private onSourceFileChanged(info: ScriptInfo, eventKind: FileWatcherEventKind) {
+         Debug.assert(!info.isScriptOpen());
++        // #49: closed file rewritten on disk — forward so the bridge re-reads
++        // it instead of its frozen first-read view on the next collect.
++        tnbNoteExternalFileChange(info.fileName);
+         if (eventKind === FileWatcherEventKind.Deleted) {
+             this.handleDeletedFile(info, /*deferredDelete*/ true);
+         }
+@@ -2191,7 +2195,28 @@ export class ProjectService {
          this.logger.info("`remove Project::");
          project.print(/*writeProjectFileNames*/ true, /*writeFileExplaination*/ true, /*writeFileVersionAndText*/ false);
  
@@ -432,7 +523,7 @@ index aa578c7ed0..e81bb3296c 100644
          if (Debug.shouldAssert(AssertionLevel.Normal)) {
              this.filenameToScriptInfo.forEach(info =>
                  Debug.assert(
-@@ -2219,22 +2240,6 @@ export class ProjectService {
+@@ -2219,22 +2244,6 @@ export class ProjectService {
                  )
              );
          }
@@ -455,7 +546,7 @@ index aa578c7ed0..e81bb3296c 100644
      }
  
      /** @internal */
-@@ -2718,6 +2723,11 @@ export class ProjectService {
+@@ -2718,6 +2727,11 @@ export class ProjectService {
      }
  
      private printProjects() {
@@ -467,7 +558,7 @@ index aa578c7ed0..e81bb3296c 100644
          if (!this.logger.hasLevel(LogLevel.normal)) {
              return;
          }
-@@ -4920,6 +4930,17 @@ export class ProjectService {
+@@ -4920,6 +4934,17 @@ export class ProjectService {
              const info = this.getScriptInfoForPath(path)!;
              // Part of external project
              if (find(info.containingProjects, isExternalProject)) return;
@@ -486,18 +577,19 @@ index aa578c7ed0..e81bb3296c 100644
              const result = this.tryFindDefaultConfiguredProjectAndLoadAncestorsForOpenScriptInfo(
                  info,
 diff --git a/src/server/scriptInfo.ts b/src/server/scriptInfo.ts
-index 8635d543cd..a052baadd8 100644
+index 8635d543cd..bcc848c1a6 100644
 --- a/src/server/scriptInfo.ts
 +++ b/src/server/scriptInfo.ts
-@@ -34,6 +34,7 @@ import {
+@@ -34,6 +34,8 @@ import {
      SourceFile,
      SourceFileLike,
      TextSpan,
++    tnbNoteExternalFileChange,
 +    tnbNoteHostEdit,
  } from "./_namespaces/ts.js";
  import {
      AbsolutePositionAndLineText,
-@@ -170,6 +171,30 @@ export class TextStorage {
+@@ -170,6 +172,35 @@ export class TextStorage {
          return false;
      }
  
@@ -522,13 +614,18 @@ index 8635d543cd..a052baadd8 100644
 +                return false;
 +            }
 +        }
-+        return this.reload(newText);
++        const reloaded = this.reload(newText);
++        // #49: the client opened this file with content differing from what
++        // the project sees — an external rewrite the bridge's frozen disk
++        // view misses unless the next overlay collect re-compares it.
++        if (reloaded) tnbNoteExternalFileChange(this.info.fileName);
++        return reloaded;
 +    }
 +
      /**
       * Reads the contents from tempFile(if supplied) or own file and sets it as contents
       * returns true if text changed
-@@ -440,7 +465,7 @@ export class ScriptInfo {
+@@ -440,7 +471,7 @@ export class ScriptInfo {
          this.textStorage.isOpen = true;
          if (
              newText !== undefined &&
@@ -537,7 +634,7 @@ index 8635d543cd..a052baadd8 100644
          ) {
              // reload new contents only if the existing contents changed
              this.markContainingProjectsAsDirty();
-@@ -675,6 +700,10 @@ export class ScriptInfo {
+@@ -675,6 +706,13 @@ export class ScriptInfo {
  
      editContent(start: number, end: number, newText: string): void {
          this.textStorage.edit(start, end, newText);
@@ -545,6 +642,9 @@ index 8635d543cd..a052baadd8 100644
 +        // `{edits, baseVersion}` for this file instead of its full text on the
 +        // next updateSnapshot. O(1) append; the sync decides delta vs full.
 +        tnbNoteHostEdit(this.fileName, start, end, newText);
++        // #49: the host's view of this file now diverges from whatever the
++        // bridge last saw on disk — the next collect re-compares it.
++        tnbNoteExternalFileChange(this.fileName);
          this.markContainingProjectsAsDirty();
      }
  

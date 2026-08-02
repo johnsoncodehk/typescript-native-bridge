@@ -72,6 +72,10 @@ interface TnbProgramContext {
     pendingExtraFileExtensions?: any[];
     /** Root files the host computed but the tsconfig expansion may miss (LS getScriptFileNames shims, glint readDirectory extras) — forwarded as updateSnapshot additionalFiles. */
     pendingAdditionalFiles?: string[];
+    /** Externally-changed disk files drained from _pendingExternalChangePaths by
+     * the overlay collect — forwarded as updateSnapshot fileChanges.changed so
+     * Go drops its frozen first-read disk view and re-reads (issue #49). */
+    pendingExternalChanged?: string[];
     pendingReferencedProjects?: string[];
     /** This project's thin program — checker-side host-SF lookups must use it
      * (not the global _hostProgramRef, which tracks the LAST created project). */
@@ -138,6 +142,10 @@ type TnbBridgeProcessState = {
     syncedOverlayVersionByFile?: Map<string, number>;
     /** Host edit deltas (ScriptInfo.editContent) awaiting the next overlay sync. */
     pendingOverlayEditsByFile?: Map<string, { start: number; deleteLength: number; insertText: string }[]>;
+    /** Files an external-change signal fired on since the last overlay collect
+     * (watch callbacks, ScriptInfo reload/edit) — the collect drains this into
+     * updateSnapshot fileChanges.changed / overlay pushes (issue #49). */
+    pendingExternalChangePaths?: Set<string>;
     /** Solution-build (tsc -b / vue-tsc -b) active-project tracker. The build
      * orchestrator finishes each project completely before the next program is
      * created, so the previously opened tsgo project can be closed when the
@@ -846,11 +854,19 @@ const sameUpdateParams = (a: any, b: any): boolean => {
         x === y || (!!x && !!y && x.length === y.length && x.every((f, i) => f.fileName === y[i].fileName && f.scriptKind === y[i].scriptKind && f.content === y[i].content
             // Edit pushes carry content:"" plus the real change in edits — comparing content alone treats two different edits as equal and drops the push (sim-xfile s1 revert).
             && f.baseVersion === y[i].baseVersion && JSON.stringify(f.edits) === JSON.stringify(y[i].edits)));
+    // Same-shape fileChanges must compare itemwise: a params object carrying
+    // changed entries vs one without (or with different ones) is a REAL state
+    // difference — treating them as equal would swallow the send (issue #49).
+    const fileChanges = (x: any, y: any): boolean =>
+        x === y || (!!x && !!y
+            && !!x.invalidateAll === !!y.invalidateAll
+            && names(x.changed, y.changed) && names(x.created, y.created) && names(x.deleted, y.deleted));
     return names(a.openFiles, b.openFiles)
         && names(a.closeFiles, b.closeFiles)
         && names(a.closeProjects, b.closeProjects)
         && names(a.additionalFiles, b.additionalFiles)
         && filesWithContent(a.openFilesWithContent, b.openFilesWithContent)
+        && fileChanges(a.fileChanges, b.fileChanges)
         && !!a.prefetchDiagnostics === !!b.prefetchDiagnostics
         && a.openProject?.fileName === b.openProject?.fileName
         && JSON.stringify(a.openProject?.compilerOptions) === JSON.stringify(b.openProject?.compilerOptions)
@@ -2241,6 +2257,30 @@ const _syncedOverlayVersionByFile: Map<string, number> = tnbBridgeProcessState()
 /** Host edit deltas captured from ScriptInfo.editContent since the last
  * overlay push, keyed by host fileName (resolved at capture time). */
 const _pendingOverlayEditsByFile: Map<string, { start: number; deleteLength: number; insertText: string }[]> = tnbBridgeProcessState().pendingOverlayEditsByFile ??= new Map();
+
+/**
+ * Files with an external-change signal since the last overlay collect (issue
+ * #49). Every signal source — watch callbacks (watchPublic onSourceFileChange
+ * / wildcard-directory / tnbWatchSourceFile registrations), tsserver
+ * ScriptInfo reloadForOpen/editContent, ProjectService.onSourceFileChanged —
+ * feeds this set and nothing else; the createTsgoProgram overlay collect is
+ * the single choke that decides the transport: host text diverging from disk
+ * rides the normal overlay push, host text equal to CURRENT disk becomes
+ * updateSnapshot fileChanges.changed (Go's SnapshotFS froze the FIRST disk
+ * read, so "same as disk" is not "same as Go saw" — the changed entry drops
+ * the frozen entry and Go re-reads). Process-global: it mirrors the shared
+ * tsgo session's disk view.
+ */
+const _pendingExternalChangePaths: Set<string> = tnbBridgeProcessState().pendingExternalChangePaths ??= new Set();
+
+/**
+ * Record one external-change signal for the next overlay collect. Normalized
+ * at capture so the key matches the collect's resolvedFn (signal sources all
+ * fire with absolute paths — host cwd is irrelevant).
+ */
+export function tnbNoteExternalFileChange(fileName: string): void {
+    _pendingExternalChangePaths.add(resolveHostFileName(fileName));
+}
 
 /**
  * Record one host edit delta (stock tsserver `change` → ScriptInfo.editContent)
@@ -4823,7 +4863,10 @@ function resolveLanguageServiceScriptKind(
     }
     return inferScriptKind(hostFileName);
 }
-/** Overlay when host snapshot text differs from disk (or file is absent on disk). */
+/** Overlay when host snapshot text differs from disk (or file is absent on disk).
+ * Same-as-current-disk host text is not necessarily same-as-Go-saw — SnapshotFS
+ * froze the first disk read; that case rides fileChanges.changed via the #49
+ * pending set, not this gate. */
 function shouldSendHostOverlay(fileName: string, hostText: string): boolean {
     if (!isOverlayCandidatePath(fileName)) return false;
     if (!fileExistsOnDisk(fileName)) return true;
@@ -5993,6 +6036,11 @@ export function createTsgoProgram(
         lsHost,
         overlayHostCtx: { host: lsHost, options, configFilePath },
     };
+    // Drained external-change signals (issue #49) — declared outside the
+    // collect block: the walk bypasses contentCanDiverge on these paths and
+    // ensureProject forwards externalChanged as fileChanges.changed.
+    let pendingExternalSet: Set<string> | undefined;
+    let externalChanged: string[] | undefined;
     {
         for (const fn of rootNames) {
             if (typeof fn === "string") names.add(fn);
@@ -6009,7 +6057,10 @@ export function createTsgoProgram(
         // contract — unsaved buffers); under tsserver only OPEN ScriptInfos
         // count (closed ones are disk reads). Watch/CLI CompilerHost answers
         // (getSourceFile / readFile) for files that exist on disk are disk
-        // reads by construction — the compare is always false for those.
+        // reads by construction — the compare is always false for those,
+        // EXCEPT files an external-change signal fired on (issue #49): those
+        // bypass this gate (pendingExternalSet below) so the walk re-reads the
+        // host text and the changed/fallback transport below decides.
         const ps = (lsHost as any)?.projectService;
         const contentCanDiverge = (fn: string, resolvedFn: string): boolean => {
             if (isExtraExtensionFileName(fn) || _syncedOverlayContentByFile.has(resolvedFn)) return true;
@@ -6020,15 +6071,31 @@ export function createTsgoProgram(
             }
             return !!(lsHost?.getScriptSnapshot?.(fn) ?? lsHost?.getScriptSnapshot?.(resolvedFn));
         };
+        // Drain the external-change signals (issue #49) — every source only
+        // feeds the set; this collect is the single choke deciding transport.
+        // The wire list is host==disk files Go must re-read (fileChanges.changed):
+        // Go's SnapshotFS froze each disk file at FIRST read, so a host text
+        // equal to CURRENT disk can still differ from Go's frozen view. Files
+        // with a synced overlay are excluded — the overlay already supersedes
+        // disk in Go's reads. Gone-from-disk files are excluded — their
+        // rootNames/params churn drives a real snapshot on its own.
+        if (_pendingExternalChangePaths.size > 0) {
+            pendingExternalSet = new Set(_pendingExternalChangePaths);
+            _pendingExternalChangePaths.clear();
+            for (const f of pendingExternalSet) {
+                if (fileExistsOnDisk(f) && !_syncedOverlayContentByFile.has(f)) (externalChanged ??= []).push(f);
+            }
+        }
         // Skip the whole collect when host content provably cannot diverge
         // anywhere: no snapshot/LS host, no projectService, no extra-extension
-        // or disk-absent file, no still-synced overlay — contentCanDiverge
-        // would be false for every name, so running the loop is identical
-        // to skipping it. Watch-mode lint otherwise walks the whole corpus
-        // per generation (issue #11 perf).
+        // or disk-absent file, no still-synced overlay, no external-change
+        // signal — contentCanDiverge would be false for every name, so running
+        // the loop is identical to skipping it. Watch-mode lint otherwise
+        // walks the whole corpus per generation (issue #11 perf).
         let collectNeeded = _syncedOverlayContentByFile.size > 0
             || typeof (lsHost as any)?.getScriptSnapshot === "function"
-            || !!ps;
+            || !!ps
+            || !!pendingExternalSet;
         if (!collectNeeded) {
             for (const n of names) {
                 // Raw absolute name for the gate scan (per-name resolution
@@ -6051,7 +6118,10 @@ export function createTsgoProgram(
             if (seenResolved.has(resolvedFn)) continue;
             seenResolved.add(resolvedFn);
             if (!isOverlayCandidatePath(fn)) continue;
-            if (!contentCanDiverge(fn, resolvedFn)) continue;
+            // #49: an externally-rewritten file must be re-compared even when the
+            // divergence heuristics below would skip it (e.g. markdown/md - the
+            // eslint repro rewrites a .md-adjacent .ts through the plain-disk path).
+            if (!pendingExternalSet?.has(resolvedFn) && !contentCanDiverge(fn, resolvedFn)) continue;
             const content = getHostScriptContentForOverlay(resolvedFn, options, host);
             if (!content) continue;
             // Only true overlays (content differs from disk — Volar virtual
@@ -6083,6 +6153,10 @@ export function createTsgoProgram(
     const preferHostSourceFiles = overlays.length > 0
         || !!(lsHost as any)?.projectService;
     programCtx.pendingOverlays = overlays.length > 0 ? overlays : undefined;
+    // #49: host==disk external rewrites ride the next updateSnapshot as
+    // fileChanges.changed (consumed in ensureProject); undefined when nothing
+    // was pending or the drained paths were dropped (deleted / synced overlay).
+    programCtx.pendingExternalChanged = externalChanged;
     programCtx.pendingExtraFileExtensions = collectExtraFileExtensions(names, options);
     // Host-computed root set (rootNames + LS getScriptFileNames) — tsgo's
     // config expansion may miss entries (injected shim d.ts, readDirectory
@@ -6538,11 +6612,39 @@ export function createTsgoProgram(
         // generation lints. Lib files keep the shell below (LS token walks
         // only, never ESTree conversion).
         if (!isHostLibFile(hostFileName)) {
+            // #49: registering a per-file watcher restores stock's trigger
+            // for hosts that top-fire FileWatcherEventKind.Changed on files
+            // with a registered watcher (typescript-estree's
+            // getWatchProgramsForProjects) — without it an external rewrite
+            // of this file never reaches any callback. Non-watch hosts don't
+            // implement tnbWatchSourceFile — zero cost there (tsslint).
+            host?.tnbWatchSourceFile?.(hostFileName);
             const ls = hostForLs();
             const snap = ls?.getScriptSnapshot?.(fileName) ?? ls?.getScriptSnapshot?.(hostFileName);
-            const hostText = snap
-                ? snap.getText(0, snap.getLength())
-                : (hostContentByFile.get(hostFileName)?.text ?? host?.readFile?.(hostFileName) ?? readDiskText(hostFileName));
+            let hostText: string | undefined;
+            let hostTextFromHostRead = false;
+            if (snap) {
+                hostText = snap.getText(0, snap.getLength());
+            }
+            else {
+                const cachedText = hostContentByFile.get(hostFileName)?.text;
+                if (cachedText !== undefined) {
+                    hostText = cachedText;
+                }
+                else {
+                    hostText = host?.readFile?.(hostFileName);
+                    hostTextFromHostRead = typeof hostText === "string";
+                    if (!hostTextFromHostRead) hostText = readDiskText(hostFileName);
+                }
+            }
+            // #49: only a host readFile result can diverge from disk (host
+            // override serving unsaved/transformed content); snapshot-sourced
+            // and self-read text are same-as-disk by construction, so pure
+            // disk hosts pay nothing here. Divergence must re-run the walk's
+            // overlay compare even when contentCanDiverge skips this file.
+            if (hostTextFromHostRead && hostText !== readDiskTextForOverlayCompare(hostFileName)) {
+                tnbNoteExternalFileChange(hostFileName);
+            }
             if (typeof hostText === "string" && hostText.length) {
                 const hostSf = attachHostSourceFileMetadata(
                     createSourceFile(
@@ -8414,6 +8516,14 @@ export function createTsgoChecker(program: any): any {
         }
         const additionalFiles = _lastAdditionalFilesByConfig.get(configFilePath!);
 
+        // #49: files the host told us were rewritten on disk (or where a
+        // host read diverged from disk at materialization). They are NOT
+        // pushed as overlays — host text == disk text — instead Go re-reads
+        // them via fileChanges.changed (its disk-file cache entry is marked
+        // needsReload). One-shot per collect; not persisted per config.
+        const externalChanged = programCtx?.pendingExternalChanged;
+        if (programCtx) programCtx.pendingExternalChanged = undefined;
+
         const syncHost = hostForOverlaySyncLocal();
         const openFiles = syncHost ? collectTsgoOpenFileNames(syncHost) : [];
         // Release tabs the client closed since the last updateSnapshot: the
@@ -8456,7 +8566,7 @@ export function createTsgoChecker(program: any): any {
         // skip the round trip. Interactive-only: build mode's beginBuildProject
         // / prefetch side effects must always fire. The fingerprint covers
         // every value that can alter the response (open files, overlay
-        // contents, extras, close params, prefetch).
+        // contents, extras, close params, prefetch, fileChanges).
         const updateParams = {
             openProject: openProjectParam(configFilePath!, options),
             ...(openFiles.length > 0 ? { openFiles } : {}),
@@ -8464,6 +8574,7 @@ export function createTsgoChecker(program: any): any {
             ...(openFilesWithContent.length > 0 ? { openFilesWithContent } : {}),
             ...(extraFileExtensions ? { extraFileExtensions } : {}),
             ...(additionalFiles?.length ? { additionalFiles } : {}),
+            ...(externalChanged?.length ? { fileChanges: { changed: externalChanged } } : {}),
             ...(buildClose.closeParams ?? {}),
             ...(prefetchDiagnostics ? { prefetchDiagnostics: true } : {}),
         };
@@ -8477,7 +8588,10 @@ export function createTsgoChecker(program: any): any {
             throw new Error(`tsgoChecker: project not found for ${configFilePath}`);
         }
         if (!deduped && !(options as any).tscBuild) {
-            _lastUpdateParamsByConfig.set(configFilePath!, { params: updateParams, project });
+            // Fingerprint WITHOUT fileChanges (#49): external-change entries
+            // are one-shot — a later snapshot with identical steady-state
+            // params and no fileChanges must still dedupe against this one.
+            _lastUpdateParamsByConfig.set(configFilePath!, { params: { ...updateParams, fileChanges: undefined }, project });
         }
         if (snapshot) {
             trackBuildProjectSnapshot(configFilePath!, snapshot, [
