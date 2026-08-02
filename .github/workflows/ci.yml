@@ -13,13 +13,62 @@ env:
   VOLAR_SHA: 343049a14 # vuejs/language-tools@master, pinned for reproducibility
 
 jobs:
-  regression:
+  prepare:
     runs-on: macos-latest
+    timeout-minutes: 5
+    outputs:
+      matrix: ${{ steps.groups.outputs.matrix }}
     steps:
       - uses: actions/checkout@v4
         with:
-          submodules: recursive
           fetch-depth: 1
+
+      # tools/ci-witness-groups.mjs is the single source of truth for the
+      # witness matrix — it validates the table (dupes, missing scripts,
+      # count) on every run, so a bad edit fails here before six jobs spawn.
+      - id: groups
+        run: echo "matrix=$(node tools/ci-witness-groups.mjs matrix)" >> "$GITHUB_OUTPUT"
+
+  build:
+    runs-on: macos-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Submodule SHAs
+        id: sub-sha
+        # The nested typescript-go/_submodules/TypeScript pin is a function of
+        # the typescript-go gitlink, so two SHAs key all three checkouts.
+        run: echo "sha=$(git ls-tree HEAD typescript typescript-go | awk '{print $3}' | paste -sd- -)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore submodules (cache)
+        id: sub-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            typescript
+            typescript-go
+            .git/modules
+          key: submodules-v1-${{ steps.sub-sha.outputs.sha }}
+
+      - name: Fetch submodules
+        if: steps.sub-cache.outputs.cache-hit != 'true'
+        run: git submodule update --init --force --recursive --depth 1
+
+      # The save runs before patch/npm-ci/build steps touch the worktrees, so
+      # the cached entry is always the pristine pinned tree. Keep this block
+      # in sync with the vet job's (GitHub Actions has no step reuse).
+      - name: Save submodules (cache)
+        if: steps.sub-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            typescript
+            typescript-go
+            .git/modules
+          key: submodules-v1-${{ steps.sub-sha.outputs.sha }}
 
       - uses: actions/setup-node@v4
         with:
@@ -55,13 +104,6 @@ jobs:
       - name: Build bridge (cgo dylib)
         run: npm run build:bridge
 
-      - name: go vet
-        # Scoped to packages TNB patches touch — vetting all of typescript-go
-        # (plus every test file) costs ~6min/run; upstream code is not our
-        # surface. Keep in sync with patches/typescript-go/.
-        run: go vet ./internal/api/... ./internal/ls/... ./internal/checker/... ./internal/compiler/... ./internal/bundled/... ./internal/project/... ./internal/module/...
-        working-directory: typescript-go
-
       - name: Gates
         run: |
           npm run check:lib
@@ -76,6 +118,9 @@ jobs:
           npm i --no-save electron@42
           node tools/triage-electron-abi.mjs
 
+      # This job is the only place the volar cache is populated: downstream
+      # jobs (volar-test, witnesses) restore it with fail-on-cache-miss, and
+      # their needs: build guarantees this job's post-job save has landed.
       - name: Clone volar (cache)
         id: volar-cache
         uses: actions/cache@v4
@@ -103,7 +148,129 @@ jobs:
           corepack enable
           pnpm install --no-frozen-lockfile
 
-      # Runs on every CI run (cache hit or miss): the cached node_modules links
+      - name: Pack stock typescript
+        if: steps.volar-cache.outputs.cache-hit != 'true'
+        run: |
+          mkdir "$RUNNER_TEMP/volar-stock"
+          cd "$RUNNER_TEMP/volar-stock"
+          npm pack typescript@6.0.3 --silent
+          tar -xzf typescript-6.0.3.tgz
+
+      - name: sourcefile-guard
+        env:
+          VOLAR_ROOT: ${{ runner.temp }}/volar
+        run: npm run check:sourcefile-guard
+
+      - name: Upload built outputs
+        uses: actions/upload-artifact@v4
+        with:
+          name: built-outputs
+          path: |
+            lib/
+            native/
+            vendor/
+          # lib/.gitattributes is hidden; v4.4+ skips hidden files by default.
+          include-hidden-files: true
+          retention-days: 1
+
+      - name: Cleanup harness processes
+        if: always()
+        run: node tools/kill-leaked-harness.mjs || true
+
+  vet:
+    runs-on: macos-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Submodule SHAs
+        id: sub-sha
+        # The nested typescript-go/_submodules/TypeScript pin is a function of
+        # the typescript-go gitlink, so two SHAs key all three checkouts.
+        run: echo "sha=$(git ls-tree HEAD typescript typescript-go | awk '{print $3}' | paste -sd- -)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore submodules (cache)
+        id: sub-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            typescript
+            typescript-go
+            .git/modules
+          key: submodules-v1-${{ steps.sub-sha.outputs.sha }}
+
+      - name: Fetch submodules
+        if: steps.sub-cache.outputs.cache-hit != 'true'
+        run: git submodule update --init --force --recursive --depth 1
+
+      # The save runs before patch steps touch the worktree, so the cached
+      # entry is always the pristine pinned tree. Keep this block in sync
+      # with the build job's (GitHub Actions has no step reuse).
+      - name: Save submodules (cache)
+        if: steps.sub-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            typescript
+            typescript-go
+            .git/modules
+          key: submodules-v1-${{ steps.sub-sha.outputs.sha }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26" # typescript-go/go.mod
+          cache-dependency-path: typescript-go/go.sum
+
+      - name: Patch tsgo
+        run: npm run patch:tsgo
+
+      - name: go vet
+        # Scoped to packages TNB patches touch — vetting all of typescript-go
+        # (plus every test file) costs ~6min/run; upstream code is not our
+        # surface. Keep in sync with patches/typescript-go/.
+        run: go vet ./internal/api/... ./internal/ls/... ./internal/checker/... ./internal/compiler/... ./internal/bundled/... ./internal/project/... ./internal/module/...
+        working-directory: typescript-go
+
+  volar-test:
+    needs: build
+    runs-on: macos-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Download built outputs
+        uses: actions/download-artifact@v4
+        with:
+          name: built-outputs
+          path: .
+
+      - name: Restore volar (cache)
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            ${{ runner.temp }}/volar
+            ${{ runner.temp }}/volar-stock
+          key: volar-${{ env.VOLAR_SHA }}-v2
+          fail-on-cache-miss: true
+
+      # Runs on every CI run: the cached node_modules links
       # typescript -> $GITHUB_WORKSPACE, i.e. the commit under test.
       - name: Test volar
         run: |
@@ -116,20 +283,54 @@ jobs:
           cd "$RUNNER_TEMP/volar"
           npm test
 
-      - name: Pack stock typescript
-        if: steps.volar-cache.outputs.cache-hit != 'true'
-        run: |
-          mkdir "$RUNNER_TEMP/volar-stock"
-          cd "$RUNNER_TEMP/volar-stock"
-          npm pack typescript@6.0.3 --silent
-          tar -xzf typescript-6.0.3.tgz
+      - name: Cleanup harness processes
+        if: always()
+        run: node tools/kill-leaked-harness.mjs || true
+
+  witnesses:
+    needs: [prepare, build]
+    runs-on: macos-latest
+    timeout-minutes: 15
+    strategy:
+      # One group's failure must not cancel the others — every commit keeps
+      # full witness coverage in a single run.
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
+    name: witnesses (wg${{ matrix.index }})
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Download built outputs
+        uses: actions/download-artifact@v4
+        with:
+          name: built-outputs
+          path: .
+
+      - name: Restore volar (cache)
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            ${{ runner.temp }}/volar
+            ${{ runner.temp }}/volar-stock
+          key: volar-${{ env.VOLAR_SHA }}-v2
+          fail-on-cache-miss: true
 
       - name: sweep-ls-throws
+        if: matrix.sweep
         env:
           VOLAR_ROOT: ${{ runner.temp }}/volar
         run: |
-          # Runs before the witness batch: it regenerates /tmp/tnb-sweep-fixtures
-          # that triage-quickinfo-emptyparity and triage-refs-exportspec read.
+          # Runs before this group's witnesses: it regenerates
+          # /tmp/tnb-sweep-fixtures that triage-quickinfo-emptyparity and
+          # triage-refs-exportspec read. /tmp is per-runner, so the three must
+          # share one job — ci-witness-groups.mjs flags this group via sweep.
+          set -o pipefail
           TNB_TRACE_THROW=1 TNB_TRACE_THROW_FILE=/tmp/tnb-throw-ci.jsonl \
             node tools/sweep-ls-throws.mjs 2>&1 | tee /tmp/tnb-sweep-ci.log
           grep -q "correlated throw hits: 0" /tmp/tnb-sweep-ci.log \
@@ -139,62 +340,58 @@ jobs:
         env:
           VOLAR_ROOT: ${{ runner.temp }}/volar
           STOCK_TSSERVER_PATH: ${{ runner.temp }}/volar-stock/package/lib/tsserver.js
+          WITNESSES: ${{ matrix.witnesses }}
         run: |
-          # Parallel groups on isolated tools copies: the harness lock lives at
-          # <toolsDir>/../.tnb-harness.lock, so concurrent tools from one
-          # tools/ dir would serialize. vendor/ lib/ native/ are symlinked into
-          # each copy for tools that boot the bridge in-process (they resolve the
-          # repo from import.meta.dirname/..); README.md + patches/ too — the
-          # ledger gate reads them for the patch<->README reconciliation.
-          # Starts are staggered to spread the tsserver boot spike.
-          group1="triage-f2qi-names triage-xrefs-diag-variants triage-tostring-gtd-vue triage-adv6b-generic-sig triage-sim-edit triage-f2hl-jsdoc triage-completion-details-array triage-refs-exportspec triage-diag-determinism triage-exit-codes"
-          group2="triage-f2r5-defcases triage-f2r6-samevue triage-f2r6-libref triage-f2r6-xvue triage-sim-xfile triage-f2hl-typesref triage-geterr-5823 triage-quickinfo-emptyparity triage-completion-parity triage-program-info"
-          group3="triage-qi-delete-min triage-defineprops-refs triage-impl-kind triage-rpcsym-nameless triage-rpcsym-adversarial triage-f2hl-augment triage-orphan-leak triage-parent-watch-acceptance triage-f2hl-defaultkw triage-adv6a-jsx-spelling triage-empty-literal triage-alias-nil triage-ghost-close triage-prefetch-inferred triage-builder-keyform triage-win-drive-overlay triage-backslash-getsourcefile triage-bool-literal-intrinsic triage-tp-constraint triage-incremental-emit triage-bridge-thread-race triage-worker-libpath triage-jsdoc-assignment triage-alias-self-loop triage-type-field-audit triage-checker-differential triage-imported-extra-extension triage-emit-declaration-only triage-semantic-defaultlib triage-cli-only-flags triage-eslint-typeref-target check-readme-ledger triage-overlay-delta-sync"
-          pids=()
-          i=0
-          for group in "$group1" "$group2" "$group3"; do
-            i=$((i + 1))
-            rm -rf "/tmp/tnb-wg$i"
-            mkdir -p "/tmp/tnb-wg$i"
-            cp -R tools "/tmp/tnb-wg$i/tools"
-            ln -sfn "$GITHUB_WORKSPACE/vendor" "/tmp/tnb-wg$i/vendor"
-            ln -sfn "$GITHUB_WORKSPACE/lib" "/tmp/tnb-wg$i/lib"
-            ln -sfn "$GITHUB_WORKSPACE/native" "/tmp/tnb-wg$i/native"
-            ln -sfn "$GITHUB_WORKSPACE/README.md" "/tmp/tnb-wg$i/README.md"
-            ln -sfn "$GITHUB_WORKSPACE/patches" "/tmp/tnb-wg$i/patches"
-            (
-              failed=()
-              for w in $group; do
-                echo "=== [wg$i] $w ==="
-                (cd "/tmp/tnb-wg$i/tools" && node "$w.mjs") || failed+=("$w")
-              done
-              if ((${#failed[@]})); then
-                echo "WG$i FAILURES (${#failed[@]}): ${failed[*]}"
-                exit 1
-              fi
-            ) > "/tmp/tnb-wg$i.log" 2>&1 &
-            pids+=($!)
-            sleep 15
-          done
+          # Isolated tools copy: the harness lock lives at
+          # <toolsDir>/../.tnb-harness.lock, and this group's witnesses run
+          # sequentially under one lock. vendor/ lib/ native/ are symlinked
+          # into the copy for tools that boot the bridge in-process (they
+          # resolve the repo from import.meta.dirname/..); README.md +
+          # patches/ too — the ledger gate reads them for the patch<->README
+          # reconciliation. pipefail is set explicitly so the tee below does
+          # not mask a group failure (the step shell's -eo pipefail default
+          # must not be load-bearing).
+          i=${{ matrix.index }}
+          set -o pipefail
+          rm -rf "/tmp/tnb-wg$i"
+          mkdir -p "/tmp/tnb-wg$i"
+          cp -R tools "/tmp/tnb-wg$i/tools"
+          ln -sfn "$GITHUB_WORKSPACE/vendor" "/tmp/tnb-wg$i/vendor"
+          ln -sfn "$GITHUB_WORKSPACE/lib" "/tmp/tnb-wg$i/lib"
+          ln -sfn "$GITHUB_WORKSPACE/native" "/tmp/tnb-wg$i/native"
+          ln -sfn "$GITHUB_WORKSPACE/README.md" "/tmp/tnb-wg$i/README.md"
+          ln -sfn "$GITHUB_WORKSPACE/patches" "/tmp/tnb-wg$i/patches"
           rc=0
-          for p in "${pids[@]}"; do wait "$p" || rc=1; done
-          for j in 1 2 3; do
-            echo "=== witness group $j (tail) ==="
-            tail -5 "/tmp/tnb-wg$j.log" || true
-            if ((rc)); then
-              # tail -5 can land on a KNOWN-exemption pair and hide the real
-              # failure keys (run 30062511367 misread this way): on failure,
-              # surface diff lines with their stock/tnb context.
-              echo "=== witness group $j (failure lines) ==="
-              grep -E -A2 "^DIFF |^FAIL |VERDICT: FAIL|FAILURES \(|verdict=DIFF" "/tmp/tnb-wg$j.log" || true
+          {
+            failed=()
+            for w in $WITNESSES; do
+              echo "=== [wg$i] $w ==="
+              (cd "/tmp/tnb-wg$i/tools" && node "$w.mjs") || failed+=("$w")
+            done
+            if ((${#failed[@]})); then
+              echo "WG$i FAILURES (${#failed[@]}): ${failed[*]}"
+              exit 1
             fi
-          done
+          } 2>&1 | tee "/tmp/tnb-wg$i.log" || rc=$?
+          if ((rc)); then
+            # On failure, surface diff lines with their stock/tnb context —
+            # the streamed log can be thousands of lines, and a bare tail can
+            # land on a KNOWN-exemption pair and hide the real failure keys
+            # (run 30062511367 misread this way).
+            echo "=== witness group $i (failure lines) ==="
+            grep -E -A2 "^DIFF |^FAIL |VERDICT: FAIL|FAILURES \(|verdict=DIFF" "/tmp/tnb-wg$i.log" || true
+          fi
           exit $rc
 
-      - name: sourcefile-guard
-        env:
-          VOLAR_ROOT: ${{ runner.temp }}/volar
-        run: npm run check:sourcefile-guard
+      - name: Upload witness log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: witness-log-wg${{ matrix.index }}
+          path: |
+            /tmp/tnb-wg${{ matrix.index }}.log
+            /tmp/tnb-sweep-ci.log
+          retention-days: 30
 
       - name: Cleanup harness processes
         if: always()
