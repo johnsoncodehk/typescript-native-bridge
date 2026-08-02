@@ -279,6 +279,10 @@ jobs:
           # With the link: override that realpath is this repo, so `typescript`
           # must resolve from here too — self-link it (TNB has no typescript
           # dependency of its own; node_modules is CI-local state).
+          # node_modules may not exist at all: the root package has no
+          # dependencies, and unlike the old single job this job never installs
+          # Electron. Create it before self-linking.
+          mkdir -p "$GITHUB_WORKSPACE/node_modules"
           ln -sfn "$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE/node_modules/typescript"
           cd "$RUNNER_TEMP/volar"
           npm test
