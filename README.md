@@ -131,6 +131,7 @@ the [differences from tsgo](#behavior-and-differences-from-tsgo)).
 | `astro-check` | ✅ | fixture project: output identical to stock |
 | `svelte-check` | ✅ | fixture project: output identical to stock (incl. `svelteHTML` ambient shims) |
 | `glint` | ✅ | fixture project: same error set as stock (transformed `.gts` virtual files) |
+| `mdx-tsc` | ✅ | fixture project: diagnostic output identical to stock (Volar `runTsc`, errors mapped to MDX source spans) |
 | ESLint + typescript-eslint (type-aware rules) | ✅ | 1,000-file type-aware corpus: lint output byte-identical to stock |
 | `tsserver` + `@vue/typescript-plugin` | ✅ | volar language-tools test suite: 205/209 pass (4 skipped) |
 | `tsslint` | ✅ | runs as the volar repo's own linter |
