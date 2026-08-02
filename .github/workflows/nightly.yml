@@ -14,22 +14,61 @@ env:
   BASELINE: test/baselines/nav-results-343049a1-t1.json
 
 jobs:
-  sim-nav:
+  build:
     runs-on: macos-latest
-    timeout-minutes: 120
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
         with:
-          submodules: recursive
           fetch-depth: 1
+
+      - name: Submodule SHAs
+        id: sub-sha
+        # The nested typescript-go/_submodules/TypeScript pin is a function of
+        # the typescript-go gitlink, so two SHAs key all three checkouts.
+        run: echo "sha=$(git ls-tree HEAD typescript typescript-go | awk '{print $3}' | paste -sd- -)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore submodules (cache)
+        id: sub-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            typescript
+            typescript-go
+            .git/modules
+          key: submodules-v1-${{ steps.sub-sha.outputs.sha }}
+
+      - name: Fetch submodules
+        if: steps.sub-cache.outputs.cache-hit != 'true'
+        run: git submodule update --init --force --recursive --depth 1
+
+      # The save runs before patch/npm-ci/build steps touch the worktrees, so
+      # the cached entry is always the pristine pinned tree. Keep this block
+      # in sync with the other submodule jobs (GitHub Actions has no step
+      # reuse): pristine-attribution + build-win32 here, build + vet in ci.yml.
+      - name: Save submodules (cache)
+        if: steps.sub-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            typescript
+            typescript-go
+            .git/modules
+          key: submodules-v1-${{ steps.sub-sha.outputs.sha }}
 
       - uses: actions/setup-node@v4
         with:
           node-version: 24
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            typescript/package-lock.json
+            typescript-go/package-lock.json
 
       - uses: actions/setup-go@v5
         with:
           go-version: "1.26" # typescript-go/go.mod
+          cache-dependency-path: typescript-go/go.sum
 
       - name: Install dependencies
         run: npm ci
@@ -51,20 +90,20 @@ jobs:
       - name: Build bridge (cgo dylib)
         run: npm run build:bridge
 
-      # v5 attribution audit: every stopgap/KNOWN the tree carries must
-      # reproduce on pristine upstream tsgo (never the patched submodule).
-      # Fails loud when upstream fixes one, forcing stopgap removal.
-      - name: pristine-tsgo attribution gate
-        run: node tools/check-pristine-attribution.mjs
-
+      # This job is the only place the volar cache is populated: shard jobs
+      # restore it with fail-on-cache-miss, and their needs: build guarantees
+      # this job's post-job save has landed.
       - name: Clone volar (cache)
         id: volar-cache
+        # Nightly needs a BUILT volar tree (install + pnpm run build) while
+        # ci.yml's entry is install-only — sharing a key would make whichever
+        # workflow writes first define the content for both.
         uses: actions/cache@v4
         with:
           path: |
             ${{ runner.temp }}/volar
             ${{ runner.temp }}/volar-stock
-          key: volar-${{ env.VOLAR_SHA }}-v2
+          key: volar-${{ env.VOLAR_SHA }}-nightly-v2
 
       - name: Clone volar
         if: steps.volar-cache.outputs.cache-hit != 'true'
@@ -93,42 +132,183 @@ jobs:
           npm pack typescript@6.0.3 --silent
           tar -xzf typescript-6.0.3.tgz
 
-      - name: Run sim-nav (4 shards in parallel)
+      - name: Upload built outputs
+        uses: actions/upload-artifact@v4
+        with:
+          name: built-outputs
+          path: |
+            lib/
+            native/
+            vendor/
+          # lib/.gitattributes is hidden; v4.4+ skips hidden files by default.
+          include-hidden-files: true
+          retention-days: 1
+
+  pristine-attribution:
+    runs-on: macos-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Submodule SHAs
+        id: sub-sha
+        # The nested typescript-go/_submodules/TypeScript pin is a function of
+        # the typescript-go gitlink, so two SHAs key all three checkouts.
+        run: echo "sha=$(git ls-tree HEAD typescript typescript-go | awk '{print $3}' | paste -sd- -)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore submodules (cache)
+        id: sub-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            typescript
+            typescript-go
+            .git/modules
+          key: submodules-v1-${{ steps.sub-sha.outputs.sha }}
+
+      - name: Fetch submodules
+        if: steps.sub-cache.outputs.cache-hit != 'true'
+        run: git submodule update --init --force --recursive --depth 1
+
+      # The save runs before patch steps touch the worktree, so the cached
+      # entry is always the pristine pinned tree. Keep this block in sync
+      # with the other submodule jobs (GitHub Actions has no step reuse).
+      - name: Save submodules (cache)
+        if: steps.sub-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            typescript
+            typescript-go
+            .git/modules
+          key: submodules-v1-${{ steps.sub-sha.outputs.sha }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26" # typescript-go/go.mod
+          cache-dependency-path: typescript-go/go.sum
+
+      - name: Patch tsgo
+        run: npm run patch:tsgo
+
+      # v5 attribution audit: every stopgap/KNOWN the tree carries must
+      # reproduce on pristine upstream tsgo (never the patched submodule).
+      # Fails loud when upstream fixes one, forcing stopgap removal.
+      # Standalone job: the gate tests the patched submodule plus a pristine
+      # clone — it has no dependency on the build job's outputs, so it must
+      # not sit on the shards' critical path (it costs ~4min alone).
+      - name: pristine-tsgo attribution gate
+        run: node tools/check-pristine-attribution.mjs
+
+  sim-nav-shard:
+    needs: build
+    runs-on: macos-latest
+    timeout-minutes: 30
+    strategy:
+      # One shard's failure must not cancel the others.
+      fail-fast: false
+      matrix:
+        index: [0, 1, 2, 3]
+    name: sim-nav (shard ${{ matrix.index }})
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Download built outputs
+        uses: actions/download-artifact@v4
+        with:
+          name: built-outputs
+          path: .
+
+      - name: Restore volar (cache)
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            ${{ runner.temp }}/volar
+            ${{ runner.temp }}/volar-stock
+          key: volar-${{ env.VOLAR_SHA }}-nightly-v2
+          fail-on-cache-miss: true
+
+      - name: Run sim-nav shard
         env:
           VOLAR_ROOT: ${{ runner.temp }}/volar
           STOCK_TSSERVER_PATH: ${{ runner.temp }}/volar-stock/package/lib/tsserver.js
           SIM_NAV_BASELINE: ${{ github.workspace }}/${{ env.BASELINE }}
         run: |
           set -u
-          # Shards need ISOLATED PARENT DIRS: the harness lock file lives at
-          # <toolsDir>/../.tnb-harness.lock, so copies must not share /tmp.
-          for i in 0 1 2 3; do
-            rm -rf "/tmp/tnb-shard$i"
-            mkdir -p "/tmp/tnb-shard$i"
-            cp -R tools "/tmp/tnb-shard$i/tools"
-          done
-          pids=()
-          for i in 0 1 2 3; do
-            (
-              cd "/tmp/tnb-shard$i/tools"
-              SIM_NAV_SHARD_INDEX=$i SIM_NAV_SHARD_COUNT=4 \
-              SIM_NAV_SKIP_CLASSIFY=1 \
-              SIM_NAV_OUT_JSON="/tmp/tnb-sim-nav-shard$i.json" \
-              SIM_NAV_THROW_FILE="/tmp/tnb-sim-nav-shard$i.throws.jsonl" \
-                node triage-sim-nav-shard.mjs > "/tmp/tnb-sim-nav-shard$i.log" 2>&1
-            ) &
-            pids+=($!)
-          done
+          # Isolated tools copy, same shape as the old single-job shards: the
+          # harness lock lives at <toolsDir>/../.tnb-harness.lock — one shard
+          # per runner now, but the shard script still expects to run from a
+          # tools copy it owns.
+          i=${{ matrix.index }}
+          rm -rf "/tmp/tnb-shard$i"
+          mkdir -p "/tmp/tnb-shard$i"
+          cp -R tools "/tmp/tnb-shard$i/tools"
           rc=0
-          for p in "${pids[@]}"; do wait "$p" || rc=1; done
-          for i in 0 1 2 3; do
-            echo "=== shard $i (tail) ==="
-            tail -5 "/tmp/tnb-sim-nav-shard$i.log" || true
-          done
+          (cd "/tmp/tnb-shard$i/tools" && \
+            SIM_NAV_SHARD_INDEX=$i SIM_NAV_SHARD_COUNT=4 \
+            SIM_NAV_SKIP_CLASSIFY=1 \
+            SIM_NAV_OUT_JSON="/tmp/tnb-sim-nav-shard$i.json" \
+            SIM_NAV_THROW_FILE="/tmp/tnb-sim-nav-shard$i.throws.jsonl" \
+            node triage-sim-nav-shard.mjs > "/tmp/tnb-sim-nav-shard$i.log" 2>&1) || rc=$?
+          echo "=== shard $i (tail) ==="
+          tail -5 "/tmp/tnb-sim-nav-shard$i.log" || true
           exit $rc
 
+      - name: Upload shard result
+        uses: actions/upload-artifact@v4
+        with:
+          name: sim-nav-shard-json-${{ matrix.index }}
+          path: /tmp/tnb-sim-nav-shard${{ matrix.index }}.json
+          retention-days: 1
+
+      - name: Upload shard logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sim-nav-shard-logs-${{ matrix.index }}
+          path: |
+            /tmp/tnb-sim-nav-shard${{ matrix.index }}.log
+            /tmp/tnb-sim-nav-shard${{ matrix.index }}.throws.jsonl
+          retention-days: 30
+
+      - name: Cleanup harness processes
+        if: always()
+        run: node tools/kill-leaked-harness.mjs || true
+
+  merge:
+    needs: sim-nav-shard
+    runs-on: macos-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Download shard results
+        uses: actions/download-artifact@v4
+        with:
+          pattern: sim-nav-shard-json-*
+          path: /tmp/tnb-shards
+          merge-multiple: true
+
       - name: Merge shard results
-        run: node tools/sim-nav-merge.mjs --out /tmp/tnb-sim-nav-merged.json /tmp/tnb-sim-nav-shard0.json /tmp/tnb-sim-nav-shard1.json /tmp/tnb-sim-nav-shard2.json /tmp/tnb-sim-nav-shard3.json
+        run: node tools/sim-nav-merge.mjs --out /tmp/tnb-sim-nav-merged.json /tmp/tnb-shards/tnb-sim-nav-shard0.json /tmp/tnb-shards/tnb-sim-nav-shard1.json /tmp/tnb-shards/tnb-sim-nav-shard2.json /tmp/tnb-shards/tnb-sim-nav-shard3.json
 
       - name: Check against baseline
         run: node tools/sim-nav-merge.mjs --baseline "$BASELINE" /tmp/tnb-sim-nav-merged.json
@@ -141,27 +321,46 @@ jobs:
           path: /tmp/tnb-sim-nav-merged.json
           retention-days: 30
 
-      - name: Upload shard logs on failure
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: sim-nav-shard-logs
-          path: |
-            /tmp/tnb-sim-nav-shard*.log
-            /tmp/tnb-sim-nav-shard*.throws.jsonl
-          retention-days: 30
-
-      - name: Cleanup harness processes
-        if: always()
-        run: node tools/kill-leaked-harness.mjs || true
-
   build-win32:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
-          submodules: recursive
           fetch-depth: 1
+
+      - name: Submodule SHAs
+        id: sub-sha
+        # The nested typescript-go/_submodules/TypeScript pin is a function of
+        # the typescript-go gitlink, so two SHAs key all three checkouts.
+        run: echo "sha=$(git ls-tree HEAD typescript typescript-go | awk '{print $3}' | paste -sd- -)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore submodules (cache)
+        id: sub-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            typescript
+            typescript-go
+            .git/modules
+          key: submodules-v1-${{ steps.sub-sha.outputs.sha }}
+
+      - name: Fetch submodules
+        if: steps.sub-cache.outputs.cache-hit != 'true'
+        run: git submodule update --init --force --recursive --depth 1
+
+      # The save runs before patch/npm-ci/build steps touch the worktrees, so
+      # the cached entry is always the pristine pinned tree. Keep this block
+      # in sync with the other submodule jobs (GitHub Actions has no step
+      # reuse).
+      - name: Save submodules (cache)
+        if: steps.sub-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            typescript
+            typescript-go
+            .git/modules
+          key: submodules-v1-${{ steps.sub-sha.outputs.sha }}
 
       - uses: actions/setup-node@v4
         with:
