@@ -141,6 +141,16 @@ jobs:
           path: /tmp/tnb-sim-nav-merged.json
           retention-days: 30
 
+      - name: Upload shard logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sim-nav-shard-logs
+          path: |
+            /tmp/tnb-sim-nav-shard*.log
+            /tmp/tnb-sim-nav-shard*.throws.jsonl
+          retention-days: 30
+
       - name: Cleanup harness processes
         if: always()
         run: node tools/kill-leaked-harness.mjs || true
