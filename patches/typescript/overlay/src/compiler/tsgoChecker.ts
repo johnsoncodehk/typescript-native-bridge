@@ -8191,9 +8191,26 @@ export function createTsgoProgram(
             if (hasTransformers) {
                 throw new Error("tsgoChecker: Program.emit does not support customTransformers — tsgo cannot execute JS transformer functions");
             }
-            // --noEmit / --emitDeclarationOnly are gated Go-side in handleEmit
-            // from the wire options (stock program.emit parity) — the JS side
-            // only maps the per-call emitOnlyDtsFiles builder state.
+            // Stock handleNoEmitOptions (emitWorker runs it before any real
+            // emit): under --noEmit a whole-program emit degenerates to
+            // program.emitBuildInfo — emitSkipped: false, tsbuildinfo written
+            // iff the program is incremental-capable — and a single-file emit
+            // is emitSkippedWithNoDiagnostics. Go's handleEmit instead
+            // short-circuits noEmit with EmitSkipped: true, which the stock
+            // driver maps to exit 1 (DiagnosticsPresent_OutputsSkipped) where
+            // stock exits 2 (DiagnosticsPresent_OutputsGenerated) on a
+            // project with errors. Route around it here; the buildinfo
+            // contract lives in emitBuildInfo below. forceDtsEmit bypasses
+            // the gate like stock (referenced-project d.ts emit).
+            if (options.noEmit && !forceDtsEmit) {
+                if (targetSourceFile) {
+                    return { emitSkipped: true, diagnostics: [], emittedFiles: undefined, sourceMaps: [] };
+                }
+                return thinProgram.emitBuildInfo(writeFile, _ct);
+            }
+            // --emitDeclarationOnly is gated Go-side in handleEmit from the
+            // wire options (stock program.emit parity) — the JS side only
+            // maps the per-call emitOnlyDtsFiles builder state.
             // DocumentIdentifier wire format is plain path string or { uri }, not { fileName }.
             const file = targetSourceFile?.fileName ? tsgoFileArg(targetSourceFile.fileName) : undefined;
             const emitOnly = forceDtsEmit ? 3 : (emitOnlyDtsFiles ? 2 : undefined);
@@ -8234,11 +8251,17 @@ export function createTsgoProgram(
             // watch.ts logs TSFILE from this array, so leaving it undefined avoids spurious output.
             const emittedFiles: string[] | undefined = options.listEmittedFiles ? [] : undefined;
 
-            // Stock parity: no buildinfo path configured → nothing to emit.
-            // Checked before any RPC so misconfigured callers cost nothing.
+            // Stock parity: no buildinfo path configured → nothing to emit,
+            // but not "skipped" — stock's Program.emitBuildInfo (emitFiles
+            // with onlyBuildInfo) reports emitSkipped: false when there is
+            // nothing to write; skipped is reserved for host-blocked writes
+            // (isEmitBlocked, which has no bridge analog). The --noEmit
+            // whole-program exit code (DiagnosticsPresent_OutputsGenerated
+            // on a project with errors) rides on this. Checked before any
+            // RPC so misconfigured callers cost nothing.
             const buildInfoPath = getTsBuildInfoEmitOutputFilePath(options);
             if (!buildInfoPath) {
-                return { emitSkipped: true, diagnostics: [], emittedFiles, sourceMaps: [] };
+                return { emitSkipped: false, diagnostics: [], emittedFiles, sourceMaps: [] };
             }
 
             // JS-builder bypass — createBuilderProgram installs its state
