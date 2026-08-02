@@ -9,12 +9,13 @@
 // /tmp/tnb-sweep-fixtures on the same runner before triage-quickinfo-emptyparity
 // and triage-refs-exportspec read it (/tmp is per-runner, so they must share a job).
 //
-// Balance (run 30752526338: 3 groups / 273s, old group3 with 33 witnesses was the
-// long tail): old groups 1-2 are split across all five non-sweep groups, old
-// group3 is quartered with its heavies (checker-differential, type-field-audit,
-// bridge-thread-race, parent-watch-acceptance, rpcsym-adversarial) spread one per
-// group. Rebalance by moving names between lists; `all` fails on duplicates,
-// missing tools/<name>.mjs, or a drifted TOTAL.
+// Balance (measured on run 30756640008 — the agent-estimated "heavies"
+// checker-differential / type-field-audit / bridge-thread-race /
+// parent-watch-acceptance / rpcsym-adversarial all run ≤1s; the real cost is
+// nine ~49-70s witnesses): each of wg1-wg4 carries two heavies (~126-131s),
+// wg5 carries the ninth plus all ≤11s witnesses (~125s). Rebalance by moving
+// names between lists; `all` fails on duplicates, missing tools/<name>.mjs,
+// or a drifted TOTAL.
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
@@ -32,72 +33,72 @@ const groups = [
 	},
 	{
 		witnesses: [
-			'triage-diag-determinism',
-			'triage-exit-codes',
-			'triage-f2hl-jsdoc',
-			'triage-rpcsym-adversarial',
-			'triage-incremental-emit',
-			'triage-win-drive-overlay',
-			'triage-backslash-getsourcefile',
-			'triage-worker-libpath',
-			'triage-jsdoc-assignment',
-			'triage-alias-self-loop',
+			'triage-f2qi-names', // ~70s
+			'triage-adv6b-generic-sig', // ~61s
 		],
 	},
 	{
 		witnesses: [
-			'triage-program-info',
-			'triage-sim-edit',
-			'triage-adv6b-generic-sig',
-			'triage-checker-differential',
-			'triage-eslint-typeref-target',
+			'triage-f2r6-libref', // ~67s
+			'triage-adv6a-jsx-spelling', // ~61s
+		],
+	},
+	{
+		witnesses: [
+			'triage-f2r5-defcases', // ~67s
+			'triage-tostring-gtd-vue', // ~61s
+		],
+	},
+	{
+		witnesses: [
+			'triage-qi-delete-min', // ~65s
+			'triage-f2r6-xvue', // ~62s
+		],
+	},
+	{
+		witnesses: [
+			'triage-sim-edit', // ~49s; everything below ≤11s
 			'triage-cli-only-flags',
+			'triage-f2hl-augment',
+			'triage-sim-xfile',
+			'triage-xrefs-diag-variants',
+			'triage-f2r6-samevue',
+			'triage-completion-parity',
+			'triage-f2hl-jsdoc',
+			'triage-diag-determinism',
+			'triage-orphan-leak',
+			'triage-exit-codes',
+			'triage-f2hl-typesref',
+			'triage-f2hl-defaultkw',
+			'triage-geterr-5823',
+			'triage-defineprops-refs',
+			'triage-program-info',
+			'triage-ghost-close',
+			'triage-rpcsym-adversarial',
+			'triage-checker-differential',
+			'triage-type-field-audit',
+			'triage-worker-libpath',
+			'triage-parent-watch-acceptance',
+			'triage-impl-kind',
+			'triage-imported-extra-extension',
+			'triage-eslint-typeref-target',
 			'triage-semantic-defaultlib',
 			'triage-emit-declaration-only',
-			'triage-imported-extra-extension',
-			'triage-alias-nil',
-		],
-	},
-	{
-		witnesses: [
-			'triage-completion-parity',
-			'triage-sim-xfile',
-			'triage-geterr-5823',
-			'triage-type-field-audit',
 			'triage-tp-constraint',
 			'triage-bool-literal-intrinsic',
-			'triage-builder-keyform',
-			'triage-prefetch-inferred',
-			'triage-ghost-close',
-			'triage-empty-literal',
-		],
-	},
-	{
-		witnesses: [
-			'triage-xrefs-diag-variants',
-			'triage-f2r6-xvue',
-			'triage-f2r6-libref',
 			'triage-bridge-thread-race',
-			'triage-f2hl-augment',
-			'triage-orphan-leak',
-			'triage-f2hl-defaultkw',
-			'triage-adv6a-jsx-spelling',
+			'triage-backslash-getsourcefile',
+			'triage-jsdoc-assignment',
+			'triage-builder-keyform',
+			'triage-incremental-emit',
+			'triage-win-drive-overlay',
+			'triage-prefetch-inferred',
 			'check-readme-ledger',
 			'triage-overlay-delta-sync',
-		],
-	},
-	{
-		witnesses: [
-			'triage-f2qi-names',
-			'triage-tostring-gtd-vue',
-			'triage-f2r5-defcases',
-			'triage-f2r6-samevue',
-			'triage-f2hl-typesref',
 			'triage-completion-details-array',
-			'triage-parent-watch-acceptance',
-			'triage-qi-delete-min',
-			'triage-defineprops-refs',
-			'triage-impl-kind',
+			'triage-alias-self-loop',
+			'triage-alias-nil',
+			'triage-empty-literal',
 			'triage-rpcsym-nameless',
 		],
 	},
