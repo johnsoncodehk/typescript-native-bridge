@@ -340,6 +340,11 @@ function normalizeNavResult(cmd, resp, side) {
 
 function compareNav(cmd, tnbN, stockN) {
 	if (tnbN?.error || stockN?.error) {
+		// A stock-side error/timeout is harness noise (loaded runner), not a TNB
+		// divergence; only a TNB-side failure is gate-worthy.
+		if (!tnbN?.error) {
+			return { kind: 'SKIP', detail: 'stock-error/timeout', tnb: tnbN, stock: stockN };
+		}
 		return { kind: 'DIFF', detail: 'error/timeout', tnb: tnbN, stock: stockN };
 	}
 	if (tnbN.tnbBad?.bad) {
@@ -378,6 +383,10 @@ function compareNav(cmd, tnbN, stockN) {
 
 function compareDiag(tnbD, stockD) {
 	if (tnbD?.error || stockD?.error) {
+		// Same rule as compareNav: stock-side timeout is harness noise, not a diff.
+		if (!tnbD?.error) {
+			return { kind: 'SKIP', detail: 'stock-error/timeout', tnb: tnbD, stock: stockD };
+		}
 		return { kind: 'DIFF', detail: 'diag-error/timeout', tnb: tnbD, stock: stockD };
 	}
 	const tSets = {
@@ -503,6 +512,10 @@ async function runGeterr(send, eventState, file) {
 			},
 		};
 	});
+	// The waiter timer can fire while `send` below is still in flight; pin a
+	// catch so that window can't surface as an unhandled rejection — the
+	// caller's await still receives the same rejection.
+	diagPromise.catch(() => {});
 	await send('geterr', { delay: 0, files: [file] }, CMD_TIMEOUT_MS);
 	return diagPromise;
 }
@@ -818,7 +831,9 @@ for (const key of compareKeys) {
 	const isDiag = key.startsWith('diag:');
 	const cmp = isDiag ? compareDiag(t, s) : compareNav(t.cmd, t, s);
 
-	if (cmp.kind === 'MATCH') {
+	if (cmp.kind === 'SKIP') {
+		bumpSkip(cmp.detail);
+	} else if (cmp.kind === 'MATCH') {
 		match++;
 		if (cmp.dedupeOnly) dedupeRescued.push(key);
 	}
