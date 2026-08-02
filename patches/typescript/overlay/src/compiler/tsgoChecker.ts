@@ -132,6 +132,16 @@ type TnbBridgeProcessState = {
     /** NodeHandle.prototype hooks are installed exactly once per process —
      * the prototype is shared across lib/typescript.js and lib/_tsc.js bundles. */
     nodeHandlePatched?: boolean;
+    /** Bundle Type/Symbol/Signature prototype hooks are installed exactly
+     * once per process, never once per program generation: a hook closure
+     * defined inside a generation's createTsgoChecker scope pins that whole
+     * generation island (V8 keeps a closure's entire defining context
+     * alive), and a re-install that wraps the previous hook chains one
+     * island per generation. The hooks live at module scope and route to
+     * the live checker through project.__tnbTypeChecker. */
+    typeProtoPatched?: boolean;
+    symbolProtoPatched?: boolean;
+    signatureProtoPatched?: boolean;
     /** RemoteNode.prototype getChildren for LS token walks (findAllReferences/rename). */
     remoteNodeTraversalPatched?: boolean;
     /** SignalExit bypass listeners installed exactly once per process. */
@@ -182,6 +192,32 @@ let _sync: any;
 let _bridgeFns: any;
 /** Thin program from createTsgoProgram — wired after getOrCreateSourceFile exists. */
 let _hostProgramRef: { getSourceFile?: (fileName: string) => any | undefined } | undefined;
+/** Latest generation's versionForFile, overwritten per program. The `version`
+ * getters ensureTnbVersion installs live on shared (cross-generation) stable
+ * SourceFiles, so they must route through this module-level slot — a getter
+ * that closes over a generation's versionForFile pins that whole generation
+ * island for as long as the stable sf is cached. */
+let _tnbVersionForFile: ((hostFileName: string) => string) | undefined;
+
+/** Lazily bind a content-derived version getter (idempotent; skips
+ * host-supplied versions). Module scope is load-bearing: the getter lands on
+ * shared (cross-generation) stable SourceFiles, and V8 keeps a closure's
+ * entire defining context chain alive — a getter defined inside a
+ * generation's scope pins that generation island even when it only reads the
+ * module-level slot above. */
+function ensureTnbVersion(sf: any, hostFileName: string): void {
+    if (!sf) return;
+    try {
+        const own = Object.getOwnPropertyDescriptor(sf, "version");
+        if (own && !own.configurable) return;
+        if (own && own.value !== undefined && own.value !== "1") return;
+        Object.defineProperty(sf, "version", {
+            configurable: true,
+            enumerable: false,
+            get: () => _tnbVersionForFile?.(hostFileName) ?? "1",
+        });
+    } catch { /* best-effort */ }
+}
 
 /** Vendored @typescript/native-preview at vendor/native-preview/. */
 function getNativePreviewDir(): string {
@@ -2936,6 +2972,704 @@ function displayPartsFromDocText(text: string): any[] {
     const trimmed = trimDocTrailingNewlines(text);
     return trimmed ? [{ kind: "text", text: trimmed }] : [];
 }
+
+// ── Bundle-prototype hooks (installed exactly once per process) ─────
+// Every Type/Symbol/Signature the bridge hands to stock services is a data
+// object decoded onto the native-preview bundle's shared prototypes. The
+// hooks below implement stock's checker-API surface on those prototypes by
+// routing to the owning project's live tsgo checker. Two invariants keep
+// this leak-free — both exist because V8 keeps a closure's entire defining
+// context chain alive:
+//  - Install exactly once per process (gated on TnbBridgeProcessState),
+//    never once per program generation: a hook closure defined inside a
+//    generation's createTsgoChecker scope pins that whole generation
+//    island, and a re-install that wraps the previous hook chains one
+//    island per generation.
+//  - Every closure that lands on a shared prototype is defined here at
+//    module scope, so its context is the module frame. Bodies reach the
+//    live project only at call time — through the object's own registry
+//    (projectForBridgeObject) or _currentProjectRef — and the live checker
+//    through project.__tnbTypeChecker.
+function getTypePrototype(sample: any): any {
+    let proto = Object.getPrototypeOf(sample);
+    while (proto && Object.getPrototypeOf(proto) !== Object.prototype) {
+        proto = Object.getPrototypeOf(proto);
+    }
+    return proto ?? undefined;
+}
+
+function installTypePredicates(target: any, s: any): void {
+    if (typeof target.isUnionOrIntersection === "function") return;
+    // NOTE: don't check `target.flags` here — when target is a prototype,
+    // `flags` lives on instances, not the proto. The `has` closures read
+    // `this.flags` at call time, so they work on instances regardless.
+    const TF = s.TypeFlags;
+    const has = (flag: number) => function (this: any) { return (this.flags & flag) !== 0; };
+    if (!target.isStringLiteral) target.isStringLiteral = has(TF.StringLiteral);
+    if (!target.isNumberLiteral) target.isNumberLiteral = has(TF.NumberLiteral);
+    if (!target.isBooleanLiteral) target.isBooleanLiteral = has(TF.BooleanLiteral);
+    if (!target.isBigIntLiteral) target.isBigIntLiteral = has(TF.BigIntLiteral);
+    if (!target.isEnumLiteral) target.isEnumLiteral = has(TF.EnumLiteral);
+    if (!target.isLiteral) target.isLiteral = has(TF.StringLiteral | TF.NumberLiteral | TF.BigIntLiteral | TF.BooleanLiteral);
+    if (!target.isUnion) target.isUnion = has(TF.Union);
+    if (!target.isIntersection) target.isIntersection = has(TF.Intersection);
+    if (!target.isUnionOrIntersection) target.isUnionOrIntersection = has(TF.UnionOrIntersection);
+    if (!target.isTypeParameter) target.isTypeParameter = has(TF.TypeParameter);
+    // Mirror stock Type.isClassOrInterface/isClass: read ObjectFlags off
+    // Object-flagged types. Class/Interface live in the low bits, which are
+    // identical between the tsgo and fork ObjectFlags layouts, so this is
+    // safe whether or not the instance's objectFlags were remapped yet.
+    const OF = (ts as any).ObjectFlags;
+    const objectFlagsOf = function (t: any): number {
+        return (t.flags & TF.Object) !== 0 && typeof t.objectFlags === "number" ? t.objectFlags : 0;
+    };
+    if (!target.isClassOrInterface) target.isClassOrInterface = function (this: any) { return (objectFlagsOf(this) & (OF.Class | OF.Interface)) !== 0; };
+    if (!target.isClass) target.isClass = function (this: any) { return (objectFlagsOf(this) & OF.Class) !== 0; };
+    if (!target.isIndexType) target.isIndexType = has(TF.Index);
+    if (!target.getFlags) target.getFlags = function () { return this.flags; };
+    // isNullableType — stock Type method; installed in patchTypeProto via checker RPC.
+}
+
+// Cross-project routing: a bridge TypeObject/Signature knows its producing
+// project via its (private) objectRegistry. With several configured
+// projects in one tsserver session, _currentProjectRef may point at a
+// sibling project whose Go-side registry doesn't own this handle — the RPC
+// then dies with "type handle N not found in project registry". Prefer the
+// object's own project when it exposes one.
+function projectForBridgeObject(obj: any): any {
+    return obj?.objectRegistry?.project;
+}
+
+// The checker proxy createTsgoChecker hands to the program, stashed on its
+// tsgo project so the prototype hooks reach the live adapter (memoized,
+// fixup-applying) without capturing a generation scope. The reference
+// cycle project → proxy → adapter closure → project is island-internal —
+// it dies with its generation.
+function checkerForBridgeObject(obj: any): any {
+    const proj = projectForBridgeObject(obj) ?? _currentProjectRef.project;
+    return proj?.__tnbTypeChecker;
+}
+
+// Raw nested wire handles (type.target = id 73, not the TypeObject) and
+// the tsgo-layout objectFlags are converted at the registry creation site
+// (patchRegistryWireShapes → convertTypeWireShape), so every TypeObject is
+// already stock-shaped here no matter which RPC delivered it — including
+// the getBaseTypes()/getTarget() results that never pass an adapter method
+// (issue #35). What remains per adapter pass is the prototype hook.
+function fixupType(t: any): any {
+    if (Array.isArray(t)) { for (const i of t) fixupType(i); return t; }
+    if (t && typeof t === "object") patchTypeProto(t, tnbBridgeProcessState().sync);
+    return t;
+}
+
+function patchTypeProto(sample: any, s: any): void {
+    const proto = getTypePrototype(sample);
+    const proc = tnbBridgeProcessState();
+    if (!proto || proc.typeProtoPatched) {
+        installTypePredicates(sample, s);
+        return;
+    }
+    proc.typeProtoPatched = true;
+    installTypePredicates(proto, s);
+    if (!Object.getOwnPropertyDescriptor(proto, "types")) {
+        Object.defineProperty(proto, "types", {
+            configurable: true,
+            get() {
+                if (this.__tsgoTypesMemo !== undefined) return this.__tsgoTypesMemo;
+                const types = this.getTypes ? this.getTypes() : undefined;
+                if (types) for (const c of types) fixupType(c);
+                this.__tsgoTypesMemo = types;
+                return types;
+            },
+        });
+    }
+    // getCallSignatures / getConstructSignatures — delegate to checker's
+    // getSignaturesOfType. Short-circuit for primitive/literal types.
+    const TF = s.TypeFlags;
+    const SK = s.SignatureKind;
+    const noSigMask = TF.Never | TF.Undefined | TF.Null | TF.Void |
+        TF.StringLiteral | TF.NumberLiteral | TF.BooleanLiteral |
+        TF.BigIntLiteral | TF.EnumLiteral | TF.TemplateLiteral |
+        TF.StringMapping | TF.UniqueESSymbol | TF.Enum;
+    if (!proto.getCallSignatures) {
+        proto.getCallSignatures = function () {
+            if (typeof this.flags === "number" && (this.flags & noSigMask) !== 0) return [];
+            return checkerForBridgeObject(this)?.getSignaturesOfType(this, SK.Call) ?? [];
+        };
+    }
+    if (!proto.getConstructSignatures) {
+        proto.getConstructSignatures = function () {
+            if (typeof this.flags === "number" && (this.flags & noSigMask) !== 0) return [];
+            return checkerForBridgeObject(this)?.getSignaturesOfType(this, SK.Construct) ?? [];
+        };
+    }
+    // getProperties / getProperty / getApparentProperties — delegate to
+    // checker.getPropertiesOfType (memoized in the owning project's
+    // adapter). Rule code reads these directly off Type objects (e.g.
+    // no-unnecessary-type-assertion's hasSameProperties).
+    if (!proto.getProperties) {
+        proto.getProperties = function () {
+            const checker = checkerForBridgeObject(this);
+            if (!checker) return [];
+            return checker.getPropertiesOfType(this) ?? [];
+        };
+    }
+    if (!proto.getProperty) {
+        proto.getProperty = function (name: string) {
+            return checkerForBridgeObject(this)?.getPropertyOfType(this, name);
+        };
+    }
+    if (!proto.getApparentProperties) {
+        proto.getApparentProperties = function () {
+            return checkerForBridgeObject(this)?.getAugmentedPropertiesOfType(this) ?? [];
+        };
+    }
+    if (!proto.getBaseTypes) {
+        proto.getBaseTypes = function () {
+            return checkerForBridgeObject(this)?.getBaseTypes(this) ?? [];
+        };
+    }
+    if (!proto.getNonNullableType) {
+        proto.getNonNullableType = function () {
+            const checker = checkerForBridgeObject(this);
+            if (!checker) return this;
+            return checker.getNonNullableType(this) ?? this;
+        };
+    }
+    if (!proto.getNonOptionalType) {
+        proto.getNonOptionalType = function () {
+            const checker = checkerForBridgeObject(this);
+            if (!checker) return this;
+            return checker.getNonOptionalType(this) ?? this;
+        };
+    }
+    // getDefault — stock Type.getDefault is
+    // checker.getDefaultFromTypeParameter(type). The vendored TypeObject
+    // has no own getDefault; install it like getConstraint.
+    if (!proto.getDefault) {
+        proto.getDefault = function () {
+            return checkerForBridgeObject(this)?.getDefaultFromTypeParameter(this);
+        };
+    }
+    // getConstraint — stock Type.getConstraint is
+    // checker.getBaseConstraintOfType(type) for every type (type parameter
+    // → declared constraint, substitution → its constraint, otherwise the
+    // type itself). The vendored TypeObject ships its own getConstraint
+    // that only fetches SubstitutionType.substConstraint — wrong for type
+    // parameters (issue #23: T.getConstraint() → undefined on the tsgo
+    // path). Overwrite unconditionally (exactly once — the proc gate above
+    // is what makes overwriting safe).
+    proto.getConstraint = function () {
+        return checkerForBridgeObject(this)?.getBaseConstraintOfType(this);
+    };
+    // getNumberIndexType / getStringIndexType — stock Type path:
+    // checker.getIndexTypeOfType(this, IndexKind.String|Number).
+    if (!proto.getNumberIndexType) {
+        proto.getNumberIndexType = function () {
+            return checkerForBridgeObject(this)?.getIndexTypeOfType(this, 1 /* IndexKind.Number */);
+        };
+    }
+    if (!proto.getStringIndexType) {
+        proto.getStringIndexType = function () {
+            return checkerForBridgeObject(this)?.getIndexTypeOfType(this, 0 /* IndexKind.String */);
+        };
+    }
+    // isNullableType — stock Type path: checker.isNullableType(this).
+    if (!proto.isNullableType) {
+        proto.isNullableType = function () {
+            const checker = checkerForBridgeObject(this);
+            if (!checker) return false;
+            return !!checker.isNullableType(this);
+        };
+    }
+}
+
+// ── Signature prototype patch ────────────────────────────────────
+function patchSignatureProto(s: any): void {
+    const proc = tnbBridgeProcessState();
+    if (proc.signatureProtoPatched) return;
+    const SignatureCtor = s.Signature;
+    if (!SignatureCtor?.prototype) return;
+    const proto = SignatureCtor.prototype;
+    proc.signatureProtoPatched = true;
+    // getReturnType — delegate to checker.getReturnTypeOfSignature (the
+    // adapter applies fixupType and the `.symbol` backfill).
+    if (!proto.getReturnType) {
+        proto.getReturnType = function () {
+            return checkerForBridgeObject(this)?.getReturnTypeOfSignature(this);
+        };
+    }
+    // getTypeParameterAtPosition — stock SignatureObject delegates to
+    // checker.getParameterType; bridge Signature implements it via registry
+    // RPC. Wrap to fixupType for LS consumers. Installed exactly once (proc
+    // gate), so origGetTypeParameterAtPosition is always the bundle
+    // original — a second wrap would chain onto the first and pin the first
+    // installer's scope.
+    const origGetTypeParameterAtPosition = proto.getTypeParameterAtPosition;
+    proto.getTypeParameterAtPosition = function (pos: number) {
+        const t = origGetTypeParameterAtPosition.call(this, pos);
+        if (t) fixupType(t);
+        return t;
+    };
+    // getDeclaration — tsgo stores it as `this.declaration` (a NodeHandle).
+    if (!proto.getDeclaration) {
+        proto.getDeclaration = function () { return this.declaration; };
+    }
+    // vue-component-meta reads signature docs via getDocumentationComment(checker)
+    // and getJsDocTags(checker). tsgo's Signature class omits both; stock TS
+    // resolves them from signature.declaration JSDoc.
+    // tsgo has no signature-level doc RPC, so the only source is the JSDoc on
+    // signature.declaration. Memoise only non-empty results: a transient empty
+    // read (e.g. declaration not yet resolvable) must not be cached permanently.
+    proto.getDocumentationComment = function (_checker: any) {
+        if (this.__tnbDocComment) return this.__tnbDocComment;
+        const decl = resolveDocDeclaration(this.declaration);
+        if (!decl) return [];
+        let parts: any[] = [];
+        try {
+            parts = trimDocPartsTrailingNewlines(jsDocCommentsFromDeclarations([decl]) ?? []);
+        }
+        catch { parts = []; }
+        if (parts.length) this.__tnbDocComment = parts;
+        return parts;
+    };
+    proto.getJsDocTags = function (_checker: any) {
+        if (this.__tnbJsDocTags) return this.__tnbJsDocTags;
+        const decl = resolveDocDeclaration(this.declaration);
+        if (!decl) return [];
+        let tags: any[] = [];
+        try {
+            tags = trimJsDocTagsTrailingNewlines(jsDocTagsFromDeclarations([decl]) ?? []);
+        }
+        catch { tags = []; }
+        if (tags.length) this.__tnbJsDocTags = tags;
+        return tags;
+    };
+}
+
+// ── SignatureFlags boundary remap ─────────────────────────────────
+// Raw tsgo flags per remapped Signature, kept so the native-preview
+// getters (hasRestParameter/isConstruct/isAbstract) can keep reading TSGO
+// semantics after `flags` is rewritten to the fork layout. The WeakMap
+// doubles as the already-remapped marker (registry memoizes instances, so
+// a cache hit must not remap a second time).
+const _sigRawFlags = new WeakMap<object, number>();
+
+// All Signature instances funnel through
+// ProjectObjectRegistry.getOrCreateSignature (single `new Signature` site
+// in the native-preview bundle, memoized per registry). Wrapping that one
+// method remaps every signature exactly once at creation. The registry
+// class is not exported, so reach its prototype through a live instance.
+function patchSignatureFlagsRemap(s: any, project: any): void {
+    const proc = tnbBridgeProcessState();
+    if (proc.sigFlagsRemapApplied) return;
+    const registry = project?.checker?.objectRegistry;
+    const registryProto = registry ? Object.getPrototypeOf(registry) : undefined;
+    const sigProto = s?.Signature?.prototype;
+    if (!registryProto?.getOrCreateSignature || !sigProto) return;
+    proc.sigFlagsRemapApplied = true;
+    const origGetOrCreateSignature = registryProto.getOrCreateSignature;
+    registryProto.getOrCreateSignature = function (this: any, data: any) {
+        const sig = origGetOrCreateSignature.call(this, data);
+        if (sig && typeof sig.flags === "number" && !_sigRawFlags.has(sig)) {
+            const raw = sig.flags as number;
+            _sigRawFlags.set(sig, raw);
+            sig.flags = remapSignatureFlags(raw);
+        }
+        return sig;
+    };
+    // The native-preview Signature getters read `this.flags` against the
+    // TSGO enum; keep them correct off the raw stored value.
+    const tsgoSF = loadTsgoEnums().SignatureFlags;
+    const rawFlagsOf = (self: any): number => _sigRawFlags.get(self) ?? self?.flags ?? 0;
+    for (const [getterName, bit] of [
+        ["hasRestParameter", tsgoSF.HasRestParameter],
+        ["isConstruct", tsgoSF.Construct],
+        ["isAbstract", tsgoSF.Abstract],
+    ] as const) {
+        Object.defineProperty(sigProto, getterName, {
+            configurable: true,
+            get(this: any) { return (rawFlagsOf(this) & (bit as number)) !== 0; },
+        });
+    }
+}
+
+// ── Nested wire handles → lazy registry-backed accessors ─────────
+// The vendored TypeObject/Symbol constructors copy nested handles off the
+// wire payload as raw ids (`type.target` is the literal 73, not the
+// TypeObject with id 73). Stock semantics for those fields are object
+// references (ts.TypeReference.target is a Type), and rule code reads the
+// property directly — typescript-eslint's containsAllTypesByName does
+// `if (isTypeReference(type)) type = type.target; type.getSymbol()`
+// (issue #35). Resolving them in the adapter's fixup pass only covered
+// types that crossed an adapter method; base types out of the vendored
+// TypeObject.getBaseTypes() (and any other RPC-delivered type) leaked the
+// raw ids. Convert at the single creation site instead: each raw handle
+// becomes a lazy accessor that resolves through the id-keyed registry
+// (so `type.target === anyOtherResultForTheSameId` holds), memoizes by
+// redefining the property as a plain writable value, and costs no RPC
+// unless a consumer actually reads the field — the eager pass it replaces
+// paid one RPC per field per type up front. A failed resolution (stale
+// snapshot under an edit) memoizes undefined/[]: stock property reads
+// never throw, so neither do these.
+const convertedWireObjects = new WeakSet<object>();
+
+// [own property, registry fetch method] — method names mirror the
+// vendored TypeObject getters (and the Go dispatcher).
+const NESTED_TYPE_SINGLE: ReadonlyArray<readonly [string, string]> = [
+    ["target", "getTargetOfType"],
+    ["freshType", "getFreshTypeOfType"],
+    ["regularType", "getRegularTypeOfType"],
+    ["objectType", "getObjectTypeOfType"],
+    ["indexType", "getIndexedAccessIndexType"],
+    ["checkType", "getCheckTypeOfType"],
+    ["extendsType", "getExtendsTypeOfType"],
+    ["baseType", "getBaseTypeOfType"],
+    ["substConstraint", "getConstraintOfType"],
+];
+const NESTED_TYPE_ARRAY: ReadonlyArray<readonly [string, string]> = [
+    ["typeParameters", "getTypeParametersOfType"],
+    ["outerTypeParameters", "getOuterTypeParametersOfType"],
+    ["localTypeParameters", "getLocalTypeParametersOfType"],
+    ["aliasTypeArguments", "getAliasTypeArgumentsOfType"],
+];
+
+function memoizedOwnValue(obj: any, prop: string, value: any): any {
+    Object.defineProperty(obj, prop, { configurable: true, enumerable: true, writable: true, value });
+    return value;
+}
+
+function convertTypeWireShape(t: any): void {
+    if (convertedWireObjects.has(t)) return;
+    convertedWireObjects.add(t);
+    // ObjectFlags cross in the tsgo bit layout; fork consumers read the
+    // fork layout. Remap here (once per type) rather than per adapter
+    // pass, so types that never touch the adapter (getBaseTypes
+    // elements) get the same treatment.
+    if (typeof t.objectFlags === "number") t.objectFlags = remapObjectFlags(t.objectFlags);
+    const registry = t.objectRegistry;
+    if (!registry) return;
+    const descs: Record<string, PropertyDescriptor> = {};
+    for (const [prop, method] of NESTED_TYPE_SINGLE) {
+        const raw = t[prop];
+        if (typeof raw !== "number") continue;
+        descs[prop] = {
+            configurable: true,
+            enumerable: true,
+            get() {
+                let resolved: any;
+                try { resolved = registry.fetchType(t, method, raw); } catch { resolved = undefined; }
+                if (resolved) fixupType(resolved);
+                return memoizedOwnValue(t, prop, resolved);
+            },
+        };
+    }
+    for (const [prop, method] of NESTED_TYPE_ARRAY) {
+        const raw = t[prop];
+        if (!Array.isArray(raw)) continue;
+        if (raw.length === 0) {
+            // tsgo emits aliasTypeArguments: [] on reference/array types
+            // where stock leaves the property absent. Rule helpers
+            // (no-unnecessary-type-assertion's containsAny) branch on
+            // `type.aliasTypeArguments ?? checker.getTypeArguments(type)`
+            // — an empty array is truthy for ?? and suppresses the
+            // fallback, misclassifying any[]. Drop the empty slot; the
+            // other array props keep the wire [] (consumers and the
+            // field audit treat empty ≡ absent there).
+            if (prop === "aliasTypeArguments") delete t[prop];
+            continue;
+        }
+        if (typeof raw[0] !== "number") continue;
+        descs[prop] = {
+            configurable: true,
+            enumerable: true,
+            get() {
+                let resolved: any[];
+                try { resolved = registry.fetchTypes(t, method, raw); } catch { resolved = []; }
+                for (const c of resolved) fixupType(c);
+                return memoizedOwnValue(t, prop, resolved);
+            },
+        };
+    }
+    const aliasSym = t.aliasSymbol;
+    if (typeof aliasSym === "number") {
+        descs.aliasSymbol = {
+            configurable: true,
+            enumerable: true,
+            get() {
+                let resolved: any;
+                try { resolved = registry.fetchSymbol(t, "getAliasSymbolOfType", aliasSym); } catch { resolved = undefined; }
+                return memoizedOwnValue(t, "aliasSymbol", resolved);
+            },
+        };
+    }
+    Object.defineProperties(t, descs);
+}
+
+function convertSymbolWireShape(sym: any): void {
+    if (convertedWireObjects.has(sym)) return;
+    convertedWireObjects.add(sym);
+    const raw = sym.exportSymbol;
+    if (typeof raw !== "number") return;
+    const registry = sym.objectRegistry;
+    if (!registry) return;
+    Object.defineProperty(sym, "exportSymbol", {
+        configurable: true,
+        enumerable: true,
+        get() {
+            let resolved: any;
+            try { resolved = registry.fetchSymbol(sym, "getExportSymbolOfSymbol", raw, sym.canonicalProject?.id); } catch { resolved = undefined; }
+            return memoizedOwnValue(sym, "exportSymbol", resolved);
+        },
+    });
+}
+
+// Wrap the two registry creation sites so every bridge object is
+// converted no matter which RPC delivered it — one path, no reliance on
+// consumers passing through an adapter method first. The registry
+// classes are not exported; reach their prototypes through live
+// instances (same pattern as patchSignatureFlagsRemap).
+function patchRegistryWireShapes(project: any): void {
+    const proc = tnbBridgeProcessState();
+    if (proc.wireShapeWrapApplied) return;
+    const registry = project?.checker?.objectRegistry;
+    const registryProto = registry ? Object.getPrototypeOf(registry) : undefined;
+    const snapshotRegistryProto = registry?.snapshotRegistry ? Object.getPrototypeOf(registry.snapshotRegistry) : undefined;
+    if (!registryProto?.getOrCreateType || !snapshotRegistryProto?.getOrCreateSymbol) return;
+    proc.wireShapeWrapApplied = true;
+    const origGetOrCreateType = registryProto.getOrCreateType;
+    registryProto.getOrCreateType = function (this: any, data: any) {
+        const t = origGetOrCreateType.call(this, data);
+        if (t) convertTypeWireShape(t);
+        return t;
+    };
+    const origGetOrCreateSymbol = snapshotRegistryProto.getOrCreateSymbol;
+    snapshotRegistryProto.getOrCreateSymbol = function (this: any, data: any) {
+        const s = origGetOrCreateSymbol.call(this, data);
+        if (s) convertSymbolWireShape(s);
+        return s;
+    };
+}
+
+function patchSymbolProto(s: any): void {
+    const proc = tnbBridgeProcessState();
+    if (proc.symbolProtoPatched) return;
+    const SymbolCtor = s.Symbol;
+    if (!SymbolCtor?.prototype) return;
+    const proto = SymbolCtor.prototype;
+    proc.symbolProtoPatched = true;
+    if (!proto.getName) proto.getName = function () { return this.name; };
+    if (!proto.getEscapedName) proto.getEscapedName = function () { return this.name; };
+    if (!proto.getFlags) proto.getFlags = function () { return this.flags; };
+    if (!proto.getDeclarations) proto.getDeclarations = function () { return this.declarations; };
+    if (!Object.getOwnPropertyDescriptor(proto, "escapedName")) {
+        Object.defineProperty(proto, "escapedName", { configurable: true, get() { return this.name; } });
+    }
+    // Stock EnumLike defaulting (tryGetValueFromType) reads `type.symbol.exports`
+    // as a Map and picks the first member via `.values()`. Bridge Symbol only
+    // exposes getExports(); materialize a Map lazily.
+    if (!Object.getOwnPropertyDescriptor(proto, "exports")) {
+        Object.defineProperty(proto, "exports", {
+            configurable: true,
+            get() {
+                if (Object.prototype.hasOwnProperty.call(this, "__tnbExports")) return this.__tnbExports;
+                try {
+                    const list = typeof this.getExports === "function" ? this.getExports() : undefined;
+                    // getExports() returns a ReadonlyMap already in the
+                    // checker's canonical (declaration) order — use it directly.
+                    if (list && typeof list.get === "function" && typeof list.values === "function") {
+                        this.__tnbExports = list.size ? list : undefined;
+                        return this.__tnbExports;
+                    }
+                    this.__tnbExports = undefined;
+                    return undefined;
+                } catch {
+                    this.__tnbExports = undefined;
+                    return undefined;
+                }
+            },
+        });
+    }
+    // Memoize Symbol.parent across repeated reads in one snapshot epoch.
+    // Covers confirmed-none (RPC null) so omitzero symbols pay one lazy
+    // getParentOfSymbol, not per-entry FFI. Invalidate on: parentHandle
+    // upgrade (ph key) or overlay content refresh (_tnbParentMemoEpoch).
+    // Soft-P′ instance data properties still shadow this getter.
+    // parentHandle===0 ("unfilled") stays lazy — do not seal undefined.
+    // Wrapped exactly once (the proc gate above): a second wrap would
+    // capture the previous wrap's getter closure and pin its defining
+    // scope through the closure context chain.
+    const parentDesc = Object.getOwnPropertyDescriptor(proto, "parent");
+    if (parentDesc?.get) {
+        const rawGet = parentDesc.get;
+        Object.defineProperty(proto, "parent", {
+            configurable: true,
+            enumerable: parentDesc.enumerable ?? true,
+            get() {
+                const ph = this.parentHandle;
+                if (
+                    Object.prototype.hasOwnProperty.call(this, "__tnbParentMemo")
+                    && this.__tnbParentMemoPh === ph
+                    && this.__tnbParentMemoEpoch === _tnbParentMemoEpoch
+                ) {
+                    return this.__tnbParentMemo;
+                }
+                let result: any;
+                try { result = rawGet.call(this); }
+                catch { result = undefined; }
+                try {
+                    Object.defineProperty(this, "__tnbParentMemo", {
+                        value: result,
+                        writable: true,
+                        configurable: true,
+                    });
+                    Object.defineProperty(this, "__tnbParentMemoPh", {
+                        value: ph,
+                        writable: true,
+                        configurable: true,
+                    });
+                    Object.defineProperty(this, "__tnbParentMemoEpoch", {
+                        value: _tnbParentMemoEpoch,
+                        writable: true,
+                        configurable: true,
+                    });
+                }
+                catch {
+                    this.__tnbParentMemo = result;
+                    this.__tnbParentMemoPh = ph;
+                    this.__tnbParentMemoEpoch = _tnbParentMemoEpoch;
+                }
+                return result;
+            },
+        });
+    }
+
+    // Stock TransientSymbol carries `links.checkFlags`; getCheckFlags reads
+    // it whenever SymbolFlags.Transient is set. tsgo symbols expose raw
+    // `checkFlags` (bit layout audited identical) but no `links` object, so
+    // a Transient-flagged tsgo symbol flowing into stock services
+    // (find-all-refs fromRoot, SymbolDisplay getSymbolKind) would crash on
+    // `links.checkFlags`. Satisfy the contract at the prototype.
+    // Also provide lazy `links.type` → getTypeOfSymbol for inferFromUsage
+    // readback of materialized transient parameters (inferFromUsage.ts:1207).
+    if (!Object.getOwnPropertyDescriptor(proto, "links")) {
+        Object.defineProperty(proto, "links", {
+            configurable: true,
+            get() {
+                if (this.__tnbLinks) return this.__tnbLinks;
+                const self = this;
+                const links: any = { checkFlags: this.checkFlags ?? 0 };
+                Object.defineProperty(links, "type", {
+                    configurable: true,
+                    enumerable: true,
+                    get() {
+                        if (Object.prototype.hasOwnProperty.call(this, "_type")) return this._type;
+                        let t: any;
+                        try {
+                            t = checkerForBridgeObject(self)?.getTypeOfSymbol(self);
+                        }
+                        catch {
+                            return undefined;
+                        }
+                        this._type = t;
+                        return t;
+                    },
+                    set(v: any) {
+                        this._type = v;
+                    },
+                });
+                this.__tnbLinks = links;
+                return links;
+            },
+        });
+    }
+    // tsgo Symbol.getDocumentationComment returns plain text from RPC; stock TS
+    // and vue-component-meta expect SymbolDisplayPart[] via displayPartsToString.
+    // Resolution order: (1) genuine host AST declarations -> stock JSDoc parser
+    // (authoritative for host/.vue virtual symbols); (2) tsgo-backed symbol
+    // (id>0) -> native checker RPC (authoritative for tsgo symbols); (3) last
+    // resort, resolve a tsgo declaration handle and parse its JSDoc. Each step
+    // only "wins" on a non-empty result so a barren host node still falls
+    // through to the RPC for hybrid symbols carrying both.
+    proto.getDocumentationComment = function (checker: any) {
+        const decls = this.declarations ?? (this.valueDeclaration ? [this.valueDeclaration] : undefined);
+        if (decls?.length && isHostSyntaxNode(decls[0])) {
+            try {
+                const parts = jsDocCommentsFromDeclarations(decls) ?? [];
+                if (parts.length) return parts;
+            }
+            catch { /* fall through */ }
+        }
+        if (typeof this.id === "number" && this.id > 0 && checker?.getDocumentationCommentOfSymbol) {
+            try {
+                const text = checker.getDocumentationCommentOfSymbol(this);
+                const parts = displayPartsFromDocText(typeof text === "string" ? text : "");
+                if (parts.length) return parts;
+            }
+            catch { /* fall through */ }
+        }
+        if (decls?.length) {
+            const decl = resolveDocDeclaration(decls[0]);
+            if (decl) {
+                try {
+                    return jsDocCommentsFromDeclarations([decl]) ?? [];
+                }
+                catch { /* empty */ }
+            }
+        }
+        return [];
+    };
+    if (!proto.getContextualDocumentationComment) {
+        proto.getContextualDocumentationComment = function (context: any) {
+            try {
+                const parts = this.getDocumentationComment?.(context?.checker ?? context);
+                if (Array.isArray(parts)) return parts;
+            } catch {
+                // fall through
+            }
+            return [];
+        };
+    }
+    if (!proto.getContextualJsDocTags) {
+        proto.getContextualJsDocTags = function (context: any) {
+            try {
+                const tags = this.getJsDocTags?.(context?.checker ?? context);
+                if (Array.isArray(tags)) return tags;
+            } catch {
+                // fall through
+            }
+            return [];
+        };
+    }
+    proto.getJsDocTags = function (checker: any) {
+        const decls = this.declarations ?? (this.valueDeclaration ? [this.valueDeclaration] : undefined);
+        if (decls?.length && isHostSyntaxNode(decls[0])) {
+            try {
+                const tags = jsDocTagsFromDeclarations(decls) ?? [];
+                if (tags.length) return tags;
+            }
+            catch { /* fall through */ }
+        }
+        if (typeof this.id === "number" && this.id > 0 && checker?.getJsDocTagsOfSymbol) {
+            try {
+                const tags = trimJsDocTagsTrailingNewlines(checker.getJsDocTagsOfSymbol(this) ?? []);
+                if (tags.length) return tags;
+            }
+            catch { /* fall through */ }
+        }
+        if (decls?.length) {
+            const decl = resolveDocDeclaration(decls[0]);
+            if (decl) {
+                try {
+                    return trimJsDocTagsTrailingNewlines(jsDocTagsFromDeclarations([decl]) ?? []);
+                }
+                catch { /* empty */ }
+            }
+        }
+        return [];
+    };
+}
+
 let _removeCommentsPrinter: any;
 function getRemoveCommentsPrinter(): any {
     return _removeCommentsPrinter ??= createPrinterWithRemoveComments();
@@ -4291,6 +5025,24 @@ function remapDeclarationToHost(decl: any, getHostSf: (fileName: string) => any 
     return hostNode;
 }
 /** tsgo RemoteSourceFile declarations → host bindSourceFile nodes for LS navigation. */
+/** Install a getter returning a fixed value, in isolation. The getter's V8
+ * context holds only `value` and chains to the module frame — a getter
+ * created inside a helper whose frame also references generation-scoped
+ * callbacks (e.g. remapSymbolDeclarationsToHost's getHostSf) would pin that
+ * whole generation island through the context chain for as long as `obj`
+ * lives, and registry-memoized symbols outlive their birth generation
+ * (projects are cached across program generations). */
+function defineValueGetter(obj: any, prop: string, value: any): boolean {
+    try {
+        Object.defineProperty(obj, prop, {
+            configurable: true,
+            enumerable: true,
+            get() { return value; },
+        });
+        return true;
+    } catch { return false; }
+}
+
 function remapSymbolDeclarationsToHost(symbol: any, getHostSf: (fileName: string) => any | undefined): any {
     if (!symbol) return symbol;
     // Hydrate bridge symbols; findAllReferences/rename read valueDeclaration on the
@@ -4302,13 +5054,7 @@ function remapSymbolDeclarationsToHost(symbol: any, getHostSf: (fileName: string
         if (mappedVal !== valDecl) {
             try { symbol.valueDeclaration = mappedVal; }
             catch {
-                try {
-                    Object.defineProperty(symbol, "valueDeclaration", {
-                        configurable: true,
-                        enumerable: true,
-                        get() { return mappedVal; },
-                    });
-                } catch { /* read-only symbol object */ }
+                defineValueGetter(symbol, "valueDeclaration", mappedVal);
             }
         }
     }
@@ -4336,11 +5082,7 @@ function remapSymbolDeclarationsToHost(symbol: any, getHostSf: (fileName: string
     }
     try {
         if (symbol.declarations !== mapped) {
-            Object.defineProperty(symbol, "declarations", {
-                configurable: true,
-                enumerable: true,
-                get() { return mapped; },
-            });
+            defineValueGetter(symbol, "declarations", mapped);
         }
     } catch {
         // read-only symbol object; best-effort only.
@@ -7019,20 +7761,7 @@ export function createTsgoProgram(
         const hv = hostForLs()?.getScriptVersion?.(hostFileName) ?? host?.getScriptVersion?.(hostFileName);
         return typeof hv === "string" && hv.length ? hv : "1";
     };
-    /** Lazily bind a content-derived version getter (idempotent; skips host-supplied versions). */
-    const ensureTnbVersion = (sf: any, hostFileName: string): void => {
-        if (!sf) return;
-        try {
-            const own = Object.getOwnPropertyDescriptor(sf, "version");
-            if (own && !own.configurable) return;
-            if (own && own.value !== undefined && own.value !== "1") return;
-            Object.defineProperty(sf, "version", {
-                configurable: true,
-                enumerable: false,
-                get: () => versionForFile(hostFileName),
-            });
-        } catch { /* best-effort */ }
-    };
+    _tnbVersionForFile = versionForFile;
     // Root-file membership for buildinfo serialization (builder.ts tryAddRoot
     // consults this instead of materializing each SourceFile to inspect
     // fileIncludeReasons, which the thin program does not track).
@@ -9507,688 +10236,6 @@ export function createTsgoChecker(program: any): any {
         return facade;
     }
 
-    // ── Type / Symbol prototype patches ──────────────────────────────
-    let typeProtoPatched = false;
-    let symbolProtoPatched = false;
-
-    function getTypePrototype(sample: any): any {
-        let proto = Object.getPrototypeOf(sample);
-        while (proto && Object.getPrototypeOf(proto) !== Object.prototype) {
-            proto = Object.getPrototypeOf(proto);
-        }
-        return proto ?? undefined;
-    }
-
-    function installTypePredicates(target: any, s: any): void {
-        if (typeof target.isUnionOrIntersection === "function") return;
-        // NOTE: don't check `target.flags` here — when target is a prototype,
-        // `flags` lives on instances, not the proto. The `has` closures read
-        // `this.flags` at call time, so they work on instances regardless.
-        const TF = s.TypeFlags;
-        const has = (flag: number) => function (this: any) { return (this.flags & flag) !== 0; };
-        if (!target.isStringLiteral) target.isStringLiteral = has(TF.StringLiteral);
-        if (!target.isNumberLiteral) target.isNumberLiteral = has(TF.NumberLiteral);
-        if (!target.isBooleanLiteral) target.isBooleanLiteral = has(TF.BooleanLiteral);
-        if (!target.isBigIntLiteral) target.isBigIntLiteral = has(TF.BigIntLiteral);
-        if (!target.isEnumLiteral) target.isEnumLiteral = has(TF.EnumLiteral);
-        if (!target.isLiteral) target.isLiteral = has(TF.StringLiteral | TF.NumberLiteral | TF.BigIntLiteral | TF.BooleanLiteral);
-        if (!target.isUnion) target.isUnion = has(TF.Union);
-        if (!target.isIntersection) target.isIntersection = has(TF.Intersection);
-        if (!target.isUnionOrIntersection) target.isUnionOrIntersection = has(TF.UnionOrIntersection);
-        if (!target.isTypeParameter) target.isTypeParameter = has(TF.TypeParameter);
-        // Mirror stock Type.isClassOrInterface/isClass: read ObjectFlags off
-        // Object-flagged types. Class/Interface live in the low bits, which are
-        // identical between the tsgo and fork ObjectFlags layouts, so this is
-        // safe whether or not the instance's objectFlags were remapped yet.
-        const OF = (ts as any).ObjectFlags;
-        const objectFlagsOf = function (t: any): number {
-            return (t.flags & TF.Object) !== 0 && typeof t.objectFlags === "number" ? t.objectFlags : 0;
-        };
-        if (!target.isClassOrInterface) target.isClassOrInterface = function (this: any) { return (objectFlagsOf(this) & (OF.Class | OF.Interface)) !== 0; };
-        if (!target.isClass) target.isClass = function (this: any) { return (objectFlagsOf(this) & OF.Class) !== 0; };
-        if (!target.isIndexType) target.isIndexType = has(TF.Index);
-        if (!target.getFlags) target.getFlags = function () { return this.flags; };
-        // isNullableType — stock Type method; installed in patchTypeProto via checker RPC.
-    }
-
-    function patchTypeProto(sample: any, s: any): void {
-        const proto = getTypePrototype(sample);
-        if (!proto || typeProtoPatched) {
-            installTypePredicates(sample, s);
-            return;
-        }
-        typeProtoPatched = true;
-        installTypePredicates(proto, s);
-        if (!Object.getOwnPropertyDescriptor(proto, "types")) {
-            Object.defineProperty(proto, "types", {
-                configurable: true,
-                get() {
-                    if (this.__tsgoTypesMemo !== undefined) return this.__tsgoTypesMemo;
-                    const types = this.getTypes ? this.getTypes() : undefined;
-                    if (types) for (const c of types) fixupType(c);
-                    this.__tsgoTypesMemo = types;
-                    return types;
-                },
-            });
-        }
-        // getCallSignatures / getConstructSignatures — delegate to checker's
-        // getSignaturesOfType. Short-circuit for primitive/literal types.
-        const TF = s.TypeFlags;
-        const SK = s.SignatureKind;
-        const noSigMask = TF.Never | TF.Undefined | TF.Null | TF.Void |
-            TF.StringLiteral | TF.NumberLiteral | TF.BooleanLiteral |
-            TF.BigIntLiteral | TF.EnumLiteral | TF.TemplateLiteral |
-            TF.StringMapping | TF.UniqueESSymbol | TF.Enum;
-        if (!proto.getCallSignatures) {
-            proto.getCallSignatures = function () {
-                if (typeof this.flags === "number" && (this.flags & noSigMask) !== 0) return [];
-                const sigs = getSignaturesCached(this, SK.Call);
-                return sigs ?? [];
-            };
-        }
-        if (!proto.getConstructSignatures) {
-            proto.getConstructSignatures = function () {
-                if (typeof this.flags === "number" && (this.flags & noSigMask) !== 0) return [];
-                return getSignaturesCached(this, SK.Construct);
-            };
-        }
-        // getProperties / getProperty / getApparentProperties — delegate to
-        // checker.getPropertiesOfType. Rule code reads these directly off
-        // Type objects (e.g. no-unnecessary-type-assertion's hasSameProperties).
-        if (!proto.getProperties) {
-            proto.getProperties = function () {
-                const proj = projectForBridgeObject(this) ?? _currentProjectRef.project;
-                if (!proj) return [];
-                return memoGet(propertiesCache, this, () => proj.checker.getPropertiesOfType(this) ?? []);
-            };
-        }
-        if (!proto.getProperty) {
-            proto.getProperty = function (name: string) {
-                return resolvePropertyOfType(this, name);
-            };
-        }
-        if (!proto.getApparentProperties) {
-            proto.getApparentProperties = function () {
-                const proj = projectForBridgeObject(this) ?? _currentProjectRef.project;
-                if (!proj) return [];
-                return proj.checker.getAugmentedPropertiesOfType(this) ?? [];
-            };
-        }
-        if (!proto.getBaseTypes) {
-            proto.getBaseTypes = function () {
-                return getBaseTypesCached(this);
-            };
-        }
-        if (!proto.getNonNullableType) {
-            proto.getNonNullableType = function () {
-                const proj = projectForBridgeObject(this) ?? _currentProjectRef.project;
-                if (!proj) return this;
-                const t = proj.checker.getNonNullableType(this);
-                if (t) fixupType(t);
-                return t ?? this;
-            };
-        }
-        if (!proto.getNonOptionalType) {
-            proto.getNonOptionalType = function () {
-                const proj = projectForBridgeObject(this) ?? _currentProjectRef.project;
-                if (!proj) return this;
-                const t = proj.checker.getNonOptionalType(this);
-                if (t) fixupType(t);
-                return t ?? this;
-            };
-        }
-        // getDefault — stock Type.getDefault is
-        // checker.getDefaultFromTypeParameter(type). The vendored TypeObject
-        // has no own getDefault; install it like getConstraint.
-        if (!proto.getDefault) {
-            proto.getDefault = function () {
-                const proj = projectForBridgeObject(this) ?? _currentProjectRef.project;
-                if (!proj) return undefined;
-                const t = proj.checker.getDefaultFromTypeParameter(this);
-                if (t) fixupType(t);
-                return t;
-            };
-        }
-        // getConstraint — stock Type.getConstraint is
-        // checker.getBaseConstraintOfType(type) for every type (type parameter
-        // → declared constraint, substitution → its constraint, otherwise the
-        // type itself). The vendored TypeObject ships its own getConstraint
-        // that only fetches SubstitutionType.substConstraint — wrong for type
-        // parameters (issue #23: T.getConstraint() → undefined on the tsgo
-        // path). Overwrite unconditionally.
-        proto.getConstraint = function () {
-            const proj = projectForBridgeObject(this) ?? _currentProjectRef.project;
-            if (!proj) return undefined;
-            const t = proj.checker.getBaseConstraintOfType(this);
-            if (t) fixupType(t);
-            return t;
-        };
-        // getNumberIndexType / getStringIndexType — stock Type path:
-        // checker.getIndexTypeOfType(this, IndexKind.String|Number).
-        if (!proto.getNumberIndexType) {
-            proto.getNumberIndexType = function () {
-                const proj = projectForBridgeObject(this) ?? _currentProjectRef.project;
-                if (!proj) return undefined;
-                const t = proj.checker.getIndexTypeOfType(this, 1 /* IndexKind.Number */);
-                if (t) fixupType(t);
-                return t;
-            };
-        }
-        if (!proto.getStringIndexType) {
-            proto.getStringIndexType = function () {
-                const proj = projectForBridgeObject(this) ?? _currentProjectRef.project;
-                if (!proj) return undefined;
-                const t = proj.checker.getIndexTypeOfType(this, 0 /* IndexKind.String */);
-                if (t) fixupType(t);
-                return t;
-            };
-        }
-        // isNullableType — stock Type path: checker.isNullableType(this).
-        if (!proto.isNullableType) {
-            proto.isNullableType = function () {
-                const proj = projectForBridgeObject(this) ?? _currentProjectRef.project;
-                if (!proj) return false;
-                return !!proj.checker.isNullableType(this);
-            };
-        }
-    }
-
-    // ── Signature prototype patch ────────────────────────────────────
-    let signatureProtoPatched = false;
-    function patchSignatureProto(s: any): void {
-        if (signatureProtoPatched) return;
-        const SignatureCtor = s.Signature;
-        if (!SignatureCtor?.prototype) return;
-        const proto = SignatureCtor.prototype;
-        signatureProtoPatched = true;
-        // getReturnType — delegate to checker.getReturnTypeOfSignature + fixup.
-        if (!proto.getReturnType) {
-            proto.getReturnType = function () {
-                const proj = projectForBridgeObject(this) ?? _currentProjectRef.project;
-                if (!proj) return undefined;
-                const t = proj.checker.getReturnTypeOfSignature(this);
-                if (t) fixupType(t);
-                return t;
-            };
-        }
-        // getTypeParameterAtPosition — stock SignatureObject delegates to
-        // checker.getParameterType; bridge Signature implements it via registry
-        // RPC. Wrap to fixupType for LS consumers.
-        const origGetTypeParameterAtPosition = proto.getTypeParameterAtPosition;
-        proto.getTypeParameterAtPosition = function (pos: number) {
-            const t = origGetTypeParameterAtPosition.call(this, pos);
-            if (t) fixupType(t);
-            return t;
-        };
-        // getDeclaration — tsgo stores it as `this.declaration` (a NodeHandle).
-        if (!proto.getDeclaration) {
-            proto.getDeclaration = function () { return this.declaration; };
-        }
-        // vue-component-meta reads signature docs via getDocumentationComment(checker)
-        // and getJsDocTags(checker). tsgo's Signature class omits both; stock TS
-        // resolves them from signature.declaration JSDoc.
-        // tsgo has no signature-level doc RPC, so the only source is the JSDoc on
-        // signature.declaration. Memoise only non-empty results: a transient empty
-        // read (e.g. declaration not yet resolvable) must not be cached permanently.
-        proto.getDocumentationComment = function (_checker: any) {
-            if (this.__tnbDocComment) return this.__tnbDocComment;
-            const decl = resolveDocDeclaration(this.declaration);
-            if (!decl) return [];
-            let parts: any[] = [];
-            try {
-                parts = trimDocPartsTrailingNewlines(jsDocCommentsFromDeclarations([decl]) ?? []);
-            }
-            catch { parts = []; }
-            if (parts.length) this.__tnbDocComment = parts;
-            return parts;
-        };
-        proto.getJsDocTags = function (_checker: any) {
-            if (this.__tnbJsDocTags) return this.__tnbJsDocTags;
-            const decl = resolveDocDeclaration(this.declaration);
-            if (!decl) return [];
-            let tags: any[] = [];
-            try {
-                tags = trimJsDocTagsTrailingNewlines(jsDocTagsFromDeclarations([decl]) ?? []);
-            }
-            catch { tags = []; }
-            if (tags.length) this.__tnbJsDocTags = tags;
-            return tags;
-        };
-    }
-
-    // ── SignatureFlags boundary remap ─────────────────────────────────
-    // Raw tsgo flags per remapped Signature, kept so the native-preview
-    // getters (hasRestParameter/isConstruct/isAbstract) can keep reading TSGO
-    // semantics after `flags` is rewritten to the fork layout. The WeakMap
-    // doubles as the already-remapped marker (registry memoizes instances, so
-    // a cache hit must not remap a second time).
-    const _sigRawFlags = new WeakMap<object, number>();
-
-    // All Signature instances funnel through
-    // ProjectObjectRegistry.getOrCreateSignature (single `new Signature` site
-    // in the native-preview bundle, memoized per registry). Wrapping that one
-    // method remaps every signature exactly once at creation. The registry
-    // class is not exported, so reach its prototype through a live instance.
-    function patchSignatureFlagsRemap(s: any, project: any): void {
-        const proc = tnbBridgeProcessState();
-        if (proc.sigFlagsRemapApplied) return;
-        const registry = project?.checker?.objectRegistry;
-        const registryProto = registry ? Object.getPrototypeOf(registry) : undefined;
-        const sigProto = s?.Signature?.prototype;
-        if (!registryProto?.getOrCreateSignature || !sigProto) return;
-        proc.sigFlagsRemapApplied = true;
-        const origGetOrCreateSignature = registryProto.getOrCreateSignature;
-        registryProto.getOrCreateSignature = function (this: any, data: any) {
-            const sig = origGetOrCreateSignature.call(this, data);
-            if (sig && typeof sig.flags === "number" && !_sigRawFlags.has(sig)) {
-                const raw = sig.flags as number;
-                _sigRawFlags.set(sig, raw);
-                sig.flags = remapSignatureFlags(raw);
-            }
-            return sig;
-        };
-        // The native-preview Signature getters read `this.flags` against the
-        // TSGO enum; keep them correct off the raw stored value.
-        const tsgoSF = loadTsgoEnums().SignatureFlags;
-        const rawFlagsOf = (self: any): number => _sigRawFlags.get(self) ?? self?.flags ?? 0;
-        for (const [getterName, bit] of [
-            ["hasRestParameter", tsgoSF.HasRestParameter],
-            ["isConstruct", tsgoSF.Construct],
-            ["isAbstract", tsgoSF.Abstract],
-        ] as const) {
-            Object.defineProperty(sigProto, getterName, {
-                configurable: true,
-                get(this: any) { return (rawFlagsOf(this) & (bit as number)) !== 0; },
-            });
-        }
-    }
-
-    // ── Nested wire handles → lazy registry-backed accessors ─────────
-    // The vendored TypeObject/Symbol constructors copy nested handles off the
-    // wire payload as raw ids (`type.target` is the literal 73, not the
-    // TypeObject with id 73). Stock semantics for those fields are object
-    // references (ts.TypeReference.target is a Type), and rule code reads the
-    // property directly — typescript-eslint's containsAllTypesByName does
-    // `if (isTypeReference(type)) type = type.target; type.getSymbol()`
-    // (issue #35). Resolving them in the adapter's fixup pass only covered
-    // types that crossed an adapter method; base types out of the vendored
-    // TypeObject.getBaseTypes() (and any other RPC-delivered type) leaked the
-    // raw ids. Convert at the single creation site instead: each raw handle
-    // becomes a lazy accessor that resolves through the id-keyed registry
-    // (so `type.target === anyOtherResultForTheSameId` holds), memoizes by
-    // redefining the property as a plain writable value, and costs no RPC
-    // unless a consumer actually reads the field — the eager pass it replaces
-    // paid one RPC per field per type up front. A failed resolution (stale
-    // snapshot under an edit) memoizes undefined/[]: stock property reads
-    // never throw, so neither do these.
-    const convertedWireObjects = new WeakSet<object>();
-
-    // [own property, registry fetch method] — method names mirror the
-    // vendored TypeObject getters (and the Go dispatcher).
-    const NESTED_TYPE_SINGLE: ReadonlyArray<readonly [string, string]> = [
-        ["target", "getTargetOfType"],
-        ["freshType", "getFreshTypeOfType"],
-        ["regularType", "getRegularTypeOfType"],
-        ["objectType", "getObjectTypeOfType"],
-        ["indexType", "getIndexedAccessIndexType"],
-        ["checkType", "getCheckTypeOfType"],
-        ["extendsType", "getExtendsTypeOfType"],
-        ["baseType", "getBaseTypeOfType"],
-        ["substConstraint", "getConstraintOfType"],
-    ];
-    const NESTED_TYPE_ARRAY: ReadonlyArray<readonly [string, string]> = [
-        ["typeParameters", "getTypeParametersOfType"],
-        ["outerTypeParameters", "getOuterTypeParametersOfType"],
-        ["localTypeParameters", "getLocalTypeParametersOfType"],
-        ["aliasTypeArguments", "getAliasTypeArgumentsOfType"],
-    ];
-
-    function memoizedOwnValue(obj: any, prop: string, value: any): any {
-        Object.defineProperty(obj, prop, { configurable: true, enumerable: true, writable: true, value });
-        return value;
-    }
-
-    function convertTypeWireShape(t: any): void {
-        if (convertedWireObjects.has(t)) return;
-        convertedWireObjects.add(t);
-        // ObjectFlags cross in the tsgo bit layout; fork consumers read the
-        // fork layout. Remap here (once per type) rather than per adapter
-        // pass, so types that never touch the adapter (getBaseTypes
-        // elements) get the same treatment.
-        if (typeof t.objectFlags === "number") t.objectFlags = remapObjectFlags(t.objectFlags);
-        const registry = t.objectRegistry;
-        if (!registry) return;
-        const descs: Record<string, PropertyDescriptor> = {};
-        for (const [prop, method] of NESTED_TYPE_SINGLE) {
-            const raw = t[prop];
-            if (typeof raw !== "number") continue;
-            descs[prop] = {
-                configurable: true,
-                enumerable: true,
-                get() {
-                    let resolved: any;
-                    try { resolved = registry.fetchType(t, method, raw); } catch { resolved = undefined; }
-                    if (resolved) fixupType(resolved);
-                    return memoizedOwnValue(t, prop, resolved);
-                },
-            };
-        }
-        for (const [prop, method] of NESTED_TYPE_ARRAY) {
-            const raw = t[prop];
-            if (!Array.isArray(raw)) continue;
-            if (raw.length === 0) {
-                // tsgo emits aliasTypeArguments: [] on reference/array types
-                // where stock leaves the property absent. Rule helpers
-                // (no-unnecessary-type-assertion's containsAny) branch on
-                // `type.aliasTypeArguments ?? checker.getTypeArguments(type)`
-                // — an empty array is truthy for ?? and suppresses the
-                // fallback, misclassifying any[]. Drop the empty slot; the
-                // other array props keep the wire [] (consumers and the
-                // field audit treat empty ≡ absent there).
-                if (prop === "aliasTypeArguments") delete t[prop];
-                continue;
-            }
-            if (typeof raw[0] !== "number") continue;
-            descs[prop] = {
-                configurable: true,
-                enumerable: true,
-                get() {
-                    let resolved: any[];
-                    try { resolved = registry.fetchTypes(t, method, raw); } catch { resolved = []; }
-                    for (const c of resolved) fixupType(c);
-                    return memoizedOwnValue(t, prop, resolved);
-                },
-            };
-        }
-        const aliasSym = t.aliasSymbol;
-        if (typeof aliasSym === "number") {
-            descs.aliasSymbol = {
-                configurable: true,
-                enumerable: true,
-                get() {
-                    let resolved: any;
-                    try { resolved = registry.fetchSymbol(t, "getAliasSymbolOfType", aliasSym); } catch { resolved = undefined; }
-                    return memoizedOwnValue(t, "aliasSymbol", resolved);
-                },
-            };
-        }
-        Object.defineProperties(t, descs);
-    }
-
-    function convertSymbolWireShape(sym: any): void {
-        if (convertedWireObjects.has(sym)) return;
-        convertedWireObjects.add(sym);
-        const raw = sym.exportSymbol;
-        if (typeof raw !== "number") return;
-        const registry = sym.objectRegistry;
-        if (!registry) return;
-        Object.defineProperty(sym, "exportSymbol", {
-            configurable: true,
-            enumerable: true,
-            get() {
-                let resolved: any;
-                try { resolved = registry.fetchSymbol(sym, "getExportSymbolOfSymbol", raw, sym.canonicalProject?.id); } catch { resolved = undefined; }
-                return memoizedOwnValue(sym, "exportSymbol", resolved);
-            },
-        });
-    }
-
-    // Wrap the two registry creation sites so every bridge object is
-    // converted no matter which RPC delivered it — one path, no reliance on
-    // consumers passing through an adapter method first. The registry
-    // classes are not exported; reach their prototypes through live
-    // instances (same pattern as patchSignatureFlagsRemap).
-    function patchRegistryWireShapes(project: any): void {
-        const proc = tnbBridgeProcessState();
-        if (proc.wireShapeWrapApplied) return;
-        const registry = project?.checker?.objectRegistry;
-        const registryProto = registry ? Object.getPrototypeOf(registry) : undefined;
-        const snapshotRegistryProto = registry?.snapshotRegistry ? Object.getPrototypeOf(registry.snapshotRegistry) : undefined;
-        if (!registryProto?.getOrCreateType || !snapshotRegistryProto?.getOrCreateSymbol) return;
-        proc.wireShapeWrapApplied = true;
-        const origGetOrCreateType = registryProto.getOrCreateType;
-        registryProto.getOrCreateType = function (this: any, data: any) {
-            const t = origGetOrCreateType.call(this, data);
-            if (t) convertTypeWireShape(t);
-            return t;
-        };
-        const origGetOrCreateSymbol = snapshotRegistryProto.getOrCreateSymbol;
-        snapshotRegistryProto.getOrCreateSymbol = function (this: any, data: any) {
-            const s = origGetOrCreateSymbol.call(this, data);
-            if (s) convertSymbolWireShape(s);
-            return s;
-        };
-    }
-
-    function patchSymbolProto(s: any): void {
-        if (symbolProtoPatched) return;
-        const SymbolCtor = s.Symbol;
-        if (!SymbolCtor?.prototype) return;
-        const proto = SymbolCtor.prototype;
-        symbolProtoPatched = true;
-        if (!proto.getName) proto.getName = function () { return this.name; };
-        if (!proto.getEscapedName) proto.getEscapedName = function () { return this.name; };
-        if (!proto.getFlags) proto.getFlags = function () { return this.flags; };
-        if (!proto.getDeclarations) proto.getDeclarations = function () { return this.declarations; };
-        if (!Object.getOwnPropertyDescriptor(proto, "escapedName")) {
-            Object.defineProperty(proto, "escapedName", { configurable: true, get() { return this.name; } });
-        }
-        // Stock EnumLike defaulting (tryGetValueFromType) reads `type.symbol.exports`
-        // as a Map and picks the first member via `.values()`. Bridge Symbol only
-        // exposes getExports(); materialize a Map lazily.
-        if (!Object.getOwnPropertyDescriptor(proto, "exports")) {
-            Object.defineProperty(proto, "exports", {
-                configurable: true,
-                get() {
-                    if (Object.prototype.hasOwnProperty.call(this, "__tnbExports")) return this.__tnbExports;
-                    try {
-                        const list = typeof this.getExports === "function" ? this.getExports() : undefined;
-                        // getExports() returns a ReadonlyMap already in the
-                        // checker's canonical (declaration) order — use it directly.
-                        if (list && typeof list.get === "function" && typeof list.values === "function") {
-                            this.__tnbExports = list.size ? list : undefined;
-                            return this.__tnbExports;
-                        }
-                        this.__tnbExports = undefined;
-                        return undefined;
-                    } catch {
-                        this.__tnbExports = undefined;
-                        return undefined;
-                    }
-                },
-            });
-        }
-        // Memoize Symbol.parent across repeated reads in one snapshot epoch.
-        // Covers confirmed-none (RPC null) so omitzero symbols pay one lazy
-        // getParentOfSymbol, not per-entry FFI. Invalidate on: parentHandle
-        // upgrade (ph key) or overlay content refresh (_tnbParentMemoEpoch).
-        // Soft-P′ instance data properties still shadow this getter.
-        // parentHandle===0 ("unfilled") stays lazy — do not seal undefined.
-        const parentDesc = Object.getOwnPropertyDescriptor(proto, "parent");
-        if (parentDesc?.get && !(parentDesc as any).__tnbParentMemo) {
-            const rawGet = parentDesc.get;
-            Object.defineProperty(proto, "parent", {
-                configurable: true,
-                enumerable: parentDesc.enumerable ?? true,
-                get() {
-                    const ph = this.parentHandle;
-                    if (
-                        Object.prototype.hasOwnProperty.call(this, "__tnbParentMemo")
-                        && this.__tnbParentMemoPh === ph
-                        && this.__tnbParentMemoEpoch === _tnbParentMemoEpoch
-                    ) {
-                        return this.__tnbParentMemo;
-                    }
-                    let result: any;
-                    try { result = rawGet.call(this); }
-                    catch { result = undefined; }
-                    try {
-                        Object.defineProperty(this, "__tnbParentMemo", {
-                            value: result,
-                            writable: true,
-                            configurable: true,
-                        });
-                        Object.defineProperty(this, "__tnbParentMemoPh", {
-                            value: ph,
-                            writable: true,
-                            configurable: true,
-                        });
-                        Object.defineProperty(this, "__tnbParentMemoEpoch", {
-                            value: _tnbParentMemoEpoch,
-                            writable: true,
-                            configurable: true,
-                        });
-                    }
-                    catch {
-                        this.__tnbParentMemo = result;
-                        this.__tnbParentMemoPh = ph;
-                        this.__tnbParentMemoEpoch = _tnbParentMemoEpoch;
-                    }
-                    return result;
-                },
-            });
-            (Object.getOwnPropertyDescriptor(proto, "parent") as any).__tnbParentMemo = true;
-        }
-
-        // Stock TransientSymbol carries `links.checkFlags`; getCheckFlags reads
-        // it whenever SymbolFlags.Transient is set. tsgo symbols expose raw
-        // `checkFlags` (bit layout audited identical) but no `links` object, so
-        // a Transient-flagged tsgo symbol flowing into stock services
-        // (find-all-refs fromRoot, SymbolDisplay getSymbolKind) would crash on
-        // `links.checkFlags`. Satisfy the contract at the prototype.
-        // Also provide lazy `links.type` → getTypeOfSymbol for inferFromUsage
-        // readback of materialized transient parameters (inferFromUsage.ts:1207).
-        if (!Object.getOwnPropertyDescriptor(proto, "links")) {
-            Object.defineProperty(proto, "links", {
-                configurable: true,
-                get() {
-                    if (this.__tnbLinks) return this.__tnbLinks;
-                    const self = this;
-                    const links: any = { checkFlags: this.checkFlags ?? 0 };
-                    Object.defineProperty(links, "type", {
-                        configurable: true,
-                        enumerable: true,
-                        get() {
-                            if (Object.prototype.hasOwnProperty.call(this, "_type")) return this._type;
-                            try {
-                                ensureProject();
-                                const t = rpc().getTypeOfSymbol(self);
-                                if (t) fixupType(t);
-                                this._type = t;
-                                return t;
-                            }
-                            catch {
-                                return undefined;
-                            }
-                        },
-                        set(v: any) {
-                            this._type = v;
-                        },
-                    });
-                    this.__tnbLinks = links;
-                    return links;
-                },
-            });
-        }
-        // tsgo Symbol.getDocumentationComment returns plain text from RPC; stock TS
-        // and vue-component-meta expect SymbolDisplayPart[] via displayPartsToString.
-        // Resolution order: (1) genuine host AST declarations -> stock JSDoc parser
-        // (authoritative for host/.vue virtual symbols); (2) tsgo-backed symbol
-        // (id>0) -> native checker RPC (authoritative for tsgo symbols); (3) last
-        // resort, resolve a tsgo declaration handle and parse its JSDoc. Each step
-        // only "wins" on a non-empty result so a barren host node still falls
-        // through to the RPC for hybrid symbols carrying both.
-        proto.getDocumentationComment = function (checker: any) {
-            const decls = this.declarations ?? (this.valueDeclaration ? [this.valueDeclaration] : undefined);
-            if (decls?.length && isHostSyntaxNode(decls[0])) {
-                try {
-                    const parts = jsDocCommentsFromDeclarations(decls) ?? [];
-                    if (parts.length) return parts;
-                }
-                catch { /* fall through */ }
-            }
-            if (typeof this.id === "number" && this.id > 0 && checker?.getDocumentationCommentOfSymbol) {
-                try {
-                    const text = checker.getDocumentationCommentOfSymbol(this);
-                    const parts = displayPartsFromDocText(typeof text === "string" ? text : "");
-                    if (parts.length) return parts;
-                }
-                catch { /* fall through */ }
-            }
-            if (decls?.length) {
-                const decl = resolveDocDeclaration(decls[0]);
-                if (decl) {
-                    try {
-                        return jsDocCommentsFromDeclarations([decl]) ?? [];
-                    }
-                    catch { /* empty */ }
-                }
-            }
-            return [];
-        };
-        if (!proto.getContextualDocumentationComment) {
-            proto.getContextualDocumentationComment = function (context: any) {
-                try {
-                    const parts = this.getDocumentationComment?.(context?.checker ?? context);
-                    if (Array.isArray(parts)) return parts;
-                } catch {
-                    // fall through
-                }
-                return [];
-            };
-        }
-        if (!proto.getContextualJsDocTags) {
-            proto.getContextualJsDocTags = function (context: any) {
-                try {
-                    const tags = this.getJsDocTags?.(context?.checker ?? context);
-                    if (Array.isArray(tags)) return tags;
-                } catch {
-                    // fall through
-                }
-                return [];
-            };
-        }
-        proto.getJsDocTags = function (checker: any) {
-            const decls = this.declarations ?? (this.valueDeclaration ? [this.valueDeclaration] : undefined);
-            if (decls?.length && isHostSyntaxNode(decls[0])) {
-                try {
-                    const tags = jsDocTagsFromDeclarations(decls) ?? [];
-                    if (tags.length) return tags;
-                }
-                catch { /* fall through */ }
-            }
-            if (typeof this.id === "number" && this.id > 0 && checker?.getJsDocTagsOfSymbol) {
-                try {
-                    const tags = trimJsDocTagsTrailingNewlines(checker.getJsDocTagsOfSymbol(this) ?? []);
-                    if (tags.length) return tags;
-                }
-                catch { /* fall through */ }
-            }
-            if (decls?.length) {
-                const decl = resolveDocDeclaration(decls[0]);
-                if (decl) {
-                    try {
-                        return trimJsDocTagsTrailingNewlines(jsDocTagsFromDeclarations([decl]) ?? []);
-                    }
-                    catch { /* empty */ }
-                }
-            }
-            return [];
-        };
-    }
-
-    // Raw nested wire handles (type.target = id 73, not the TypeObject) and
-    // the tsgo-layout objectFlags are converted at the registry creation site
-    // (patchRegistryWireShapes → convertTypeWireShape), so every TypeObject is
-    // already stock-shaped here no matter which RPC delivered it — including
-    // the getBaseTypes()/getTarget() results that never pass an adapter method
-    // (issue #35). What remains per adapter pass is the prototype hook.
-    function fixupType(t: any): any {
-        if (Array.isArray(t)) { for (const i of t) fixupType(i); return t; }
-        if (t && typeof t === "object") patchTypeProto(t, sync);
-        return t;
-    }
-
     // ── Caches ───────────────────────────────────────────────────────
     const nodeTypeCache = new Map<any, any>();
     const typeOfSymbolCache = new Map<any, any>();
@@ -10213,16 +10260,6 @@ export function createTsgoChecker(program: any): any {
         cache.set(key, v);
         return v;
     };
-
-    // Cross-project routing: a bridge TypeObject/Signature knows its producing
-    // project via its (private) objectRegistry. With several configured
-    // projects in one tsserver session, _currentProjectRef may point at a
-    // sibling project whose Go-side registry doesn't own this handle — the RPC
-    // then dies with "type handle N not found in project registry". Prefer the
-    // object's own project when it exposes one.
-    function projectForBridgeObject(obj: any): any {
-        return obj?.objectRegistry?.project;
-    }
 
     // ── Object-literal completion batch ──────────────────────────────
     // Stock Completions.getPropertiesForObjectExpression makes O(3N) checker
@@ -13272,6 +13309,11 @@ export function createTsgoChecker(program: any): any {
         },
         has(target: any, p) { return p in target; },
     });
+    // Stash on the tsgo project so module-level prototype hooks route
+    // stock-API calls on wire objects to this checker without capturing its
+    // generation scope (checkerForBridgeObject). Island-internal: the proxy
+    // closes over the adapter, which closes over this project.
+    project.__tnbTypeChecker = checkerProxyRef;
     return checkerProxyRef;
 }
 
