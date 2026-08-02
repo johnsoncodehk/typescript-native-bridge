@@ -127,7 +127,7 @@ the [differences from tsgo](#behavior-and-differences-from-tsgo)).
 | Tool | Status | Verified on |
 |---|---|---|
 | `tsc` | ✅ | compiler test corpus |
-| `vue-tsc` | ✅ | elk.zone monorepo (~2,000 files): **emitted-error parity** with stock, ~1.8× faster |
+| `vue-tsc` | ✅ | elk.zone monorepo (~2,000 files): **emitted-error parity** with stock, ~3× faster |
 | `astro-check` | ✅ | fixture project: output identical to stock |
 | `svelte-check` | ✅ | fixture project: output identical to stock (incl. `svelteHTML` ambient shims) |
 | `glint` | ✅ | fixture project: same error set as stock (transformed `.gts` virtual files) |
@@ -161,10 +161,10 @@ Measured on this repo's benchmarks (Apple Silicon; your repo will differ — mea
 
 | Workload | Stock `typescript` | TNB | |
 |---|---|---|---|
-| `vue-tsc -b` full check (elk.zone, ~2,000 files) | 9.2s | **5.2s** | ~1.8× |
-| type-aware ESLint, single-run (1,000 plain-TS files, one program) | 2.1s | 2.4s | +13% |
-| same, 3,000 files | 6.9s | 7.4s | +6.4% |
-| JS heap peak (1,000-file ESLint fixture) | 762MB | 634MB | −17% |
+| `vue-tsc -b` full check (elk.zone, ~2,000 files) | 9.7s | **3.2s** | ~3× |
+| type-aware ESLint, single-run (1,000 plain-TS files, one program) | 2.3s | 2.4s | +1.5% |
+| same, 3,000 files | 6.9s | 6.8s | ~parity |
+| JS heap peak (1,000-file ESLint fixture) | 769MB | 631MB | −18% |
 | peak RSS, whole-process (vue-tsc -b; TNB's includes the in-process Go checker) | 1.8GB | 3.3GB | ~1.9× — structural |
 
 **The rule is simple: wherever the time is in the checker, TNB is faster.** The
@@ -172,9 +172,10 @@ question for any workload is how much of its time that phase is — and how much
 it pays the JS↔Go boundary instead.
 
 **`vue-tsc -b` (checker-dominated — the big win):** the whole-program semantic
-pass drops from ~5.7s (JS checker) to ~2.6s (Go checker, incl. per-file
-batches); the rest is Volar codegen and JS-side work both sides pay (~3.5s vs
-~2.6s). The Go checker's in-process program state is also why TNB's whole-process
+pass drops from ~5.5s (JS checker) to ~1.5s (Go checker), and most of stock's
+~2.6s full-program parse+bind never happens — TNB's thin program materializes
+files lazily, on demand. The rest is Volar codegen and JS-side work both sides
+pay. The Go checker's in-process program state is also why TNB's whole-process
 RSS runs higher than stock's on this workload — JS heap stays lower; RSS is the
 honest whole-process figure.
 
@@ -191,10 +192,9 @@ editor-facing tsserver wire.
 gain.** Its time is in parsing, AST conversion and rule execution (work both
 sides pay), and its type-aware queries arrive as tens of thousands of tiny calls
 (~44K checker RPCs per 1,000 files after the bridge's per-generation memoizing)
-that measure the JS↔Go boundary, not the engine. TNB lands within ~13% of stock
-at 1,000 files and ~6% at 3,000 — near parity, not a win; peak JS heap stays at
-or below stock. The memory wins live on the long-session editor path (see
-release notes).
+that measure the JS↔Go boundary, not the engine. TNB lands within ~2% of stock
+at both sizes — parity, not a win; peak JS heap stays at or below stock. The
+memory wins live on the long-session editor path (see release notes).
 
 ---
 
