@@ -1,17 +1,29 @@
 #!/usr/bin/env node
 /**
- * Determinism witness for issue #42: the session's whole-program
- * diagnostics pass distributed files to checker-pool slots by goroutine
- * queue pickup, so checker-local lazy state (merged global heritage
- * resolution, report dedup) varied run to run — TS2430 blame landed on a
- * varying subset of `interface Window` augmentation sites across identical
- * programs (2–4 of ~8 sites over 30 runs pre-fix; one run even reported
- * none). The fix assigns files to checker groups by index stride, mirroring
- * the compiler pool's fileAssociations — output is now byte-identical
- * across runs and content-identical to plain tsgo on this fixture.
+ * Determinism witness for issue #51 (residual of #42): the whole-program
+ * diagnostics stride pass released each group's checker at group end, and
+ * the pool prefers an existing idle slot — so a fast group plus a goroutine
+ * startup skew let one warm checker serve two groups. Checker-local lazy
+ * state (`interfaceChecked` on merged globals) then carried across groups:
+ * the second group's first `interface Window` augmentation saw the gate
+ * already set and its TS2430 blame site was silently dropped (~1/300 fresh
+ * runs; 1 of 2 sites here, 3 of 4 on the original #42 fixture). The fix
+ * defers all group releases until after `wg.RunAndWait()`, so no slot goes
+ * idle mid-pass and group↔slot pairing is 1:1 by construction.
+ *
+ * Fixture is the minimal flake shape: 5 checkable files is the floor (4
+ * would take the smallProgramCheckerThreshold single-checker path, immune
+ * by construction), with two `Window`-declaring files landing in different
+ * stride groups. 4 runs at natural scheduling + 12 with GOMAXPROCS=1 in
+ * the spawn env — serializing the group goroutines opens the
+ * release-before-lease window on nearly every pre-fix run, so teeth do not
+ * depend on winning a ~1/300 scheduling race.
  *
  * Runs `lib/_tsc.js --noEmit` on a self-contained fixture in fresh
- * processes and requires byte-identical error output.
+ * processes and requires byte-identical error output containing exactly
+ * both expected TS2430 sites — the surviving-site mode varies (either
+ * augmentation can be the one dropped), so a bare count would not catch a
+ * stably-wrong output.
  *
  * Exit: 0 = PASS, 1 = FAIL.
  */
@@ -22,57 +34,44 @@ import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const RUNS = 20;
+const NATURAL_RUNS = 4;
+const FORCED_RUNS = 12; // with GOMAXPROCS=1
+const RUNS = NATURAL_RUNS + FORCED_RUNS;
 
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'tnb-diag-determinism-'));
-fs.mkdirSync(path.join(dir, 'node_modules', '@nuxt', 'scripts', 'dist'), { recursive: true });
-fs.mkdirSync(path.join(dir, 'declarations'));
-fs.mkdirSync(path.join(dir, 'composables'));
 
-fs.writeFileSync(path.join(dir, 'node_modules', '@nuxt', 'scripts', 'package.json'),
-	JSON.stringify({ name: '@nuxt/scripts', version: '0.0.0', types: './dist/index.d.ts' }));
-fs.writeFileSync(path.join(dir, 'node_modules', '@nuxt', 'scripts', 'dist', 'index.d.ts'),
-	`interface DataLayerPush { (...args: unknown[]): void }
-interface DataLayer extends Array<unknown> {}
-export interface GoogleTagManagerApi { dataLayer: DataLayer & { push: DataLayerPush } }
+fs.writeFileSync(path.join(dir, 'a-base.ts'),
+	`interface GTM { dataLayer: string }
 declare global {
-	interface Window extends GoogleTagManagerApi {}
+	interface Window extends GTM {}
 }
 export {};
 `);
-fs.writeFileSync(path.join(dir, 'declarations', 'global.ts'),
-	`interface FirstPartyGtm { gtm: { start: number } }
-declare global {
-	interface Window extends FirstPartyGtm {
-		firstParty: string;
-	}
+fs.writeFileSync(path.join(dir, 'b-conflict.ts'),
+	`declare global {
+	interface Window { dataLayer: number }
 }
 export {};
 `);
-fs.writeFileSync(path.join(dir, 'composables', 'useRiskSession.ts'),
-	`interface RiskSessionApi { risk: { session: string } }
-declare global {
-	interface Window extends RiskSessionApi {}
+for (const n of ['c', 'd', 'e']) {
+	fs.writeFileSync(path.join(dir, `${n}-pad.ts`), `export const x${n}: number = 1;\n`);
 }
-export function useRiskSession(): string { return window.risk.session; }
-`);
-for (const n of ['a', 'b', 'c', 'd']) {
-	fs.writeFileSync(path.join(dir, 'declarations', `more-${n}.ts`),
-		`declare global {\n\tinterface Window { extra${n}: number }\n}\nexport {};\n`);
-}
-fs.writeFileSync(path.join(dir, 'declarations', 'conflict.ts'),
-	`declare global {\n\tinterface Window { dataLayer: string[] }\n}\nexport {};\n`);
-fs.writeFileSync(path.join(dir, 'main.ts'), `import '@nuxt/scripts';\nexport const x: number = 1;\n`);
 fs.writeFileSync(path.join(dir, 'tsconfig.json'), JSON.stringify({
-	compilerOptions: { strict: true, noEmit: true, module: 'esnext', moduleResolution: 'bundler', target: 'es2022', types: [] },
+	compilerOptions: { strict: true, noEmit: true, skipLibCheck: true, module: 'esnext', moduleResolution: 'bundler', target: 'es2022', types: [] },
 	include: ['**/*.ts'],
 }));
+
+const EXPECTED_SITES = [
+	`a-base.ts(3,12): error TS2430: Interface 'Window' incorrectly extends interface 'GTM'.`,
+	`b-conflict.ts(2,12): error TS2430: Interface 'Window' incorrectly extends interface 'GTM'.`,
+];
 
 const outputs = new Map();
 for (let i = 0; i < RUNS; i++) {
 	const r = spawnSync(process.execPath, [path.join(repoRoot, 'lib', '_tsc.js'), '--noEmit', '-p', 'tsconfig.json'], {
 		cwd: dir,
 		encoding: 'utf8',
+		env: i < NATURAL_RUNS ? process.env : { ...process.env, GOMAXPROCS: '1' },
 	});
 	if (r.error) {
 		console.error(`FAIL: run ${i} spawn error: ${r.error.message}`);
@@ -95,9 +94,11 @@ if (outputs.size !== 1) {
 	process.exit(1);
 }
 const body = [...outputs.keys()][0];
-const ts2430Sites = body.split('\n').filter(l => l.includes('TS2430')).length;
-if (ts2430Sites === 0) {
-	console.error('FAIL: fixture lost its TS2430s — witness no longer exercises the class');
+const bodyLines = body.split('\n');
+const ts2430Sites = bodyLines.filter(l => l.includes('TS2430')).length;
+const missing = EXPECTED_SITES.filter(l => !bodyLines.includes(l));
+if (missing.length > 0 || ts2430Sites !== EXPECTED_SITES.length) {
+	console.error(`FAIL: expected exactly these ${EXPECTED_SITES.length} TS2430 sites:\n${EXPECTED_SITES.join('\n')}\n── got (${ts2430Sites} sites):\n${body}`);
 	process.exit(1);
 }
-console.log(`PASS: byte-identical diagnostics over ${RUNS} fresh runs (${ts2430Sites} TS2430 sites)`);
+console.log(`PASS: byte-identical diagnostics over ${RUNS} fresh runs (${NATURAL_RUNS} natural + ${FORCED_RUNS} GOMAXPROCS=1, ${ts2430Sites} TS2430 sites)`);

@@ -1760,7 +1760,7 @@ index 5817fc6bb..698abd084 100644
  				missingFiles = append(missingFiles, task.normalizedFilePath)
  				continue
 diff --git a/internal/compiler/program.go b/internal/compiler/program.go
-index 74b2504d9..5621c4657 100644
+index 74b2504d9..490d5ea10 100644
 --- a/internal/compiler/program.go
 +++ b/internal/compiler/program.go
 @@ -116,6 +116,30 @@ type Program struct {
@@ -1844,7 +1844,7 @@ index 74b2504d9..5621c4657 100644
  // collectCheckerDiagnosticsFromFiles collects checker diagnostics for a list of files.
  func (p *Program) collectCheckerDiagnosticsFromFiles(ctx context.Context, sourceFiles []*ast.SourceFile, collect func(context.Context, *checker.Checker, *ast.SourceFile) []*ast.Diagnostic) [][]*ast.Diagnostic {
  	diagnostics := make([][]*ast.Diagnostic, len(sourceFiles))
-@@ -585,14 +629,92 @@ func (p *Program) collectCheckerDiagnosticsFromFiles(ctx context.Context, source
+@@ -585,18 +629,108 @@ func (p *Program) collectCheckerDiagnosticsFromFiles(ctx context.Context, source
  			diagnostics[fileIndex] = collect(ctx, c, file)
  		})
  	} else {
@@ -1895,18 +1895,23 @@ index 74b2504d9..5621c4657 100644
 +		// symmetric) as long as no slot serves two groups, so groups never
 +		// exceed the pool's query slots. The whole-program pass runs before
 +		// query traffic on the paths that reach it (one-shot tsc/build,
-+		// fresh snapshot), so the slots are free and pair 1:1.
++		// fresh snapshot), so the slots are free at pass start — and with
++		// releases deferred past RunAndWait (below, issue #51) no slot goes
++		// idle mid-pass, so the 1:1 pairing is guaranteed rather than
++		// scheduling-dependent.
 +		groupCount := 4
 +		if qp, ok := p.checkerPool.(interface{ QueryCheckerSlots() int }); ok {
 +			groupCount = qp.QueryCheckerSlots()
 +		}
 +		groups := min(groupCount, len(checkable))
 +		wg := core.NewWorkGroup(p.SingleThreaded())
++		dones := make([]func(), groups)
 +		for g := 0; g < groups; g++ {
 +			g := g
  			wg.Queue(func() {
 -				c, done := p.checkerPool.GetChecker(ctx, file)
 -				diagnostics[i] = collect(ctx, c, file)
+-				done()
 +				c, done := p.checkerPool.GetChecker(ctx, nil)
 +				// The nil lease names no file, so without this the group's
 +				// files keep no file→checker affinity — queue pickup used to
@@ -1939,9 +1944,21 @@ index 74b2504d9..5621c4657 100644
 +					}
 +					diagnostics[i] = collect(ctx, c, sourceFiles[i])
 +				}
- 				done()
++				dones[g] = done
  			})
  		}
+ 		wg.RunAndWait()
++		// Releases happen only after every group has leased and finished:
++		// the pool prefers an idle slot, so a checker released mid-pass
++		// could be re-leased by a later-scheduled group, carrying its
++		// checker-local lazy state (merged-global interfaceChecked gates)
++		// across groups and silently dropping that group's blame sites.
++		for _, done := range dones {
++			done()
++		}
+ 	}
+ 	return diagnostics
+ }
 diff --git a/internal/execute/incremental/programtosnapshot.go b/internal/execute/incremental/programtosnapshot.go
 index 44b9b4cbc..0a8aafd0d 100644
 --- a/internal/execute/incremental/programtosnapshot.go
