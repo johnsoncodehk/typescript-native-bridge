@@ -4,11 +4,10 @@
 
 import fs from "node:fs";
 import path from "node:path";
+import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const overlay = path.join(root, "patches/typescript/overlay/src/compiler/tsgoChecker.ts");
-const submodule = path.join(root, "typescript/src/compiler/tsgoChecker.ts");
 const libTs = path.join(root, "lib/typescript.js");
 const libTsc = path.join(root, "lib/_tsc.js");
 
@@ -18,14 +17,55 @@ function fail(msg) {
 	errors.push(msg);
 }
 
-// 1. overlay applied to submodule
-if (!fs.existsSync(overlay)) {
-	fail(`missing overlay: ${path.relative(root, overlay)}`);
-} else if (!fs.existsSync(submodule)) {
-	fail(`missing submodule source: ${path.relative(root, submodule)} (run npm run patch:ts)`);
-} else if (fs.readFileSync(overlay, "utf8") !== fs.readFileSync(submodule, "utf8")) {
-	fail("typescript/src/compiler/tsgoChecker.ts differs from patches/typescript/overlay/ — run npm run patch:ts");
+function walkFiles(dir, rel = "") {
+	const out = [];
+	const abs = path.join(dir, rel);
+	if (!fs.existsSync(abs)) return out;
+	for (const e of fs.readdirSync(abs, { withFileTypes: true })) {
+		const childRel = rel ? path.posix.join(rel, e.name) : e.name;
+		if (e.isDirectory()) out.push(...walkFiles(dir, childRel));
+		else out.push(childRel);
+	}
+	return out;
 }
+
+// 1. overlay applied to submodule: every file under patches/<sub>/overlay/
+// mirrors a submodule-relative path (same rule for both submodules) and must
+// be byte-identical to it — saveOverlay copies net-new submodule files into
+// the overlay, so this is the gate that patch:ts / patch:tsgo actually ran.
+function checkOverlaySync(subName, patchScript) {
+	const overlayDir = path.join(root, "patches", subName, "overlay");
+	const subDir = path.join(root, subName);
+	if (!fs.existsSync(overlayDir)) {
+		fail(`missing overlay dir: ${path.relative(root, overlayDir)}`);
+		return;
+	}
+	const rels = walkFiles(overlayDir).sort();
+	for (const rel of rels) {
+		const overlayFile = path.join(overlayDir, rel);
+		const subFile = path.join(subDir, rel);
+		if (!fs.existsSync(subFile)) {
+			fail(`${subName}/${rel}: overlay file missing from submodule — run npm run ${patchScript}`);
+		} else if (!fs.readFileSync(overlayFile).equals(fs.readFileSync(subFile))) {
+			fail(`${subName}/${rel} differs from patches/${subName}/overlay/${rel} — run npm run ${patchScript}`);
+		}
+	}
+}
+
+// 1.5 no staged changes inside either submodule: save flows diff against HEAD
+// (patch-common.js), so anything staged would be silently dropped from the
+// saved patches. Surface it here instead of losing it at save time.
+function checkNoStaged(subName) {
+	const st = spawnSync("git", ["-C", path.join(root, subName), "diff", "--cached", "--quiet"], { encoding: "utf8" });
+	if (st.status !== 0) {
+		fail(`${subName}/: staged changes present — save-patches diffs against HEAD and would silently drop them; unstage first (git restore --staged .)`);
+	}
+}
+
+checkOverlaySync("typescript", "patch:ts");
+checkOverlaySync("typescript-go", "patch:tsgo");
+checkNoStaged("typescript");
+checkNoStaged("typescript-go");
 
 // 2. lib bundles exist and share the same banner shape (compiled JS uses \u escapes)
 const stale = ["1;42;30", '\\u2501".repeat(56)', '\\u2500".repeat(inner)', '\\u2514" + "\\u2500"', '\\x1B[32m', '\\u2705', '>>  TNB'];
@@ -71,6 +111,14 @@ for (const lib of [libTs, libTsc]) {
 	if (text.includes("bridge.node") && !text.includes("asyncpreemptoff=1")) {
 		fail(`${path.relative(root, lib)}: has bridge loader but no GODEBUG asyncpreemptoff guard — stale build, run npm run build:lib`);
 	}
+}
+
+// 2.75 lib shims: patch-lib-shims.js must have run. bin/tsc and bin/tsserver
+// require lib/tnb-godebug.js as their first line, so its absence crashes the
+// CLI after a plain build:ts. build:ts carries the shim step (package.json),
+// so this is a gate that the build produced shims, not a manual-copy check.
+if (!fs.existsSync(path.join(root, "lib", "tnb-godebug.js"))) {
+	fail("missing lib/tnb-godebug.js — run npm run build:ts (or build:lib) so the lib shims are produced");
 }
 
 // 3. both bundles carry the same dimmed one-line banner (not divergent hand patches)
@@ -125,4 +173,4 @@ if (errors.length) {
 	process.exit(1);
 }
 
-console.log("check:lib-sync ok (overlay, submodule, lib/typescript.js, lib/_tsc.js, bundled libs)");
+console.log("check:lib-sync ok (overlay↔submodule both dirs, lib shims, lib/typescript.js, lib/_tsc.js, bundled libs, no staged)");

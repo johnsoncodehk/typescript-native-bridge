@@ -34,7 +34,7 @@ savePatch(subDir, path.join(patchDir, "0001-bridge-inplace.patch"), [
 ]);
 
 function saveSingleFilePatch(rel, patchName) {
-	const diff = git(["diff", "--", rel]);
+	const diff = git(["diff", "HEAD", "--", rel]);
 	if (diff.status !== 0) {
 		console.error(`save: git diff ${rel} failed\n` + diff.stderr);
 		process.exit(1);
@@ -45,7 +45,7 @@ function saveSingleFilePatch(rel, patchName) {
 }
 
 function saveFilesPatch(rels, patchName) {
-	const diff = git(["diff", "--", ...rels]);
+	const diff = git(["diff", "HEAD", "--", ...rels]);
 	if (diff.status !== 0) {
 		console.error(`save: git diff ${rels.join(" ")} failed\n` + diff.stderr);
 		process.exit(1);

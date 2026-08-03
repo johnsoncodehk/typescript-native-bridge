@@ -6168,7 +6168,7 @@ index 0917c385d..b4c8ee8be 100644
  type GetProjectDiagnosticsParams struct {
  	Snapshot SnapshotID `json:"snapshot"`
 diff --git a/internal/api/session.go b/internal/api/session.go
-index 7e29c44b6..a67798cfe 100644
+index 7e29c44b6..6aca1003d 100644
 --- a/internal/api/session.go
 +++ b/internal/api/session.go
 @@ -3,6 +3,7 @@ package api
@@ -11228,24 +11228,23 @@ index 7e29c44b6..a67798cfe 100644
 -
 -	if params.Index < 0 {
 -		return nil, fmt.Errorf("%w: invalid parameter index", ErrClientError)
--	}
--
--	t := setup.checker.GetTypeAtPosition(sig, int(params.Index))
--	if t == nil {
--		return nil, nil
 +	typeParameters, err := setup.resolveTypeHandles(params.TypeParameters)
 +	if err != nil {
 +		return nil, err
  	}
 -
--	return setup.newTypeResponse(t), nil
+-	t := setup.checker.GetTypeAtPosition(sig, int(params.Index))
+-	if t == nil {
+-		return nil, nil
 +	var thisParameter *ast.Symbol
 +	if params.ThisParameter != 0 {
 +		thisParameter, err = setup.resolveSymbolHandle(params.ThisParameter)
 +		if err != nil {
 +			return nil, err
 +		}
-+	}
+ 	}
+-
+-	return setup.newTypeResponse(t), nil
 +	sig := setup.checker.CreateSignatureFromParts(
 +		parameters,
 +		returnType,
@@ -11600,7 +11599,7 @@ index 7e29c44b6..a67798cfe 100644
  		return nil, err
  	}
 -	defer setup.done()
--
+ 
 -	unknown, _ := setup.sd.registerSymbol(setup.checker.GetUnknownSymbol(), setup.projectID)
 -	undefined, _ := setup.sd.registerSymbol(setup.checker.GetUndefinedSymbol(), setup.projectID)
 -	arguments, _ := setup.sd.registerSymbol(setup.checker.GetArgumentsSymbol(), setup.projectID)
@@ -11610,7 +11609,7 @@ index 7e29c44b6..a67798cfe 100644
 -		Arguments: arguments,
 -	}, nil
 -}
- 
+-
 -// handleIsContextSensitive returns whether a node is context-sensitive.
 -func (s *Session) handleIsContextSensitive(ctx context.Context, params *GetContextualTypeParams) (bool, error) {
 -	setup, err := s.setupChecker(ctx, params.Snapshot, params.Project)
@@ -12068,7 +12067,19 @@ index 7e29c44b6..a67798cfe 100644
  				if changes.ChangedProjects == nil {
  					changes.ChangedProjects = make(map[ProjectID]*ProjectFileChanges)
  				}
-@@ -2858,6 +6471,11 @@ func (s *Session) Close() {
+@@ -2853,11 +6466,23 @@ func computeSnapshotChanges(prev *project.Snapshot, next *project.Snapshot) *Sna
+ // Close closes the session and releases all active snapshots,
+ // regardless of their ref counts.
+ func (s *Session) Close() {
++	// Drop the arena first: the JS side frees the V8-allocated buffer when it
++	// disposes the session, so a Close that kept s.arena would leave a dangling
++	// pointer into freed memory for the session's lifetime. All calls are
++	// synchronous on the JS thread, so a plain nil assignment cannot race a
++	// handler; SetArena reinstalls if the session were ever reused.
++	s.arena = nil
++
+ 	s.releaseOpenRefs()
+ 
  	s.snapshotsMu.Lock()
  	defer s.snapshotsMu.Unlock()
  	for handle, sd := range s.snapshots {
@@ -12080,7 +12091,7 @@ index 7e29c44b6..a67798cfe 100644
  		sd.snapshot.Deref(s.projectSession)
  		delete(s.snapshots, handle)
  	}
-@@ -2979,7 +6597,6 @@ func (s *Session) handleGetBindDiagnostics(ctx context.Context, params *GetDiagn
+@@ -2979,7 +6604,6 @@ func (s *Session) handleGetBindDiagnostics(ctx context.Context, params *GetDiagn
  
  // handleGetSemanticDiagnostics returns semantic diagnostics for a file or all files.
  func (s *Session) handleGetSemanticDiagnostics(ctx context.Context, params *GetDiagnosticsParams) ([]*DiagnosticResponse, error) {
@@ -12088,7 +12099,7 @@ index 7e29c44b6..a67798cfe 100644
  	sd, err := s.getSnapshotData(params.Snapshot)
  	if err != nil {
  		return nil, err
-@@ -2995,10 +6612,162 @@ func (s *Session) handleGetSemanticDiagnostics(ctx context.Context, params *GetD
+@@ -2995,10 +6619,162 @@ func (s *Session) handleGetSemanticDiagnostics(ctx context.Context, params *GetD
  		return nil, err
  	}
  
@@ -12251,7 +12262,7 @@ index 7e29c44b6..a67798cfe 100644
  // handleGetSuggestionDiagnostics returns suggestion diagnostics for a file or all files.
  func (s *Session) handleGetSuggestionDiagnostics(ctx context.Context, params *GetDiagnosticsParams) ([]*DiagnosticResponse, error) {
  	ctx = core.WithCheckerLifetime(ctx, core.CheckerLifetimeDiagnostics)
-@@ -3077,7 +6846,6 @@ func (s *Session) handleGetProgramDiagnostics(ctx context.Context, params *GetPr
+@@ -3077,7 +6853,6 @@ func (s *Session) handleGetProgramDiagnostics(ctx context.Context, params *GetPr
  
  // handleGetGlobalDiagnostics returns global (non-file-specific) semantic diagnostics.
  func (s *Session) handleGetGlobalDiagnostics(ctx context.Context, params *GetProjectDiagnosticsParams) ([]*DiagnosticResponse, error) {
@@ -12259,7 +12270,7 @@ index 7e29c44b6..a67798cfe 100644
  	sd, err := s.getSnapshotData(params.Snapshot)
  	if err != nil {
  		return nil, err
-@@ -3094,11 +6862,27 @@ func (s *Session) handleGetGlobalDiagnostics(ctx context.Context, params *GetPro
+@@ -3094,11 +6869,27 @@ func (s *Session) handleGetGlobalDiagnostics(ctx context.Context, params *GetPro
  	}
  
  	// Global diagnostics are accumulated lazily by the project's checker pool as
@@ -12292,7 +12303,7 @@ index 7e29c44b6..a67798cfe 100644
  
  	diags := core.Filter(proj.GetProjectDiagnostics(ctx), func(d *ast.Diagnostic) bool {
  		return d.File() == nil
-@@ -3143,7 +6927,7 @@ func (s *Session) handleGetReferencesToSymbolInFile(ctx context.Context, params
+@@ -3143,7 +6934,7 @@ func (s *Session) handleGetReferencesToSymbolInFile(ctx context.Context, params
  	nodes := setup.checker.GetReferencesToSymbolInFile(sourceFile, symbol)
  	result := make([]NodeHandle, len(nodes))
  	for i, node := range nodes {
@@ -12301,7 +12312,7 @@ index 7e29c44b6..a67798cfe 100644
  	}
  	return result, nil
  }
-@@ -3179,10 +6963,10 @@ func (s *Session) handleGetSignatureUsages(ctx context.Context, params *GetSigna
+@@ -3179,10 +6970,10 @@ func (s *Session) handleGetSignatureUsages(ctx context.Context, params *GetSigna
  	result := make([]SignatureUsageResponse, 0, len(usages))
  	for _, u := range usages {
  		entry := SignatureUsageResponse{
@@ -12314,7 +12325,7 @@ index 7e29c44b6..a67798cfe 100644
  		}
  		result = append(result, entry)
  	}
-@@ -3206,29 +6990,72 @@ func (s *Session) handleGetCompletionsAtPosition(ctx context.Context, params *Ge
+@@ -3206,29 +6997,72 @@ func (s *Session) handleGetCompletionsAtPosition(ctx context.Context, params *Ge
  	if sourceFile == nil {
  		return nil, nil
  	}
@@ -12399,7 +12410,7 @@ index 7e29c44b6..a67798cfe 100644
  			entry.LabelDetails = &CompletionEntryLabelDetailsResponse{
  				Detail:      item.LabelDetails.Detail,
  				Description: item.LabelDetails.Description,
-@@ -3237,12 +7064,62 @@ func (s *Session) handleGetCompletionsAtPosition(ctx context.Context, params *Ge
+@@ -3237,12 +7071,62 @@ func (s *Session) handleGetCompletionsAtPosition(ctx context.Context, params *Ge
  		if item.Symbol != nil {
  			entry.Symbol = sd.newSymbolResponse(item.Symbol, params.Project)
  		}
@@ -12466,7 +12477,7 @@ index 7e29c44b6..a67798cfe 100644
  }
  
  // handleGetReferencedSymbolsForNode returns node handles for all references found at a node.
-@@ -3284,11 +7161,11 @@ func (s *Session) handleGetReferencedSymbolsForNode(ctx context.Context, params
+@@ -3284,11 +7168,11 @@ func (s *Session) handleGetReferencedSymbolsForNode(ctx context.Context, params
  		var refs []NodeHandle
  		for _, ref := range entry.References() {
  			if ref.IsNodeEntry() {
@@ -12480,7 +12491,7 @@ index 7e29c44b6..a67798cfe 100644
  			References: refs,
  		}
  		if sym := entry.DefinitionSymbol(); sym != nil {
-@@ -3298,3 +7175,24 @@ func (s *Session) handleGetReferencedSymbolsForNode(ctx context.Context, params
+@@ -3298,3 +7182,24 @@ func (s *Session) handleGetReferencedSymbolsForNode(ctx context.Context, params
  	}
  	return result, nil
  }

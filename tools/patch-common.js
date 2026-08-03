@@ -81,8 +81,21 @@ function applyPatchFiles(subDir, patchDir, checkOnly) {
 	}
 }
 
+// Save-time guard: every save step diffs against HEAD, so a staged change
+// would silently vanish from the saved overlay/patch. Fail loudly instead.
+function guardNoStaged(subDir) {
+	const st = git(subDir, ["diff", "--cached", "--quiet"]);
+	if (st.status !== 0) {
+		console.error(
+			`save: ${path.basename(subDir)}/ has staged changes; save diffs against HEAD and would silently drop them — unstage first (git restore --staged .)`,
+		);
+		process.exit(1);
+	}
+}
+
 // Save: net-new files (git ls-files --others) -> overlay tree.
 function saveOverlay(subDir, overlayDir) {
+	guardNoStaged(subDir);
 	const ls = git(subDir, ["ls-files", "--others", "--exclude-standard"]);
 	if (ls.status !== 0) {
 		console.error("save: git ls-files failed\n" + ls.stderr);
@@ -113,7 +126,7 @@ function saveOverlay(subDir, overlayDir) {
 // byte-for-byte (latin1 round-trip avoids corrupting UTF-8). This makes the
 // CRLF<->LF flip impossible to leak into a saved patch.
 function realignEolToHead(subDir) {
-	const names = git(subDir, ["diff", "--name-only"]);
+	const names = git(subDir, ["diff", "HEAD", "--name-only"]);
 	if (names.status !== 0) return;
 	for (const rel of names.stdout.split("\n").map((s) => s.trim()).filter(Boolean)) {
 		const abs = path.join(subDir, rel);
@@ -133,11 +146,12 @@ function realignEolToHead(subDir) {
 	}
 }
 
-// Save: in-place edits to tracked files (git diff) -> single patch.
+// Save: in-place edits to tracked files (git diff HEAD) -> single patch.
 // Optional exclude globs keep named files in separate patch files.
 function savePatch(subDir, patchPath, exclude = []) {
+	guardNoStaged(subDir);
 	realignEolToHead(subDir);
-	const args = ["diff", "--", "."];
+	const args = ["diff", "HEAD", "--", "."];
 	for (const ex of exclude) args.push(`:(exclude)${ex}`);
 	const diff = git(subDir, args);
 	if (diff.status !== 0) {

@@ -90,6 +90,20 @@ const putHandle = (handle, off, w) => {
 	putStr(handle.slice(d2 + 1), off + 8, w);
 };
 
+// ── Rename wire-contract mirror (tsgoChecker.ts filePosRename) ─────────────
+// getEditsForRename and getRenameInfo disagree on every byte slot, so they
+// must encode independently:
+//   getEditsForRename: findInStrings u8 @28, findInComments u8 @29,
+//                      providePrefixAndSuffixTextForRename tri @30
+//   getRenameInfo:     allowRenameOfImportPath tri @28,
+//                      providePrefixAndSuffixTextForRename tri @29, byte 30 = 0
+const renameBytes = (method, params) => {
+	const tri2 = (b) => b === true ? 1 : b === false ? 2 : 0;
+	return method === 'getEditsForRename'
+		? [params.findInStrings ? 1 : 0, params.findInComments ? 1 : 0, tri2(params.providePrefixAndSuffixTextForRename)]
+		: [tri2(params.allowRenameOfImportPath), tri2(params.providePrefixAndSuffixTextForRename), 0];
+};
+
 function arenaCall(method, params) {
 	const w = { off: 256 };
 	view.setBigUint64(0, BigInt(params.snapshot ?? 0), true);
@@ -152,10 +166,8 @@ function arenaCall(method, params) {
 			view.setBigUint64(16, BigInt(params.signature ?? 0), true); view.setUint32(24, params.skipUnionExpanding ? 1 : 0, true); break;
 		case 'getRenameInfo': case 'getEditsForRename': {
 			putStr(String(params.file ?? ''), 16, w); view.setUint32(24, params.position >>> 0, true);
-			const tri2 = (b) => b === true ? 1 : b === false ? 2 : 0;
-			view.setUint8(28, tri2(params.allowRenameOfImportPath));
-			view.setUint8(29, tri2(params.providePrefixAndSuffixTextForRename));
-			view.setUint8(30, tri2(params.providePrefixAndSuffixTextForRename));
+			const [b28, b29, b30] = renameBytes(method, params);
+			view.setUint8(28, b28); view.setUint8(29, b29); view.setUint8(30, b30);
 			break;
 		}
 		case 'signatureHelp': {
@@ -930,6 +942,34 @@ query('getRenameInfo', P({ file: aTs, position: pos('export interface Entity') }
 query('getEditsForRename', P({ file: aTs, position: pos('add(a: number') }), '(fn decl: decl+call)');
 query('getEditsForRename', P({ file: aTs, position: pos('model: Model') }), '(const: several uses)');
 query('getEditsForRename', P({ file: aTs, position: pos('model: Model'), providePrefixAndSuffixTextForRename: true }), '(with prefix/suffix)');
+// tsgo's reference finder does not honor findInStrings today ("!!! not
+// implemented", findallreferences.go), so this stays green; once the engine
+// honors it, the arena encoder must send byte28 = findInStrings exactly like
+// the JSON transport — any drift DIFFs here.
+query('getEditsForRename', P({ file: aTs, position: pos('add(a: number'), findInStrings: true }), '(fn decl: findInStrings)');
+
+// ── Rename wire-contract self-check ────────────────────────────────────
+// The JSON-vs-arena differential above cannot see drift on the
+// findInStrings/findInComments bytes: tsgo ignores both flags, so the two
+// transports return the same spans no matter what the encoder wrote. Assert
+// the mirror bytes directly — the findInStrings battery case starts
+// DIFFing for real once the engine honors the flag.
+const checkRenameBytes = (method, params, want, note) => {
+	const got = renameBytes(method, params);
+	if (got[0] !== want[0] || got[1] !== want[1] || got[2] !== want[2]) {
+		fail++;
+		console.log(`FAIL rename-encode ${method} ${note}: bytes [${got}] != contract [${want}]`);
+		return;
+	}
+	pass++;
+	console.log(`ok rename-encode ${method} ${note} [${want}]`);
+};
+checkRenameBytes('getEditsForRename', { findInStrings: true }, [1, 0, 0], '(findInStrings)');
+checkRenameBytes('getEditsForRename', { findInComments: true }, [0, 1, 0], '(findInComments)');
+checkRenameBytes('getEditsForRename', { providePrefixAndSuffixTextForRename: true }, [0, 0, 1], '(prefix/suffix)');
+checkRenameBytes('getRenameInfo', { allowRenameOfImportPath: true }, [1, 0, 0], '(allowRenameOfImportPath)');
+checkRenameBytes('getRenameInfo', { providePrefixAndSuffixTextForRename: true }, [0, 1, 0], '(prefix/suffix)');
+checkRenameBytes('getRenameInfo', { allowRenameOfImportPath: true, providePrefixAndSuffixTextForRename: true }, [1, 1, 0], '(both, byte30 zero)');
 
 addon.disposeSession(H);
 console.log(`\nVERDICT: ${fail === 0 ? 'PASS' : 'FAIL'} (${pass} ok, ${fail} mismatches)`);

@@ -3417,7 +3417,15 @@ function convertTypeWireShape(t: any, data?: any): void {
             enumerable: true,
             get() {
                 let resolved: any;
-                try { resolved = registry.fetchType(t, method, raw); } catch { resolved = undefined; }
+                try { resolved = registry.fetchType(t, method, raw); }
+                catch (e) {
+                    // A failed RPC must not memoize: it would pin a transient
+                    // registry failure as the permanent value. Keep the
+                    // accessor live (next read retries); TNB_TRACE_THROW
+                    // rethrows for diagnosis.
+                    if (_traceThrowEnabled) throw e;
+                    return undefined;
+                }
                 if (resolved) fixupType(resolved);
                 return memoizedOwnValue(t, prop, resolved);
             },
@@ -3444,7 +3452,15 @@ function convertTypeWireShape(t: any, data?: any): void {
             enumerable: true,
             get() {
                 let resolved: any[];
-                try { resolved = registry.fetchTypes(t, method, raw); } catch { resolved = []; }
+                try { resolved = registry.fetchTypes(t, method, raw); }
+                catch (e) {
+                    // A failed RPC must not memoize: it would pin a transient
+                    // registry failure as the permanent value. Keep the
+                    // accessor live (next read retries); TNB_TRACE_THROW
+                    // rethrows for diagnosis.
+                    if (_traceThrowEnabled) throw e;
+                    return undefined;
+                }
                 for (const c of resolved) fixupType(c);
                 return memoizedOwnValue(t, prop, resolved);
             },
@@ -3457,7 +3473,15 @@ function convertTypeWireShape(t: any, data?: any): void {
             enumerable: true,
             get() {
                 let resolved: any;
-                try { resolved = registry.fetchSymbol(t, "getAliasSymbolOfType", aliasSym); } catch { resolved = undefined; }
+                try { resolved = registry.fetchSymbol(t, "getAliasSymbolOfType", aliasSym); }
+                catch (e) {
+                    // A failed RPC must not memoize: it would pin a transient
+                    // registry failure as the permanent value. Keep the
+                    // accessor live (next read retries); TNB_TRACE_THROW
+                    // rethrows for diagnosis.
+                    if (_traceThrowEnabled) throw e;
+                    return undefined;
+                }
                 return memoizedOwnValue(t, "aliasSymbol", resolved);
             },
         };
@@ -3478,7 +3502,15 @@ function convertTypeWireShape(t: any, data?: any): void {
             enumerable: true,
             get() {
                 let resolved: any;
-                try { resolved = registry.fetchType(t, method, data.substConstraint); } catch { resolved = undefined; }
+                try { resolved = registry.fetchType(t, method, data.substConstraint); }
+                catch (e) {
+                    // A failed RPC must not memoize: it would pin a transient
+                    // registry failure as the permanent value. Keep the
+                    // accessor live (next read retries); TNB_TRACE_THROW
+                    // rethrows for diagnosis.
+                    if (_traceThrowEnabled) throw e;
+                    return undefined;
+                }
                 if (resolved) fixupType(resolved);
                 return memoizedOwnValue(t, "constraint", resolved);
             },
@@ -3499,7 +3531,15 @@ function convertSymbolWireShape(sym: any): void {
         enumerable: true,
         get() {
             let resolved: any;
-            try { resolved = registry.fetchSymbol(sym, "getExportSymbolOfSymbol", raw, sym.canonicalProject?.id); } catch { resolved = undefined; }
+            try { resolved = registry.fetchSymbol(sym, "getExportSymbolOfSymbol", raw, sym.canonicalProject?.id); }
+            catch (e) {
+                // A failed RPC must not memoize: it would pin a transient
+                // registry failure as the permanent value. Keep the
+                // accessor live (next read retries); TNB_TRACE_THROW
+                // rethrows for diagnosis.
+                if (_traceThrowEnabled) throw e;
+                return undefined;
+            }
             return memoizedOwnValue(sym, "exportSymbol", resolved);
         },
     });
@@ -6906,6 +6946,17 @@ export function createTsgoProgram(
             pendingExternalSet = new Set(_pendingExternalChangePaths);
             _pendingExternalChangePaths.clear();
             for (const f of pendingExternalSet) {
+                // Stable host-SF cache eviction: an externally-rewritten
+                // stable-path file (node_modules/lib .d.ts) must not keep
+                // serving the process-global bound AST. Go re-reads disk via
+                // fileChanges.changed, but a constant-version host
+                // (typescript-estree getScriptVersion "1") makes the stable
+                // version check below match forever — evict the entry so the
+                // next materialization re-reads host/disk like Go does. The
+                // per-program sfCache is empty at this choke (fresh per
+                // createTsgoProgram, populated only by later materialization),
+                // so the process-global entry is the only stale cache.
+                if (isStableHostSfPath(f)) _hostSfStableGlobal.delete(f);
                 if (fileExistsOnDisk(f) && !_syncedOverlayContentByFile.has(f)) (externalChanged ??= []).push(f);
             }
         }

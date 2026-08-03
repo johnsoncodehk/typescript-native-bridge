@@ -20,7 +20,7 @@ savePatch(subDir, path.join(patchDir, "0001-tsgo-hooks.patch"), ["scripts/produc
 // produceLKG.mjs is a separate tracked edit — keep it in its own patch so
 // overlay/hook changes can be rebased independently.
 const lkgRel = "scripts/produceLKG.mjs";
-const lkgDiff = git(subDir, ["diff", "--", lkgRel]);
+const lkgDiff = git(subDir, ["diff", "HEAD", "--", lkgRel]);
 if (lkgDiff.status !== 0) {
 	console.error("save: git diff produceLKG failed\n" + lkgDiff.stderr);
 	process.exit(1);
@@ -30,7 +30,7 @@ fs.writeFileSync(lkgPatch, lkgDiff.stdout);
 console.log(`save: patch <- ${lkgDiff.stdout.length} bytes (${path.basename(lkgPatch)})`);
 
 const projectRel = "src/server/project.ts";
-const projectDiff = git(subDir, ["diff", "--", projectRel]);
+const projectDiff = git(subDir, ["diff", "HEAD", "--", projectRel]);
 if (projectDiff.status !== 0) {
 	console.error("save: git diff project.ts failed\n" + projectDiff.stderr);
 	process.exit(1);

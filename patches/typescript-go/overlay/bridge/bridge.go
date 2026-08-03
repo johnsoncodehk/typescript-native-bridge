@@ -80,6 +80,15 @@ var (
 const invalidSessionMsg = "invalid session handle"
 const foreignThreadMsg = "session belongs to a different thread"
 
+// arenaErrorPrefix marks arena-path errors (missing/foreign session) returned
+// by BridgeSetArena/BridgeCallArena. A genuine JSON escape doc always starts
+// with '{', so the prefix can never collide with a result; napi_shim.c checks
+// it on the returned doc and throws the message with the prefix stripped
+// (fn_call_arena), or throws it directly (fn_set_arena). Without this, a
+// missing/foreign session silently returned undefined and the JS side decoded
+// a stale response out of its own arena buffer.
+const arenaErrorPrefix = "tnb-error:"
+
 type sessionEntry struct {
 	api *api.Session
 	// owner is the OS thread that created the session. Every session call
@@ -393,31 +402,42 @@ func BridgeReleaseBinary(handle C.ulonglong) {
 // BridgeSetArena installs the session's V8-allocated arena (part 3): the JS
 // side allocates one 4 MiB buffer per session and hands its pointer here. Go
 // writes hot-path responses into it in place; the buffer is rooted JS-side
-// for the session's lifetime and additionally ref'd by the shim.
+// for the session's lifetime and additionally ref'd by the shim. Returns
+// NULL, or a malloc'd sentinel-prefixed error (missing/foreign session) the
+// shim throws and frees.
 //
 //export BridgeSetArena
-func BridgeSetArena(session C.int64_t, ptr unsafe.Pointer, length C.int) {
+func BridgeSetArena(session C.int64_t, ptr unsafe.Pointer, length C.int) *C.char {
 	mu.Lock()
 	entry, ok := sessions[int64(session)]
 	mu.Unlock()
-	if !ok || entry.foreignThread() {
-		return
+	if !ok {
+		return C.CString(arenaErrorPrefix + invalidSessionMsg)
+	}
+	if entry.foreignThread() {
+		return C.CString(arenaErrorPrefix + foreignThreadMsg)
 	}
 	entry.api.SetArena(ptr, int(length))
+	return nil
 }
 
 // BridgeCallArena invokes one arena-capable hot query. The request record is
 // read from the arena at offset 0; the response header is written back at
 // arenaRespOffset for the JS side to decode — no bytes cross either way. An
-// oversize response escapes as the returned JSON doc (freed by the shim).
+// oversize response escapes as the returned JSON doc (freed by the shim). A
+// missing/foreign session returns a malloc'd sentinel-prefixed error instead
+// of nil, so the shim throws instead of letting JS decode a stale arena.
 //
 //export BridgeCallArena
 func BridgeCallArena(session C.int64_t, method *C.char) *C.char {
 	mu.Lock()
 	entry, ok := sessions[int64(session)]
 	mu.Unlock()
-	if !ok || entry.foreignThread() {
-		return nil
+	if !ok {
+		return C.CString(arenaErrorPrefix + invalidSessionMsg)
+	}
+	if entry.foreignThread() {
+		return C.CString(arenaErrorPrefix + foreignThreadMsg)
 	}
 	if doc := entry.api.HandleArenaRequest(C.GoString(method)); doc != "" {
 		return C.CString(doc)

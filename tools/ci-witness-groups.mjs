@@ -21,7 +21,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const TOTAL = 53;
+const TOTAL = 54;
 
 const groups = [
 	{
@@ -77,6 +77,7 @@ const groups = [
 			'triage-rpcsym-adversarial',
 			'triage-checker-differential',
 			'triage-type-field-audit',
+			'triage-arena-parity',
 			'triage-worker-libpath',
 			'triage-parent-watch-acceptance',
 			'triage-impl-kind',

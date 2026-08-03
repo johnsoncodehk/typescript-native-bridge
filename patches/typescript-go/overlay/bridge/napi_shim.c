@@ -76,7 +76,7 @@ extern struct BridgeText BridgeCall(int64_t session, char* method, char* paramsJ
 extern struct BridgeBinary BridgeCallBinary(int64_t session, char* method, char* paramsJson);
 extern void BridgeReleaseBinary(unsigned long long handle);
 extern void BridgeDisposeSession(int64_t session);
-extern void BridgeSetArena(int64_t session, void* ptr, long long length);
+extern char* BridgeSetArena(int64_t session, void* ptr, long long length);
 extern char* BridgeCallArena(int64_t session, char* method);
 
 // Per-env reusable scratch for params conversion. The bridge call is
@@ -96,11 +96,39 @@ struct ShimInstance {
 	// Session arenas kept alive while Go holds their pointers (part 3).
 	struct { int64_t session; napi_ref ref; } arenas[SHIM_MAX_ARENAS];
 	int arenaCount;
+	// Sessions this env created, tracked so finalize_instance can dispose any
+	// that were never explicitly disposed (a worker that exits without
+	// disposeSession must not leave its session registered in Go, or a later
+	// call on the dead id silently fails the affinity guard instead of being
+	// an unknown session). Grows on demand; freed in finalize_instance.
+	int64_t* sessions;
+	int sessionCount;
+	int sessionCap;
 };
+
+// Arena-path error sentinel (mirrors bridge.go's arenaErrorPrefix): Go returns
+// malloc'd strings with this prefix for missing/foreign sessions. A genuine
+// JSON escape doc always starts with '{', so the prefix can never collide
+// with a result; fn_call_arena/fn_set_arena strip it and throw.
+#define TNB_ARENA_ERR "tnb-error:"
+
+// throw_arena_error throws msg with the TNB_ARENA_ERR prefix stripped (the
+// message body is what the JSON path's textError would have carried).
+static void throw_arena_error(napi_env env, const char* msg) {
+	if (strncmp(msg, TNB_ARENA_ERR, sizeof(TNB_ARENA_ERR) - 1) == 0) {
+		msg += sizeof(TNB_ARENA_ERR) - 1;
+	}
+	napi_throw_error(env, NULL, msg);
+}
 
 static void finalize_instance(napi_env env, void* data, void* hint) {
 	(void)hint;
 	struct ShimInstance* i = (struct ShimInstance*)data;
+	// Best-effort dispose of every session this env created: Go's
+	// BridgeDisposeSession is idempotent (missing handle = no-op), so
+	// double-disposing an already-disposed session is harmless.
+	for (int k = 0; k < i->sessionCount; k++) BridgeDisposeSession(i->sessions[k]);
+	free(i->sessions);
 	for (int k = 0; k < i->arenaCount; k++) napi_delete_reference(env, i->arenas[k].ref);
 	for (int k = 0; k < METHOD_CACHE_SIZE; k++) free(i->methodCache[k]);
 	free(i->paramsBuf);
@@ -252,6 +280,31 @@ static napi_value fn_set_lib_path(napi_env env, napi_callback_info info) {
 	return undef;
 }
 
+// Session registry helpers: every session this env creates is recorded so
+// finalize_instance can dispose the ones never explicitly disposed.
+static void register_session(napi_env env, struct ShimInstance* i, int64_t session) {
+	if (i->sessionCount == i->sessionCap) {
+		int cap = i->sessionCap ? i->sessionCap * 2 : 8;
+		int64_t* ns = (int64_t*)realloc(i->sessions, (size_t)cap * sizeof(int64_t));
+		if (!ns) {
+			napi_throw_error(env, NULL, "tnb bridge: out of memory");
+			return;
+		}
+		i->sessions = ns;
+		i->sessionCap = cap;
+	}
+	i->sessions[i->sessionCount++] = session;
+}
+
+static void unregister_session(struct ShimInstance* i, int64_t session) {
+	for (int k = 0; k < i->sessionCount; k++) {
+		if (i->sessions[k] == session) {
+			i->sessions[k] = i->sessions[--i->sessionCount];
+			return;
+		}
+	}
+}
+
 // newSession(cwd: string): number (session handle)
 static napi_value fn_new_session(napi_env env, napi_callback_info info) {
 	napi_value argv[1];
@@ -262,6 +315,7 @@ static napi_value fn_new_session(napi_env env, napi_callback_info info) {
 	if (!ok) return NULL;
 	long long handle = BridgeNewSession(cwd);
 	free(cwd);
+	register_session(env, instance(env), handle);
 	napi_value out = NULL;
 	napi_create_double(env, (double)handle, &out);
 	return out;
@@ -355,7 +409,10 @@ static napi_value fn_call_binary(napi_env env, napi_callback_info info) {
 // setArena(session, buffer): install the session's V8-allocated arena (part
 // 3). The buffer is created JS-side (V8 memory — sandbox-legal); Go writes
 // hot-path responses into it in place. The shim refs it so the pointer Go
-// holds can never dangle, released with the session/env.
+// holds can never dangle, released with the session/env. A missing/foreign
+// session is a loud error (BridgeSetArena's sentinel) — the registry is only
+// touched after Go accepted the pointer, so a failed call never drops an
+// existing entry while Go still points at the old buffer.
 static napi_value fn_set_arena(napi_env env, napi_callback_info info) {
 	napi_value argv[2];
 	size_t argc = 2;
@@ -370,6 +427,20 @@ static napi_value fn_set_arena(napi_env env, napi_callback_info info) {
 	if (napi_get_buffer_info(env, argv[1], &data, &len) != napi_ok) return NULL;
 	int64_t session = arg_int64(env, argv[0]);
 	struct ShimInstance* inst = instance(env);
+	// Capacity first: a full table must fail before Go installs the pointer.
+	if (inst->arenaCount >= SHIM_MAX_ARENAS) {
+		napi_throw_error(env, NULL, "tnb bridge: too many arena sessions");
+		return NULL;
+	}
+	// Install Go-side before mutating the registry: the buffer is rooted by
+	// argv while this call runs, and a rejected session leaves every existing
+	// registry entry (and Go's installed pointer) untouched and consistent.
+	char* err = BridgeSetArena(session, data, (long long)len);
+	if (err != NULL) {
+		throw_arena_error(env, err);
+		free(err);
+		return NULL;
+	}
 	for (int k = 0; k < inst->arenaCount; k++) {
 		if (inst->arenas[k].session == session) {
 			napi_delete_reference(env, inst->arenas[k].ref);
@@ -377,16 +448,11 @@ static napi_value fn_set_arena(napi_env env, napi_callback_info info) {
 			break;
 		}
 	}
-	if (inst->arenaCount >= SHIM_MAX_ARENAS) {
-		napi_throw_error(env, NULL, "tnb bridge: too many arena sessions");
-		return NULL;
-	}
 	napi_ref ref = NULL;
 	if (napi_create_reference(env, argv[1], 1, &ref) != napi_ok) return NULL;
 	inst->arenas[inst->arenaCount].session = session;
 	inst->arenas[inst->arenaCount].ref = ref;
 	inst->arenaCount++;
-	BridgeSetArena(session, data, (long long)len);
 	napi_value undef;
 	napi_get_undefined(env, &undef);
 	return undef;
@@ -396,7 +462,9 @@ static napi_value fn_set_arena(napi_env env, napi_callback_info info) {
 // is read from the arena at offset 0; the response header is written back at
 // the arena's response offset — the JS side decodes directly out of its own
 // buffer (no copies either way). An oversize response escapes as the returned
-// JSON string.
+// JSON string. A missing/foreign session returns a sentinel-prefixed error
+// instead: it is thrown here, never surfaced to JS as a string (which the
+// caller would decode as a stale arena response).
 static napi_value fn_call_arena(napi_env env, napi_callback_info info) {
 	napi_value argv[2];
 	size_t argc = 2;
@@ -408,6 +476,11 @@ static napi_value fn_call_arena(napi_env env, napi_callback_info info) {
 	char* doc = BridgeCallArena(session, method);
 	if (!methodCached) free(method);
 	if (doc != NULL) {
+		if (strncmp(doc, TNB_ARENA_ERR, sizeof(TNB_ARENA_ERR) - 1) == 0) {
+			throw_arena_error(env, doc);
+			free(doc);
+			return NULL;
+		}
 		napi_value out = NULL;
 		napi_create_string_utf8(env, doc, NAPI_AUTO_LENGTH, &out);
 		free(doc);
@@ -434,6 +507,9 @@ static napi_value fn_dispose_session(napi_env env, napi_callback_info info) {
 			break;
 		}
 	}
+	// Drop the registry entry so finalize_instance won't re-dispose (harmless
+	// if it did — BridgeDisposeSession is idempotent — but keep it tidy).
+	unregister_session(inst, session);
 	BridgeDisposeSession(session);
 	napi_value undef;
 	napi_get_undefined(env, &undef);

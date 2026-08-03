@@ -34,9 +34,15 @@
  * produce plain IndexedAccessType), so baseType/substConstraint are audited
  * on any visited type that carries them but have no dedicated site.
  *
- * Usage: node tools/triage-type-field-audit.mjs
+ * Usage: node tools/triage-type-field-audit.mjs [--simulate-mirror-drop] [--simulate-constraint-drop]
  * Env:   STOCK_TSSERVER_PATH  override stock tsserver.js path (default /tmp/stock-ts-p3/...);
  *        stock typescript.js is resolved as its sibling.
+ *
+ * --simulate-mirror-drop deletes the tuple-mirror fields off every bridge
+ * reference whose target is a tuple before auditing, simulating a regression
+ * in proto.go's "Mirror checker.isTupleType" logic. The bridge-side
+ * tuple-reference invariant (auditPair) must turn the gate red; without it
+ * both sides read undefined and the stock-driven diff stays silently green.
  */
 import { createRequire } from 'node:module';
 import * as fs from 'node:fs';
@@ -93,6 +99,7 @@ declare function fk<T>(x: T): keyof T;
 declare function fu<T extends string>(x: T): Uppercase<T>;
 declare function ftp<T extends string>(x: T): T;
 declare function fia<T extends { a: string }>(x: T): T["a"];
+declare function fiam<T extends { a: string; b: number }>(x: T): M<T>["a"];
 interface ThisI { m(): this; }
 interface AuditBase<T> { x: T; }
 interface AuditDerived extends AuditBase<string> { y: number; }
@@ -144,6 +151,7 @@ const SITES = [
 	{ label: 'string-mapping', kind: 'ret', name: 'fu' },
 	{ label: 'type-parameter', kind: 'ret', name: 'ftp' },
 	{ label: 'indexed-access', kind: 'ret', name: 'fia' },
+	{ label: 'indexed-access-mapped', kind: 'ret', name: 'fiam' },
 	{ label: 'this-type', kind: 'thisRet' },
 	{ label: 'derived-interface', kind: 'decl', name: 'derived' },
 	{ label: 'alias-args', kind: 'decl', name: 'pair' },
@@ -219,6 +227,7 @@ const STOCK_INTERNAL_KEYS = new Map(Object.entries({
 	node: 'syntax back-reference; declarations cross on symbols, not types',
 	declaration: 'mapped-type source internals',
 	typeParameter: 'mapped-type source internals',
+	constraintType: 'mapped-type constraint cache (@internal); constraint semantics cross via the getConstraint()/getBaseConstraintOfType RPC — cross-checked per site at the indexed-access sites',
 	members: 'structure cache; members cross via getPropertiesOfType/getSignaturesOfType RPC',
 	properties: 'structure cache; members cross via getPropertiesOfType/getSignaturesOfType RPC',
 	callSignatures: 'structure cache; members cross via getPropertiesOfType/getSignaturesOfType RPC',
@@ -234,7 +243,7 @@ const STOCK_INTERNAL_KEYS = new Map(Object.entries({
 	propertyCacheWithoutObjectFunctionPropertyAugment: 'property cache; property data crosses via RPC',
 	resolvedProperties: 'property cache; property data crosses via RPC',
 	immediateBaseConstraint: 'base-constraint cache; constraint semantics cross via getConstraintOfType RPC',
-	constraint: 'lazy TypeParameter field; crosses via getConstraint() RPC by design (issue #23) — cross-checked per site',
+	constraint: 'TypeParameter: lazy field, crosses via getConstraint() RPC by design (issue #23) — cross-checked per site. IndexedAccess: stock 6.0.3 declares constraint?: Type but never materializes the own key (verified Object.keys probe — computed on demand by getConstraintOfType/computeBaseConstraint, never cached onto the field); the bridge serves t.getConstraint() via the getBaseConstraintOfType RPC — cross-checked per site at the indexed-access sites. Both are separate per-site cross-checks, never the SINGLE list (a payload field would break TypeParameter laziness)',
 	default: 'lazy TypeParameter field; crosses via getDefault() RPC by design — same contract as constraint',
 	accessFlags: 'internal indexed-access bitfield, not part of the public d.ts surface',
 	indexFlags: 'internal index-type bitfield, not part of the public d.ts surface',
@@ -250,6 +259,23 @@ const OF = tss.ObjectFlags;
 const failures = [];
 const notes = new Set();
 let pairCount = 0;
+
+// --simulate-mirror-drop: delete the tuple-mirror fields off every bridge
+// reference whose target is a tuple before auditing (see auditPair). The
+// invariant below is the only thing between a deleted proto.go mirror and a
+// silently-green gate.
+const simulateMirrorDrop = process.argv.includes('--simulate-mirror-drop');
+// --simulate-constraint-drop: force the bridge's getConstraint() to undefined
+// at indexed-access sites, simulating a regression in tsgo's
+// computeBaseConstraint IndexedAccess branch (or the getBaseConstraintOfType
+// RPC serving it). The stock-driven diff cannot see this — stock's
+// IndexedAccessType.constraint field is never materialized, so both sides
+// read undefined and the per-site mechanism cross-check below is the only
+// thing that turns red.
+const simulateConstraintDrop = process.argv.includes('--simulate-constraint-drop');
+const MIRROR_FIELDS = [
+    'elementFlags', 'readonly', 'fixedLength', 'minLength', 'combinedFlags', 'hasRestElement', 'labeledElementDeclarations',
+];
 const visited = new Set();
 const stockIds = new WeakMap();
 const tnbIds = new WeakMap();
@@ -371,6 +397,32 @@ function auditPair(s, b, pathLabel) {
 		const v = b.labeledElementDeclarations;
 		if (Array.isArray(v) && v.some(x => typeof x === 'string')) {
 			failures.push(`${pathLabel}.labeledElementDeclarations: raw wire handle strings exposed as own property values (issue #52/#35 class)`);
+		}
+	}
+
+	// Tuple reference-mirror invariant (proto.go "Mirror checker.isTupleType"):
+	// the bridge deliberately copies a tuple target's tuple data onto the
+	// reference, where stock keeps those fields only on the target — so the
+	// stock-driven diffs below compare s[f] (undefined on a stock reference)
+	// against b[f], and a deleted mirror reads undefined on both sides with
+	// the gate staying silently green. Assert the mirror fields exist on
+	// every bridge reference whose target is a tuple. Reading b.target
+	// triggers the lazy RPC; a failed resolve must not crash the audit.
+	{
+		let tupTarget = null;
+		try { tupTarget = b.target; } catch { /* lazy RPC */ }
+		if (tupTarget !== null && (b.objectFlags & OF.Reference) !== 0 && ((tupTarget.objectFlags ?? 0) & OF.Tuple) !== 0) {
+			if (simulateMirrorDrop) {
+				for (const f of MIRROR_FIELDS) delete b[f];
+			}
+			if (!Array.isArray(b.elementFlags)) {
+				failures.push(`${pathLabel}.elementFlags: tuple reference mirror missing — bridge must mirror elementFlags onto the reference (proto.go "Mirror checker.isTupleType")`);
+			}
+			for (const f of ['readonly', 'fixedLength', 'minLength', 'combinedFlags', 'hasRestElement', 'labeledElementDeclarations']) {
+				if (b[f] === undefined) {
+					failures.push(`${pathLabel}.${f}: tuple reference mirror missing — bridge must mirror ${f} onto the reference (proto.go "Mirror checker.isTupleType")`);
+				}
+			}
 		}
 	}
 
@@ -600,6 +652,27 @@ for (const spec of SITES) {
 		const bc = bT.getConstraint?.();
 		if (!sameShallowType(sc, bc)) {
 			failures.push(`${spec.label}.getConstraint(): stock=${summarize(sc, 0)} tnb=${summarize(bc, 0)}`);
+		}
+	}
+	// IndexedAccess constraint (task H2-1): stock's public d.ts declares
+	// `constraint?: Type` on IndexedAccessType but 6.0.3 never materializes the
+	// own key — the value is computed on demand by getConstraintOfType →
+	// computeBaseConstraint (the identical IndexedAccess branch exists in tsgo)
+	// and served on the bridge by t.getConstraint() → getBaseConstraintOfType
+	// RPC. Both sides read undefined on the field today, so a payload diff can
+	// never see a regression — gate the mechanism instead. Deliberately NOT the
+	// TypeParameter block above (lazy-by-design, separate contract) and NOT the
+	// SINGLE list (a payload field would break TypeParameter laziness).
+	if ((sT.flags & TF.IndexedAccess) !== 0) {
+		if ((sT.constraint ?? undefined) !== (bT.constraint ?? undefined)) {
+			failures.push(`${spec.label}.constraint: stock=${summarize(sT.constraint, 0)} tnb=${summarize(bT.constraint, 0)}`);
+		}
+		let sgc, bgc;
+		try { sgc = sT.getConstraint?.(); } catch (e) { sgc = `THREW ${e.message}`; }
+		try { bgc = bT.getConstraint?.(); } catch (e) { bgc = `THREW ${e.message}`; }
+		if (simulateConstraintDrop) bgc = undefined;
+		if (!sameShallowType(sgc, bgc)) {
+			failures.push(`${spec.label}.getConstraint(): stock=${summarize(sgc, 0)} tnb=${summarize(bgc, 0)}`);
 		}
 	}
 	if ((sT.objectFlags & OF.Reference) !== 0) {

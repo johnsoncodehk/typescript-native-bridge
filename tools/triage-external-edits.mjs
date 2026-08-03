@@ -12,7 +12,11 @@
  *               dependent b.ts diagnostic.
  *   - tscwatch: plain `tsc -w` — content edit must clear the error, file add
  *               must surface the new file's error, output text stock-equal.
- * Usage: node tools/triage-external-edits.mjs [estree|tsserver|tscwatch...]
+ *   - stablecache: external rewrite of a node_modules .d.ts under a
+ *               constant-version host must re-materialize the host AST on the
+ *               JS side (stock does; the bridge must evict its stable host-SF
+ *               cache at the external-change choke so JS agrees with Go).
+ * Usage: node tools/triage-external-edits.mjs [estree|tsserver|tscwatch|stablecache...]
  * Exit: 0 = PASS, 1 = FAIL. Network required on first run (stock pack).
  *
  * v5 classification: bridge-contract surface — stock's own watch/session
@@ -271,6 +275,97 @@ async function runTscwatchCase() {
 	return true;
 }
 
+// ── Repro 4: stable host-SF cache vs external rewrite (constant-version host) ──
+// Issue E: _hostSfStableGlobal reuses the bound host AST while the script
+// version is unchanged. Under a constant-version host (typescript-estree's
+// getScriptVersion always "1"), an externally-rewritten node_modules .d.ts
+// re-reads on the Go side (issue #49 fileChanges.changed) while the JS side
+// keeps serving the stale stable AST — a silent cross-side mismatch. Stock
+// re-reads disk on the next program (no cross-program AST cache), so both
+// stock and TNB must surface the NEW text. The host forces preferHostSourceFiles
+// via a divergent snapshot on the root file (the overlay path the stable
+// cache was built for); the external-change feed is injected directly
+// (white-box — the per-file watcher fires the same signal in a watch host).
+
+const STABLE_DRIVER = `
+import { createRequire } from 'node:module';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
+
+const require2 = createRequire(import.meta.url);
+const ts = require2(process.argv[2]);
+
+const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'tnb-stable-'));
+const pkgRel = path.join('node_modules', 'tnb-stable-pkg', 'index.d.ts');
+fs.mkdirSync(path.join(dir, 'node_modules', 'tnb-stable-pkg'), { recursive: true });
+fs.writeFileSync(path.join(dir, 'node_modules', 'tnb-stable-pkg', 'package.json'), JSON.stringify({ name: 'tnb-stable-pkg', types: 'index.d.ts' }));
+fs.writeFileSync(path.join(dir, pkgRel), 'export declare const stableValue: string;\\n');
+fs.writeFileSync(path.join(dir, 'entry.ts'), 'import { stableValue } from "tnb-stable-pkg";\\nexport const b: string = stableValue;\\n');
+fs.writeFileSync(path.join(dir, 'tsconfig.json'), JSON.stringify({
+	compilerOptions: { strict: true, noEmit: true, target: 'es2022', module: 'commonjs', moduleResolution: 'node', types: [] },
+	include: ['entry.ts'],
+}));
+const pkgDts = fs.realpathSync(path.join(dir, pkgRel));
+const entry = fs.realpathSync(path.join(dir, 'entry.ts'));
+const tsconfig = fs.realpathSync(path.join(dir, 'tsconfig.json'));
+const options = ts.getParsedCommandLineOfConfigFile(tsconfig, {}, { ...ts.sys, onUnRecoverableConfigFileDiagnostic: () => {} }).options;
+
+const makeHost = () => {
+	const host = ts.createCompilerHost(options);
+	host.getScriptVersion = () => '1'; // constant-version host (typescript-estree style)
+	// Divergent snapshot on the root file -> overlay -> preferHostSourceFiles
+	// (the path that populates the stable host-SF cache).
+	host.getScriptSnapshot = (f) => {
+		if (path.resolve(f) === entry) {
+			return ts.ScriptSnapshot.fromString('import { stableValue } from "tnb-stable-pkg";\\nexport const b: string = stableValue;\\n// OVERLAY_SNAPSHOT\\n');
+		}
+		return undefined;
+	};
+	return host;
+};
+const opts = { rootNames: [entry], options, configFilePath: tsconfig };
+
+const program1 = ts.createProgram({ ...opts, host: makeHost() });
+const sf1 = program1.getSourceFile(pkgDts);
+console.log('gen1 hasMarker:', !!sf1?.text?.includes('V1_MARKER'));
+
+// External rewrite, then feed the external-change signal. A real watch host's
+// per-file watcher (tnbWatchSourceFile) fires the same signal; the direct call
+// makes the stage deterministic (stock has no such export — guarded).
+fs.writeFileSync(pkgDts, 'export declare const stableValue: number; // V1_MARKER\\n');
+if (ts.tnbNoteExternalFileChange) ts.tnbNoteExternalFileChange(pkgDts);
+
+const program2 = ts.createProgram({ ...opts, host: makeHost() });
+const sf2 = program2.getSourceFile(pkgDts);
+console.log('gen2 hasMarker:', !!sf2?.text?.includes('V1_MARKER'));
+console.log('sameObject:', sf1 === sf2);
+`;
+
+function runStablecacheCase() {
+	const driver = path.join(scratchRoot, 'stablecache-driver.mjs');
+	fs.mkdirSync(scratchRoot, { recursive: true });
+	fs.writeFileSync(driver, STABLE_DRIVER);
+	const outTnb = runNode(driver, [path.join(repoRoot, 'lib', 'typescript.js')], scratchRoot);
+	const outStock = runNode(driver, [path.join(stockPkg, 'lib', 'typescript.js')], scratchRoot);
+	const parse = (out) => {
+		const grab = (label) => {
+			const m = out.match(new RegExp(label + ':\\s*(true|false)'));
+			return m ? m[1] === 'true' : undefined;
+		};
+		return { g1: grab('gen1 hasMarker'), g2: grab('gen2 hasMarker'), same: grab('sameObject') };
+	};
+	const tnb = parse(outTnb), stock = parse(outStock);
+	if (!(stock.g1 === false && stock.g2 === true && stock.same === false)) {
+		return fail('stablecache', `stock control diverged: expected g1=false g2=true same=false, got ${JSON.stringify(stock)}\n${outStock}`);
+	}
+	if (!(tnb.g1 === false && tnb.g2 === true && tnb.same === false)) {
+		return fail('stablecache', `external rewrite of node_modules .d.ts did not re-materialize: ${JSON.stringify(tnb)} (expected g1=false g2=true same=false)\n${outTnb}`);
+	}
+	console.log('[stablecache] ok (node_modules .d.ts external rewrite re-materializes under constant-version host, stock-identical)');
+	return true;
+}
+
 // ── driver ───────────────────────────────────────────────────────────────
 
 function fail(name, msg) {
@@ -280,7 +375,7 @@ function fail(name, msg) {
 
 ensureStock();
 const wanted = process.argv.slice(2);
-const CASES = { estree: runEstree, tsserver: runTsserver, tscwatch: runTscwatchCase };
+const CASES = { estree: runEstree, tsserver: runTsserver, tscwatch: runTscwatchCase, stablecache: runStablecacheCase };
 const names = wanted.length ? wanted : Object.keys(CASES);
 let ok = true;
 for (const name of names) {

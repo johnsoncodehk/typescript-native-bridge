@@ -67,7 +67,21 @@
  * A key whose sides converged FAILS as stale so the list cannot rot — when a
  * B-class entry gets fixed, the gate demands its removal.
  *
+ * Ordering-class exemptions (U1/U2/U2T/LU2) are shape-validated before being
+ * green-lit: the claim is "same content, different order", so the two sides
+ * must be permutations of each other (sorted stable element keys byte-equal).
+ * U2 member lists compare full elements; U2T compares members modulo their
+ * (truncation-dependent) type strings; LU2 compares full elements after
+ * normalizing the documented padStart/padEnd parameter rename; U1 compares the
+ * type string's top-level `|` constituents as a multiset (and canonType
+ * flags/objectFlags must match). A divergence at a known key that is not a
+ * permutation — a wrong member name, wrong union constituent, drifted flags —
+ * is a genuine bug riding on the exemption and FAILs as KNOWN-SHAPE-VIOLATION.
+ * U3 (alias-chain shape) is a structural difference, not an ordering one, and
+ * is not shape-checked.
+ *
  * Usage: node tools/triage-checker-differential.mjs
+ *        node tools/triage-checker-differential.mjs --self-test
  * Stock side: STOCK_TYPESCRIPT_PATH, else derived from STOCK_TSSERVER_PATH
  * (CI), else /tmp/stock-ts-p3/package/lib/typescript.js.
  */
@@ -92,7 +106,7 @@ const stockTsPath = process.env.STOCK_TYPESCRIPT_PATH
 const REASON = {
 	U1: 'U1: tsgo union constituent order (upstream issue #20), stock declaration order',
 	U2: 'U2: tsgo member/symbol ordering (upstream, same class as #20)',
-	U2T: 'U2: member-order-dependent typeToString truncation tail (upstream #20 class)',
+	U2T: 'U2T: member-order-dependent typeToString truncation tail (upstream #20 class)',
 	U3: 'U3: tsgo keeps export= as an alias hop; stock immediateTarget resolves it (upstream alias model)',
 	LU2: 'L+U2: bundled-lib padStart/padEnd parameter rename + tsgo member order',
 };
@@ -534,22 +548,90 @@ function runChild(side, dir) {
 	}
 }
 
-function parentMain() {
-	const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'tnb-checker-diff-'));
-	writeCorpus(dir);
-	const stock = runChild('stock', dir);
-	const tnb = runChild('tnb', dir);
-	console.log(`fixture: ${dir}`);
-	console.log(`entries: stock=${stock.entries.length} tnb=${tnb.entries.length}`);
-
-	let fail = 0;
-	if (stock.entries.length !== tnb.entries.length) {
-		console.error(`FAIL entry count mismatch (harness bug): stock=${stock.entries.length} tnb=${tnb.entries.length}`);
-		process.exit(1);
+// ── Known-exemption shape validation ────────────────────────────────────────
+// Ordering-class exemptions (U1/U2/U2T/LU2) claim "same content, different
+// order". Before green-lighting a known key, re-verify that claim on the raw
+// values: a divergence at an exempted coordinate that is not a permutation
+// (wrong member name, wrong union constituent, drifted flags) is a genuine bug
+// riding on the exemption and must FAIL as KNOWN-SHAPE-VIOLATION.
+const ORDERING_CLASSES = new Set(['U1', 'U2', 'U2T', 'LU2']);
+// REASON tokens are class prefixes; the compound 'L+U2' (lib delta + member
+// order) is the LU2 ordering class.
+const classOf = reason => (reason.startsWith('L+U2') ? 'LU2' : reason.split(':')[0]);
+const multisetEq = (a, b) => {
+	if (a.length !== b.length) return false;
+	const sa = [...a].sort(), sb = [...b].sort();
+	return sa.every((x, i) => x === sb[i]);
+};
+// LU2's documented lib delta is the padStart/padEnd parameter rename (the U2
+// part is member order). Normalize the rename so full-element multiset
+// equality holds iff the only content difference is exactly that rename.
+const LU2_RENAME = t => (typeof t === 'string' ? t.replace(/\bmaxLength\b/g, 'targetLength').replace(/\bfillString\b/g, 'padString') : t);
+const arrayShapeOk = (a, b, keyOf) => {
+	if (!Array.isArray(a) || !Array.isArray(b)) return false;
+	return multisetEq(a.map(keyOf), b.map(keyOf));
+};
+// Split a type string at top-level `|`s only: quoted strings, tuples, object
+// types, generics and template literals keep their inner `|`s.
+function splitUnion(s) {
+	const parts = [];
+	let cur = '';
+	const stack = [];
+	let str = null;
+	const flush = () => { parts.push(cur.trim()); cur = ''; };
+	for (let i = 0; i < s.length; i++) {
+		const c = s[i];
+		if (str) {
+			cur += c;
+			if (c === '\\') cur += s[++i] ?? '';
+			else if (c === str) str = null;
+			continue;
+		}
+		if (stack[stack.length - 1] === '`') {
+			cur += c;
+			if (c === '\\') cur += s[++i] ?? '';
+			else if (c === '`') stack.pop();
+			else if (c === '$' && s[i + 1] === '{') { stack.push('${'); cur += '{'; i++; }
+			continue;
+		}
+		if (c === "'" || c === '"') { str = c; cur += c; continue; }
+		if (c === '`') { stack.push('`'); cur += c; continue; }
+		if (c === '(') { stack.push('('); cur += c; continue; }
+		if (c === ')') { if (stack[stack.length - 1] === '(') stack.pop(); cur += c; continue; }
+		if (c === '[') { stack.push('['); cur += c; continue; }
+		if (c === ']') { if (stack[stack.length - 1] === '[') stack.pop(); cur += c; continue; }
+		if (c === '{') { stack.push('{'); cur += c; continue; }
+		if (c === '}') { if (stack[stack.length - 1] === '{' || stack[stack.length - 1] === '${') stack.pop(); cur += c; continue; }
+		if (c === '<') { stack.push('<'); cur += c; continue; }
+		if (c === '>') { if (stack[stack.length - 1] === '<') stack.pop(); cur += c; continue; }
+		if (c === '|' && stack.length === 0) { flush(); continue; }
+		cur += c;
 	}
-	let ok = 0, known = 0;
-	for (let i = 0; i < stock.entries.length; i++) {
-		const a = stock.entries[i], b = tnb.entries[i];
+	flush();
+	return parts;
+}
+const isCanonType = v => !!v && typeof v === 'object' && !Array.isArray(v) && typeof v.s === 'string' && typeof v.f === 'number' && typeof v.of === 'number';
+const u1ShapeOk = (a, b) => {
+	if (typeof a === 'string' && typeof b === 'string') return multisetEq(splitUnion(a), splitUnion(b));
+	if (isCanonType(a) && isCanonType(b)) {
+		return a.f === b.f && a.of === b.of && multisetEq(splitUnion(a.s), splitUnion(b.s));
+	}
+	return false;
+};
+function checkKnownShape(cls, a, b) {
+	switch (cls) {
+		case 'U1': return u1ShapeOk(a, b);
+		case 'U2': return arrayShapeOk(a, b, e => stable(e));
+		case 'U2T': return arrayShapeOk(a, b, e => stable({ ...e, t: undefined }));
+		case 'LU2': return arrayShapeOk(a, b, e => stable({ ...e, t: LU2_RENAME(e.t) }));
+		default: return true; // non-ordering classes (U3) are unchecked
+	}
+}
+
+function compareEntries(aList, bList) {
+	let fail = 0, ok = 0, known = 0;
+	for (let i = 0; i < aList.length; i++) {
+		const a = aList[i], b = bList[i];
 		const key = `${a.m}@${a.at}`;
 		if (a.m !== b.m || a.at !== b.at) {
 			console.error(`FAIL entry misalignment at #${i} (harness bug): stock=${key} tnb=${b.m}@${b.at}`);
@@ -566,6 +648,14 @@ function parentMain() {
 			continue;
 		}
 		if (why !== undefined) {
+			const cls = classOf(why);
+			if (ORDERING_CLASSES.has(cls) && !checkKnownShape(cls, a.v, b.v)) {
+				fail++;
+				console.log(`KNOWN-SHAPE-VIOLATION ${key} — ${why}`);
+				console.log(`  stock: ${sa.slice(0, 600)}`);
+				console.log(`  tnb  : ${sb.slice(0, 600)}`);
+				continue;
+			}
 			known++;
 			console.log(`KNOWN ${key} — ${why}`);
 			console.log(`  stock: ${sa.slice(0, 400)}`);
@@ -577,11 +667,95 @@ function parentMain() {
 		console.log(`  stock: ${sa.slice(0, 600)}`);
 		console.log(`  tnb  : ${sb.slice(0, 600)}`);
 	}
+	return { ok, known, fail };
+}
+
+function parentMain() {
+	const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'tnb-checker-diff-'));
+	writeCorpus(dir);
+	const stock = runChild('stock', dir);
+	const tnb = runChild('tnb', dir);
+	console.log(`fixture: ${dir}`);
+	console.log(`entries: stock=${stock.entries.length} tnb=${tnb.entries.length}`);
+	if (stock.entries.length !== tnb.entries.length) {
+		console.error(`FAIL entry count mismatch (harness bug): stock=${stock.entries.length} tnb=${tnb.entries.length}`);
+		process.exit(1);
+	}
+	const { ok, known, fail } = compareEntries(stock.entries, tnb.entries);
 	console.log(`\nVERDICT: ${fail === 0 ? 'PASS' : 'FAIL'} (${ok} ok, ${known} known, ${fail} diffs)`);
 	process.exit(fail === 0 ? 0 : 1);
 }
 
-if (process.env.TNB_DIFF_SIDE) {
+// ── Self-test (--self-test) ─────────────────────────────────────────────────
+// Synthetic same-key diffs pin the KNOWN exemption contract: a pure
+// permutation at a known key stays KNOWN; a content bug (wrong member name,
+// wrong union constituent, drifted canonType flags) at the same key must be
+// caught as KNOWN-SHAPE-VIOLATION. Without shape validation the violation
+// assertions below fail — the gate green-lights a genuine bug riding on an
+// exempted coordinate. This mode is the regression guard for that behavior.
+function selfTest() {
+	let failed = 0;
+	const check = (name, ok, detail = '') => {
+		console.log(`${ok ? 'SELF-OK  ' : 'SELF-FAIL'} ${name}${detail ? ` — ${detail}` : ''}`);
+		if (!ok) failed++;
+	};
+	const prop = (name, t, flags = 1, decls = [['util.ts', 0, 0]]) => ({ name, flags, decls, t });
+	const splitKey = key => ({ m: key.slice(0, key.indexOf('@')), at: key.slice(key.indexOf('@') + 1) });
+	const run = (key, stockV, tnbV) => compareEntries(
+		[{ ...splitKey(key), v: stockV }],
+		[{ ...splitKey(key), v: tnbV }],
+	);
+
+	const U2_KEY = 'getApparentProperties@util.ts:add-decl';
+	const U1_KEY = 'typeToString@types.ts:Tpl-decl';
+	const U1T_KEY = 'getApparentType@types.ts:Tpl-decl';
+	const LU2_KEY = 'getPropertiesOfType@types.ts:Tpl-decl';
+	const U2T_KEY = 'getPropertiesOfType@types.ts:lang-elemaccess';
+
+	// U2 member lists: reorder stays known, a wrong member name is a violation.
+	let r = run(U2_KEY, [prop('add', 't1'), prop('Shape', 't2'), prop('Box', 't3')], [prop('Box', 't3'), prop('add', 't1'), prop('Shape', 't2')]);
+	check('U2 reorder at known key stays a known pass', r.fail === 0 && r.known === 1);
+	r = run(U2_KEY, [prop('add', 't1'), prop('Shape', 't2')], [prop('addd', 't1'), prop('Shape', 't2')]);
+	check('U2 wrong member name at known key is KNOWN-SHAPE-VIOLATION', r.fail === 1 && r.known === 0);
+
+	// U1 union-constituent order in type strings: reorder stays known, a wrong
+	// constituent is a violation.
+	r = run(U1_KEY, '"a" | "b" | "c"', '"c" | "a" | "b"');
+	check('U1 union reorder stays a known pass', r.fail === 0 && r.known === 1);
+	r = run(U1_KEY, '"a" | "b" | "c"', '"c" | "a" | "d"');
+	check('U1 wrong constituent at known key is KNOWN-SHAPE-VIOLATION', r.fail === 1 && r.known === 0);
+
+	// U1 canonType: same union reorder stays known; flags drift is a violation.
+	r = run(U1T_KEY, { s: '"a" | "b" | "c"', f: 134217728, of: 0 }, { s: '"c" | "a" | "b"', f: 134217728, of: 0 });
+	check('U1 canonType reorder (same flags) stays a known pass', r.fail === 0 && r.known === 1);
+	r = run(U1T_KEY, { s: '"a" | "b" | "c"', f: 134217728, of: 0 }, { s: '"c" | "a" | "b"', f: 64, of: 0 });
+	check('U1 canonType flags drift at known key is KNOWN-SHAPE-VIOLATION', r.fail === 1 && r.known === 0);
+
+	// LU2: the documented padStart/padEnd parameter rename + reorder stays
+	// known; a wrong member name is a violation.
+	const padStart = { name: 'padStart', flags: 8192, decls: [['lib.es5.d.ts', 174]], t: '(maxLength: number, fillString?: string | undefined) => string' };
+	const padStartTnb = { ...padStart, t: '(targetLength: number, padString?: string | undefined) => string' };
+	r = run(LU2_KEY, [padStart, prop('padEnd', 'x')], [prop('padEnd', 'x'), padStartTnb]);
+	check('LU2 documented rename + reorder stays a known pass', r.fail === 0 && r.known === 1);
+	r = run(LU2_KEY, [padStart, prop('padEnd', 'x')], [prop('padEnd', 'x'), { ...padStartTnb, name: 'padStartX' }]);
+	check('LU2 wrong member name at known key is KNOWN-SHAPE-VIOLATION', r.fail === 1 && r.known === 0);
+
+	// U2T: truncation-tail type-string drift (same member identity) stays
+	// known; a wrong member name is a violation.
+	const every = { name: 'every', flags: 8192, decls: [['lib.es5.d.ts', 174]], t: '{ (): boolean; … 12 more …; last: string; }' };
+	const everyTnb = { ...every, t: '{ (): boolean; … 13 more …; other: number; }' };
+	r = run(U2T_KEY, [{ name: '0', flags: 4, decls: [], t: 'P' }, every], [everyTnb, { name: '0', flags: 4, decls: [], t: 'P' }]);
+	check('U2T truncation-tail t drift stays a known pass', r.fail === 0 && r.known === 1);
+	r = run(U2T_KEY, [{ name: '0', flags: 4, decls: [], t: 'P' }, every], [{ ...everyTnb, name: 'evry' }, { name: '0', flags: 4, decls: [], t: 'P' }]);
+	check('U2T wrong member name at known key is KNOWN-SHAPE-VIOLATION', r.fail === 1 && r.known === 0);
+
+	console.log(failed === 0 ? '\nSELF-TEST: PASS' : `\nSELF-TEST: FAIL (${failed} assertions)`);
+	process.exit(failed === 0 ? 0 : 1);
+}
+
+if (process.argv.includes('--self-test')) {
+	selfTest();
+} else if (process.env.TNB_DIFF_SIDE) {
 	const out = runSide(process.env.TNB_DIFF_SIDE, process.argv[2]);
 	fs.writeSync(1, JSON.stringify(out) + '\n');
 	process.exit(0);
