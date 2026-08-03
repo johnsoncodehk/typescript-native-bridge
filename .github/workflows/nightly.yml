@@ -95,9 +95,10 @@ jobs:
       # this job's post-job save has landed.
       - name: Clone volar (cache)
         id: volar-cache
-        # Nightly needs a BUILT volar tree (install + pnpm run build) while
-        # ci.yml's entry is install-only — sharing a key would make whichever
-        # workflow writes first define the content for both.
+        # Both workflows need a BUILT volar tree (install + pnpm run build —
+        # the sim-nav shards load the compiled plugin). Keys stay per-workflow
+        # (nightly-v2 vs ci.yml's v3): first-writer-wins on a shared key would
+        # let one workflow's write timing define the other's content.
         uses: actions/cache@v4
         with:
           path: |
@@ -245,6 +246,11 @@ jobs:
           VOLAR_ROOT: ${{ runner.temp }}/volar
           STOCK_TSSERVER_PATH: ${{ runner.temp }}/volar-stock/package/lib/tsserver.js
           SIM_NAV_BASELINE: ${{ github.workspace }}/${{ env.BASELINE }}
+          # SIM_NAV_SKIP_CLASSIFY was removed: nightly now runs the full
+          # classify replay, isomorphic with local `npm run check:sim-nav`
+          # (green since the stalls). If a replay stall/SDK-disconnect recurs
+          # in CI, re-add SIM_NAV_SKIP_CLASSIFY=1 to the shard invocation
+          # below and file the issue.
         run: |
           set -u
           # Isolated tools copy, same shape as the old single-job shards: the
@@ -258,7 +264,6 @@ jobs:
           rc=0
           (cd "/tmp/tnb-shard$i/tools" && \
             SIM_NAV_SHARD_INDEX=$i SIM_NAV_SHARD_COUNT=4 \
-            SIM_NAV_SKIP_CLASSIFY=1 \
             SIM_NAV_OUT_JSON="/tmp/tnb-sim-nav-shard$i.json" \
             SIM_NAV_THROW_FILE="/tmp/tnb-sim-nav-shard$i.throws.jsonl" \
             node triage-sim-nav-shard.mjs > "/tmp/tnb-sim-nav-shard$i.log" 2>&1) || rc=$?

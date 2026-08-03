@@ -6,8 +6,10 @@
 //
 // The adapter builds a tsgo project from the Program's configFilePath,
 // then routes checker queries by (fileName, position) — the same file
-// content and offsets as the real TS Program (Phase 1: plain .ts, disk
-// content === Program content). Type/Symbol objects come from tsgo and
+// content and offsets as the real TS Program. Text is served overlay-first
+// (unsaved buffers, extra-extension virtual files), then host readFile,
+// then disk — never a stale disk-only snapshot — so the checker query and
+// the stock AST never disagree. Type/Symbol objects come from tsgo and
 // get prototype-patched to quack like ts.Type / ts.Symbol so rule code
 // that reads .flags / .symbol / calls .getSymbol() / .isUnion() etc.
 // keeps working.
@@ -700,7 +702,6 @@ function createSharedLightStub(hostFileName: string, configFilePath: string, met
         } catch (e) {
             if (!/snapshot \d+ not found/.test(String((e as any)?.message ?? e))) throw e;
             return undefined;
-            return undefined;
         }
     };
     const delegate = (field: string) => full()?.[field];
@@ -745,8 +746,13 @@ function createSharedLightStub(hostFileName: string, configFilePath: string, met
         get libReferenceDirectives() { return delegateOr("libReferenceDirectives", []); },
         amdDependencies: [],
         moduleAugmentations: [],
-        get imports() { return delegate("imports"); },
-        get ambientModuleNames() { return delegate("ambientModuleNames"); },
+        // imports/ambientModuleNames/statements are always arrays in stock —
+        // an inert stale-generation read must still satisfy array consumers,
+        // so they fall back to [] like statements does. externalModuleIndicator
+        // is optional in stock (Node | true | undefined — undefined means the
+        // file is not an external module), so delegate's undefined matches it.
+        get imports() { return delegateOr("imports", []); },
+        get ambientModuleNames() { return delegateOr("ambientModuleNames", []); },
         get externalModuleIndicator() { return delegate("externalModuleIndicator"); },
         get parseDiagnostics() { return delegateOr("parseDiagnostics", []); },
         get bindDiagnostics() { return delegateOr("bindDiagnostics", []); },
@@ -7783,9 +7789,6 @@ export function createTsgoProgram(
         const resolvedFn = resolveHostFileNameMemoized(fileName, host);
         const hit = nameSet.has(toHostFileName(resolvedFn))
             || nameSet.has(canonicalSourceFilePath(resolvedFn));
-        if (!hit) {
-            _navTrace(() => `programContainsFile miss: file=${fileName} cfg=${configFilePath} names=${nameSet.size}`);
-        }
         return hit;
     };
 
@@ -9079,17 +9082,6 @@ function peelExpressionWrappersForBindingParent(node: any): any {
     return cur;
 }
 
-// ── nav-path debug trace (default OFF; TNB_TRACE_NAV=1 → TNB_TRACE_NAV_FILE) ──
-const _navTraceFile = process.env.TNB_TRACE_NAV === "1"
-    ? (process.env.TNB_TRACE_NAV_FILE || "/tmp/tnb-nav-trace.log")
-    : "";
-function _navTrace(msg: () => string): void {
-    if (!_navTraceFile) return;
-    try {
-        (require("fs") as typeof import("fs")).appendFileSync(_navTraceFile, `${Date.now()} ${msg()}\n`);
-    } catch { /* best-effort */ }
-}
-
 function resolveNamelessDeclarationSymbol(n: any, project: any): any {
     if (!n || !project?.checker) return undefined;
     const parent = peelExpressionWrappersForBindingParent(n) ?? n.parent;
@@ -9191,7 +9183,6 @@ function installNodeHandleHooks(s: any): void {
             // early call, or a snapshot rotation) must not poison the handle for
             // the rest of the session.
             if (resolved === null) {
-                _navTrace(() => `resolveSelf miss: path=${self?.path} kind=${self?.kind} index=${self?.index}`);
                 return self._resolvedNode = null;
             }
             self._resolvedNode = resolved;
@@ -9344,7 +9335,6 @@ function installNodeHandleHooks(s: any): void {
                     const n = resolveSelf(this);
                     const project = _currentProjectRef.project;
                     if (!n || !project?.checker) {
-                        _navTrace(() => `symbol-getter bail: n=${!!n} checker=${!!project?.checker} path=${(this as any)?.path} kind=${(this as any)?.kind}`);
                         return undefined;
                     }
                     try {
@@ -9358,15 +9348,13 @@ function installNodeHandleHooks(s: any): void {
                                 ensureContainerDeclarationOnSymbol(sym, n);
                                 return sym;
                             }
-                            _navTrace(() => `symbol-getter named-miss: kind=${n.kind} name=${String(nameNode.text ?? "").slice(0, 40)} sf=${n.getSourceFile?.()?.fileName}`);
                             // Named binding miss (e.g. generated __VLS_export behind
                             // wrappers): still recover nameless function shims.
                         }
                         const shim = resolveNamelessDeclarationSymbol(n, project);
-                        if (!shim) _navTrace(() => `symbol-getter nameless-miss: kind=${n.kind} sf=${n.getSourceFile?.()?.fileName}`);
                         return shim;
-                    } catch (e) {
-                        _navTrace(() => `symbol-getter throw: kind=${n?.kind} err=${String((e as any)?.message ?? e).slice(0, 120)}`);
+                    } catch {
+                        // Best-effort: a failed symbol resolution must not crash the getter.
                     }
                     return undefined;
                 },
@@ -10086,11 +10074,6 @@ export function createTsgoChecker(program: any): any {
                 nodeIndexCache.set(fileName, stable);
                 return stable;
             }
-        }
-        if (process.env.TNB_TRACE_NODEINDEX === "1") {
-            try {
-                require("fs").appendFileSync("/tmp/tnb-nodeindex.log", `build file=${fileName} sfType=${sf?.constructor?.name}\n`);
-            } catch { /* trace only */ }
         }
         const t0 = process.env.TSGO_PROFILE === "1" ? Date.now() : 0;
         const idx = new Map<number, any[]>();

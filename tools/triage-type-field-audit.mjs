@@ -15,6 +15,18 @@
  * the payload. Stock own-keys not in the audit table and not exempted FAIL —
  * a future stock field or bridge drop turns the gate red.
  *
+ * Tripwire scope: the tripwire enumerates Object.keys at auditPair time, so it
+ * only sees own keys the fixture actually materializes. Public d.ts fields
+ * stock caches onto the type lazily on first checker use — the constraint
+ * family (IndexedAccessType simplifiedForReading/simplifiedForWriting via
+ * getSimplifiedIndexedAccessType, resolvedBaseConstraint via
+ * getResolvedBaseConstraint) and the transient EvolvingArrayType fields
+ * (elementType/finalArrayType — evolving arrays are completed at every
+ * getTypeAtLocation-observable point) never exist at auditPair time on the
+ * fixture and are exempted in STOCK_INTERNAL_KEYS with reasons; the per-site
+ * lazy cross-checks (getConstraint/getTypeArguments/getBaseTypes) are the
+ * gate for the semantics those fields carry.
+ *
  * Known reasonable differences are exempted inline with reasons
  * (STOCK_INTERNAL_KEYS / conditionalExemption / union multiset rule below).
  * Fields that cross lazily by design (typeArguments, constraint) are
@@ -106,6 +118,14 @@ interface AuditDerived extends AuditBase<string> { y: number; }
 declare const derived: AuditDerived;
 type Pair<T> = [T, T];
 declare const pair: Pair<string>;
+declare const b: boolean;
+declare const obj: object;
+declare const klass: Klass;
+class Klass { m(): void {} }
+let evo = [];
+evo.push(1);
+type R<T> = { [K in keyof T as K extends string ? \`get\${Capitalize<K>}\` : never]: T[K] };
+declare function fr<T>(x: T): R<T>;
 `;
 fs.writeFileSync(path.join(dir, 'tsconfig.json'), JSON.stringify({
 	compilerOptions: { strict: true, noEmit: true, target: 'es2022', module: 'esnext', moduleResolution: 'bundler' },
@@ -127,6 +147,7 @@ const SITES = [
 	{ label: 'intersection', kind: 'decl', name: 'inter' },
 	{ label: 'generic-object-ref', kind: 'decl', name: 'box' },
 	{ label: 'array-ref', kind: 'decl', name: 'arr' },
+	{ label: 'evolving-array', kind: 'decl', name: 'evo' },
 	{ label: 'tuple', kind: 'decl', name: 'tup' },
 	{ label: 'readonly-tuple', kind: 'decl', name: 'rtup' },
 	{ label: 'labeled-tuple', kind: 'decl', name: 'ltup' },
@@ -143,10 +164,13 @@ const SITES = [
 	{ label: 'intrinsic-undefined', kind: 'decl', name: 'und' },
 	{ label: 'intrinsic-null', kind: 'decl', name: 'nul' },
 	{ label: 'intrinsic-void', kind: 'decl', name: 'voidv' },
+	{ label: 'boolean', kind: 'decl', name: 'b' },
+	{ label: 'object-keyword', kind: 'decl', name: 'obj' },
 	{ label: 'unique-symbol', kind: 'decl', name: 'us' },
 	{ label: 'fresh-literal', kind: 'init', name: 'fresh' },
 	{ label: 'conditional', kind: 'ret', name: 'fc' },
 	{ label: 'mapped', kind: 'ret', name: 'fm' },
+	{ label: 'key-remap-mapped', kind: 'ret', name: 'fr' },
 	{ label: 'index-keyof', kind: 'ret', name: 'fk' },
 	{ label: 'string-mapping', kind: 'ret', name: 'fu' },
 	{ label: 'type-parameter', kind: 'ret', name: 'ftp' },
@@ -154,6 +178,7 @@ const SITES = [
 	{ label: 'indexed-access-mapped', kind: 'ret', name: 'fiam' },
 	{ label: 'this-type', kind: 'thisRet' },
 	{ label: 'derived-interface', kind: 'decl', name: 'derived' },
+	{ label: 'class', kind: 'decl', name: 'klass' },
 	{ label: 'alias-args', kind: 'decl', name: 'pair' },
 ];
 
@@ -243,6 +268,7 @@ const STOCK_INTERNAL_KEYS = new Map(Object.entries({
 	propertyCacheWithoutObjectFunctionPropertyAugment: 'property cache; property data crosses via RPC',
 	resolvedProperties: 'property cache; property data crosses via RPC',
 	immediateBaseConstraint: 'base-constraint cache; constraint semantics cross via getConstraintOfType RPC',
+	resolvedBaseConstraint: 'base-constraint cache, same family as immediateBaseConstraint: stock materializes it on first getResolvedBaseConstraint resolution (getBaseConstraintOfType/getConstraintOfType paths) — on the fixture it becomes an own key only after the audit\'s post-auditPair getConstraint() cross-check (probe-verified at the indexed-access site), so the tripwire cannot see it; constraint semantics cross via getConstraint()/getBaseConstraintOfType RPC, cross-checked per site',
 	constraint: 'TypeParameter: lazy field, crosses via getConstraint() RPC by design (issue #23) — cross-checked per site. IndexedAccess: stock 6.0.3 declares constraint?: Type but never materializes the own key (verified Object.keys probe — computed on demand by getConstraintOfType/computeBaseConstraint, never cached onto the field); the bridge serves t.getConstraint() via the getBaseConstraintOfType RPC — cross-checked per site at the indexed-access sites. Both are separate per-site cross-checks, never the SINGLE list (a payload field would break TypeParameter laziness)',
 	default: 'lazy TypeParameter field; crosses via getDefault() RPC by design — same contract as constraint',
 	accessFlags: 'internal indexed-access bitfield, not part of the public d.ts surface',
@@ -251,6 +277,10 @@ const STOCK_INTERNAL_KEYS = new Map(Object.entries({
 	resolvedBaseTypes: 'base-type resolution cache; the resolved bases are audited via the per-site getBaseTypes walk',
 	baseTypesResolved: 'base-type resolution cache; the resolved bases are audited via the per-site getBaseTypes walk',
 	pattern: 'destructuring internals',
+	simplifiedForReading: 'IndexedAccessType public d.ts field, lazily materialized: stock computes+caches it via getSimplifiedIndexedAccessType on first indexed-access simplification, and the fixture only triggers that after auditPair (probe: own key appears on the indexed-access site only after the post-auditPair getConstraint() cross-check) — the tripwire cannot see it; simplification semantics are served on the bridge by the getSimplifiedIndexedAccessType RPC',
+	simplifiedForWriting: 'write-access half of the same getSimplifiedIndexedAccessType cache as simplifiedForReading — same lazy materialization, never a fixture own key at auditPair time',
+	elementType: 'EvolvingArrayType public d.ts field: stock materializes evolving-array types only transiently inside flow analysis — every getTypeAtLocation-observable point completes them (getFlowTypeOfReference → finalizeEvolvingArrayType / completeInferenceForEvolvingArrayType; the push-callee returns the completed reference too), so no fixture site can ever materialize this key; the evolving-array site audits the completed array instead, and tsgo mirrors the transient model (flow.go)',
+	finalArrayType: 'same transient-flow class as elementType: the finalized array of an evolving array exists only while the evolving type is being inferred, and is unreachable once getTypeAtLocation completes it',
 }));
 
 const TF = tss.TypeFlags;
@@ -447,7 +477,25 @@ function auditPair(s, b, pathLabel) {
 		notes.add(`${pathLabel}: TNB extra value=${summarize(b.value, 0)} (stock has none)`);
 	}
 	if ((s.intrinsicName ?? undefined) !== (b.intrinsicName ?? undefined)) {
-		failures.push(`${pathLabel}.intrinsicName: stock=${JSON.stringify(s.intrinsicName)} tnb=${JSON.stringify(b.intrinsicName)}`);
+		// Engine divergence, not a bridge drop: stock models the `boolean`
+		// intrinsic as a union of its literal types carrying intrinsicName
+		// 'boolean'; tsgo models `boolean` as a plain union of the false/true
+		// literal types with no intrinsicName (tsgo checker.go:1003,
+		// c.booleanType = c.getUnionType([]*Type{c.regularFalseType,
+		// c.regularTrueType}) — verified against pristine tsgo, engine design
+		// not a bridge field loss). The bridge faithfully crosses tsgo's
+		// union model; the union constituents are audited via the types
+		// multiset below, and the flags comparison above still guards the
+		// shape. The boolean literal types themselves (intrinsicName
+		// 'false'/'true') are not divergent — only the aggregate boolean
+		// type omits the intrinsic name.
+		const engineBoolean = (s.flags & TF.Intrinsic) !== 0 && s.intrinsicName === 'boolean' && b.intrinsicName === undefined;
+		if (engineBoolean) {
+			notes.add(`${pathLabel}.intrinsicName: engine-divergence exempt — stock 'boolean' intrinsic carries intrinsicName; tsgo models it as the false|true union (tsgo checker.go:1003 c.booleanType = getUnionType) — engine behavior, not a bridge field drop`);
+		}
+		else {
+			failures.push(`${pathLabel}.intrinsicName: stock=${JSON.stringify(s.intrinsicName)} tnb=${JSON.stringify(b.intrinsicName)}`);
+		}
 	}
 	// #19/#22: stock models boolean literals as IntrinsicType with no value;
 	// the bridge carries tsgo's LiteralType value alongside. With no stock

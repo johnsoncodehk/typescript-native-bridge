@@ -960,7 +960,7 @@ index 91aab0904..48b7cabb1 100644
  	assert.NilError(t, err)
  
 diff --git a/internal/checker/checker.go b/internal/checker/checker.go
-index b639d488e..107a37f10 100644
+index b639d488e..80168db76 100644
 --- a/internal/checker/checker.go
 +++ b/internal/checker/checker.go
 @@ -786,6 +786,7 @@ type Checker struct {
@@ -985,25 +985,28 @@ index b639d488e..107a37f10 100644
  		}
  		links.immediateTarget = c.getTargetOfAliasDeclaration(node)
  	}
-@@ -16372,7 +16378,7 @@ func (c *Checker) GetTypeOfSymbolAtLocation(symbol *ast.Symbol, location *ast.No
+@@ -16371,8 +16377,9 @@ func (c *Checker) GetTypeOfSymbolAtLocation(symbol *ast.Symbol, location *ast.No
+ 		// an dotted name expression, and if the location is not an assignment target, obtain the type
  		// of the expression (which will reflect control flow analysis). If the expression indeed
  		// resolved to the given symbol, return the narrowed type.
++		// Ledger(tsgo-typeat-nil-parent-guard) — README behavior table row.
  		if (ast.IsIdentifier(location) || ast.IsPrivateIdentifier(location)) &&
 -			!(ast.IsJsxTagName(location) || ast.IsJsxAttribute(location.Parent) || ast.IsJsxNamespacedName(location.Parent)) {
 +			!(ast.IsJsxTagName(location) || (location.Parent != nil && (ast.IsJsxAttribute(location.Parent) || ast.IsJsxNamespacedName(location.Parent)))) {
  			if ast.IsRightSideOfQualifiedNameOrPropertyAccess(location) {
  				location = location.Parent
  			}
-@@ -16388,7 +16394,7 @@ func (c *Checker) GetTypeOfSymbolAtLocation(symbol *ast.Symbol, location *ast.No
+@@ -16388,7 +16395,8 @@ func (c *Checker) GetTypeOfSymbolAtLocation(symbol *ast.Symbol, location *ast.No
  				}
  			}
  		}
 -		if ast.IsDeclarationName(location) && ast.IsSetAccessorDeclaration(location.Parent) && c.getAnnotatedAccessorTypeNode(location.Parent) != nil {
++		// Ledger(tsgo-typeat-nil-parent-guard) — README behavior table row.
 +		if ast.IsDeclarationName(location) && location.Parent != nil && ast.IsSetAccessorDeclaration(location.Parent) && c.getAnnotatedAccessorTypeNode(location.Parent) != nil {
  			return c.getWriteTypeOfAccessors(location.Parent.Symbol())
  		}
  		// The location isn't a reference to the given symbol, meaning we're being asked
-@@ -16403,13 +16409,13 @@ func (c *Checker) GetTypeOfSymbolAtLocation(symbol *ast.Symbol, location *ast.No
+@@ -16403,13 +16411,13 @@ func (c *Checker) GetTypeOfSymbolAtLocation(symbol *ast.Symbol, location *ast.No
  	return c.getNonMissingTypeOfSymbol(symbol)
  }
  
@@ -1021,7 +1024,7 @@ index b639d488e..107a37f10 100644
  	if symbol.CheckFlags&ast.CheckFlagsMapped != 0 {
  		return c.getTypeOfMappedSymbol(symbol)
  	}
-@@ -16434,6 +16440,20 @@ func (c *Checker) getTypeOfSymbol(symbol *ast.Symbol) *Type {
+@@ -16434,6 +16442,20 @@ func (c *Checker) getTypeOfSymbol(symbol *ast.Symbol) *Type {
  	return c.errorType
  }
  
@@ -1042,7 +1045,7 @@ index b639d488e..107a37f10 100644
  func (c *Checker) getNonMissingTypeOfSymbol(symbol *ast.Symbol) *Type {
  	return c.removeMissingType(c.getTypeOfSymbol(symbol), symbol.Flags&ast.SymbolFlagsOptional != 0)
  }
-@@ -16441,7 +16461,23 @@ func (c *Checker) getNonMissingTypeOfSymbol(symbol *ast.Symbol) *Type {
+@@ -16441,7 +16463,23 @@ func (c *Checker) getNonMissingTypeOfSymbol(symbol *ast.Symbol) *Type {
  func (c *Checker) getTypeOfInstantiatedSymbol(symbol *ast.Symbol) *Type {
  	links := c.valueSymbolLinks.Get(symbol)
  	if links.resolvedType == nil {
@@ -1067,7 +1070,7 @@ index b639d488e..107a37f10 100644
  	}
  	return links.resolvedType
  }
-@@ -16449,7 +16485,16 @@ func (c *Checker) getTypeOfInstantiatedSymbol(symbol *ast.Symbol) *Type {
+@@ -16449,7 +16487,16 @@ func (c *Checker) getTypeOfInstantiatedSymbol(symbol *ast.Symbol) *Type {
  func (c *Checker) getWriteTypeOfInstantiatedSymbol(symbol *ast.Symbol) *Type {
  	links := c.valueSymbolLinks.Get(symbol)
  	if links.writeType == nil {
@@ -1085,7 +1088,7 @@ index b639d488e..107a37f10 100644
  	}
  	return links.writeType
  }
-@@ -22798,6 +22843,19 @@ func (c *Checker) getTypeFromTypeNodeWorker(node *ast.Node) *Type {
+@@ -22798,6 +22845,19 @@ func (c *Checker) getTypeFromTypeNodeWorker(node *ast.Node) *Type {
  		return c.getTypeFromInferTypeNode(node)
  	case ast.KindImportType:
  		return c.getTypeFromImportTypeNode(node)
@@ -1105,7 +1108,7 @@ index b639d488e..107a37f10 100644
  	default:
  		return c.errorType
  	}
-@@ -29109,6 +29167,13 @@ func (c *Checker) getContextualType(node *ast.Node, contextFlags ContextFlags) *
+@@ -29109,6 +29169,13 @@ func (c *Checker) getContextualType(node *ast.Node, contextFlags ContextFlags) *
  		return c.contextualInfos[index].t
  	}
  	parent := node.Parent
@@ -1660,7 +1663,7 @@ index bd1342092..b9bfb60d7 100644
  
  type ConstrainedType struct {
 diff --git a/internal/compiler/fileloader.go b/internal/compiler/fileloader.go
-index f8d006e92..3390c5b57 100644
+index f8d006e92..82e128ca2 100644
 --- a/internal/compiler/fileloader.go
 +++ b/internal/compiler/fileloader.go
 @@ -125,7 +125,7 @@ func processAllProgramFiles(
@@ -1672,10 +1675,11 @@ index f8d006e92..3390c5b57 100644
  	supportedExtensionsWithJsonIfResolveJsonModule := tsoptions.GetSupportedExtensionsWithJsonIfResolveJsonModule(compilerOptions, supportedExtensions)
  	var maxNodeModuleJsDepth int
  	if p := opts.Config.CompilerOptions().MaxNodeModuleJsDepth; p != nil {
-@@ -148,6 +148,17 @@ func processAllProgramFiles(
+@@ -148,6 +148,18 @@ func processAllProgramFiles(
  	}
  	loader.addProjectReferenceTasks(singleThreaded)
  	loader.resolver = module.NewResolver(loader.projectReferenceFileMapper.host, compilerOptions, opts.TypingsLocation, opts.ProjectName)
++	// Ledger(tsgo-extra-file-extensions) — README behavior table row.
 +	if extras := opts.Config.ExtraFileExtensions(); len(extras) > 0 {
 +		extraExtensions := make([]string, 0, len(extras))
 +		for _, x := range extras {
@@ -1690,7 +1694,7 @@ index f8d006e92..3390c5b57 100644
  	if opts.Tracing != nil {
  		defer opts.Tracing.Push(tracing.PhaseProgram, "processRootFiles", map[string]any{"count": len(rootFiles)}, false)()
  	}
-@@ -431,7 +442,7 @@ func (p *fileLoader) getSourceFileFromReference(
+@@ -431,7 +443,7 @@ func (p *fileLoader) getSourceFileFromReference(
  	return "", &sourceFileFromReferenceDiagnostic{message: diagnostics.Could_not_resolve_the_path_0_with_the_extensions_Colon_1, args: []any{diagnosticFileName, "'" + strings.Join(core.Flatten(p.supportedExtensions), "', '") + "'"}}
  }
  
@@ -1699,10 +1703,11 @@ index f8d006e92..3390c5b57 100644
  	basePath := tspath.GetDirectoryPath(containingFile)
  	referencedFileName := moduleName
  
-@@ -454,6 +465,16 @@ func (p *fileLoader) resolveTripleslashPathReference(moduleName string, containi
+@@ -454,6 +466,17 @@ func (p *fileLoader) resolveTripleslashPathReference(moduleName string, containi
  		includeReason,
  	)
  	if diagnostic != nil {
++		// Ledger(tsgo-extra-file-extensions) — README behavior table row.
 +		// Stock tracks referenced-but-not-found files in
 +		// Program.missingFilePaths (the watch layer installs watchers that
 +		// re-probe them). Report the attempted path so the caller can do the
@@ -1716,7 +1721,7 @@ index f8d006e92..3390c5b57 100644
  		return nil, &processingDiagnostic{
  			kind: processingDiagnosticKindExplainingFileInclude,
  			data: &includeExplainingDiagnostic{
-@@ -461,13 +482,13 @@ func (p *fileLoader) resolveTripleslashPathReference(moduleName string, containi
+@@ -461,13 +484,13 @@ func (p *fileLoader) resolveTripleslashPathReference(moduleName string, containi
  				message:          diagnostic.message,
  				args:             diagnostic.args,
  			},
@@ -1732,12 +1737,13 @@ index f8d006e92..3390c5b57 100644
  }
  
  func (p *fileLoader) resolveTypeReferenceDirectives(t *parseTask) {
-@@ -590,8 +611,13 @@ func (p *fileLoader) resolveImportsAndModuleAugmentations(t *parseTask) {
+@@ -590,8 +613,14 @@ func (p *fileLoader) resolveImportsAndModuleAugmentations(t *parseTask) {
  
  			resolvedFileName := resolvedModule.ResolvedFileName
  			isFromNodeModulesSearch := resolvedModule.IsExternalLibraryImport
 -			// Don't treat redirected files as JS files.
 -			isJsFile := !tspath.FileExtensionIsOneOf(resolvedFileName, tspath.SupportedTSExtensionsWithJsonFlat) && p.projectReferenceFileMapper.getRedirectParsedCommandLineForResolution(ast.NewHasFileName(resolvedFileName, p.toPath(resolvedFileName))) == nil
++			// Ledger(tsgo-extra-file-extensions) — README behavior table row.
 +			// Extra-extension files get their script kind from host registration,
 +			// not from the resolved path's suffix. Project-reference redirects
 +			// also bypass suffix classification. Exclude both from the JavaScript
@@ -1800,7 +1806,7 @@ index 5817fc6bb..698abd084 100644
  				missingFiles = append(missingFiles, task.normalizedFilePath)
  				continue
 diff --git a/internal/compiler/program.go b/internal/compiler/program.go
-index 74b2504d9..2533e844c 100644
+index 74b2504d9..9bbda0a7a 100644
 --- a/internal/compiler/program.go
 +++ b/internal/compiler/program.go
 @@ -197,6 +197,10 @@ func (p *Program) GetRedirectForResolution(file ast.HasFileName) *tsoptions.Pars
@@ -1814,16 +1820,17 @@ index 74b2504d9..2533e844c 100644
  func (p *Program) GetParseFileRedirect(fileName string) string {
  	return p.projectReferenceFileMapper.getParseFileRedirect(ast.NewHasFileName(fileName, p.toPath(fileName)))
  }
-@@ -234,7 +238,7 @@ func (p *Program) GetSourceFileFromReference(origin *ast.SourceFile, ref *ast.Fi
+@@ -234,7 +238,8 @@ func (p *Program) GetSourceFileFromReference(origin *ast.SourceFile, ref *ast.Fi
  	// Still, without the failed lookup reporting that only the loader does, this isn't terribly complicated
  
  	fileName := tspath.ResolvePath(tspath.GetDirectoryPath(origin.FileName()), ref.FileName)
 -	supportedExtensionsBase := tsoptions.GetSupportedExtensions(p.Options(), nil /*extraFileExtensions*/)
++	// Ledger(tsgo-extra-file-extensions) — README behavior table row.
 +	supportedExtensionsBase := tsoptions.GetSupportedExtensions(p.Options(), p.CommandLine().ExtraFileExtensions())
  	supportedExtensions := tsoptions.GetSupportedExtensionsWithJsonIfResolveJsonModule(p.Options(), supportedExtensionsBase)
  	allowNonTsExtensions := p.Options().AllowNonTsExtensions.IsTrue()
  	if tspath.HasExtension(fileName) {
-@@ -585,18 +589,89 @@ func (p *Program) collectCheckerDiagnosticsFromFiles(ctx context.Context, source
+@@ -585,18 +590,90 @@ func (p *Program) collectCheckerDiagnosticsFromFiles(ctx context.Context, source
  			diagnostics[fileIndex] = collect(ctx, c, file)
  		})
  	} else {
@@ -1836,6 +1843,7 @@ index 74b2504d9..2533e844c 100644
 +				checkable = append(checkable, i)
  			}
 +		}
++		// Ledger(tsgo-checker-pool-strides) — README behavior table row.
 +		// Assign files to a fixed number of groups by original index stride
 +		// (i % groups) — one task per group, one leased checker per task;
 +		// below the group count this degenerates to one group per file.
@@ -1964,15 +1972,16 @@ index cb5278fab..bf5b19e51 100644
  	// The file where the export was found.
  	Path tspath.Path
 diff --git a/internal/ls/autoimport/extract.go b/internal/ls/autoimport/extract.go
-index dc0a1db7e..ceb098328 100644
+index dc0a1db7e..56820b267 100644
 --- a/internal/ls/autoimport/extract.go
 +++ b/internal/ls/autoimport/extract.go
-@@ -297,8 +297,14 @@ func (e *symbolExtractor) createExport(symbol *ast.Symbol, moduleID ModuleID, mo
+@@ -297,8 +297,15 @@ func (e *symbolExtractor) createExport(symbol *ast.Symbol, moduleID ModuleID, mo
  				export.Flags = targetSymbol.Flags
  				export.IsTypeOnly = core.Some(symbol.Declarations, ast.IsPartOfTypeOnlyImportOrExportDeclaration)
  			}
 -			export.ScriptElementKind = lsutil.GetSymbolKind(checkerLease.TryChecker(), targetSymbol, decl)
 -			export.ScriptElementKindModifiers = lsutil.GetSymbolModifiers(checkerLease.TryChecker(), targetSymbol)
++			// Ledger(tsgo-autoimport-kind-alias) — README behavior table row.
 +			// Stock presents the export-map entry as the alias (getSymbolKind
 +			// maps SymbolFlags.Alias to "alias"); the target only contributes
 +			// kindModifiers. The modifier SET keeps the alias union for the
@@ -1984,7 +1993,7 @@ index dc0a1db7e..ceb098328 100644
  			targetModuleID := ModuleID(ast.GetSourceFileOfNode(decl).Path())
  			if parent != nil && parent.IsExternalModule() {
  				if id, ok := e.getModuleIDForSymbol(parent); ok {
-@@ -313,6 +319,7 @@ func (e *symbolExtractor) createExport(symbol *ast.Symbol, moduleID ModuleID, mo
+@@ -313,6 +320,7 @@ func (e *symbolExtractor) createExport(symbol *ast.Symbol, moduleID ModuleID, mo
  	} else {
  		export.ScriptElementKind = lsutil.GetSymbolKind(checkerLease.TryChecker(), symbol, symbol.Declarations[0])
  		export.ScriptElementKindModifiers = lsutil.GetSymbolModifiers(checkerLease.TryChecker(), symbol)
@@ -2255,13 +2264,14 @@ index 6c6468095..5e9b8e56e 100644
  			buildPreferences:        bucketBuildPreferencesFromUserPreferences(b.userPreferences),
  			recursiveSearchPackages: recursiveSearchPackages.Clone(),
 diff --git a/internal/ls/autoimport/view.go b/internal/ls/autoimport/view.go
-index 9f8b144fa..fb0eb38a2 100644
+index 9f8b144fa..4baa9e6e2 100644
 --- a/internal/ls/autoimport/view.go
 +++ b/internal/ls/autoimport/view.go
-@@ -32,6 +32,12 @@ type View struct {
+@@ -32,6 +32,13 @@ type View struct {
  	shouldUseRequireForFixes         *bool
  }
  
++// Ledger(tsgo-autoimport-inprogram-gate) — README behavior table row.
 +// inProgram reports whether fileName is one of the program's own source files
 +// (stock's main-path coverage for program-imported packages).
 +func (v *View) inProgram(fileName string) bool {
@@ -2271,7 +2281,7 @@ index 9f8b144fa..fb0eb38a2 100644
  func NewView(registry *Registry, importingFile *ast.SourceFile, projectKey tspath.Path, program *compiler.Program, preferences modulespecifiers.UserPreferences) *View {
  	return &View{
  		registry:      registry,
-@@ -141,6 +147,7 @@ func (v *View) search(searchFn func(*RegistryBucket) []*Export) []*Export {
+@@ -141,6 +148,7 @@ func (v *View) search(searchFn func(*RegistryBucket) []*Export) []*Export {
  		if nodeModulesBucket, ok := v.registry.nodeModules[dirPath]; ok {
  			exports := searchFn(nodeModulesBucket)
  			results = slices.Grow(results, len(exports))
@@ -2279,7 +2289,7 @@ index 9f8b144fa..fb0eb38a2 100644
  			for _, e := range exports {
  				// Exclude packages found in lower node_modules (shadowing)
  				if excludePackages.Has(e.PackageName) {
-@@ -151,6 +158,16 @@ func (v *View) search(searchFn func(*RegistryBucket) []*Export) []*Export {
+@@ -151,6 +159,16 @@ func (v *View) search(searchFn func(*RegistryBucket) []*Export) []*Export {
  				if allowedPackages != nil && !allowedPackages.Has(e.PackageName) {
  					continue
  				}
@@ -2296,7 +2306,7 @@ index 9f8b144fa..fb0eb38a2 100644
  				results = append(results, e)
  			}
  
-@@ -206,18 +223,25 @@ outer:
+@@ -206,18 +224,25 @@ outer:
  		if existing, ok := grouped[key]; ok {
  			for i, ex := range existing {
  				if e.ExportID == ex.ExportID {
@@ -2334,7 +2344,7 @@ index 9f8b144fa..fb0eb38a2 100644
  					continue outer
  				}
 diff --git a/internal/ls/completions.go b/internal/ls/completions.go
-index 5e62661fc..7552798c1 100644
+index 5e62661fc..9d58f85c6 100644
 --- a/internal/ls/completions.go
 +++ b/internal/ls/completions.go
 @@ -26,6 +26,7 @@ import (
@@ -2499,7 +2509,7 @@ index 5e62661fc..7552798c1 100644
  }
  
  func isRecommendedCompletionMatch(localSymbol *ast.Symbol, recommendedCompletion *ast.Symbol, typeChecker *checker.Checker) bool {
-@@ -2752,8 +2777,23 @@ func binaryExpressionMayBeOpenTag(binaryExpression *ast.BinaryExpression) bool {
+@@ -2752,8 +2777,24 @@ func binaryExpressionMayBeOpenTag(binaryExpression *ast.BinaryExpression) bool {
  	return ast.NodeIsMissing(binaryExpression.Left)
  }
  
@@ -2511,6 +2521,7 @@ index 5e62661fc..7552798c1 100644
 +	}
 +	for _, ext := range extraExtensions {
 +		if tspath.FileExtensionIs(file.FileName(), ext.Extension) {
++			// Ledger(tsgo-extra-file-extensions) — README behavior table row.
 +			// Registered extra extensions (language-plugin files like .vue/.svelte):
 +			// their embedded service scripts parse as JS for js blocks, but the
 +			// host's generated boilerplate needs the checked-file completion path —
@@ -2525,7 +2536,7 @@ index 5e62661fc..7552798c1 100644
  }
  
  func isContextTokenValueLocation(contextToken *ast.Node) bool {
-@@ -3279,7 +3319,7 @@ func cloneItems(items []*lsproto.CompletionItem) []*CompletionItem {
+@@ -3279,7 +3320,7 @@ func cloneItems(items []*lsproto.CompletionItem) []*CompletionItem {
  	entries := make([]*CompletionItem, len(items))
  	for i, item := range items {
  		itemClone := *item
@@ -2534,7 +2545,7 @@ index 5e62661fc..7552798c1 100644
  	}
  	return entries
  }
-@@ -4382,7 +4422,7 @@ func (l *LanguageService) getJsxClosingTagCompletion(
+@@ -4382,7 +4423,7 @@ func (l *LanguageService) getJsxClosingTagCompletion(
  	optionalReplacementSpan := new(l.createLspRangeFromNode(jsxClosingElement.TagName(), file))
  	defaultCommitCharacters := getDefaultCommitCharacters(false /*isNewIdentifierLocation*/)
  
@@ -2543,7 +2554,7 @@ index 5e62661fc..7552798c1 100644
  		ctx,
  		fullClosingTag, /*name*/
  		"",             /*insertText*/
-@@ -4403,9 +4443,6 @@ func (l *LanguageService) getJsxClosingTagCompletion(
+@@ -4403,9 +4444,6 @@ func (l *LanguageService) getJsxClosingTagCompletion(
  		nil,   /*autoImportEntryData*/ // !!! jsx autoimports
  		nil,   /*detail*/
  	)
@@ -2553,7 +2564,7 @@ index 5e62661fc..7552798c1 100644
  	items := []*CompletionItem{item}
  	itemDefaults := l.setItemDefaults(
  		ctx,
-@@ -4443,7 +4480,7 @@ func (l *LanguageService) createLSPCompletionItem(
+@@ -4443,7 +4481,7 @@ func (l *LanguageService) createLSPCompletionItem(
  	source string,
  	autoImportFix *lsproto.AutoImportFix,
  	detail *string,
@@ -2562,7 +2573,7 @@ index 5e62661fc..7552798c1 100644
  	kind := getCompletionsSymbolKind(elementKind)
  	data := &lsproto.CompletionItemData{
  		FileName:   file.FileName(),
-@@ -4499,20 +4536,24 @@ func (l *LanguageService) createLSPCompletionItem(
+@@ -4499,20 +4537,24 @@ func (l *LanguageService) createLSPCompletionItem(
  		insertTextFormat = new(lsproto.InsertTextFormatSnippet)
  	}
  
@@ -2601,7 +2612,7 @@ index 5e62661fc..7552798c1 100644
  	}
  }
  
-@@ -4581,9 +4622,7 @@ func (l *LanguageService) getLabelStatementCompletions(
+@@ -4581,9 +4623,7 @@ func (l *LanguageService) getLabelStatementCompletions(
  					nil,   /*autoImportEntryData*/
  					nil,   /*detail*/
  				)
@@ -2861,7 +2872,7 @@ index c83765666..5e3df8463 100644
  	predicate := c.GetTypePredicateOfSignature(candidateSignature)
  	if predicate != nil {
 diff --git a/internal/ls/string_completions.go b/internal/ls/string_completions.go
-index f5240bcf3..12380ce79 100644
+index f5240bcf3..ba4a1873f 100644
 --- a/internal/ls/string_completions.go
 +++ b/internal/ls/string_completions.go
 @@ -173,9 +173,7 @@ func (l *LanguageService) convertStringLiteralCompletions(
@@ -2886,16 +2897,17 @@ index f5240bcf3..12380ce79 100644
  	})
  	itemDefaults := l.setItemDefaults(
  		ctx,
-@@ -1007,7 +1003,7 @@ func (l *LanguageService) getExtensionOptions(
+@@ -1007,7 +1003,8 @@ func (l *LanguageService) getExtensionOptions(
  	mode core.ResolutionMode,
  	checker *checker.Checker,
  ) *extensionOptions {
 -	extensionsToSearch := getSupportedExtensionsForModuleResolution(options, checker)
++	// Ledger(tsgo-extra-file-extensions) — README behavior table row.
 +	extensionsToSearch := getSupportedExtensionsForModuleResolution(options, l.program.CommandLine().ExtraFileExtensions(), checker)
  
  	return &extensionOptions{
  		extensionsToSearch:  extensionsToSearch,
-@@ -1018,7 +1014,7 @@ func (l *LanguageService) getExtensionOptions(
+@@ -1018,7 +1015,7 @@ func (l *LanguageService) getExtensionOptions(
  	}
  }
  
@@ -2904,7 +2916,7 @@ index f5240bcf3..12380ce79 100644
  	/** file extensions from ambient modules declarations e.g. *.css */
  	var extensions []string
  	if checker != nil {
-@@ -1031,7 +1027,7 @@ func getSupportedExtensionsForModuleResolution(options *core.CompilerOptions, ch
+@@ -1031,7 +1028,7 @@ func getSupportedExtensionsForModuleResolution(options *core.CompilerOptions, ch
  			extensions = append(extensions, name[1:])
  		}
  	}
@@ -2914,10 +2926,10 @@ index f5240bcf3..12380ce79 100644
  		extensions = append(extensions, ext...)
  	}
 diff --git a/internal/module/resolver.go b/internal/module/resolver.go
-index 52400dc2b..10546290b 100644
+index 52400dc2b..29afc1957 100644
 --- a/internal/module/resolver.go
 +++ b/internal/module/resolver.go
-@@ -158,9 +158,30 @@ type Resolver struct {
+@@ -158,9 +158,31 @@ type Resolver struct {
  	compilerOptions *core.CompilerOptions
  	typingsLocation string
  	projectName     string
@@ -2928,6 +2940,7 @@ index 52400dc2b..10546290b 100644
  	// reportDiagnostic: DiagnosticReporter
  }
  
++// Ledger(tsgo-extra-file-extensions) — README behavior table row.
 +// SetExtraExtensions registers host-provided file extensions (e.g. ".vue") so
 +// the resolver can resolve module specifiers ending in them to the file itself.
 +func (r *Resolver) SetExtraExtensions(extensions []string) {
@@ -2948,10 +2961,11 @@ index 52400dc2b..10546290b 100644
  type ResolverOptions struct {
  	PackageJsonCache *packagejson.InfoCache
  }
-@@ -1195,6 +1216,14 @@ func (r *resolutionState) createResolvedTypeReferenceDirective(resolved *resolve
+@@ -1195,6 +1217,15 @@ func (r *resolutionState) createResolvedTypeReferenceDirective(resolved *resolve
  		resolvedTypeReferenceDirective.ResolvedFileName = resolved.path
  		resolvedTypeReferenceDirective.Primary = primary
  		resolvedTypeReferenceDirective.PackageId = resolved.packageId
++		// Ledger(tsgo-extra-file-extensions) — README behavior table row.
 +		// Stock stamps PackageId on every package-backed resolution; the
 +		// typeRoot (@types) primary lookup above never fills it, so
 +		// explainFiles / ATA messages lost stock's "with packageId" suffix.
@@ -2963,7 +2977,7 @@ index 52400dc2b..10546290b 100644
  		resolvedTypeReferenceDirective.IsExternalLibraryImport = strings.Contains(resolved.path, "/node_modules/")
  
  		if r.compilerOptions.PreserveSymlinks != core.TSTrue {
-@@ -1558,11 +1587,27 @@ func (r *resolutionState) tryAddingExtensions(extensionless string, extensions e
+@@ -1558,11 +1589,28 @@ func (r *resolutionState) tryAddingExtensions(extensionless string, extensions e
  		}
  		return continueSearching()
  	default:
@@ -2975,6 +2989,7 @@ index 52400dc2b..10546290b 100644
  				return resolved
  			}
  		}
++		// Ledger(tsgo-extra-file-extensions) — README behavior table row.
 +		// tsgo cannot invoke the language plugin's module-resolution host, so a
 +		// registered extension authorizes the literal host file after the
 +		// declaration probe misses.
@@ -3031,7 +3046,7 @@ index 32f68d413..2fe5c76b1 100644
  // Creates it on first use. Blocks on diagSem if it's currently in use.
  func (p *checkerPool) getDiagnosticsChecker(ctx context.Context, requestID string) (*checker.Checker, func()) {
 diff --git a/internal/project/compilerhost.go b/internal/project/compilerhost.go
-index 212601d4b..a34452b36 100644
+index 212601d4b..abb4d611d 100644
 --- a/internal/project/compilerhost.go
 +++ b/internal/project/compilerhost.go
 @@ -3,6 +3,7 @@ package project
@@ -3042,11 +3057,12 @@ index 212601d4b..a34452b36 100644
  	"github.com/microsoft/typescript-go/internal/diagnostics"
  	"github.com/microsoft/typescript-go/internal/locale"
  	"github.com/microsoft/typescript-go/internal/project/logging"
-@@ -96,7 +97,18 @@ func (c *compilerHost) GetResolvedProjectReference(fileName string, path tspath.
+@@ -96,7 +97,19 @@ func (c *compilerHost) GetResolvedProjectReference(fileName string, path tspath.
  func (c *compilerHost) GetSourceFile(opts ast.SourceFileParseOptions) *ast.SourceFile {
  	c.ensureAlive()
  	if fh := c.sourceFS.GetFileByPath(opts.FileName, opts.Path); fh != nil {
 -		key := NewParseCacheKey(opts, fh.Hash(), fh.Kind())
++		// Ledger(tsgo-extra-file-extensions) — README behavior table row.
 +		scriptKind := fh.Kind()
 +		if scriptKind == core.ScriptKindUnknown {
 +			var extras []tsoptions.FileExtensionInfo
@@ -3063,7 +3079,7 @@ index 212601d4b..a34452b36 100644
  	}
  	return nil
 diff --git a/internal/project/configfileregistrybuilder.go b/internal/project/configfileregistrybuilder.go
-index 1d62a1188..d32314835 100644
+index 1d62a1188..59a6a8cdc 100644
 --- a/internal/project/configfileregistrybuilder.go
 +++ b/internal/project/configfileregistrybuilder.go
 @@ -31,6 +31,7 @@ type configFileRegistryBuilder struct {
@@ -3090,7 +3106,7 @@ index 1d62a1188..d32314835 100644
  
  		configs:         dirty.NewSyncMap(oldConfigFileRegistry.configs),
  		configFileNames: dirty.NewMap(oldConfigFileRegistry.configFileNames),
-@@ -125,7 +128,36 @@ func (c *configFileRegistryBuilder) reloadIfNeeded(entry *configFileEntry, fileN
+@@ -125,7 +128,37 @@ func (c *configFileRegistryBuilder) reloadIfNeeded(entry *configFileEntry, fileN
  	case PendingReloadFull:
  		logger.Log("Loading config file: " + fileName)
  		oldCommandLine := entry.commandLine
@@ -3112,6 +3128,7 @@ index 1d62a1188..d32314835 100644
 +				c.extraFileExtensions,
 +				c,
 +			)
++			// Ledger(tsgo-extra-file-extensions) — README behavior table row.
 +			// When host-provided extra file extensions are present (e.g. Volar
 +			// registers ".vue"), enable allowArbitraryExtensions so the resolver
 +			// may resolve those extensions to the file itself and the include
@@ -4116,14 +4133,15 @@ index 9f0229165..0c1abcbe2 100644
  	parsedConfig := *p.ParsedConfig
  	fileNames, literalFileNamesLen := getFileNamesFromConfigSpecs(
 diff --git a/internal/tsoptions/tsconfigparsing.go b/internal/tsoptions/tsconfigparsing.go
-index 4f8578275..bc0971d30 100644
+index 4f8578275..07524b629 100644
 --- a/internal/tsoptions/tsconfigparsing.go
 +++ b/internal/tsoptions/tsconfigparsing.go
-@@ -1673,7 +1673,6 @@ func getFileNamesFromConfigSpecs(
+@@ -1673,7 +1673,7 @@ func getFileNamesFromConfigSpecs(
  	host vfs.FS,
  	extraFileExtensions []FileExtensionInfo,
  ) ([]string, int) {
 -	extraFileExtensions = []FileExtensionInfo{}
++	// Ledger(tsgo-extra-file-extensions) — README behavior table row.
  	basePath = tspath.NormalizePath(basePath)
  	keyMappper := func(value string) string { return tspath.GetCanonicalFileName(value, host.UseCaseSensitiveFileNames()) }
  	// Literal file names (provided via the "files" array in tsconfig.json) are stored in a

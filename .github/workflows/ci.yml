@@ -11,6 +11,7 @@ permissions:
 env:
   VOLAR_BRANCH: master
   VOLAR_SHA: 343049a14 # vuejs/language-tools@master, pinned for reproducibility
+  BASELINE: test/baselines/nav-results-343049a1-t1.json # sim-nav baseline gate (same as nightly)
 
 jobs:
   prepare:
@@ -119,8 +120,12 @@ jobs:
           node tools/triage-electron-abi.mjs
 
       # This job is the only place the volar cache is populated: downstream
-      # jobs (volar-test, witnesses) restore it with fail-on-cache-miss, and
-      # their needs: build guarantees this job's post-job save has landed.
+      # jobs (volar-test, witnesses, sim-nav-shard) restore it with
+      # fail-on-cache-miss, and their needs: build guarantees this job's
+      # post-job save has landed. The tree is BUILT (install + pnpm run build,
+      # same as nightly) — the sim-nav shards need the compiled plugin; v3
+      # splits off stale install-only v2 entries so a shard never restores an
+      # unbuilt tree.
       - name: Clone volar (cache)
         id: volar-cache
         uses: actions/cache@v4
@@ -128,7 +133,7 @@ jobs:
           path: |
             ${{ runner.temp }}/volar
             ${{ runner.temp }}/volar-stock
-          key: volar-${{ env.VOLAR_SHA }}-v2
+          key: volar-${{ env.VOLAR_SHA }}-v3
 
       - name: Clone volar
         if: steps.volar-cache.outputs.cache-hit != 'true'
@@ -141,12 +146,13 @@ jobs:
           cd "$RUNNER_TEMP/volar"
           node -e "const fs=require('fs');const p='pnpm-workspace.yaml';let s=fs.readFileSync(p,'utf8');s=s.replace(/typescript: npm:typescript-native-bridge@.*/,'typescript: link:'+process.env.GITHUB_WORKSPACE);fs.writeFileSync(p,s);console.log(s.match(/overrides:[\s\S]*/)[0])"
 
-      - name: Install volar
+      - name: Install + build volar
         if: steps.volar-cache.outputs.cache-hit != 'true'
         run: |
           cd "$RUNNER_TEMP/volar"
           corepack enable
           pnpm install --no-frozen-lockfile
+          pnpm run build
 
       - name: Pack stock typescript
         if: steps.volar-cache.outputs.cache-hit != 'true'
@@ -267,7 +273,7 @@ jobs:
           path: |
             ${{ runner.temp }}/volar
             ${{ runner.temp }}/volar-stock
-          key: volar-${{ env.VOLAR_SHA }}-v2
+          key: volar-${{ env.VOLAR_SHA }}-v3
           fail-on-cache-miss: true
 
       # Runs on every CI run: the cached node_modules links
@@ -322,7 +328,7 @@ jobs:
           path: |
             ${{ runner.temp }}/volar
             ${{ runner.temp }}/volar-stock
-          key: volar-${{ env.VOLAR_SHA }}-v2
+          key: volar-${{ env.VOLAR_SHA }}-v3
           fail-on-cache-miss: true
 
       - name: sweep-ls-throws
@@ -400,3 +406,122 @@ jobs:
       - name: Cleanup harness processes
         if: always()
         run: node tools/kill-leaked-harness.mjs || true
+
+  # sim-nav mirrors nightly's shard mechanism (nightly.yml sim-nav-shard +
+  # merge): same 4-shard matrix, merge, and --baseline gate, so PR CI, nightly
+  # and local `npm run check:sim-nav` all run the same full pipeline. No
+  # SIM_NAV_SKIP_CLASSIFY here — the classify replay runs, isomorphic with the
+  # local full gate.
+  sim-nav-shard:
+    needs: build
+    runs-on: macos-latest
+    timeout-minutes: 30
+    strategy:
+      # One shard's failure must not cancel the others.
+      fail-fast: false
+      matrix:
+        index: [0, 1, 2, 3]
+    name: sim-nav (shard ${{ matrix.index }})
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Download built outputs
+        uses: actions/download-artifact@v4
+        with:
+          name: built-outputs
+          path: .
+
+      - name: Restore volar (cache)
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            ${{ runner.temp }}/volar
+            ${{ runner.temp }}/volar-stock
+          key: volar-${{ env.VOLAR_SHA }}-v3
+          fail-on-cache-miss: true
+
+      - name: Run sim-nav shard
+        env:
+          VOLAR_ROOT: ${{ runner.temp }}/volar
+          STOCK_TSSERVER_PATH: ${{ runner.temp }}/volar-stock/package/lib/tsserver.js
+          SIM_NAV_BASELINE: ${{ github.workspace }}/${{ env.BASELINE }}
+        run: |
+          set -u
+          # Isolated tools copy, same shape as the old single-job shards: the
+          # harness lock lives at <toolsDir>/../.tnb-harness.lock — one shard
+          # per runner now, but the shard script still expects to run from a
+          # tools copy it owns.
+          i=${{ matrix.index }}
+          rm -rf "/tmp/tnb-shard$i"
+          mkdir -p "/tmp/tnb-shard$i"
+          cp -R tools "/tmp/tnb-shard$i/tools"
+          rc=0
+          (cd "/tmp/tnb-shard$i/tools" && \
+            SIM_NAV_SHARD_INDEX=$i SIM_NAV_SHARD_COUNT=4 \
+            SIM_NAV_OUT_JSON="/tmp/tnb-sim-nav-shard$i.json" \
+            SIM_NAV_THROW_FILE="/tmp/tnb-sim-nav-shard$i.throws.jsonl" \
+            node triage-sim-nav-shard.mjs > "/tmp/tnb-sim-nav-shard$i.log" 2>&1) || rc=$?
+          echo "=== shard $i (tail) ==="
+          tail -5 "/tmp/tnb-sim-nav-shard$i.log" || true
+          exit $rc
+
+      - name: Upload shard result
+        uses: actions/upload-artifact@v4
+        with:
+          name: sim-nav-shard-json-${{ matrix.index }}
+          path: /tmp/tnb-sim-nav-shard${{ matrix.index }}.json
+          retention-days: 1
+
+      - name: Upload shard logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sim-nav-shard-logs-${{ matrix.index }}
+          path: |
+            /tmp/tnb-sim-nav-shard${{ matrix.index }}.log
+            /tmp/tnb-sim-nav-shard${{ matrix.index }}.throws.jsonl
+          retention-days: 30
+
+      - name: Cleanup harness processes
+        if: always()
+        run: node tools/kill-leaked-harness.mjs || true
+
+  merge:
+    needs: sim-nav-shard
+    runs-on: macos-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Download shard results
+        uses: actions/download-artifact@v4
+        with:
+          pattern: sim-nav-shard-json-*
+          path: /tmp/tnb-shards
+          merge-multiple: true
+
+      - name: Merge shard results
+        run: node tools/sim-nav-merge.mjs --out /tmp/tnb-sim-nav-merged.json /tmp/tnb-shards/tnb-sim-nav-shard0.json /tmp/tnb-shards/tnb-sim-nav-shard1.json /tmp/tnb-shards/tnb-sim-nav-shard2.json /tmp/tnb-shards/tnb-sim-nav-shard3.json
+
+      - name: Check against baseline
+        run: node tools/sim-nav-merge.mjs --baseline "$BASELINE" /tmp/tnb-sim-nav-merged.json
+
+      - name: Upload sim-nav results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sim-nav-results
+          path: /tmp/tnb-sim-nav-merged.json
+          retention-days: 30

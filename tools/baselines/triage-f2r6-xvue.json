@@ -1,0 +1,12 @@
+{
+  "main_vue_62_15": [
+    "S:NM:@vue/compiler-core/dist/compiler-core.d.ts|1009|74",
+    "S:NM:@vue/compiler-core/dist/compiler-core.d.ts|941|13",
+    "S:NM:@vue/compiler-dom/dist/compiler-dom.d.ts|1|101",
+    "S:NM:@vue/compiler-dom/dist/compiler-dom.d.ts|43|67",
+    "S:NM:vue/dist/vue.d.mts|1|10",
+    "S:NM:vue/dist/vue.d.mts|5|85",
+    "T:TW:tsc/components/script-setup-expose.vue|2|22",
+    "T:TW:tsc/components/script-setup-generic.vue|2|22"
+  ]
+}

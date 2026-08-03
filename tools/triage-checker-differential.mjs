@@ -573,6 +573,11 @@ const arrayShapeOk = (a, b, keyOf) => {
 };
 // Split a type string at top-level `|`s only: quoted strings, tuples, object
 // types, generics and template literals keep their inner `|`s.
+// Known limitation: a function type with a union return (`() => A | B`) is
+// split at the `|` after its parameter list — that `|` sits at depth 0 — so
+// it is indistinguishable from a genuine top-level union `() => A | B` and
+// can compare equal to it on the U1 multiset path (a false pass, never a
+// false failure).
 function splitUnion(s) {
 	const parts = [];
 	let cur = '';

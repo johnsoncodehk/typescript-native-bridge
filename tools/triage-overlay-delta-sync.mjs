@@ -58,7 +58,7 @@ let bad = 0;
 const fail = msg => { bad++; console.error(`FAIL ${msg}`); };
 
 await withTsserver(
-	{ tsserverPath: tnbPath, args: ['--disableAutomaticTypingAcquisition', '--suppressDiagnosticEvents'], env: tnbHarnessEnv({ TNB_TRACE_RPC: '1', TNB_TRACE_RPC_FILE: traceFile, TNB_DEBUG_DELTA: process.env.TNB_DEBUG_DELTA ?? '' }), deadlineMs: 5 * 60 * 1000 },
+	{ tsserverPath: tnbPath, args: ['--disableAutomaticTypingAcquisition', '--suppressDiagnosticEvents'], env: tnbHarnessEnv({ TNB_TRACE_RPC: '1', TNB_TRACE_RPC_FILE: traceFile }), deadlineMs: 5 * 60 * 1000 },
 	async ({ send }) => {
 		await send('updateOpen', { changedFiles: [], closedFiles: [], openFiles: [
 			{ file: mainTs, fileContent: mainV0, projectRootPath: dir },

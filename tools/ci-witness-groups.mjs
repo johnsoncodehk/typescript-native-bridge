@@ -16,12 +16,30 @@
 // wg5 carries the ninth plus all ≤11s witnesses (~125s). Rebalance by moving
 // names between lists; `all` fails on duplicates, missing tools/<name>.mjs,
 // or a drifted TOTAL.
+//
+// 2026-08-03 convergence audit: 13 witnesses wired. The batch triages
+// triage-typeq-batch (~69s) and triage-spellnb-batch (~65s) form wg6 (same
+// two-heavies shape as wg1-wg4); eleven ≤11s witnesses joined wg5 (~140s).
+// Witnesses intentionally NOT in the matrix are local-only (marked in
+// AGENTS.md Gates):
+//   - triage-framework-checks / triage-external-edits — need the
+//     /tmp/tnb-fw-fixtures installs (network; framework-checks populates
+//     them, external-edits' estree mode reads them)
+//   - triage-generation-retention — in-child GC marks (tools/tnb-gc-marks.cjs)
+//     + --stock-tsserver slope calibration
+//   - triage-nuxtui-exportstar — resolves repoRoot/bin/tsc; the CI isolated
+//     tools copy symlinks vendor/lib/native/README.md/patches only, so wiring
+//     it needs a bin symlink in the workflow (outside the table's scope)
+//   - triage-napi-fuzz — NAPI payload fuzz probe, kept local-only by audit
+//   - perf series (measurement, not pass/fail): triage-completion-latency,
+//     triage-postedit-latency, triage-perf-edit-rpc, triage-perf-qi-rpc,
+//     triage-typing-cpuprof
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const TOTAL = 54;
+const TOTAL = 67;
 
 const groups = [
 	{
@@ -101,6 +119,24 @@ const groups = [
 			'triage-alias-nil',
 			'triage-empty-literal',
 			'triage-rpcsym-nameless',
+			// 2026-08-03 convergence audit: eleven ≤11s witnesses wired.
+			'triage-ambient-order', // ~0s
+			'triage-custom-transformers', // ~0s
+			'triage-lazy-accessor-retry', // ~0s
+			'triage-symbol-global-exports', // ~0s
+			'triage-computed-literal', // ~1s
+			'triage-crossgen-reuse', // ~1s
+			'triage-display-tokens', // ~1s
+			'triage-lsnav-parity', // ~1s
+			'triage-node-modules-sfc', // ~1s
+			'triage-issue5-contextual-def', // ~3s
+			'triage-idle-drain', // ~7s
+		],
+	},
+	{
+		witnesses: [
+			'triage-typeq-batch', // ~69s
+			'triage-spellnb-batch', // ~65s
 		],
 	},
 ];

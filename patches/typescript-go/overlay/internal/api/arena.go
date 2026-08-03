@@ -29,7 +29,6 @@ const (
 	// overflowing.
 	arenaRespOffset    = 1 << 20 // responses begin 1 MiB in
 	arenaRespHeaderLen = 16      // kind u8 + pad + payloadLen u32 + newStrOff u32 + newStrLen u32
-	arenaReqMax        = 256     // request record + inline strings budget
 )
 
 const (
