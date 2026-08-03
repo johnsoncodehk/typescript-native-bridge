@@ -275,6 +275,9 @@ function arenaCall(method, params) {
 		if (vd !== '0.0.') d.valueDeclaration = vd;
 		const par = u64z(off + 48); if (par !== undefined) d.parent = par;
 		const exp = u64z(off + 56); if (exp !== undefined) d.exportSymbol = exp;
+		// go-json omitempty keeps scalar zero values, so the JSON transport
+		// always carries hasGlobalExports (true/false) — mirror unconditionally.
+		d.hasGlobalExports = (view.getUint32(off + 64, true) & 1) !== 0;
 		return d;
 	};
 	const readSignature = off => {

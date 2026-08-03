@@ -26,6 +26,11 @@
  * source-level trigger (see triage-type-field-audit notes) and is covered by
  * code-path parity only.
  *
+ * A second exportSymbol scenario covers the light-first upgrade contract
+ * (README known issue #2): a symbol created from a LIGHT payload must still
+ * get the accessor when a later FULL payload for the same id re-applies the
+ * exportSymbol handle — the WeakSet gate must not block the re-install.
+ *
  * Usage: node tools/triage-lazy-accessor-retry.mjs
  */
 import { createRequire } from 'node:module';
@@ -211,6 +216,62 @@ else {
     }
     if (calls !== 2) {
         failures.push(`exportSymbol: expected exactly 2 getExportSymbolOfSymbol RPC calls (1 injected throw + 1 retry), saw ${calls}`);
+    }
+}
+
+// ── Light-first upgrade scenario (README known issue #2) ──────────────────
+// A symbol created from a LIGHT payload (no exportSymbol handle) must still
+// get the exportSymbol accessor when a later FULL payload for the same id is
+// re-applied. getOrCreateSymbol upgrades only `parent` on an existing
+// instance, so the bridge wrapper re-surfaces the new payload's exportSymbol
+// handle; convertSymbolWireShape must not be WeakSet-blocked from installing
+// the accessor. RED before the fix: the WeakSet gate early-returns on the
+// already-converted symbol, no accessor appears, .exportSymbol reads
+// undefined forever.
+if (!localExported) {
+    failures.push('light-first upgrade: no snapshot-registry wire symbol found (fixture/transport changed)');
+}
+else {
+    const exportId = localExported.exportSymbol?.id;
+    const project = localExported.exportSymbol?.canonicalProject?.id ?? localExported.canonicalProject?.id;
+    let FRESH = 0x7ffffffe;
+    while (snapshotReg.getSymbol(FRESH)) FRESH--;
+    const light = snapshotReg.getOrCreateSymbol({ id: FRESH, name: 'exportedSym', flags: 2, checkFlags: 0, project });
+    const descBefore = Object.getOwnPropertyDescriptor(light, 'exportSymbol');
+    // The upgrade: same id, now carrying the numeric exportSymbol handle.
+    const upgraded = snapshotReg.getOrCreateSymbol({ id: FRESH, name: 'exportedSym', flags: 2, checkFlags: 0, project, exportSymbol: exportId });
+    if (upgraded !== light) {
+        failures.push('light-first upgrade: getOrCreateSymbol must return the same instance for the same id');
+    }
+    const descAfter = Object.getOwnPropertyDescriptor(upgraded, 'exportSymbol');
+    if (descBefore && typeof descBefore.value === 'number') {
+        failures.push('light-first upgrade: the light payload unexpectedly carried an exportSymbol handle (fixture/transport changed)');
+    }
+    if (!descAfter || typeof descAfter.get !== 'function') {
+        failures.push('light-first upgrade: the full payload re-apply did not install the exportSymbol accessor (WeakSet-blocked?)');
+    }
+    else {
+        const reg = upgraded.objectRegistry;
+        let calls = 0;
+        const origFetchSymbol = reg.fetchSymbol.bind(reg);
+        reg.fetchSymbol = function (source, method, handle, projectId) {
+            if (method === 'getExportSymbolOfSymbol') calls++;
+            return origFetchSymbol(source, method, handle, projectId);
+        };
+        const first = upgraded.exportSymbol;
+        const second = upgraded.exportSymbol;
+        if (first !== second) {
+            failures.push('light-first upgrade: a successful read must memoize (identity on repeat)');
+        }
+        if (!isSymbolObject(first)) {
+            failures.push(`light-first upgrade: expected a resolved export Symbol, got ${typeof first}`);
+        }
+        else if (first.name !== 'exportedSym') {
+            failures.push(`light-first upgrade: resolved export symbol name ${first.name}, expected exportedSym`);
+        }
+        if (calls !== 1) {
+            failures.push(`light-first upgrade: expected exactly 1 getExportSymbolOfSymbol RPC call, saw ${calls}`);
+        }
     }
 }
 

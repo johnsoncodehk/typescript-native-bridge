@@ -1131,6 +1131,7 @@ const ARENA_METHODS: ReadonlyMap<string, [ArenaMethodKind, ArenaResultKind]> = n
     ["getMembersOfSymbol", ["symbol", "symbols"]],
     ["getParentOfSymbol", ["symbol", "symbol"]],
     ["getExportSymbolOfSymbol", ["symbol", "symbol"]],
+    ["getGlobalExportsOfSymbol", ["symbol", "symbols"]],
     ["getDocumentationComment", ["symbol", "string"]],
     ["resolveExternalModuleSymbol", ["symbol", "symbol"]],
     ["symbolIsValue", ["symbol", "bool"]],
@@ -1970,6 +1971,11 @@ class ArenaClient {
         if (parent !== undefined) data.parent = parent;
         const exportSymbol = this.u64z(off + 56);
         if (exportSymbol !== undefined) data.exportSymbol = exportSymbol;
+        // globalExports flag @64 (bit0 = HasGlobalExports) — written
+        // unconditionally on the Go side and by go-json's omitempty for the
+        // scalar zero (same as TypeResponse.isThisType), so mirror it
+        // unconditionally here: both transports carry the field either way.
+        data.hasGlobalExports = (v.getUint32(off + 64, true) & 1) !== 0;
         return data;
     }
 
@@ -3334,6 +3340,14 @@ function patchSignatureFlagsRemap(s: any, project: any): void {
 // never throw, so neither do these.
 const convertedWireObjects = new WeakSet<object>();
 
+// Raw wire payload stash for symbols. convertSymbolWireShape needs fields the
+// vendored Symbol ctor drops (hasGlobalExports) and incremental-upgrade
+// handles (exportSymbol) that getOrCreateSymbol only applies to freshly
+// created instances — the symbol object itself carries neither. The entry is
+// replaced on every getOrCreateSymbol pass, so a later full payload upgrades
+// a light-first symbol.
+const _symbolRawPayload = new WeakMap<object, any>();
+
 // [own property, registry fetch method] — method names mirror the
 // vendored TypeObject getters (and the Go dispatcher).
 const NESTED_TYPE_SINGLE: ReadonlyArray<readonly [string, string]> = [
@@ -3520,29 +3534,85 @@ function convertTypeWireShape(t: any, data?: any): void {
 }
 
 function convertSymbolWireShape(sym: any): void {
-    if (convertedWireObjects.has(sym)) return;
-    convertedWireObjects.add(sym);
-    const raw = sym.exportSymbol;
-    if (typeof raw !== "number") return;
     const registry = sym.objectRegistry;
-    if (!registry) return;
-    Object.defineProperty(sym, "exportSymbol", {
-        configurable: true,
-        enumerable: true,
-        get() {
-            let resolved: any;
-            try { resolved = registry.fetchSymbol(sym, "getExportSymbolOfSymbol", raw, sym.canonicalProject?.id); }
-            catch (e) {
-                // A failed RPC must not memoize: it would pin a transient
-                // registry failure as the permanent value. Keep the
-                // accessor live (next read retries); TNB_TRACE_THROW
-                // rethrows for diagnosis.
-                if (_traceThrowEnabled) throw e;
-                return undefined;
+    const data = _symbolRawPayload.get(sym);
+
+    // exportSymbol — descriptor-based incremental install (no WeakSet gate).
+    // The vendored Symbol class field initializer always creates an own
+    // `exportSymbol: undefined` (light payloads included), so the install
+    // signal is the raw NUMBER handle, not property presence. A light-first
+    // symbol re-receiving a full payload gets its exportSymbol handle taken
+    // from the stashed payload and surfaced as an own raw number, then
+    // wrapped like a fresh one. Installed accessors (get) and already
+    // resolved values (object) skip naturally.
+    const esDesc = Object.getOwnPropertyDescriptor(sym, "exportSymbol");
+    if (esDesc && (typeof esDesc.get === "function" || (esDesc.value !== undefined && typeof esDesc.value !== "number"))) {
+        // accessor installed or already resolved — leave it
+    }
+    else {
+        const esRaw = esDesc && typeof esDesc.value === "number"
+            ? esDesc.value
+            : typeof data?.exportSymbol === "number" ? data.exportSymbol : undefined;
+        if (esRaw !== undefined && registry) {
+            if (!esDesc || typeof esDesc.value !== "number") {
+                Object.defineProperty(sym, "exportSymbol", {
+                    configurable: true,
+                    enumerable: true,
+                    writable: true,
+                    value: esRaw,
+                });
             }
-            return memoizedOwnValue(sym, "exportSymbol", resolved);
-        },
-    });
+            const raw = esRaw;
+            Object.defineProperty(sym, "exportSymbol", {
+                configurable: true,
+                enumerable: true,
+                get() {
+                    let resolved: any;
+                    try { resolved = registry.fetchSymbol(sym, "getExportSymbolOfSymbol", raw, sym.canonicalProject?.id); }
+                    catch (e) {
+                        // A failed RPC must not memoize: it would pin a transient
+                        // registry failure as the permanent value. Keep the
+                        // accessor live (next read retries); TNB_TRACE_THROW
+                        // rethrows for diagnosis.
+                        if (_traceThrowEnabled) throw e;
+                        return undefined;
+                    }
+                    return memoizedOwnValue(sym, "exportSymbol", resolved);
+                },
+            });
+        }
+    }
+
+    // globalExports — same incremental mechanism, installed only when the
+    // wire payload flags it (stock sets file.symbol.globalExports only for
+    // `export as namespace` UMD modules; tsgo keeps the table on the
+    // SourceFile). The vendored ctor never writes the field, so absence of an
+    // own property is the install condition; the accessor stays until its
+    // first successful read memoizes the stock-shaped Map keyed by escaped
+    // name (consumers use `.get(name)`).
+    if (data?.hasGlobalExports && registry && !Object.prototype.hasOwnProperty.call(sym, "globalExports")) {
+        Object.defineProperty(sym, "globalExports", {
+            configurable: true,
+            enumerable: true,
+            get() {
+                let resolved: any;
+                try {
+                    resolved = registry.fetchSymbols(sym, "getGlobalExportsOfSymbol", undefined, sym.canonicalProject?.id);
+                }
+                catch (e) {
+                    // A failed RPC must not memoize: it would pin a transient
+                    // registry failure as the permanent value. Keep the
+                    // accessor live (next read retries); TNB_TRACE_THROW
+                    // rethrows for diagnosis.
+                    if (_traceThrowEnabled) throw e;
+                    return undefined;
+                }
+                const table = new Map();
+                for (const s of resolved ?? []) table.set(s.escapedName, s);
+                return memoizedOwnValue(sym, "globalExports", table);
+            },
+        });
+    }
 }
 
 // Wrap the two registry creation sites so every bridge object is
@@ -3567,7 +3637,10 @@ function patchRegistryWireShapes(project: any): void {
     const origGetOrCreateSymbol = snapshotRegistryProto.getOrCreateSymbol;
     snapshotRegistryProto.getOrCreateSymbol = function (this: any, data: any) {
         const s = origGetOrCreateSymbol.call(this, data);
-        if (s) convertSymbolWireShape(s);
+        if (s) {
+            if (data && typeof data === "object") _symbolRawPayload.set(s, data);
+            convertSymbolWireShape(s);
+        }
         return s;
     };
 }

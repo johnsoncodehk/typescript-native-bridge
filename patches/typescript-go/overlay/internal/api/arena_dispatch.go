@@ -38,6 +38,7 @@ func arenaCapable(method string) bool {
 		MethodGetAliasedSymbol, MethodGetImmediateAliasedSymbol, MethodGetRootSymbols,
 		MethodGetExportsOfModule, MethodGetExportsAndPropertiesOfModule, MethodGetExportsOfSymbol,
 		MethodGetMembersOfSymbol, MethodGetParentOfSymbol, MethodGetExportSymbolOfSymbol,
+		MethodGetGlobalExportsOfSymbol,
 		MethodGetDocumentationComment, MethodResolveExternalModuleSymbol, MethodSymbolIsValue,
 		MethodGetLocalTypeParametersOfClassOrInterfaceOrTypeAlias, MethodGetJSDocTags,
 		MethodCollectVisitedTypeParameters, MethodCreateArrayType, MethodCreatePromiseType,
@@ -232,6 +233,8 @@ func (s *Session) handleArenaRequest(method string) (any, error) {
 		return s.handleGetParentOfSymbol(ctx, &GetSymbolPropertyParams{Snapshot: snap, Project: proj, Symbol: SymbolID(r.u64(16))})
 	case MethodGetExportSymbolOfSymbol:
 		return s.handleGetExportSymbolOfSymbol(ctx, &GetSymbolPropertyParams{Snapshot: snap, Project: proj, Symbol: SymbolID(r.u64(16))})
+	case MethodGetGlobalExportsOfSymbol:
+		return s.handleGetGlobalExportsOfSymbol(ctx, &GetSymbolPropertyParams{Snapshot: snap, Project: proj, Symbol: SymbolID(r.u64(16))})
 	case MethodGetDocumentationComment:
 		return s.handleGetDocumentationComment(ctx, &CheckerSymbolParams{Snapshot: snap, Project: proj, Symbol: SymbolID(r.u64(16))})
 	case MethodResolveExternalModuleSymbol:

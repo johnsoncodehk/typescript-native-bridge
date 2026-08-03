@@ -253,49 +253,6 @@ issue with a minimal repro.
 
 ---
 
-## Known issues (unfixed stock-API gaps)
-
-Stock public-API fields the bridge cannot carry today, with the evidence for why
-no fix is wired yet. These are not behavior changes — nothing reachable on a TNB
-path reads them.
-
-- **`Symbol.globalExports` (stock d.ts `Symbol` interface)** — reads `undefined`
-  on every bridge symbol. Stock sets it only for `export as namespace Foo`
-  (UMD) modules (`binder.ts` `bindNamespaceExportDeclaration` →
-  `file.symbol.globalExports`), and the only stock consumers are JS-side
-  findAllReferences (`src/services/findAllReferences.ts:1665`, exposed-by-parent)
-  and `importTracker.getAllImporters` (`src/services/importTracker.ts:160`).
-  TNB routes both Go-side (`findReferencesTsgo` → `references` RPC,
-  `getReferencesToSymbolInFile`), so no TNB-path consumer can observe the field.
-  tsgo keeps the same table on the **source file** — `ast.SourceFile.GlobalExports`
-  (`internal/ast/ast.go:2522`, populated by `internal/binder/binder.go:837`,
-  read by `internal/checker/checker.go:1322,1830`; pristine tsgo identical) —
-  while `ast.Symbol` has no such field, and a wire symbol carries no file
-  handle to resolve back to it. Wiring it means a new Symbol→SourceFile
-  resolution + a new symbol-table RPC for a field with no reachable consumer.
-
-- **Light-first `Symbol.exportSymbol` upgrade** — the JS bridge installs the
-  `exportSymbol` lazy accessor exactly once per symbol
-  (`convertSymbolWireShape`, WeakSet-gated), light payloads
-  (`newLightSymbolResponse`: getAmbientModules / getModuleExportMap) never carry
-  an exportSymbol handle, and a later full payload for the same symbol is
-  re-applied by `getOrCreateSymbol`, which upgrades only `parent` — so a
-  light-first symbol that later received a full payload with a numeric
-  exportSymbol would lose it permanently (the WeakSet gate blocks the accessor
-  re-install). The trigger is not constructible: tsgo sets `ExportSymbol` only
-  on the **local** symbol of an `export <modifier>` declaration
-  (`internal/binder/binder.go:412`); getAmbientModules / getModuleExportMap
-  return module symbols and export-table symbols (named, default, `export =`,
-  `export *` re-exports) — verified on stock 6.0.3 and tsgo, all have
-  `exportSymbol` `undefined` (e.g. `export const w`'s export symbol:
-  `undefined`; its local: `"w"` on both sides). ExportSymbol-carrying locals
-  arrive via getSymbolsInScope etc. as **full** payloads, where the mechanism
-  already works. If a future light RPC ever returned exported-declaration
-  locals, `getOrCreateSymbol`/`applyDeclarationPayload` must re-apply the
-  exportSymbol handle and the accessor install must not be WeakSet-blocked.
-
----
-
 ## Platform support
 
 The bridge binary ships as per-platform optional dependencies; `npm install` pulls only

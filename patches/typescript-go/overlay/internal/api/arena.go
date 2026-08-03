@@ -438,6 +438,10 @@ func (a *arena) encodeSymbolResponse(r *SymbolResponse) {
 }
 
 // encodeSymbolResponseAt writes a SymbolResponse record at off (pack region).
+// Fixed layout: id u64 @0, project str @8, name str @12, flags @16,
+// checkFlags @20, declarations (ptr,count) @24/28, valueDeclaration handle
+// @32, parent u64 @48, exportSymbol u64 @56, globalExports flags u32 @64
+// (bit0 = HasGlobalExports; bytes 68-71 stay pad).
 func (a *arena) encodeSymbolResponseAt(off int, r *SymbolResponse) {
 	a.u64(off+0, uint64(r.Id))
 	a.u32(off+8, a.str(string(r.Project)))
@@ -456,6 +460,14 @@ func (a *arena) encodeSymbolResponseAt(off int, r *SymbolResponse) {
 	a.nodeHandleRec(off+32, r.ValueDeclaration)
 	a.u64(off+48, uint64(r.Parent))
 	a.u64(off+56, uint64(r.ExportSymbol))
+	// The arena buffer is reused without zeroing: write the flag byte
+	// unconditionally or a `false` reads back a stale 1 (same discipline as
+	// the type record's flags2/value-kind bytes).
+	var gxFlags uint32
+	if r.HasGlobalExports {
+		gxFlags = 1
+	}
+	a.u32(off+64, gxFlags)
 }
 
 // encodeSignatureResponse writes a SignatureResponse record (64 bytes fixed).
