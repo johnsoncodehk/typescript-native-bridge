@@ -1760,41 +1760,10 @@ index 5817fc6bb..698abd084 100644
  				missingFiles = append(missingFiles, task.normalizedFilePath)
  				continue
 diff --git a/internal/compiler/program.go b/internal/compiler/program.go
-index 74b2504d9..490d5ea10 100644
+index 74b2504d9..2533e844c 100644
 --- a/internal/compiler/program.go
 +++ b/internal/compiler/program.go
-@@ -116,6 +116,30 @@ type Program struct {
- 	// Cached map of package names to whether they bundle types
- 	packagesMapOnce sync.Once
- 	packagesMap     map[string]bool
-+
-+	// Cached "micro program" classification for the single-checker
-+	// diagnostics fast path (see collectCheckerDiagnosticsFromFiles).
-+	smallCheckableOnce sync.Once
-+	smallCheckable     bool
-+}
-+
-+// isSmallCheckableProgram reports whether the program has at most
-+// smallProgramCheckerThreshold checkable (non-skipped) files. Cached: the
-+// file set and options are immutable for the lifetime of a Program.
-+func (p *Program) isSmallCheckableProgram() bool {
-+	p.smallCheckableOnce.Do(func() {
-+		count := 0
-+		for _, file := range p.files {
-+			if !p.SkipTypeChecking(file, false) {
-+				count++
-+				if count > smallProgramCheckerThreshold {
-+					return
-+				}
-+			}
-+		}
-+		p.smallCheckable = true
-+	})
-+	return p.smallCheckable
- }
- 
- // FileExists implements checker.Program.
-@@ -197,6 +221,10 @@ func (p *Program) GetRedirectForResolution(file ast.HasFileName) *tsoptions.Pars
+@@ -197,6 +197,10 @@ func (p *Program) GetRedirectForResolution(file ast.HasFileName) *tsoptions.Pars
  	return redirect
  }
  
@@ -1805,7 +1774,7 @@ index 74b2504d9..490d5ea10 100644
  func (p *Program) GetParseFileRedirect(fileName string) string {
  	return p.projectReferenceFileMapper.getParseFileRedirect(ast.NewHasFileName(fileName, p.toPath(fileName)))
  }
-@@ -234,7 +262,7 @@ func (p *Program) GetSourceFileFromReference(origin *ast.SourceFile, ref *ast.Fi
+@@ -234,7 +238,7 @@ func (p *Program) GetSourceFileFromReference(origin *ast.SourceFile, ref *ast.Fi
  	// Still, without the failed lookup reporting that only the loader does, this isn't terribly complicated
  
  	fileName := tspath.ResolvePath(tspath.GetDirectoryPath(origin.FileName()), ref.FileName)
@@ -1814,37 +1783,7 @@ index 74b2504d9..490d5ea10 100644
  	supportedExtensions := tsoptions.GetSupportedExtensionsWithJsonIfResolveJsonModule(p.Options(), supportedExtensionsBase)
  	allowNonTsExtensions := p.Options().AllowNonTsExtensions.IsTrue()
  	if tspath.HasExtension(fileName) {
-@@ -569,6 +597,17 @@ func (p *Program) collectCheckerDiagnostics(ctx context.Context, sourceFile *ast
- 		if p.SkipTypeChecking(sourceFile, false) {
- 			return nil
- 		}
-+		// Small programs: serve per-file diagnostics from the dedicated
-+		// diagnostics checker (exclusive via its semaphore) that the
-+		// whole-program pass warmed, instead of constructing a query
-+		// checker per file. See collectCheckerDiagnosticsFromFiles.
-+		if p.compilerCheckerPool == nil && p.isSmallCheckableProgram() {
-+			dctx := core.WithCheckerLifetime(ctx, core.CheckerLifetimeDiagnostics)
-+			c, done := p.checkerPool.GetChecker(dctx, sourceFile)
-+			result := collect(dctx, c, sourceFile)
-+			done()
-+			return SortAndDeduplicateDiagnostics(result)
-+		}
- 		c, done := p.GetTypeCheckerForFileExclusive(ctx, sourceFile)
- 		result := collect(ctx, c, sourceFile)
- 		done()
-@@ -577,6 +616,11 @@ func (p *Program) collectCheckerDiagnostics(ctx context.Context, sourceFile *ast
- 	return SortAndDeduplicateDiagnostics(slices.Concat(p.collectCheckerDiagnosticsFromFiles(ctx, p.files, collect)...))
- }
- 
-+// smallProgramCheckerThreshold mirrors the internal compiler pool's sizing
-+// (newCheckerPool allocates one checker per ~4 files): at or below this many
-+// checkable files a single checker is cheaper than constructing several.
-+const smallProgramCheckerThreshold = 4
-+
- // collectCheckerDiagnosticsFromFiles collects checker diagnostics for a list of files.
- func (p *Program) collectCheckerDiagnosticsFromFiles(ctx context.Context, sourceFiles []*ast.SourceFile, collect func(context.Context, *checker.Checker, *ast.SourceFile) []*ast.Diagnostic) [][]*ast.Diagnostic {
- 	diagnostics := make([][]*ast.Diagnostic, len(sourceFiles))
-@@ -585,18 +629,108 @@ func (p *Program) collectCheckerDiagnosticsFromFiles(ctx context.Context, source
+@@ -585,18 +589,89 @@ func (p *Program) collectCheckerDiagnosticsFromFiles(ctx context.Context, source
  			diagnostics[fileIndex] = collect(ctx, c, file)
  		})
  	} else {
@@ -1857,40 +1796,21 @@ index 74b2504d9..490d5ea10 100644
 +				checkable = append(checkable, i)
  			}
 +		}
-+		// Micro programs (as produced by solution builds of many small
-+		// projects) pay more for checker construction than for checking:
-+		// the parallel path below would construct one query checker per
-+		// checkable file. Route them through the single dedicated
-+		// diagnostics checker instead — matching the checker count the
-+		// internal compiler pool would pick for a program this size — so
-+		// follow-up per-file RPCs on the same program (declaration emit,
-+		// suggestion diagnostics) reuse the same warm checker rather than
-+		// constructing yet another one.
-+		if len(checkable) > 0 && len(checkable) <= smallProgramCheckerThreshold {
-+			dctx := core.WithCheckerLifetime(ctx, core.CheckerLifetimeDiagnostics)
-+			c, done := p.checkerPool.GetChecker(dctx, nil)
-+			for _, i := range checkable {
-+				if dctx.Err() != nil {
-+					// Aborted (e.g. superseded-snapshot prefetch cancel):
-+					// stop before the next collect — the checker is poisoned
-+					// after cancellation and the pool disposes it on release.
-+					break
-+				}
-+				diagnostics[i] = collect(dctx, c, sourceFiles[i])
-+			}
-+			done()
-+			return diagnostics
-+		}
-+		// Larger programs: assign files to a fixed number of groups by
-+		// original index stride (i % groups) — one task per group, one
-+		// leased checker per task. Plain queue pickup (the old shape) bound
-+		// files to checkers by goroutine scheduling, so checker-local lazy
-+		// state (merged global heritage resolution, report dedup) varied
-+		// run to run and per-file blame appeared/disappeared across
-+		// identical programs (issue #42). The stride mirrors the compiler
-+		// pool's fileAssociations (checkerCount == the default 4 whenever
-+		// the program has >= 4 files), so the session's pass also matches
-+		// the CLI's deterministic grouping instead of merely being stable.
++		// Assign files to a fixed number of groups by original index stride
++		// (i % groups) — one task per group, one leased checker per task;
++		// below the group count this degenerates to one group per file.
++		// Plain queue pickup (the old shape) bound files to checkers by
++		// goroutine scheduling, so checker-local lazy state (merged global
++		// heritage resolution, report dedup) varied run to run and per-file
++		// blame appeared/disappeared across identical programs (issue #42).
++		// The stride mirrors the compiler pool's fileAssociations
++		// (checkerCount == the default 4 whenever the program has >= 4
++		// files), so the session's pass also matches the CLI's deterministic
++		// grouping instead of merely being stable. Routing small programs
++		// through a single dedicated checker (the old micro-program fast
++		// path) was stable but wrong the other way: merged-global heritage
++		// gates resolved once per pass, deterministically dropping TS2430
++		// blame sites that both stock tsc and the strided pool report.
 +		// Which pool slot a group leases is irrelevant (checkers are
 +		// symmetric) as long as no slot serves two groups, so groups never
 +		// exceed the pool's query slots. The whole-program pass runs before
