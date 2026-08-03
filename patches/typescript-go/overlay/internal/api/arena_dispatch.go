@@ -49,6 +49,7 @@ func arenaCapable(method string) bool {
 		MethodIsTupleType, MethodTypeHasCallOrConstructSignatures,
 		MethodGetConstraintOfType, MethodGetFalseTypeOfConditionalType,
 		MethodGetTrueTypeOfConditionalType, MethodGetAliasSymbolOfType,
+		MethodGetThisTypeOfType,
 		MethodGetAnyType, MethodGetBigIntType, MethodGetBooleanType, MethodGetESSymbolType,
 		MethodGetErrorType, MethodGetNeverType, MethodGetNonPrimitiveType, MethodGetNullType,
 		MethodGetNumberType, MethodGetOptionalType, MethodGetPromiseLikeType,
@@ -170,6 +171,8 @@ func (s *Session) handleArenaRequest(method string) (any, error) {
 		return s.handleGetRegularTypeOfType(ctx, &GetTypePropertyParams{Snapshot: snap, Project: proj, Type: TypeID(r.u32(16))})
 	case MethodGetTargetOfType:
 		return s.handleGetTargetOfType(ctx, &GetTypePropertyParams{Snapshot: snap, Project: proj, Type: TypeID(r.u32(16))})
+	case MethodGetThisTypeOfType:
+		return s.handleGetThisTypeOfType(ctx, &GetTypePropertyParams{Snapshot: snap, Project: proj, Type: TypeID(r.u32(16))})
 	case MethodGetObjectTypeOfType:
 		return s.handleGetObjectTypeOfType(ctx, &GetTypePropertyParams{Snapshot: snap, Project: proj, Type: TypeID(r.u32(16))})
 	case MethodGetCheckTypeOfType:
@@ -445,15 +448,15 @@ func (a *arena) encodeResult(res any) {
 			a.finish(arenaKindNull)
 			return
 		}
-		a.records(1, 152, func(int) { a.encodeTypeResponse(v) })
+		a.records(1, typeRecordSize, func(int) { a.encodeTypeResponse(v) })
 	case []*TypeResponse:
-		a.records(len(v), 152, func(i int) { a.encodeTypeResponse(v[i]) })
+		a.records(len(v), typeRecordSize, func(i int) { a.encodeTypeResponse(v[i]) })
 	case *[]*TypeResponse:
 		if v == nil || *v == nil {
 			a.finish(arenaKindNull)
 			return
 		}
-		a.records(len(*v), 152, func(i int) { a.encodeTypeResponse((*v)[i]) })
+		a.records(len(*v), typeRecordSize, func(i int) { a.encodeTypeResponse((*v)[i]) })
 	case *SymbolResponse:
 		if v == nil {
 			a.finish(arenaKindNull)

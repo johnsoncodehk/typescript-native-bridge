@@ -202,6 +202,8 @@ const AUDITED_FIELDS = new Set([
 	'type', // stock IndexType/StringMappingType field name — compared against the bridge's `target`
 	'types', 'typeParameters', 'outerTypeParameters', 'localTypeParameters', 'aliasTypeArguments',
 	'texts', 'elementFlags', 'labeledElementDeclarations',
+	'minLength', 'combinedFlags', 'hasRestElement',
+	'thisType', 'escapedName',
 ]);
 
 // Stock own keys that are checker-internal or cross lazily by design. Each
@@ -237,11 +239,6 @@ const STOCK_INTERNAL_KEYS = new Map(Object.entries({
 	accessFlags: 'internal indexed-access bitfield, not part of the public d.ts surface',
 	indexFlags: 'internal index-type bitfield, not part of the public d.ts surface',
 	resolvedIndexType: 'index-type resolution cache; the resolved form crosses via getConstraintOfType RPC',
-	minLength: 'derivable from elementFlags (audited)',
-	combinedFlags: 'derivable from elementFlags (audited)',
-	hasRestElement: 'derivable from elementFlags (audited); deprecated upstream',
-	escapedName: 'internal name storage; symbol (audited) carries the name',
-	thisType: "polymorphic-this mechanics on class/interface targets; no wire field by design — the this-type itself is audited via the 'this-type' site",
 	resolvedBaseTypes: 'base-type resolution cache; the resolved bases are audited via the per-site getBaseTypes walk',
 	baseTypesResolved: 'base-type resolution cache; the resolved bases are audited via the per-site getBaseTypes walk',
 	pattern: 'destructuring internals',
@@ -360,7 +357,7 @@ function auditPair(s, b, pathLabel) {
 	// never a raw id — no matter which RPC delivered the type. Reading the
 	// field here also forces the bridge's lazy resolution, so a raw number
 	// can only be a leak.
-	for (const f of ['target', 'freshType', 'regularType', 'objectType', 'indexType', 'checkType', 'extendsType', 'baseType', 'substConstraint']) {
+	for (const f of ['target', 'freshType', 'regularType', 'objectType', 'indexType', 'checkType', 'extendsType', 'baseType', 'substConstraint', 'thisType']) {
 		if (typeof b[f] === 'number') failures.push(`${pathLabel}.${f}: raw wire id ${b[f]} exposed as an own property (issue #35 class)`);
 	}
 	for (const f of ['typeParameters', 'outerTypeParameters', 'localTypeParameters', 'aliasTypeArguments']) {
@@ -426,6 +423,32 @@ function auditPair(s, b, pathLabel) {
 	else if (s.fixedLength === undefined && b.fixedLength !== undefined) {
 		notes.add(`${pathLabel}: TNB extra fixedLength=${b.fixedLength} (stock keeps tuple data on the target only)`);
 	}
+	// minLength/combinedFlags/hasRestElement (issue #53): stock derives them
+	// from elementFlags at tuple creation (createTupleTargetType); the bridge
+	// materializes the same derivation in convertTypeWireShape instead of
+	// spending a wire field. Same stock-driven + noted-extra pattern as
+	// readonly/fixedLength (reference mirroring).
+	for (const f of ['minLength', 'combinedFlags', 'hasRestElement']) {
+		if (s[f] !== undefined && s[f] !== b[f]) {
+			failures.push(`${pathLabel}.${f}: stock=${s[f]} tnb=${b[f]}`);
+		}
+		else if (s[f] === undefined && b[f] !== undefined) {
+			notes.add(`${pathLabel}: TNB extra ${f}=${b[f]} (stock keeps tuple data on the target only)`);
+		}
+	}
+	// escapedName (unique-symbol types): stock formats it `__@<name>@<ordinal>`
+	// where the ordinal is the engine's getSymbolId — internal, differs between
+	// stock and tsgo, so compare the prefix; presence (a string, never
+	// undefined) is the user-hittable contract.
+	if (s.escapedName !== undefined) {
+		const strip = v => typeof v === 'string' ? v.replace(/@\d+$/, '@') : v;
+		if (strip(s.escapedName) !== strip(b.escapedName)) {
+			failures.push(`${pathLabel}.escapedName: stock=${JSON.stringify(s.escapedName)} tnb=${JSON.stringify(b.escapedName)}`);
+		}
+	}
+	else if (b.escapedName !== undefined) {
+		notes.add(`${pathLabel}: TNB extra escapedName=${JSON.stringify(b.escapedName)} (stock has none)`);
+	}
 
 	// Symbols: presence + flags + name.
 	for (const f of ['symbol', 'aliasSymbol']) {
@@ -447,7 +470,7 @@ function auditPair(s, b, pathLabel) {
 		['target', 'target'], ['freshType', 'freshType'], ['regularType', 'regularType'],
 		['objectType', 'objectType'], ['indexType', 'indexType'], ['checkType', 'checkType'],
 		['extendsType', 'extendsType'], ['baseType', 'baseType'], ['substConstraint', 'substConstraint'],
-		['type', 'target'],
+		['thisType', 'thisType'], ['type', 'target'],
 	];
 	for (const [sf, bf] of SINGLE) {
 		const st = s[sf];

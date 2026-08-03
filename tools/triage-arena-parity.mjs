@@ -249,6 +249,8 @@ function arenaCall(method, params) {
 		set('localTypeParameters', u32Arr(off + 108)); set('aliasTypeArguments', u32Arr(off + 116));
 		set('texts', strArr(off + 124)); set('elementFlags', u8Arr(off + 132));
 		set('labeledElementDeclarations', nodeHandleArr(off + 140));
+		set('thisType', u32z(off + 148));
+		set('escapedName', str(view.getUint32(off + 152, true)));
 		return d;
 	};
 	const readSymbol = off => {
@@ -614,7 +616,7 @@ function arenaCall(method, params) {
 	let off = ARENA_RESP_OFFSET + 20;
 	const recKind = resKind === 'type' || resKind === 'types' ? 'type' : resKind === 'symbol' || resKind === 'symbols' ? 'symbol' : resKind === 'quickinfo' || resKind === 'referencedSymbols' || resKind === 'definitionAndBoundSpan' || resKind === 'jsdocTags' || resKind === 'expandedParams' || resKind === 'ambientModules' || resKind === 'completionInfo' || resKind === 'signatureHelpItems' || resKind === 'renameInfo' || resKind === 'renameLocations' ? resKind : 'signature';
 	const read = recKind === 'type' ? readType : recKind === 'symbol' ? readSymbol : recKind === 'quickinfo' ? readQuickinfo : recKind === 'referencedSymbols' ? readReferencedSymbol : recKind === 'definitionAndBoundSpan' ? readDabs : recKind === 'jsdocTags' ? readJsDocTag : recKind === 'expandedParams' ? readExpandedParams : recKind === 'ambientModules' ? readAmbientModules : recKind === 'completionInfo' ? readCompletions : recKind === 'signatureHelpItems' ? readSignatureHelpItems : recKind === 'renameInfo' ? readRenameInfo : recKind === 'renameLocations' ? readRenameLocation : readSignature;
-	const stride = recKind === 'type' ? 152 : recKind === 'symbol' ? 72 : recKind === 'quickinfo' ? 48 : recKind === 'referencedSymbols' ? 56 : recKind === 'definitionAndBoundSpan' ? 16 : recKind === 'jsdocTags' ? 8 : recKind === 'expandedParams' ? 8 : recKind === 'ambientModules' ? 8 : recKind === 'completionInfo' ? 32 : recKind === 'signatureHelpItems' ? 28 : recKind === 'renameInfo' ? 36 : recKind === 'renameLocations' ? 32 : 64;
+	const stride = recKind === 'type' ? 156 : recKind === 'symbol' ? 72 : recKind === 'quickinfo' ? 48 : recKind === 'referencedSymbols' ? 56 : recKind === 'definitionAndBoundSpan' ? 16 : recKind === 'jsdocTags' ? 8 : recKind === 'expandedParams' ? 8 : recKind === 'ambientModules' ? 8 : recKind === 'completionInfo' ? 32 : recKind === 'signatureHelpItems' ? 28 : recKind === 'renameInfo' ? 36 : recKind === 'renameLocations' ? 32 : 64;
 	const out = [];
 	for (let i = 0; i < count; i++) { out.push(read(off)); off += stride; }
 	const singular = resKind === 'type' || resKind === 'symbol' || resKind === 'signature' || resKind === 'quickinfo' || resKind === 'definitionAndBoundSpan' || resKind === 'expandedParams' || resKind === 'ambientModules' || resKind === 'completionInfo' || resKind === 'signatureHelpItems' || resKind === 'renameInfo';

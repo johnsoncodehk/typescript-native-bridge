@@ -1100,6 +1100,7 @@ const ARENA_METHODS: ReadonlyMap<string, [ArenaMethodKind, ArenaResultKind]> = n
     ["getFreshTypeOfType", ["type", "type"]],
     ["getRegularTypeOfType", ["type", "type"]],
     ["getTargetOfType", ["type", "type"]],
+    ["getThisTypeOfType", ["type", "type"]],
     ["getObjectTypeOfType", ["type", "type"]],
     ["getCheckTypeOfType", ["type", "type"]],
     ["getExtendsTypeOfType", ["type", "type"]],
@@ -1453,8 +1454,8 @@ class ArenaClient {
     // Record readers per result kind (strides must mirror arena.go). Bound once
     // per session so the hot decode loop allocates nothing per call.
     private readonly arenaReaders: Record<string, { read: (off: number) => any; stride: number; singular: boolean }> = {
-        type: { read: o => this.readType(o), stride: 152, singular: true },
-        types: { read: o => this.readType(o), stride: 152, singular: false },
+        type: { read: o => this.readType(o), stride: 156, singular: true },
+        types: { read: o => this.readType(o), stride: 156, singular: false },
         symbol: { read: o => this.readSymbol(o), stride: 72, singular: true },
         symbols: { read: o => this.readSymbol(o), stride: 72, singular: false },
         signature: { read: o => this.readSignature(o), stride: 64, singular: true },
@@ -1929,6 +1930,8 @@ class ArenaClient {
         set("texts", this.strArray(off + 124));
         set("elementFlags", this.u8Array(off + 132));
         set("labeledElementDeclarations", this.nodeHandleArray(off + 140));
+        set("thisType", this.u32z(off + 148));
+        set("escapedName", this.str(v.getUint32(off + 152, true)));
         return data;
     }
 
@@ -3335,6 +3338,7 @@ const convertedWireObjects = new WeakSet<object>();
 // vendored TypeObject getters (and the Go dispatcher).
 const NESTED_TYPE_SINGLE: ReadonlyArray<readonly [string, string]> = [
     ["target", "getTargetOfType"],
+    ["thisType", "getThisTypeOfType"],
     ["freshType", "getFreshTypeOfType"],
     ["regularType", "getRegularTypeOfType"],
     ["objectType", "getObjectTypeOfType"],
@@ -3380,6 +3384,30 @@ function convertTypeWireShape(t: any, data?: any): void {
             t.labeledElementDeclarations = labels.map((h: any) => h == null ? undefined : new NodeHandleCtor(h, project));
         }
     }
+    // Stock derives minLength/combinedFlags/hasRestElement from elementFlags
+    // at tuple creation (createTupleTargetType); tsgo carries elementFlags
+    // only, so the public TupleType scalars read back undefined (issue #53).
+    // Materialize the same derivation here — zero wire cost. ElementFlags
+    // bits are identical in both layouts (elementFlags is audited equal).
+    const elementFlags: readonly number[] | undefined = t.elementFlags;
+    if (Array.isArray(elementFlags)) {
+        const Required = 1, Variadic = 1 << 3, Variable = (1 << 2) | (1 << 3);
+        let minLength = 0, combinedFlags = 0;
+        for (const f of elementFlags) {
+            combinedFlags |= f;
+            if (f & (Required | Variadic)) minLength++;
+        }
+        t.minLength = minLength;
+        t.combinedFlags = combinedFlags;
+        t.hasRestElement = (combinedFlags & Variable) !== 0;
+    }
+    // thisType (issue #53) is a TNB-only wire field — the vendored TypeObject
+    // ctor drops it, so copy the raw id off the wire record and let the
+    // NESTED_TYPE_SINGLE loop below lay the lazy accessor over it.
+    if (typeof data?.thisType === "number") t.thisType = data.thisType;
+    // escapedName (unique-symbol types) is likewise TNB-only on the wire; a
+    // plain string, copied straight off the record.
+    if (typeof data?.escapedName === "string") t.escapedName = data.escapedName;
     const descs: Record<string, PropertyDescriptor> = {};
     for (const [prop, method] of NESTED_TYPE_SINGLE) {
         const raw = t[prop];
@@ -3431,6 +3459,28 @@ function convertTypeWireShape(t: any, data?: any): void {
                 let resolved: any;
                 try { resolved = registry.fetchSymbol(t, "getAliasSymbolOfType", aliasSym); } catch { resolved = undefined; }
                 return memoizedOwnValue(t, "aliasSymbol", resolved);
+            },
+        };
+    }
+    Object.defineProperties(t, descs);
+    // SubstitutionType.constraint (public d.ts): tsgo's wire field for the
+    // same slot crosses as substConstraint, so a direct `type.constraint`
+    // read got undefined. Expose the stock name as a resolving alias — same
+    // fetch the NESTED loop uses for substConstraint. TypeParameter.constraint
+    // stays on the getConstraint() contract (issue #23): this alias fires
+    // only on Substitution flags. No audit fixture triggers SubstitutionType
+    // (no reliable source-level trigger — see triage-type-field-audit notes),
+    // so this is code-path parity without gate coverage.
+    if (data && (t.flags & ts.TypeFlags.Substitution) !== 0 && typeof data.substConstraint === "number") {
+        const method = "getConstraintOfType";
+        descs.constraint = {
+            configurable: true,
+            enumerable: true,
+            get() {
+                let resolved: any;
+                try { resolved = registry.fetchType(t, method, data.substConstraint); } catch { resolved = undefined; }
+                if (resolved) fixupType(resolved);
+                return memoizedOwnValue(t, "constraint", resolved);
             },
         };
     }

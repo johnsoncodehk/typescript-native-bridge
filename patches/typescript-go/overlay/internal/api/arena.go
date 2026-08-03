@@ -351,9 +351,14 @@ func parseNodeHandleParts(h NodeHandle) (uint64, uint64, string) {
 	return idx, kind, s[j+1:]
 }
 
-// encodeTypeResponse writes a TypeResponse record (152 bytes fixed).
+// encodeTypeResponse writes a TypeResponse record (156 bytes fixed).
+// The record stride is the single source of truth for the type-record
+// layout: encodeResult's records() call and the JS arenaReaders stride
+// (tsgoChecker.ts) and the arena-parity witness mirror must match.
+const typeRecordSize = 156
+
 func (a *arena) encodeTypeResponse(r *TypeResponse) {
-	off := a.rec(152)
+	off := a.rec(typeRecordSize)
 	a.u32(off+0, uint32(r.Id))
 	a.u32(off+4, r.Flags)
 	a.u32(off+8, r.ObjectFlags)
@@ -415,6 +420,8 @@ func (a *arena) encodeTypeResponse(r *TypeResponse) {
 	a.strArray(off+124, r.Texts)
 	a.u8Array(off+132, r.ElementFlags)
 	a.nodeHandleArray(off+140, r.LabeledElementDeclarations)
+	a.u32(off+148, uint32(r.ThisType))
+	a.u32(off+152, a.str(r.EscapedName))
 	// offset map (u32 unless noted):
 	//   0 id / 4 flags / 8 objectFlags / 12 target / 16 freshType / 20 regularType
 	//   24 objectType / 28 indexType / 32 checkType / 36 extendsType / 40 baseType
@@ -422,7 +429,7 @@ func (a *arena) encodeTypeResponse(r *TypeResponse) {
 	//   68 flags2 / 69 valueKind / 70-71 pad / 72 valueStr u32 / 76 pad
 	//   80 valueF64 f64 / 88 intrinsicName / 92 typeParameters / 100 outer
 	//   108 local / 116 aliasTypeArguments / 124 texts / 132 elementFlags
-	//   140 labeledElementDeclarations / 148-151 pad
+	//   140 labeledElementDeclarations / 148 thisType / 152 escapedName
 }
 
 // encodeSymbolResponse writes a SymbolResponse record (72 bytes fixed).

@@ -1619,6 +1619,39 @@ index 12b9d4079..db9750b1a 100644
  func (c *Checker) IsUndefinedSymbol(symbol *ast.Symbol) bool {
  	return symbol == c.undefinedSymbol
  }
+diff --git a/internal/checker/types.go b/internal/checker/types.go
+index bd1342092..b9bfb60d7 100644
+--- a/internal/checker/types.go
++++ b/internal/checker/types.go
+@@ -746,6 +746,16 @@ func (t *Type) Target() *Type {
+ 	panic("Unhandled case in Type.Target")
+ }
+ 
++// ThisType returns the polymorphic this-type of a class/interface or tuple
++// target (stock InterfaceType.thisType); nil for other type kinds. TupleType
++// embeds InterfaceType, so the promoted accessor covers both data shapes.
++func (t *Type) ThisType() *Type {
++	if t.objectFlags&(ObjectFlagsClassOrInterface|ObjectFlagsTuple) != 0 {
++		return t.AsInterfaceType().thisType
++	}
++	return nil
++}
++
+ func (t *Type) Mapper() *TypeMapper {
+ 	switch {
+ 	case t.flags&TypeFlagsObject != 0:
+@@ -903,6 +913,11 @@ type UniqueESSymbolType struct {
+ 	name string
+ }
+ 
++// Name is the unique-symbol type's escaped name — stock formats it
++// `__@<name>@<symbolId>` (UniqueESSymbolType.escapedName); the trailing
++// symbol ordinal is engine-internal and may differ from stock's.
++func (t *UniqueESSymbolType) Name() string { return t.name }
++
+ // ConstrainedType (type with computed base constraint)
+ 
+ type ConstrainedType struct {
 diff --git a/internal/compiler/fileloader.go b/internal/compiler/fileloader.go
 index f8d006e92..3390c5b57 100644
 --- a/internal/compiler/fileloader.go
