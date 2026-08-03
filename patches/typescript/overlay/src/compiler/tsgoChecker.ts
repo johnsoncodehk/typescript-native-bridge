@@ -129,6 +129,10 @@ type TnbBridgeProcessState = {
      * process — the wrap converts raw nested wire handles to lazy accessors,
      * and a second wrap would bury the first one's memoized reads. */
     wireShapeWrapApplied?: boolean;
+    /** NodeHandle class stashed from the sync API (not exported) so
+     * convertTypeWireShape can materialize declaration handles carried on
+     * type records (labeledElementDeclarations, issue #52). */
+    NodeHandleCtor?: any;
     /** NodeHandle.prototype hooks are installed exactly once per process —
      * the prototype is shared across lib/typescript.js and lib/_tsc.js bundles. */
     nodeHandlePatched?: boolean;
@@ -1862,6 +1866,18 @@ class ArenaClient {
         return out;
     }
 
+    private nodeHandleArray(off: number): (string | null)[] | undefined {
+        const count = this.view.getUint32(off + 4, true);
+        if (count === 0) return undefined;
+        let p = this.view.getUint32(off, true);
+        const out: (string | null)[] = new Array(count);
+        // The "0.0." zero record is a sparse-array hole, not an absent array:
+        // labeledElementDeclarations is full-length with holes at unlabeled
+        // positions, and holes must stay positional.
+        for (let i = 0; i < count; i++) { const h = this.readHandle(p); out[i] = h === "0.0." ? null : h; p += 16; }
+        return out;
+    }
+
     private u32z(off: number): number | undefined {
         const x = this.view.getUint32(off, true);
         return x === 0 ? undefined : x;
@@ -1912,6 +1928,7 @@ class ArenaClient {
         set("aliasTypeArguments", this.u32Array(off + 116));
         set("texts", this.strArray(off + 124));
         set("elementFlags", this.u8Array(off + 132));
+        set("labeledElementDeclarations", this.nodeHandleArray(off + 140));
         return data;
     }
 
@@ -3339,7 +3356,7 @@ function memoizedOwnValue(obj: any, prop: string, value: any): any {
     return value;
 }
 
-function convertTypeWireShape(t: any): void {
+function convertTypeWireShape(t: any, data?: any): void {
     if (convertedWireObjects.has(t)) return;
     convertedWireObjects.add(t);
     // ObjectFlags cross in the tsgo bit layout; fork consumers read the
@@ -3349,6 +3366,20 @@ function convertTypeWireShape(t: any): void {
     if (typeof t.objectFlags === "number") t.objectFlags = remapObjectFlags(t.objectFlags);
     const registry = t.objectRegistry;
     if (!registry) return;
+    // labeledElementDeclarations (issue #52) crosses as a full-length handle
+    // array (null holes at unlabeled positions) on both transports, but the
+    // vendored TypeObject ctor doesn't know the TNB-only field — copy it off
+    // the wire record and materialize NodeHandles, the same construction the
+    // vendored Symbol ctor applies to symbol declarations. Stock elements
+    // are declaration nodes, so holes read back as undefined.
+    const labels = data?.labeledElementDeclarations;
+    if (Array.isArray(labels)) {
+        const NodeHandleCtor = tnbBridgeProcessState().NodeHandleCtor;
+        if (NodeHandleCtor) {
+            const project = registry.project;
+            t.labeledElementDeclarations = labels.map((h: any) => h == null ? undefined : new NodeHandleCtor(h, project));
+        }
+    }
     const descs: Record<string, PropertyDescriptor> = {};
     for (const [prop, method] of NESTED_TYPE_SINGLE) {
         const raw = t[prop];
@@ -3440,7 +3471,7 @@ function patchRegistryWireShapes(project: any): void {
     const origGetOrCreateType = registryProto.getOrCreateType;
     registryProto.getOrCreateType = function (this: any, data: any) {
         const t = origGetOrCreateType.call(this, data);
-        if (t) convertTypeWireShape(t);
+        if (t) convertTypeWireShape(t, data);
         return t;
     };
     const origGetOrCreateSymbol = snapshotRegistryProto.getOrCreateSymbol;
@@ -8960,6 +8991,9 @@ function installNodeHandleHooks(s: any): void {
     // the prototype chain — the classes aren't exported by the sync API.
     const NodeHandle = s.NodeHandle;
     if (!NodeHandle?.prototype) return;
+    // Stash the class (not exported by the sync API) so convertTypeWireShape
+    // can materialize declaration handles carried on type records.
+    proc.NodeHandleCtor ??= NodeHandle;
     const proto = NodeHandle.prototype;
     // Resolve the handle to its full tsgo RemoteNode once, caching on the
     // instance so repeat reads skip the resolve() walk.

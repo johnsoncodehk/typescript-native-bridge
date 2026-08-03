@@ -7,8 +7,8 @@
  * arena readType → vendored TypeObject), so a field stock has but the bridge
  * doesn't carry is invisible until a consumer trips over it — empty-string
  * literal value (#16), stale bool literal value bits (#19), missing
- * intrinsicName on `false` (#22), type-parameter constraint (#23) all shipped
- * that way. This probe turns that class from user-report-driven into
+ * intrinsicName on `false` (#22), type-parameter constraint (#23), tuple
+ * labeledElementDeclarations (#52) all shipped that way. This probe turns that class from user-report-driven into
  * gate-driven: it walks a fixture covering every type class, takes each type
  * from stock 6.0.3 (plain createProgram) and from TNB (watch/builder path, so
  * types really cross the bridge — arena transport), then recursively diffs
@@ -66,6 +66,10 @@ declare const box: Box<string>;
 declare const arr: string[];
 declare const tup: [string, number?];
 declare const rtup: readonly [string, ...number[]];
+declare const ltup: [first: string, second?: number];
+declare const pltup: [string, second: number];
+declare function fpl(a: string, b?: number): void;
+declare const ptup: Parameters<typeof fpl>;
 declare const fn: <T extends string>(a: T, b?: number) => T;
 enum E { A = 1, B = 2 }
 enum SE { A = "a", B = "b" }
@@ -118,6 +122,9 @@ const SITES = [
 	{ label: 'array-ref', kind: 'decl', name: 'arr' },
 	{ label: 'tuple', kind: 'decl', name: 'tup' },
 	{ label: 'readonly-tuple', kind: 'decl', name: 'rtup' },
+	{ label: 'labeled-tuple', kind: 'decl', name: 'ltup' },
+	{ label: 'partial-labeled-tuple', kind: 'decl', name: 'pltup' },
+	{ label: 'params-tuple', kind: 'decl', name: 'ptup' },
 	{ label: 'function-type', kind: 'decl', name: 'fn' },
 	{ label: 'enum', kind: 'decl', name: 'e' },
 	{ label: 'enum-literal', kind: 'decl', name: 'ea' },
@@ -194,7 +201,7 @@ const AUDITED_FIELDS = new Set([
 	'target', 'freshType', 'regularType', 'objectType', 'indexType', 'checkType', 'extendsType', 'baseType', 'substConstraint',
 	'type', // stock IndexType/StringMappingType field name — compared against the bridge's `target`
 	'types', 'typeParameters', 'outerTypeParameters', 'localTypeParameters', 'aliasTypeArguments',
-	'texts', 'elementFlags',
+	'texts', 'elementFlags', 'labeledElementDeclarations',
 ]);
 
 // Stock own keys that are checker-internal or cross lazily by design. Each
@@ -233,7 +240,6 @@ const STOCK_INTERNAL_KEYS = new Map(Object.entries({
 	minLength: 'derivable from elementFlags (audited)',
 	combinedFlags: 'derivable from elementFlags (audited)',
 	hasRestElement: 'derivable from elementFlags (audited); deprecated upstream',
-	labeledElementDeclarations: 'syntax back-references; declarations cross on symbols, not types',
 	escapedName: 'internal name storage; symbol (audited) carries the name',
 	thisType: "polymorphic-this mechanics on class/interface targets; no wire field by design — the this-type itself is audited via the 'this-type' site",
 	resolvedBaseTypes: 'base-type resolution cache; the resolved bases are audited via the per-site getBaseTypes walk',
@@ -272,6 +278,18 @@ function normValue(v) {
 	if (typeof v === 'bigint') return `${v}n`;
 	if (v && typeof v === 'object' && typeof v.base10Value === 'string') return `${(v.negative ? '-' : '') + v.base10Value}n`;
 	return v;
+}
+
+// Declaration canon for labeledElementDeclarations: stock nodes and bridge
+// NodeHandles both expose getSourceFile/getStart/end/kind (NodeHandles via
+// the installNodeHandleHooks prototype delegation). Basename keeps the key
+// machine-local-path free.
+function canonDecl(d) {
+	if (d == null) return 'undefined';
+	if (typeof d !== 'object' || typeof d.kind !== 'number') return `LEAK:${typeof d === 'string' ? d : summarize(d, 0)}`;
+	const sf = typeof d.getSourceFile === 'function' ? d.getSourceFile() : undefined;
+	const file = sf?.fileName ? path.basename(sf.fileName) : '?';
+	return `${file}:${d.getStart()}-${d.end}:${d.kind}`;
 }
 
 function summarize(v, depth = 1) {
@@ -352,6 +370,12 @@ function auditPair(s, b, pathLabel) {
 		}
 	}
 	if (typeof b.aliasSymbol === 'number') failures.push(`${pathLabel}.aliasSymbol: raw wire id ${b.aliasSymbol} exposed as an own property (issue #35 class)`);
+	{
+		const v = b.labeledElementDeclarations;
+		if (Array.isArray(v) && v.some(x => typeof x === 'string')) {
+			failures.push(`${pathLabel}.labeledElementDeclarations: raw wire handle strings exposed as own property values (issue #52/#35 class)`);
+		}
+	}
 
 	// Scalars.
 	if (s.flags !== b.flags) failures.push(`${pathLabel}.flags: stock=${s.flags} tnb=${b.flags}`);
@@ -493,6 +517,32 @@ function auditPair(s, b, pathLabel) {
 		const ba = b[f];
 		if (ba === undefined || JSON.stringify([...sa]) !== JSON.stringify([...ba])) {
 			failures.push(`${pathLabel}.${f}: stock=${JSON.stringify(sa)} tnb=${JSON.stringify(ba)}`);
+		}
+	}
+
+	// labeledElementDeclarations (issue #52): full-length array on the tuple
+	// target, undefined at unlabeled positions. Stock keeps it on the target
+	// only; the bridge mirrors tuple data onto the reference (same shape as
+	// readonly/fixedLength), so a present-but-absent-on-stock value is a
+	// noted extra, not a failure. Elements compare by declaration canon.
+	{
+		const f = 'labeledElementDeclarations';
+		const sa = s[f];
+		if (sa === undefined) {
+			if (b[f] !== undefined) notes.add(`${pathLabel}: TNB extra ${f} (stock keeps tuple data on the target only)`);
+		}
+		else {
+			const ba = b[f];
+			if (!Array.isArray(ba) || ba.length !== sa.length) {
+				failures.push(`${pathLabel}.${f}: stock ${sa.length} items, tnb=${summarize(ba, 0)}`);
+			}
+			else {
+				for (let i = 0; i < sa.length; i++) {
+					const sc = canonDecl(sa[i]);
+					const bc = canonDecl(ba[i]);
+					if (sc !== bc) failures.push(`${pathLabel}.${f}[${i}]: stock=${sc} tnb=${bc}`);
+				}
+			}
 		}
 	}
 }

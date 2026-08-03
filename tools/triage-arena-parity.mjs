@@ -32,6 +32,7 @@ export type NestedPick = Model["nested"];
 export const np: NestedPick = { a: "x", b: [1] };
 export type RO = readonly [string, number, boolean];
 export type MutTup = [string, number];
+export type LabTup = [string, second: number];
 export type Lit = "x" | 42 | true;
 export class Base { z: string = ""; }
 export class Derived extends Base { w?: number; }
@@ -44,6 +45,7 @@ export function getKey<T, K extends keyof T>(obj: T, k: K): T[K] { return obj[k]
 export const lit: Lit = "x";
 export const tup: RO = ["a", 1, true];
 export const mtup: MutTup = ["a", 1];
+export const ltup: LabTup = ["a", 1];
 export const maybe: string | null | undefined = null;
 export const d = new Derived();
 export function generic<T extends object>(x: T): T { return x; }
@@ -221,6 +223,9 @@ function arenaCall(method, params) {
 	const strArr = off => { const c = view.getUint32(off + 4, true); if (!c) return undefined; let p = view.getUint32(off, true); const out = new Array(c); for (let i = 0; i < c; i++) { out[i] = str(view.getUint32(p, true)); p += 4; } return out; };
 	const u8Arr = off => { const c = view.getUint32(off + 4, true); if (!c) return undefined; const p = view.getUint32(off, true); const out = new Array(c); for (let i = 0; i < c; i++) out[i] = view.getUint8(p + i); return out; };
 	const readHandle = off => `${view.getUint32(off, true)}.${view.getUint32(off + 4, true)}.${str(view.getUint32(off + 8, true)) ?? ''}`;
+	// The '0.0.' zero record is a sparse-array hole (labeledElementDeclarations
+	// is full-length with holes at unlabeled positions), kept positional.
+	const nodeHandleArr = off => { const c = view.getUint32(off + 4, true); if (!c) return undefined; let p = view.getUint32(off, true); const out = new Array(c); for (let i = 0; i < c; i++) { const h = readHandle(p); out[i] = h === '0.0.' ? null : h; p += 16; } return out; };
 	const readType = off => {
 		// go-json-experiment omitempty keeps scalar zero values (only omitzero
 		// drops them): objectFlags/isThisType cross unconditionally.
@@ -243,6 +248,7 @@ function arenaCall(method, params) {
 		set('typeParameters', u32Arr(off + 92)); set('outerTypeParameters', u32Arr(off + 100));
 		set('localTypeParameters', u32Arr(off + 108)); set('aliasTypeArguments', u32Arr(off + 116));
 		set('texts', strArr(off + 124)); set('elementFlags', u8Arr(off + 132));
+		set('labeledElementDeclarations', nodeHandleArr(off + 140));
 		return d;
 	};
 	const readSymbol = off => {
@@ -656,6 +662,7 @@ const symAdd = query('getSymbolAtPosition', P({ file: aTs, position: pos('add(a:
 const symModel = query('getSymbolAtPosition', P({ file: aTs, position: pos('model: Model') }), '(model)');
 const symTup = query('getSymbolAtPosition', P({ file: aTs, position: pos('tup: RO') }), '(tuple)');
 const symMTup = query('getSymbolAtPosition', P({ file: aTs, position: pos('mtup: MutTup') }), '(mutable tuple)');
+const symLTup = query('getSymbolAtPosition', P({ file: aTs, position: pos('ltup: LabTup') }), '(labeled tuple)');
 const symLit = query('getSymbolAtPosition', P({ file: aTs, position: pos('lit: Lit') }), '(union literal)');
 const symMaybe = query('getSymbolAtPosition', P({ file: aTs, position: pos('maybe: string') }), '(nullable)');
 const symD = query('getSymbolAtPosition', P({ file: aTs, position: pos('d = new Derived') }), '(class)');
@@ -690,6 +697,7 @@ query('getTypeOfSymbolAtLocation', P({ symbol: symAdd.id, location: symAdd.value
 const modelType = query('getTypeOfSymbol', P({ symbol: symModel.id }));
 const tupType = query('getTypeOfSymbol', P({ symbol: symTup.id }));
 const mtupType = query('getTypeOfSymbol', P({ symbol: symMTup.id }));
+const ltupType = query('getTypeOfSymbol', P({ symbol: symLTup.id }));
 const litType = query('getTypeOfSymbol', P({ symbol: symLit.id }));
 const maybeType = query('getTypeOfSymbol', P({ symbol: symMaybe.id }));
 const dType = query('getTypeOfSymbol', P({ symbol: symD.id }));
@@ -747,6 +755,7 @@ if (tupType) {
 	query('getBaseTypes', P({ type: tupType.id }));
 }
 if (mtupType) query('isArrayType', P({ type: mtupType.id }), '(mutable tuple: readonly=false field)');
+if (ltupType) query('getTargetOfType', P({ objectId: ltupType.id }), '(labeled tuple target: labeledElementDeclarations with a hole)');
 if (litType) {
 	query('getTypesOfType', P({ objectId: litType.id }), '(union constituents: value kinds 1/2/3)');
 	query('getBaseTypeOfLiteralType', P({ type: litType.id }));

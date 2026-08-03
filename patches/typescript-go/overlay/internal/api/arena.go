@@ -314,6 +314,26 @@ func (a *arena) nodeHandleRec(off int, h NodeHandle) {
 	a.u32(off+12, 0)
 }
 
+// nodeHandleArray writes a (ptr u32, count u32) descriptor at off and packs
+// count 16-byte handle records; nil elements become zero records (the JS
+// "0.0." null sentinel) so sparse arrays keep their holes positional.
+func (a *arena) nodeHandleArray(off int, vals []*NodeHandle) {
+	a.u32(off, 0)
+	a.u32(off+4, uint32(len(vals)))
+	if len(vals) == 0 {
+		return
+	}
+	p := a.pack(16 * len(vals))
+	a.u32(off, uint32(p))
+	for i, v := range vals {
+		var h NodeHandle
+		if v != nil {
+			h = *v
+		}
+		a.nodeHandleRec(p+16*i, h)
+	}
+}
+
 // parseNodeHandleParts splits "index.kind.path" without the error path (the
 // encoder wrote it, so it is well-formed).
 func parseNodeHandleParts(h NodeHandle) (uint64, uint64, string) {
@@ -394,6 +414,7 @@ func (a *arena) encodeTypeResponse(r *TypeResponse) {
 	a.typeIDs(off+116, r.AliasTypeArguments)
 	a.strArray(off+124, r.Texts)
 	a.u8Array(off+132, r.ElementFlags)
+	a.nodeHandleArray(off+140, r.LabeledElementDeclarations)
 	// offset map (u32 unless noted):
 	//   0 id / 4 flags / 8 objectFlags / 12 target / 16 freshType / 20 regularType
 	//   24 objectType / 28 indexType / 32 checkType / 36 extendsType / 40 baseType
@@ -401,7 +422,7 @@ func (a *arena) encodeTypeResponse(r *TypeResponse) {
 	//   68 flags2 / 69 valueKind / 70-71 pad / 72 valueStr u32 / 76 pad
 	//   80 valueF64 f64 / 88 intrinsicName / 92 typeParameters / 100 outer
 	//   108 local / 116 aliasTypeArguments / 124 texts / 132 elementFlags
-	//   140-151 reserved
+	//   140 labeledElementDeclarations / 148-151 pad
 }
 
 // encodeSymbolResponse writes a SymbolResponse record (72 bytes fixed).
