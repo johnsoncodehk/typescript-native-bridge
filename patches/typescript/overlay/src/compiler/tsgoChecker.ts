@@ -13452,6 +13452,31 @@ export function createTsgoChecker(program: any): any {
                     // fall through to host-bound AST
                 }
             }
+            if (!tsgoLocation && location == null) {
+                // Stock resolveName with an undefined location skips the scope
+                // walk and falls straight to the globals table. tsgo's
+                // resolveName with a nil node does the same — route it there
+                // instead of the host fallback, which can only see host-bound
+                // scopes. (typeDefinition enrichment: the
+                // getFirstTypeArgumentDefinitions unwrap gate compares
+                // resolveName's result against type.target.symbol / the type's
+                // aliasSymbol — lib globals like Array/Readonly/Promise.)
+                try {
+                    const sym = project.checker.resolveName(name, meaning >>> 0, undefined, excludeGlobals);
+                    if (sym) {
+                        const refined = refineNavSymbol(sym);
+                        if (_traceSymEnabled) {
+                            traceSym(
+                                `resolveName name=${JSON.stringify(name)} meaning=${meaning >>> 0} `
+                                + `loc=none → ${traceSymSymbol(refined)} (global)`,
+                            );
+                        }
+                        return refined;
+                    }
+                } catch {
+                    // fall through to host-bound AST
+                }
+            }
             // Host lexical resolve (file/block scopes) — mirrors stock when the
             // Go location map is missing or returns nothing visible.
             const hostSym = location?.getSourceFile?.()?.__tnbHostBound

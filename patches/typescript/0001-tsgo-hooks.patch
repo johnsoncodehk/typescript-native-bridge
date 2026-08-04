@@ -2229,10 +2229,18 @@ index dfd00ce2e9..db82cf9534 100644
      catch (err) {
          // Ensure cache is reset if operation is cancelled
 diff --git a/src/services/goToDefinition.ts b/src/services/goToDefinition.ts
-index 0a45cc3e3e..d296a01666 100644
+index 0a45cc3e3e..81cc493bc6 100644
 --- a/src/services/goToDefinition.ts
 +++ b/src/services/goToDefinition.ts
-@@ -316,7 +316,7 @@ function getDefinitionFromObjectLiteralElement(typeChecker: TypeChecker, node: N
+@@ -115,6 +115,7 @@ import {
+     TypeFlags,
+     TypeReference,
+     unescapeLeadingUnderscores,
++    VariableDeclaration,
+ } from "./_namespaces/ts.js";
+ 
+ /** @internal */
+@@ -316,7 +317,7 @@ function getDefinitionFromObjectLiteralElement(typeChecker: TypeChecker, node: N
          const contextualType = element && typeChecker.getContextualType(element.parent);
          if (contextualType) {
              let properties = getPropertySymbolsFromContextualType(element, typeChecker, contextualType, /*unionSymbolOk*/ false);
@@ -2241,7 +2249,7 @@ index 0a45cc3e3e..d296a01666 100644
                  const withoutNodeInferencesType = typeChecker.getContextualType(element.parent, ContextFlags.IgnoreNodeInferences);
                  if (withoutNodeInferencesType) {
                      const withoutNodeInferencesProperties = getPropertySymbolsFromContextualType(element, typeChecker, withoutNodeInferencesType, /*unionSymbolOk*/ false);
-@@ -331,6 +331,45 @@ function getDefinitionFromObjectLiteralElement(typeChecker: TypeChecker, node: N
+@@ -331,6 +332,45 @@ function getDefinitionFromObjectLiteralElement(typeChecker: TypeChecker, node: N
      return emptyArray;
  }
  
@@ -2287,6 +2295,59 @@ index 0a45cc3e3e..d296a01666 100644
  function getDefinitionFromOverriddenMember(typeChecker: TypeChecker, node: Node) {
      const classElement = findAncestor(node, isClassElement);
      if (!(classElement && classElement.name)) return;
+@@ -519,7 +559,7 @@ function tryGetReturnTypeOfFunction(symbol: Symbol, type: Type, checker: TypeChe
+     if (
+         type.symbol === symbol ||
+         // At `const f = () => {}`, the symbol is `f` and the type symbol is at `() => {}`
+-        symbol.valueDeclaration && type.symbol && isVariableDeclaration(symbol.valueDeclaration) && symbol.valueDeclaration.initializer === type.symbol.valueDeclaration as Node
++        symbol.valueDeclaration && type.symbol && isVariableDeclaration(symbol.valueDeclaration) && initializerMatchesTypeSymbolDeclaration(symbol, type.symbol)
+     ) {
+         const sigs = type.getCallSignatures();
+         if (sigs.length === 1) return checker.getReturnTypeOfSignature(first(sigs));
+@@ -527,6 +567,43 @@ function tryGetReturnTypeOfFunction(symbol: Symbol, type: Type, checker: TypeChe
+     return undefined;
+ }
+ 
++/**
++ * TNB (typeDefinition enrichment): the stock test
++ * `symbol.valueDeclaration.initializer === type.symbol.valueDeclaration`
++ * cannot fire on tsgo-side symbols: `.initializer` resolves to a RemoteNode
++ * while `type.symbol.valueDeclaration` stays a bare NodeHandle — distinct
++ * objects for the same node. Resolve both sides and compare instances
++ * (RemoteSourceFile caches decoded nodes by index, so the same node always
++ * resolves to the same instance). Host-node pairs short-circuit on the first
++ * `===`; a host AST node vs a resolved RemoteNode for the same source text
++ * falls back to a source-file + span comparison.
++ */
++function initializerMatchesTypeSymbolDeclaration(symbol: Symbol, typeSymbol: Symbol): boolean {
++    const initializer = (symbol.valueDeclaration as VariableDeclaration).initializer;
++    if (initializer === typeSymbol.valueDeclaration) return true;
++    const resolve = (n: Node | undefined): Node | undefined => {
++        if (!n || typeof (n as any).resolve !== "function") return n;
++        try { return (n as any).resolve() ?? undefined; } catch { return undefined; }
++    };
++    const resolvedInitializer = resolve(initializer);
++    const resolvedTypeDeclaration = resolve(typeSymbol.valueDeclaration as Node | undefined);
++    if (!!resolvedInitializer && resolvedInitializer === resolvedTypeDeclaration) return true;
++    if (resolvedInitializer && resolvedTypeDeclaration) {
++        const initializerSourceFile = resolvedInitializer.getSourceFile?.();
++        const typeDeclarationSourceFile = resolvedTypeDeclaration.getSourceFile?.();
++        if (initializerSourceFile && typeDeclarationSourceFile && initializerSourceFile.fileName === typeDeclarationSourceFile.fileName) {
++            const initializerStart = resolvedInitializer.getStart?.(initializerSourceFile);
++            const typeDeclarationStart = resolvedTypeDeclaration.getStart?.(typeDeclarationSourceFile);
++            const initializerEnd = resolvedInitializer.getEnd?.();
++            const typeDeclarationEnd = resolvedTypeDeclaration.getEnd?.();
++            if (typeof initializerStart === "number" && initializerStart === typeDeclarationStart && initializerEnd === typeDeclarationEnd) {
++                return true;
++            }
++        }
++    }
++    return false;
++}
++
+ /** @internal */
+ export function getDefinitionAndBoundSpan(program: Program, sourceFile: SourceFile, position: number): DefinitionInfoAndBoundSpan | undefined {
+     const definitions = getDefinitionAtPosition(program, sourceFile, position);
 diff --git a/src/services/services.ts b/src/services/services.ts
 index 9885093ed6..b0a6e5b278 100644
 --- a/src/services/services.ts
