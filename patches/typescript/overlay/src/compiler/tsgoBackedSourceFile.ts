@@ -112,7 +112,6 @@ export function createSkeletonSourceFile(
     anySf.identifierCount = 0;
     anySf.symbolCount = 0;
     anySf.moduleAugmentations = [];
-    anySf.imports = [];
     anySf.ambientModuleNames = [];
     // navto/FAR call getNamedDeclarations on every program SourceFile; the
     // skeleton has no statements, so the empty map is its honest answer (the
