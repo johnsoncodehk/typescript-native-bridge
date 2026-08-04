@@ -2229,7 +2229,7 @@ index dfd00ce2e9..db82cf9534 100644
      catch (err) {
          // Ensure cache is reset if operation is cancelled
 diff --git a/src/services/goToDefinition.ts b/src/services/goToDefinition.ts
-index 0a45cc3e3e..81cc493bc6 100644
+index 0a45cc3e3e..a25ff3b71e 100644
 --- a/src/services/goToDefinition.ts
 +++ b/src/services/goToDefinition.ts
 @@ -115,6 +115,7 @@ import {
@@ -2295,54 +2295,96 @@ index 0a45cc3e3e..81cc493bc6 100644
  function getDefinitionFromOverriddenMember(typeChecker: TypeChecker, node: Node) {
      const classElement = findAncestor(node, isClassElement);
      if (!(classElement && classElement.name)) return;
-@@ -519,7 +559,7 @@ function tryGetReturnTypeOfFunction(symbol: Symbol, type: Type, checker: TypeChe
+@@ -518,8 +558,13 @@ function tryGetReturnTypeOfFunction(symbol: Symbol, type: Type, checker: TypeChe
+     // go-to-type should go to the return type instead, since go-to-definition takes you to the function anyway.
      if (
          type.symbol === symbol ||
++        // Cross-AST symbol identity: a virtual-file AST (volar) splits one
++        // symbol into a host binder SymbolObject and a tsgo wire symbol, so
++        // `type.symbol === symbol` never fires — the same underlying value
++        // declaration node means the same symbol.
++        symbolsShareValueDeclaration(symbol, type.symbol) ||
          // At `const f = () => {}`, the symbol is `f` and the type symbol is at `() => {}`
 -        symbol.valueDeclaration && type.symbol && isVariableDeclaration(symbol.valueDeclaration) && symbol.valueDeclaration.initializer === type.symbol.valueDeclaration as Node
 +        symbol.valueDeclaration && type.symbol && isVariableDeclaration(symbol.valueDeclaration) && initializerMatchesTypeSymbolDeclaration(symbol, type.symbol)
      ) {
          const sigs = type.getCallSignatures();
          if (sigs.length === 1) return checker.getReturnTypeOfSignature(first(sigs));
-@@ -527,6 +567,43 @@ function tryGetReturnTypeOfFunction(symbol: Symbol, type: Type, checker: TypeChe
+@@ -527,6 +572,79 @@ function tryGetReturnTypeOfFunction(symbol: Symbol, type: Type, checker: TypeChe
      return undefined;
  }
  
++/**
++ * TNB (typeDefinition enrichment): compare two declaration nodes for identity
++ * across the host/tsgo AST boundary. Host-node pairs short-circuit on the
++ * first `===`; a tsgo-side node (bare NodeHandle or RemoteNode) resolves to
++ * its decoded node (RemoteSourceFile caches decoded nodes by index, so the
++ * same node always resolves to the same instance); a host AST node vs a
++ * resolved RemoteNode for the same source text falls back to a source-file +
++ * span comparison. The span fallback is safe because a value declaration is
++ * the unique declaration node of its symbol — two distinct symbols share a
++ * start/end pair only if they share the underlying declaration.
++ */
++function sameDeclarationNode(a: Node | undefined, b: Node | undefined): boolean {
++    if (!a || !b) return false;
++    if (a === b) return true;
++    const resolve = (n: Node): Node | undefined => {
++        if (typeof (n as any).resolve !== "function") return n;
++        try { return (n as any).resolve() ?? undefined; } catch { return undefined; }
++    };
++    const resolvedA = resolve(a);
++    const resolvedB = resolve(b);
++    if (resolvedA && resolvedA === resolvedB) return true;
++    if (resolvedA && resolvedB) {
++        const aSourceFile = resolvedA.getSourceFile?.();
++        const bSourceFile = resolvedB.getSourceFile?.();
++        if (aSourceFile && bSourceFile && aSourceFile.fileName === bSourceFile.fileName) {
++            const aStart = resolvedA.getStart?.(aSourceFile);
++            const bStart = resolvedB.getStart?.(bSourceFile);
++            const aEnd = resolvedA.getEnd?.();
++            const bEnd = resolvedB.getEnd?.();
++            if (typeof aStart === "number" && aStart === bStart && aEnd === bEnd) return true;
++        }
++    }
++    return false;
++}
++
++/**
++ * TNB: true when two symbols are the same symbol across the host/tsgo AST
++ * boundary — a virtual-file AST (volar) splits one symbol into a host binder
++ * SymbolObject and a tsgo wire symbol (e.g. the `async` keyword of a function
++ * declaration carries the function's symbol on the host side).
++ *
++ * Only host-vs-wire pairs are compared here. A wire symbol pair never needs
++ * this path: the snapshot registry returns the same object per tsgo symbol
++ * id, so gate1's `type.symbol === symbol` already covers genuine matches, and
++ * a declaration comparison would over-fire — stock's `type.symbol` at a
++ * method-signature use-site is a distinct anonymous symbol that shares the
++ * valueDeclaration node with the member symbol (`items.map`). The wire
++ * declaration kind is also restricted to function-like *declarations*
++ * (FunctionDeclaration / MethodDeclaration): stock's `type.symbol === symbol`
++ * holds there, but not for signature members.
++ */
++function symbolsShareValueDeclaration(symbol: Symbol, typeSymbol: Symbol | undefined): boolean {
++    const valueDeclaration = symbol.valueDeclaration;
++    if (!valueDeclaration || typeof (valueDeclaration as any).resolve === "function") return false;
++    const typeValueDeclaration = typeSymbol?.valueDeclaration;
++    if (!typeValueDeclaration || typeof (typeValueDeclaration as any).resolve !== "function") return false;
++    let resolved: Node | undefined;
++    try { resolved = (typeValueDeclaration as any).resolve() ?? undefined; } catch { return false; }
++    if (!resolved || (resolved.kind !== SyntaxKind.FunctionDeclaration && resolved.kind !== SyntaxKind.MethodDeclaration)) return false;
++    return sameDeclarationNode(valueDeclaration, typeValueDeclaration);
++}
++
 +/**
 + * TNB (typeDefinition enrichment): the stock test
 + * `symbol.valueDeclaration.initializer === type.symbol.valueDeclaration`
 + * cannot fire on tsgo-side symbols: `.initializer` resolves to a RemoteNode
 + * while `type.symbol.valueDeclaration` stays a bare NodeHandle — distinct
-+ * objects for the same node. Resolve both sides and compare instances
-+ * (RemoteSourceFile caches decoded nodes by index, so the same node always
-+ * resolves to the same instance). Host-node pairs short-circuit on the first
-+ * `===`; a host AST node vs a resolved RemoteNode for the same source text
-+ * falls back to a source-file + span comparison.
++ * objects for the same node. Compare through sameDeclarationNode.
 + */
 +function initializerMatchesTypeSymbolDeclaration(symbol: Symbol, typeSymbol: Symbol): boolean {
-+    const initializer = (symbol.valueDeclaration as VariableDeclaration).initializer;
-+    if (initializer === typeSymbol.valueDeclaration) return true;
-+    const resolve = (n: Node | undefined): Node | undefined => {
-+        if (!n || typeof (n as any).resolve !== "function") return n;
-+        try { return (n as any).resolve() ?? undefined; } catch { return undefined; }
-+    };
-+    const resolvedInitializer = resolve(initializer);
-+    const resolvedTypeDeclaration = resolve(typeSymbol.valueDeclaration as Node | undefined);
-+    if (!!resolvedInitializer && resolvedInitializer === resolvedTypeDeclaration) return true;
-+    if (resolvedInitializer && resolvedTypeDeclaration) {
-+        const initializerSourceFile = resolvedInitializer.getSourceFile?.();
-+        const typeDeclarationSourceFile = resolvedTypeDeclaration.getSourceFile?.();
-+        if (initializerSourceFile && typeDeclarationSourceFile && initializerSourceFile.fileName === typeDeclarationSourceFile.fileName) {
-+            const initializerStart = resolvedInitializer.getStart?.(initializerSourceFile);
-+            const typeDeclarationStart = resolvedTypeDeclaration.getStart?.(typeDeclarationSourceFile);
-+            const initializerEnd = resolvedInitializer.getEnd?.();
-+            const typeDeclarationEnd = resolvedTypeDeclaration.getEnd?.();
-+            if (typeof initializerStart === "number" && initializerStart === typeDeclarationStart && initializerEnd === typeDeclarationEnd) {
-+                return true;
-+            }
-+        }
-+    }
-+    return false;
++    return sameDeclarationNode((symbol.valueDeclaration as VariableDeclaration).initializer, typeSymbol.valueDeclaration as Node | undefined);
 +}
 +
  /** @internal */

@@ -1,8 +1,8 @@
 {
-  "summaryLine": "SUMMARY total=24914 match=23173 diff=1737 docdiff=3 diagmsg=1 skip=0",
+  "summaryLine": "SUMMARY total=24914 match=23174 diff=1736 docdiff=3 diagmsg=1 skip=0",
   "total": 24914,
-  "match": 23173,
-  "diff": 1737,
+  "match": 23174,
+  "diff": 1736,
   "docdiff": 3,
   "diagmsg": 1,
   "skip": 0,
@@ -4853,16 +4853,6 @@
       "offset": 8,
       "cmd": "quickinfo",
       "detail": "quickinfo-display/kind",
-      "seqClass": "ALWAYS"
-    },
-    {
-      "key": "nav:tsc/#2712/main.vue:8:1:typeDefinition",
-      "file": "tsc/#2712/main.vue",
-      "line": 8,
-      "offset": 1,
-      "cmd": "typeDefinition",
-      "detail": "loc-set-mismatch",
-      "locClass": "mixed",
       "seqClass": "ALWAYS"
     },
     {

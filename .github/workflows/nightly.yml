@@ -11,7 +11,7 @@ permissions:
 env:
   VOLAR_BRANCH: master
   VOLAR_SHA: 343049a14 # vuejs/language-tools@master, pinned for reproducibility
-  BASELINE: test/baselines/nav-results-abd9c40-t1.json
+  BASELINE: test/baselines/nav-results-c195185-t1.json
 
 jobs:
   build:
