@@ -2884,14 +2884,6 @@ function ensureHostSourceFileModuleRefs(sf: any): void {
             // file.imports so findModuleReferences matches module-specifier FAR.
             pushSpec(node.moduleSpecifier);
         }
-        else if (kind === SyntaxKind.ModuleDeclaration && (node as any).name?.kind === SyntaxKind.StringLiteral) {
-            // declare module 'x' { import ... } — stock's binder counts the
-            // body's imports in file.imports (issue #54: a rebuilt imports list
-            // that omits ambient-module-body imports lets a tsgo include-reason
-            // index exceed file.imports → explainFiles Debug.fail).
-            const body = (node as any).body;
-            if (body) walk(body);
-        }
         // forEachChild has no jsDoc slot on statements (stock forEachChildVisitor),
         // so JSDoc tags are invisible to the plain child walk — descend explicitly.
         if (Array.isArray(node.jsDoc)) for (const doc of node.jsDoc) walk(doc);
