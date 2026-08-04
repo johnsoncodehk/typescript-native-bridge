@@ -14,31 +14,54 @@
 // parent-watch-acceptance / rpcsym-adversarial all run ≤1s; the real cost is
 // nine ~49-70s witnesses): each of wg1-wg4 carries two heavies (~126-131s),
 // wg5 carries the ninth plus all ≤11s witnesses (~125s). Rebalance by moving
-// names between lists; `all` fails on duplicates, missing tools/<name>.mjs,
-// or a drifted TOTAL.
+// names between lists; `all` validates the full table (below).
 //
 // 2026-08-03 convergence audit: 14 witnesses wired (13 in the audit, plus
 // triage-nuxtui-exportstar 2026-08-04 — unblocked by the bin symlink the
 // witnesses job now creates). The batch triages
 // triage-typeq-batch (~69s) and triage-spellnb-batch (~65s) form wg6 (same
 // two-heavies shape as wg1-wg4); twelve ≤11s witnesses joined wg5 (~140s).
-// Witnesses intentionally NOT in the matrix are local-only (marked in
-// AGENTS.md Gates):
-//   - triage-framework-checks / triage-external-edits — need the
-//     /tmp/tnb-fw-fixtures installs (network; framework-checks populates
-//     them, external-edits' estree mode reads them)
-//   - triage-generation-retention — in-child GC marks (tools/tnb-gc-marks.cjs)
-//     + --stock-tsserver slope calibration
-//   - triage-napi-fuzz — NAPI payload fuzz probe, kept local-only by audit
-//   - perf series (measurement, not pass/fail): triage-completion-latency,
-//     triage-postedit-latency, triage-perf-edit-rpc, triage-perf-qi-rpc,
-//     triage-typing-cpuprof
+// Witnesses intentionally NOT in the matrix are local-only — the machine-
+// readable list lives in LOCAL_ONLY below (reasons: framework-checks /
+// external-edits need the /tmp/tnb-fw-fixtures installs (network;
+// framework-checks populates them, external-edits' estree mode reads them);
+// generation-retention needs in-child GC marks + --stock-tsserver slope
+// calibration; napi-fuzz is a NAPI payload fuzz probe; the perf series is
+// measurement, not pass/fail). triage-electron-abi / triage-sim-nav-shard
+// are wired outside the matrix — OWNED_ELSEWHERE below (electron-abi:
+// direct ci.yml build-job step + nightly test-bridge-win32; sim-nav-shard:
+// the sim-nav gate's shard runner). `all` fails on duplicates, missing
+// tools/<name>.mjs, a drifted TOTAL, an orphan triage-*.mjs (no group, not
+// LOCAL_ONLY, not OWNED_ELSEWHERE), a LOCAL_ONLY/OWNED_ELSEWHERE name
+// without its file, or a tools/baselines/triage-<name>.json whose witness
+// is not wired.
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const TOTAL = 68;
+
+// Witnesses intentionally NOT in the matrix — run on demand (reasons above).
+const LOCAL_ONLY = [
+	'triage-framework-checks',
+	'triage-external-edits',
+	'triage-generation-retention',
+	'triage-napi-fuzz',
+	'triage-completion-latency',
+	'triage-postedit-latency',
+	'triage-perf-edit-rpc',
+	'triage-perf-qi-rpc',
+	'triage-typing-cpuprof',
+];
+
+// triage-*.mjs wired outside the witness matrix, owned by other gates (above):
+//   triage-electron-abi  — direct step in ci.yml build job + nightly test-bridge-win32
+//   triage-sim-nav-shard — the sim-nav gate's shard runner (check:sim-nav)
+const OWNED_ELSEWHERE = [
+	'triage-electron-abi',
+	'triage-sim-nav-shard',
+];
 
 const groups = [
 	{
@@ -174,4 +197,39 @@ if (arg === 'matrix') {
 		for (const w of g.witnesses) console.log(`  ${w}`);
 	});
 	console.log(`total: ${flat.length} witnesses in ${groups.length} groups`);
+
+	// Orphan sweep: every tools/triage-*.mjs must be in a group, LOCAL_ONLY,
+	// or OWNED_ELSEWHERE. LOCAL_ONLY/OWNED_ELSEWHERE names must exist on
+	// disk. tools/baselines/triage-<name>.json must map to a wired witness
+	// (reverse direction — a group witness without a baseline — is fine).
+	const errors = [];
+	const onDisk = fs.readdirSync(toolsDir)
+		.filter(f => f.startsWith('triage-') && f.endsWith('.mjs'))
+		.map(f => f.slice(0, -'.mjs'.length));
+	const accounted = new Set([...flat, ...LOCAL_ONLY, ...OWNED_ELSEWHERE]);
+	const orphans = onDisk.filter(w => !accounted.has(w));
+	if (orphans.length) {
+		errors.push(`orphan triage-*.mjs (no group, not local-only, not owned elsewhere): ${orphans.join(', ')}`);
+	}
+	const missingLocal = [...LOCAL_ONLY, ...OWNED_ELSEWHERE].filter(w => !fs.existsSync(path.join(toolsDir, `${w}.mjs`)));
+	if (missingLocal.length) {
+		errors.push(`no tools/<name>.mjs for: ${missingLocal.join(', ')}`);
+	}
+	const baselineDir = path.join(toolsDir, 'baselines');
+	if (fs.existsSync(baselineDir)) {
+		const groupSet = new Set(flat);
+		const unwired = fs.readdirSync(baselineDir)
+			.filter(f => f.endsWith('.json') && f.startsWith('triage-'))
+			.map(f => f.slice(0, -'.json'.length))
+			.filter(w => !groupSet.has(w));
+		if (unwired.length) {
+			errors.push(`baseline json without a wired witness: ${unwired.map(w => `${w}.json`).join(', ')}`);
+		}
+	}
+
+	if (errors.length) {
+		for (const e of errors) console.error(e);
+		process.exit(1);
+	}
+	console.log(`local-only (${LOCAL_ONLY.length}) and owned-elsewhere (${OWNED_ELSEWHERE.length}) files all present; ${onDisk.length} triage-*.mjs accounted, no orphans; baselines all wired`);
 }

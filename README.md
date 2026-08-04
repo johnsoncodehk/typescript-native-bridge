@@ -136,7 +136,7 @@ the [differences from tsgo](#behavior-and-differences-from-tsgo)).
 | `tsserver` + `@vue/typescript-plugin` | ✅ | volar language-tools test suite: 205/209 pass (4 skipped) |
 | `tsslint` | ✅ | runs as the volar repo's own linter |
 
-Continuous verification: a nightly CI gate replays the language-service probe
+Continuous verification: a CI gate (every push/PR and nightly) replays the language-service probe
 corpus (quickinfo / definition / references / diagnostics, ~19k units) against the
 same stock build — no new divergences allowed. If your tool isn't listed, try it and
 file an issue; the fork covers any tool that drives the standard `typescript`
