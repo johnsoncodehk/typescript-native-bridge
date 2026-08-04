@@ -465,11 +465,11 @@ func (a *arena) encodeResult(res any) {
 			a.finish(arenaKindNull)
 			return
 		}
-		a.records(1, 72, func(int) { a.encodeSymbolResponse(v) })
+		a.records(1, symbolRecordSize, func(int) { a.encodeSymbolResponse(v) })
 	case []*SymbolResponse:
-		a.records(len(v), 72, func(i int) {
+		a.records(len(v), symbolRecordSize, func(i int) {
 			if v[i] == nil {
-				a.zeroSymbolRecord(a.rec(72))
+				a.zeroSymbolRecord(a.rec(symbolRecordSize))
 				return
 			}
 			a.encodeSymbolResponse(v[i])
@@ -479,9 +479,9 @@ func (a *arena) encodeResult(res any) {
 			a.finish(arenaKindNull)
 			return
 		}
-		a.records(1, 64, func(int) { a.encodeSignatureResponse(v) })
+		a.records(1, signatureRecordSize, func(int) { a.encodeSignatureResponse(v) })
 	case []*SignatureResponse:
-		a.records(len(v), 64, func(i int) { a.encodeSignatureResponse(v[i]) })
+		a.records(len(v), signatureRecordSize, func(i int) { a.encodeSignatureResponse(v[i]) })
 	case string:
 		o, n := a.writeStr(v)
 		off := a.rec(8)
@@ -518,7 +518,7 @@ func (a *arena) encodeResult(res any) {
 			a.finish(arenaKindNull)
 			return
 		}
-		a.records(1, 8, func(int) { a.encodeAmbientModulesResponse(v) })
+		a.records(1, ambientModulesRecordSize, func(int) { a.encodeAmbientModulesResponse(v) })
 	case *CompletionInfoResponse:
 		if v == nil {
 			a.finish(arenaKindNull)

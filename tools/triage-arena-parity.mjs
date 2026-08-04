@@ -631,6 +631,13 @@ function arenaCall(method, params) {
 	let off = ARENA_RESP_OFFSET + 20;
 	const recKind = resKind === 'type' || resKind === 'types' ? 'type' : resKind === 'symbol' || resKind === 'symbols' ? 'symbol' : resKind === 'quickinfo' || resKind === 'referencedSymbols' || resKind === 'definitionAndBoundSpan' || resKind === 'jsdocTags' || resKind === 'expandedParams' || resKind === 'ambientModules' || resKind === 'completionInfo' || resKind === 'signatureHelpItems' || resKind === 'renameInfo' || resKind === 'renameLocations' ? resKind : 'signature';
 	const read = recKind === 'type' ? readType : recKind === 'symbol' ? readSymbol : recKind === 'quickinfo' ? readQuickinfo : recKind === 'referencedSymbols' ? readReferencedSymbol : recKind === 'definitionAndBoundSpan' ? readDabs : recKind === 'jsdocTags' ? readJsDocTag : recKind === 'expandedParams' ? readExpandedParams : recKind === 'ambientModules' ? readAmbientModules : recKind === 'completionInfo' ? readCompletions : recKind === 'signatureHelpItems' ? readSignatureHelpItems : recKind === 'renameInfo' ? readRenameInfo : recKind === 'renameLocations' ? readRenameLocation : readSignature;
+	// Record strides — the parity mirror of arena.go's record-size consts
+	// (typeRecordSize, symbolRecordSize, signatureRecordSize,
+	// quickinfoRecordSize, referencedSymbolRecordSize, dabsRecordSize,
+	// jsdocTagRecordSize, expandedParamsRecordSize, ambientModulesRecordSize,
+	// completionInfoRecordSize, signatureHelpTopRecordSize,
+	// renameInfoRecordSize, renameLocationRecordSize) and tsgoChecker.ts's
+	// arenaReaders table. A size change must land in all three places.
 	const stride = recKind === 'type' ? 156 : recKind === 'symbol' ? 72 : recKind === 'quickinfo' ? 48 : recKind === 'referencedSymbols' ? 56 : recKind === 'definitionAndBoundSpan' ? 16 : recKind === 'jsdocTags' ? 8 : recKind === 'expandedParams' ? 8 : recKind === 'ambientModules' ? 8 : recKind === 'completionInfo' ? 32 : recKind === 'signatureHelpItems' ? 28 : recKind === 'renameInfo' ? 36 : recKind === 'renameLocations' ? 32 : 64;
 	const out = [];
 	for (let i = 0; i < count; i++) { out.push(read(off)); off += stride; }

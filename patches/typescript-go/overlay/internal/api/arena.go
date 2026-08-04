@@ -431,9 +431,16 @@ func (a *arena) encodeTypeResponse(r *TypeResponse) {
 	//   140 labeledElementDeclarations / 148 thisType / 152 escapedName
 }
 
-// encodeSymbolResponse writes a SymbolResponse record (72 bytes fixed).
+// Fixed record strides for the symbol/signature record runs. Each stride is
+// mirrored in encodeResult's records() call (arena_dispatch.go) and the JS
+// arenaReaders strides (tsgoChecker.ts) and the arena-parity witness stride
+// (tools/triage-arena-parity.mjs) — a size change must land in all three.
+const symbolRecordSize = 72
+const signatureRecordSize = 64
+
+// encodeSymbolResponse writes a SymbolResponse record (symbolRecordSize bytes fixed).
 func (a *arena) encodeSymbolResponse(r *SymbolResponse) {
-	a.encodeSymbolResponseAt(a.rec(72), r)
+	a.encodeSymbolResponseAt(a.rec(symbolRecordSize), r)
 }
 
 // encodeSymbolResponseAt writes a SymbolResponse record at off (pack region).
@@ -469,9 +476,9 @@ func (a *arena) encodeSymbolResponseAt(off int, r *SymbolResponse) {
 	a.u32(off+64, gxFlags)
 }
 
-// encodeSignatureResponse writes a SignatureResponse record (64 bytes fixed).
+// encodeSignatureResponse writes a SignatureResponse record (signatureRecordSize bytes fixed).
 func (a *arena) encodeSignatureResponse(r *SignatureResponse) {
-	off := a.rec(64)
+	off := a.rec(signatureRecordSize)
 	a.u64(off+0, uint64(r.Id))
 	a.u32(off+8, r.Flags)
 	a.nodeHandleRec(off+12, r.Declaration)
@@ -712,7 +719,13 @@ func (a *arena) encodeDefinitionAndBoundSpanResponse(r *DefinitionAndBoundSpanRe
 
 const jsdocTagRecordSize = 8
 
+// ambientModuleRecordSize is the inner 40-byte AmbientModuleResponse record
+// (moduleName strId, pad, inline 32-byte light symbol).
 const ambientModuleRecordSize = 40
+
+// ambientModulesRecordSize is the outer 8-byte AmbientModulesResponse record
+// ({modules ptr, modules count}); same three-way mirror as symbolRecordSize.
+const ambientModulesRecordSize = 8
 
 // encodeJSDocTag writes a JSDocTagInfo record ({name strId, text strId}, 8 bytes).
 func (a *arena) encodeJSDocTag(t *JSDocTagInfo) {
@@ -721,10 +734,10 @@ func (a *arena) encodeJSDocTag(t *JSDocTagInfo) {
 	a.u32(off+4, a.str(t.Text))
 }
 
-// zeroSymbolRecord zeroes one 72-byte symbol slot (a nil element in a symbols run
+// zeroSymbolRecord zeroes one symbolRecordSize slot (a nil element in a symbols run
 // reads back as JS null — getSymbolsDeclarations/getParentsOfSymbols holes).
 func (a *arena) zeroSymbolRecord(off int) {
-	for i := 0; i < 72; i += 4 {
+	for i := 0; i < symbolRecordSize; i += 4 {
 		a.u32(off+i, 0)
 	}
 }
@@ -754,9 +767,10 @@ func (a *arena) encodeAmbientModule(off int, m *AmbientModuleResponse) {
 }
 
 // encodeAmbientModulesResponse writes an AmbientModulesResponse as a single
-// 8-byte record {modules ptr, modules count} with 40-byte module records packed.
+// ambientModulesRecordSize record {modules ptr, modules count} with
+// ambientModuleRecordSize module records packed.
 func (a *arena) encodeAmbientModulesResponse(r *AmbientModulesResponse) {
-	off := a.rec(8)
+	off := a.rec(ambientModulesRecordSize)
 	a.u32(off+0, 0)
 	a.u32(off+4, uint32(len(r.Modules)))
 	if len(r.Modules) > 0 {
@@ -768,10 +782,14 @@ func (a *arena) encodeAmbientModulesResponse(r *AmbientModulesResponse) {
 	}
 }
 
+// expandedParamsRecordSize is the outer 8-byte {ptr,count} record of the
+// getExpandedParameters result; same three-way mirror as symbolRecordSize.
+const expandedParamsRecordSize = 8
+
 // encodeExpandedParameters writes a [][]SymbolID as an outer (ptr,count) array
 // of inner (ptr,count) u64 runs (the getExpandedParameters result).
 func (a *arena) encodeExpandedParameters(v [][]SymbolID) {
-	off := a.rec(8)
+	off := a.rec(expandedParamsRecordSize)
 	a.u32(off+0, 0)
 	a.u32(off+4, uint32(len(v)))
 	if len(v) == 0 {
@@ -832,7 +850,7 @@ func (a *arena) encodeCompletionEntry(off int, r *CompletionEntryResponse) {
 	a.strArray(off+48, r.CommitCharacters)
 	a.u32(off+56, 0)
 	if r.Symbol != nil {
-		p := a.pack(72)
+		p := a.pack(symbolRecordSize)
 		a.u32(off+56, uint32(p))
 		a.encodeSymbolResponseAt(p, r.Symbol)
 	}

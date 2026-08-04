@@ -1458,7 +1458,9 @@ class ArenaClient {
         return reader.singular ? out[0] : out;
     }
 
-    // Record readers per result kind (strides must mirror arena.go). Bound once
+    // Record readers per result kind (strides must mirror arena.go and the
+    // triage-arena-parity witness decoder — three mirror points, Go consts are
+    // the single source of truth). Bound once
     // per session so the hot decode loop allocates nothing per call.
     private readonly arenaReaders: Record<string, { read: (off: number) => any; stride: number; singular: boolean }> = {
         type: { read: o => this.readType(o), stride: 156, singular: true },
