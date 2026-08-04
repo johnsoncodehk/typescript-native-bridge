@@ -10,8 +10,8 @@ permissions:
 
 env:
   VOLAR_BRANCH: master
-  VOLAR_SHA: 343049a14 # vuejs/language-tools@master, pinned for reproducibility
-  BASELINE: test/baselines/nav-results-c195185-t1.json # sim-nav baseline gate (same as nightly)
+  VOLAR_SHA: 59df2981f38b03960deb9be93fdd940ab2ec72f6 # vuejs/language-tools@master
+  BASELINE: test/baselines/nav-results-de92bfb-t1.json # sim-nav baseline gate (same as nightly)
 
 jobs:
   prepare:
@@ -133,13 +133,16 @@ jobs:
           path: |
             ${{ runner.temp }}/volar
             ${{ runner.temp }}/volar-stock
-          key: volar-${{ env.VOLAR_SHA }}-v3
+          key: volar-${{ env.VOLAR_SHA }}-v4
 
       - name: Clone volar
         if: steps.volar-cache.outputs.cache-hit != 'true'
         run: |
           git clone --depth 50 --branch "$VOLAR_BRANCH" https://github.com/vuejs/language-tools.git "$RUNNER_TEMP/volar"
-          git -C "$RUNNER_TEMP/volar" checkout "$VOLAR_SHA"
+          git -C "$RUNNER_TEMP/volar" checkout "$VOLAR_SHA" 2>/dev/null || {
+            git -C "$RUNNER_TEMP/volar" fetch --deepen 50 origin "$VOLAR_BRANCH"
+            git -C "$RUNNER_TEMP/volar" checkout "$VOLAR_SHA"
+          }
           # Point volar's typescript override at the CI-built TNB — volar
           # master's override is `npm:typescript-native-bridge@<release>`, which
           # would fetch the released package instead of the commit under test.
@@ -273,7 +276,7 @@ jobs:
           path: |
             ${{ runner.temp }}/volar
             ${{ runner.temp }}/volar-stock
-          key: volar-${{ env.VOLAR_SHA }}-v3
+          key: volar-${{ env.VOLAR_SHA }}-v4
           fail-on-cache-miss: true
 
       # Runs on every CI run: the cached node_modules links
@@ -328,7 +331,7 @@ jobs:
           path: |
             ${{ runner.temp }}/volar
             ${{ runner.temp }}/volar-stock
-          key: volar-${{ env.VOLAR_SHA }}-v3
+          key: volar-${{ env.VOLAR_SHA }}-v4
           fail-on-cache-miss: true
 
       - name: sweep-ls-throws
@@ -445,7 +448,7 @@ jobs:
           path: |
             ${{ runner.temp }}/volar
             ${{ runner.temp }}/volar-stock
-          key: volar-${{ env.VOLAR_SHA }}-v3
+          key: volar-${{ env.VOLAR_SHA }}-v4
           fail-on-cache-miss: true
 
       - name: Run sim-nav shard

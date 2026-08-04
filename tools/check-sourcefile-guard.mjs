@@ -61,7 +61,7 @@ const env = {
 
 const vitest = spawnSync(
 	"npx",
-	["vitest", "run", "packages/tsc", "--maxWorkers=1"],
+	["vitest", "run", "packages/tsc", "--maxWorkers=1", "--pool=threads"],
 	{ cwd: volarVue, env, encoding: "utf8", maxBuffer: 1 << 28 },
 );
 

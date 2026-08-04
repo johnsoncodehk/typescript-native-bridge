@@ -547,15 +547,6 @@ allMarkers.sort((a, b) => a.id - b.id);
 
 // ── Known divergences (marker id → class reason; see header) ───────────────
 const KNOWN_DIVERGENCES = new Map([
-	// id 19 (cf @ jsdoc.js): the marker's own block comment closes the JSDoc
-	// comment early, so the file is deliberately broken syntax soup. tsgo's
-	// parser reports TS1161 (unterminated regular expression) where stock's
-	// grammar checker reports TS1003 (identifier expected) — engine-owned
-	// error-recovery divergence, verified against pristine tsgo 7.0.2 (its
-	// LSP pull diagnostics report 1161, not 1003). The syntax-phase bucket
-	// never reaches semanticDiagnosticsSync under either engine, so TNB's
-	// codefix aggregate carries one fewer ts-nocheck group than stock's.
-	[19, 'T-PARSE: tsgo parser error recovery in broken JSDoc (1161 vs stock 1003; pristine tsgo reference)'],
 ]);
 
 let matched = 0, known = 0, stale = 0;

@@ -128,7 +128,7 @@ const KNOWN_DIVERGENCES = new Map((() => {
 		['types.ts:Cond-decl']);
 	// U2 — member-list ordering
 	add(REASON.U2, ['getApparentProperties'], [
-		'util.ts:add-decl', 'util.ts:fetchData-decl', 'types.ts:Lit-decl', 'types.ts:rex-decl', 'types.ts:Dog-ctor-use',
+		'types.ts:rex-decl', 'types.ts:Dog-ctor-use',
 		'types.ts:identity-decl', 'types.ts:overloaded-decl', 'consumer.ts:add-import', 'consumer.ts:add-use',
 		'consumer.ts:Def-import', 'consumer.ts:DefRe-import', 'consumer.ts:DefAlias-import', 'consumer.ts:plus-import',
 		'consumer.ts:plus-use', 'consumer.ts:utilNs-import', 'consumer.ts:utilNs-use', 'consumer.ts:identity-use',
