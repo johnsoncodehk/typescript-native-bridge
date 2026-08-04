@@ -10,7 +10,7 @@ permissions:
 
 env:
   VOLAR_BRANCH: master
-  VOLAR_SHA: 343049a14 # vuejs/language-tools@master, pinned for reproducibility
+  VOLAR_SHA: 59df2981f38b03960deb9be93fdd940ab2ec72f6 # vuejs/language-tools@master
   BASELINE: test/baselines/nav-results-8c26673-t1.json
 
 jobs:
@@ -97,7 +97,7 @@ jobs:
         id: volar-cache
         # Both workflows need a BUILT volar tree (install + pnpm run build —
         # the sim-nav shards load the compiled plugin). Keys stay per-workflow
-        # (nightly-v2 vs ci.yml's v3): first-writer-wins on a shared key would
+        # (nightly-v2 vs ci.yml's v4): first-writer-wins on a shared key would
         # let one workflow's write timing define the other's content.
         uses: actions/cache@v4
         with:

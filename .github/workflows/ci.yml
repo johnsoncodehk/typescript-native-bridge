@@ -123,7 +123,7 @@ jobs:
       # jobs (volar-test, witnesses, sim-nav-shard) restore it with
       # fail-on-cache-miss, and their needs: build guarantees this job's
       # post-job save has landed. The tree is BUILT (install + pnpm run build,
-      # same as nightly) — the sim-nav shards need the compiled plugin; v3
+      # same as nightly) — the sim-nav shards need the compiled plugin; v4
       # splits off stale install-only v2 entries so a shard never restores an
       # unbuilt tree.
       - name: Clone volar (cache)
