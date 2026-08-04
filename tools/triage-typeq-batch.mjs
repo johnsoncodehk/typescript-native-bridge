@@ -547,6 +547,11 @@ allMarkers.sort((a, b) => a.id - b.id);
 
 // ── Known divergences (marker id → class reason; see header) ───────────────
 const KNOWN_DIVERGENCES = new Map([
+		// id 19 (cf @ jsdoc.js): tsgo parser reports TS1161 (unterminated
+		// regular expression) where stock's grammar checker reports TS1003
+		// (identifier expected) — engine-owned error-recovery divergence,
+		// verified against pristine tsgo 7.0.2.
+		[19, 'T-PARSE: tsgo parser error recovery in broken JSDoc (1161 vs stock 1003; pristine tsgo reference)'],
 ]);
 
 let matched = 0, known = 0, stale = 0;
