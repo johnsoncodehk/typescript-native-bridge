@@ -2002,7 +2002,7 @@ index dc0a1db7e..56820b267 100644
  
  	if symbol.Name == ast.InternalSymbolNameDefault || symbol.Name == ast.InternalSymbolNameExportEquals {
 diff --git a/internal/ls/autoimport/registry.go b/internal/ls/autoimport/registry.go
-index 6c6468095..5e9b8e56e 100644
+index 6c6468095..95e9725b0 100644
 --- a/internal/ls/autoimport/registry.go
 +++ b/internal/ls/autoimport/registry.go
 @@ -244,6 +244,12 @@ type RegistryBucket struct {
@@ -2077,16 +2077,21 @@ index 6c6468095..5e9b8e56e 100644
  		neededProjects[core.FirstResult(b.host.GetDefaultProject(change.RequestedFile))] = struct{}{}
  		if !b.specifierCache.Has(change.RequestedFile) {
  			b.specifierCache.Set(change.RequestedFile, &collections.SyncMap[tspath.Path, string]{})
-@@ -738,7 +754,7 @@ func (b *registryBuilder) markBucketsDirty(change RegistryChange, logger *loggin
+@@ -738,7 +754,12 @@ func (b *registryBuilder) markBucketsDirty(change RegistryChange, logger *loggin
  						// Look up the package name for granular updates
  						packageName := entry.Value().Paths[path]
  						entry.Change(func(bucket *RegistryBucket) { bucket.markNodeModulesDirty(packageName) })
 -						if !entry.Value().state.multipleFilesDirty {
++						// Ledger(tsgo-autoimport-markbuckets-dirty) — README behavior table row.
++						// Pristine deletes the bucket here on !multipleFilesDirty, which ejects it
++						// from the worklist before a second same-batch file's mark lands — the
++						// second dirty mark is eaten (map-order 50% flake, volar #5847). Keep the
++						// bucket until it actually goes multiple-dirty so every changed file marks.
 +						if entry.Value().state.multipleFilesDirty {
  							delete(cleanNodeModulesBuckets, dirPath)
  						}
  					}
-@@ -750,7 +766,7 @@ func (b *registryBuilder) markBucketsDirty(change RegistryChange, logger *loggin
+@@ -750,7 +771,7 @@ func (b *registryBuilder) markBucketsDirty(change RegistryChange, logger *loggin
  						if packageName, ok := entry.Value().Paths[path]; ok {
  							// Use the package name for granular updates
  							entry.Change(func(bucket *RegistryBucket) { bucket.markNodeModulesDirty(packageName) })
@@ -2095,7 +2100,7 @@ index 6c6468095..5e9b8e56e 100644
  								delete(cleanNodeModulesBuckets, bucketDirPath)
  							}
  						}
-@@ -766,7 +782,7 @@ func (b *registryBuilder) markBucketsDirty(change RegistryChange, logger *loggin
+@@ -766,7 +787,7 @@ func (b *registryBuilder) markBucketsDirty(change RegistryChange, logger *loggin
  				if _, ok := entry.Value().Paths[path]; ok {
  					// Project buckets don't use package-based granular updates
  					entry.Change(func(bucket *RegistryBucket) { bucket.markProjectFileDirty(path) })
@@ -2104,7 +2109,7 @@ index 6c6468095..5e9b8e56e 100644
  						delete(cleanProjectBuckets, projectDirPath)
  					}
  				}
-@@ -781,10 +797,11 @@ func (b *registryBuilder) markBucketsDirty(change RegistryChange, logger *loggin
+@@ -781,10 +802,11 @@ func (b *registryBuilder) markBucketsDirty(change RegistryChange, logger *loggin
  
  func (b *registryBuilder) updateIndexes(ctx context.Context, change RegistryChange, logger *logging.LogTree) {
  	type nodeModulesBucketTask struct {
@@ -2120,7 +2125,7 @@ index 6c6468095..5e9b8e56e 100644
  
  		// For granular updates.
  		isUpdate       bool
-@@ -842,7 +859,7 @@ func (b *registryBuilder) updateIndexes(ctx context.Context, change RegistryChan
+@@ -842,7 +864,7 @@ func (b *registryBuilder) updateIndexes(ctx context.Context, change RegistryChan
  	tspath.ForEachAncestorDirectoryPath(change.RequestedFile, func(dirPath tspath.Path) (any, bool) {
  		if nodeModulesBucket, ok := b.nodeModules.Get(dirPath); ok {
  			dirName := core.FirstResult(b.directories.Get(dirPath)).Value().name
@@ -2129,7 +2134,7 @@ index 6c6468095..5e9b8e56e 100644
  			bucketState := nodeModulesBucket.Value().state
  			// !!! Optimization: handle different dependency set via granular updates
  			needsFullRebuild := bucketState.multipleFilesDirty ||
-@@ -854,20 +871,22 @@ func (b *registryBuilder) updateIndexes(ctx context.Context, change RegistryChan
+@@ -854,20 +876,22 @@ func (b *registryBuilder) updateIndexes(ctx context.Context, change RegistryChan
  
  			if needsFullRebuild {
  				nodeModulesTasks = append(nodeModulesTasks, &nodeModulesBucketTask{
@@ -2163,7 +2168,7 @@ index 6c6468095..5e9b8e56e 100644
  				})
  			}
  		}
-@@ -1004,7 +1023,7 @@ func (b *registryBuilder) updateIndexes(ctx context.Context, change RegistryChan
+@@ -1004,7 +1028,7 @@ func (b *registryBuilder) updateIndexes(ctx context.Context, change RegistryChan
  				)
  			} else {
  				b.buildNodeModulesBucket(
@@ -2172,7 +2177,7 @@ index 6c6468095..5e9b8e56e 100644
  					targetRecursivePackages, nodeModulesLogger.Fork(task.dirName),
  				)
  			}
-@@ -1291,34 +1310,41 @@ func (b *registryBuilder) buildProjectBucket(
+@@ -1291,34 +1315,41 @@ func (b *registryBuilder) buildProjectBucket(
  	}
  }
  
@@ -2219,7 +2224,7 @@ index 6c6468095..5e9b8e56e 100644
  }
  
  // discoveredPackage represents a package found during the discovery phase.
-@@ -1598,6 +1624,7 @@ func (b *registryBuilder) buildNodeModulesBucket(
+@@ -1598,6 +1629,7 @@ func (b *registryBuilder) buildNodeModulesBucket(
  	ctx context.Context,
  	result *bucketBuildResult,
  	dependencies *collections.Set[string],
@@ -2227,7 +2232,7 @@ index 6c6468095..5e9b8e56e 100644
  	dirPath tspath.Path,
  	discovered []*discoveredPackage,
  	directoryPackageNames *collections.Set[string],
-@@ -1632,11 +1659,12 @@ func (b *registryBuilder) buildNodeModulesBucket(
+@@ -1632,11 +1664,12 @@ func (b *registryBuilder) buildNodeModulesBucket(
  	}
  
  	result.bucket = &RegistryBucket{
@@ -2245,7 +2250,7 @@ index 6c6468095..5e9b8e56e 100644
  		state: BucketState{
  			buildPreferences:        bucketBuildPreferencesFromUserPreferences(b.userPreferences),
  			recursiveSearchPackages: recursiveSearchPackages.Clone(),
-@@ -1779,11 +1807,12 @@ func (b *registryBuilder) updateNodeModulesBucket(
+@@ -1779,11 +1812,12 @@ func (b *registryBuilder) updateNodeModulesBucket(
  	}
  
  	result.bucket = &RegistryBucket{
