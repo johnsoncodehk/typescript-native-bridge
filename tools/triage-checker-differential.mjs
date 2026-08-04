@@ -50,8 +50,9 @@
  *
  * Known divergences live in KNOWN_DIVERGENCES keyed `method@label`, grouped by
  * attribution class:
- *   U1  union constituent order — tsgo normalizes union members by type id
- *       (upstream issue #20 behavior), stock keeps declaration order.
+ *   U1  union constituent order — tsgo orders union members by its total type
+ *       ordering (upstream tsgo #200 "Total ordering of types"), stock keeps
+ *       declaration order.
  *   U2  member-list ordering — tsgo returns symbols in its own table/sort
  *       order (CompareSymbols by symbol id), stock in resolution order; same
  *       upstream class as U1, for symbol lists. Includes the visible tail of
@@ -104,9 +105,9 @@ const stockTsPath = process.env.STOCK_TYPESCRIPT_PATH
 // (upstream tsgo behavior / lib delta, or a tracked TNB-side bug). A stale
 // entry (sides converged) fails the gate so fixed bugs force list cleanup.
 const REASON = {
-	U1: 'U1: tsgo union constituent order (upstream issue #20), stock declaration order',
-	U2: 'U2: tsgo member/symbol ordering (upstream, same class as #20)',
-	U2T: 'U2T: member-order-dependent typeToString truncation tail (upstream #20 class)',
+	U1: 'U1: tsgo union constituent order (upstream tsgo #200 total ordering of types), stock declaration order',
+	U2: 'U2: tsgo member/symbol ordering (upstream, same class as #200)',
+	U2T: 'U2T: member-order-dependent typeToString truncation tail (upstream #200 class)',
 	U3: 'U3: tsgo keeps export= as an alias hop; stock immediateTarget resolves it (upstream alias model)',
 	LU2: 'L+U2: bundled-lib padStart/padEnd parameter rename + tsgo member order',
 };

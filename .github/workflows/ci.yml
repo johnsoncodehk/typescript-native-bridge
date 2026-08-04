@@ -11,7 +11,7 @@ permissions:
 env:
   VOLAR_BRANCH: master
   VOLAR_SHA: 343049a14 # vuejs/language-tools@master, pinned for reproducibility
-  BASELINE: test/baselines/nav-results-343049a1-t1.json # sim-nav baseline gate (same as nightly)
+  BASELINE: test/baselines/nav-results-0d2bca1-t1.json # sim-nav baseline gate (same as nightly)
 
 jobs:
   prepare:
@@ -358,7 +358,8 @@ jobs:
           # into the copy for tools that boot the bridge in-process (they
           # resolve the repo from import.meta.dirname/..); README.md +
           # patches/ too — the ledger gate reads them for the patch<->README
-          # reconciliation. pipefail is set explicitly so the tee below does
+          # reconciliation; bin/ too — triage-nuxtui-exportstar shells out to
+          # repoRoot/bin/tsc. pipefail is set explicitly so the tee below does
           # not mask a group failure (the step shell's -eo pipefail default
           # must not be load-bearing).
           i=${{ matrix.index }}
@@ -371,6 +372,7 @@ jobs:
           ln -sfn "$GITHUB_WORKSPACE/native" "/tmp/tnb-wg$i/native"
           ln -sfn "$GITHUB_WORKSPACE/README.md" "/tmp/tnb-wg$i/README.md"
           ln -sfn "$GITHUB_WORKSPACE/patches" "/tmp/tnb-wg$i/patches"
+          ln -sfn "$GITHUB_WORKSPACE/bin" "/tmp/tnb-wg$i/bin"
           rc=0
           {
             failed=()

@@ -17,9 +17,11 @@
 // names between lists; `all` fails on duplicates, missing tools/<name>.mjs,
 // or a drifted TOTAL.
 //
-// 2026-08-03 convergence audit: 13 witnesses wired. The batch triages
+// 2026-08-03 convergence audit: 14 witnesses wired (13 in the audit, plus
+// triage-nuxtui-exportstar 2026-08-04 — unblocked by the bin symlink the
+// witnesses job now creates). The batch triages
 // triage-typeq-batch (~69s) and triage-spellnb-batch (~65s) form wg6 (same
-// two-heavies shape as wg1-wg4); eleven ≤11s witnesses joined wg5 (~140s).
+// two-heavies shape as wg1-wg4); twelve ≤11s witnesses joined wg5 (~140s).
 // Witnesses intentionally NOT in the matrix are local-only (marked in
 // AGENTS.md Gates):
 //   - triage-framework-checks / triage-external-edits — need the
@@ -27,9 +29,6 @@
 //     them, external-edits' estree mode reads them)
 //   - triage-generation-retention — in-child GC marks (tools/tnb-gc-marks.cjs)
 //     + --stock-tsserver slope calibration
-//   - triage-nuxtui-exportstar — resolves repoRoot/bin/tsc; the CI isolated
-//     tools copy symlinks vendor/lib/native/README.md/patches only, so wiring
-//     it needs a bin symlink in the workflow (outside the table's scope)
 //   - triage-napi-fuzz — NAPI payload fuzz probe, kept local-only by audit
 //   - perf series (measurement, not pass/fail): triage-completion-latency,
 //     triage-postedit-latency, triage-perf-edit-rpc, triage-perf-qi-rpc,
@@ -39,7 +38,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const TOTAL = 67;
+const TOTAL = 68;
 
 const groups = [
 	{
@@ -131,6 +130,7 @@ const groups = [
 			'triage-node-modules-sfc', // ~1s
 			'triage-issue5-contextual-def', // ~3s
 			'triage-idle-drain', // ~7s
+			'triage-nuxtui-exportstar', // ~0s
 		],
 	},
 	{

@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 /**
- * IDE nav roam: long-session quickinfo / definitionAndBoundSpan / references
- * + geterr diag parity — TNB vs stock. (documentHighlights was dropped: its
+ * IDE nav roam: long-session quickinfo / definitionAndBoundSpan /
+ * typeDefinition / references + geterr diag parity — TNB vs stock.
+ * (documentHighlights was dropped: its
  * compared surface is a strict subset of references on the same FAR
  * machinery, and it diverged zero times in gate history; f2hl-* witnesses
  * keep the targeted highlights coverage.)
@@ -44,7 +45,7 @@ const CMD_TIMEOUT_MS = 30_000;
 const SESSION_DEADLINE_MS = 12 * 60 * 60 * 1000;
 const MAX_POS_PER_FILE = 80;
 const IDENT_RE = /[A-Za-z_$][A-Za-z0-9_$]*/g;
-const NAV_CMDS = ['quickinfo', 'definitionAndBoundSpan', 'references'];
+const NAV_CMDS = ['quickinfo', 'definitionAndBoundSpan', 'typeDefinition', 'references'];
 
 const harnessArgs = [
 	'--disableAutomaticTypingAcquisition',
@@ -303,7 +304,9 @@ function normalizeNavResult(cmd, resp, side) {
 	const success = !!resp?.success;
 	const body = resp?.body;
 	let locs = [];
-	if (cmd === 'definitionAndBoundSpan') locs = extractLocsFromDefs(body);
+	// definition/typeDefinition/implementation responses carry `definitions`
+	// (DefinitionInfo[] — or bare arrays); references carry `refs`.
+	if (cmd === 'definitionAndBoundSpan' || cmd === 'typeDefinition') locs = extractLocsFromDefs(body);
 	else if (cmd === 'references') locs = extractLocsFromRefs(body);
 
 	const summary = {
@@ -940,7 +943,7 @@ const payload = {
 	dedupeRescued,
 	files: fileTable,
 	positionsSum: fileTable.reduce((s, r) => s + r.positions, 0),
-	navCmdCount: fileTable.reduce((s, r) => s + r.positions, 0) * 4,
+	navCmdCount: fileTable.reduce((s, r) => s + r.positions, 0) * NAV_CMDS.length,
 	diagUnitCount: fileTable.length,
 	findings: [...tnbRun.findings, ...stockRun.findings],
 	diffs: diffs.map((d) => ({

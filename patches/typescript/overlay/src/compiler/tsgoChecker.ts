@@ -558,7 +558,7 @@ const _builderMetaByConfig = new Map<string, { epoch: number | undefined; proj: 
 const _namesByConfig = new Map<string, { epoch: number | undefined; proj: any; names: string[]; nameSet: Set<string>; canonicalToHost: Map<string, string>; sortedNames: string[] }>();
 /** Latest per-file version/format, merged on every fetch — read by shared stub version getters. */
 const _latestMetaByPath = new Map<string, { version: string; impliedFormat: number | undefined }>();
-/** Shared light-stub SourceFiles, keyed by host file name (see getOrCreateLightSourceFile). */
+/** Shared light-stub SourceFiles, keyed by host file name only — a stub created by one config is served to every config asking for that file, so its metaEnabled/configFilePath stay fixed by the first creator (see getOrCreateLightSourceFile). */
 const _lightSfSharedByFile = new Map<string, any>();
 /** Raw absolute path → shared stub (CPU memo; resolveHostFileName is host-dependent for relative paths). */
 const _lightSfSharedByRawPath = new Map<string, any>();
@@ -7736,6 +7736,9 @@ export function createTsgoProgram(
         // fileName+path than the full/host SF for the same logical file,
         // silently drifting the BuilderState fileInfos key (Axis C).
         const hostFileName = hostNameForQuery(resolveHostFileNameMemoized(fileName, host));
+        // Cross-config sharing is first-creator-fixed: the Map is keyed by file
+        // name alone, so a stub's metaEnabled/configFilePath were captured from
+        // whichever config created it, not the one asking now.
         let sf = _lightSfSharedByFile.get(hostFileName);
         if (!sf) {
             // Metadata-only SourceFile stub: no host.readFile, no computeLineStarts,

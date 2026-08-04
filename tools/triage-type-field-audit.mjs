@@ -276,7 +276,7 @@ const STOCK_INTERNAL_KEYS = new Map(Object.entries({
 	resolvedIndexType: 'index-type resolution cache; the resolved form crosses via getConstraintOfType RPC',
 	resolvedBaseTypes: 'base-type resolution cache; the resolved bases are audited via the per-site getBaseTypes walk',
 	baseTypesResolved: 'base-type resolution cache; the resolved bases are audited via the per-site getBaseTypes walk',
-	pattern: 'destructuring internals',
+	pattern: 'public d.ts field (Type.pattern?: DestructuringPattern) with no consumers: stock materializes it only as destructuring-syntax bookkeeping on the declared type of a binding pattern, and no public API reads it back — the bridge carries destructuring semantics via checker methods instead',
 	simplifiedForReading: 'IndexedAccessType public d.ts field, lazily materialized: stock computes+caches it via getSimplifiedIndexedAccessType on first indexed-access simplification, and the fixture only triggers that after auditPair (probe: own key appears on the indexed-access site only after the post-auditPair getConstraint() cross-check) — the tripwire cannot see it; simplification semantics are served on the bridge by the getSimplifiedIndexedAccessType RPC',
 	simplifiedForWriting: 'write-access half of the same getSimplifiedIndexedAccessType cache as simplifiedForReading — same lazy materialization, never a fixture own key at auditPair time',
 	elementType: 'EvolvingArrayType public d.ts field: stock materializes evolving-array types only transiently inside flow analysis — every getTypeAtLocation-observable point completes them (getFlowTypeOfReference → finalizeEvolvingArrayType / completeInferenceForEvolvingArrayType; the push-callee returns the completed reference too), so no fixture site can ever materialize this key; the evolving-array site audits the completed array instead, and tsgo mirrors the transient model (flow.go)',
@@ -371,7 +371,7 @@ function conditionalExemption(field, stockVal, s) {
 		return 'stock links a mapped instantiation to its anonymous source via target+mapper mechanics; tsgo has no Reference-style target handle for mapped types (getTargetOfType covers Reference/Index/StringMapping)';
 	}
 	if ((field === 'regularType' || field === 'freshType') && stockVal === s && (s.flags & (TF.Enum | TF.EnumLiteral)) && (s.flags & TF.UnionOrIntersection)) {
-		return 'stock attaches a self-referential regular/freshType to the enum union; tsgo models the enum union without a fresh/regular pair, so a consumer reading t.regularType gets an equivalent type either way';
+		return 'stock attaches a self-referential regular/freshType to the enum union (the union is its own regular form); tsgo models the enum union without the pair, so the bridge leaves the field undefined — reading t.regularType yields undefined, not an equivalent type. Acceptable because the fresh/regular pairing only matters for fresh literal types and an enum union is never fresh — no checker consumer reads the pair on it';
 	}
 	if ((field === 'typeParameters' || field === 'outerTypeParameters' || field === 'localTypeParameters') && (s.flags & TF.Object) && (s.objectFlags & OF.Tuple)) {
 		return 'stock wires synthetic per-element type parameters into a tuple target\'s GenericType instantiation machinery (they are the target\'s identity typeArguments, typeToString \'?\'); tsgo models tuple targets non-generically — element types cross via getTypeArguments on the reference (cross-checked per site)';

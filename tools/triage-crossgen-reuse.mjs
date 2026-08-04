@@ -14,6 +14,12 @@
  *  - program.getSourceFile returns a full TS surface in the pure-disk thin
  *    path (parseDiagnostics array, token-level getChildren — the
  *    typescript-estree crash in issue #11).
+ *  - A type handle captured in gen 2 must not silently resolve to the NEW
+ *    snapshot's same-id type after the gen-3 edit flips the snapshot: the
+ *    bridge registry is per-snapshot (proto.go snapshotData.projectRegistries,
+ *    keyed by TypeID = t.Id()), so a stale handle either dies loudly ("type
+ *    handle N not found in project registry") or serves the value it was
+ *    captured with — never a different type from the rebuilt snapshot.
  *
  * Parent spawns three child processes (gen counts 1 / 2 / 3-with-edit) with
  * TSGO_PROFILE=1 and compares the getSourceFileRpc exit counters, so
@@ -84,7 +90,12 @@ function childMain(gens) {
     const configFile = ts.readConfigFile(configPath, ts.sys.readFile);
     const parsed = ts.parseJsonConfigFileContent(configFile.config, ts.sys, dir, undefined, configPath);
     const options = { ...parsed.options, configFilePath: configPath, noEmit: true };
-    const editedB = fs.readFileSync(bPath, 'utf8') + '\nexport const __edited = 1;\n';
+    // The overlay edit changes b.ts's declared type (not just appending): a
+    // stale gen-2 handle whose wire id no longer exists in the rebuilt
+    // snapshot must die loudly, while an id-stable type (c.ts) must never
+    // silently resolve to a DIFFERENT same-id type. Appending alone keeps the
+    // id sequence stable, which would mask that discrimination.
+    const editedB = fs.readFileSync(bPath, 'utf8').replace(': string', ': number') + '\nexport const __edited = 1;\n';
 
     const firstIdentifier = (sf) => {
         let found;
@@ -106,7 +117,14 @@ function childMain(gens) {
         return kinds;
     };
 
-    const out = { surface: {}, identity: {} };
+    const staleProbe = { captured: {}, probes: {} };
+    const out = { surface: {}, identity: {}, stale: staleProbe };
+    // Stale-handle scenario state: type objects captured in gen 2, probed in
+    // gen 3 after the overlay edit flipped the Go snapshot. The type objects
+    // stay in plain module-scope vars — they reference the BridgeClient (via
+    // objectRegistry) and must never ride the serialized `out`.
+    let oldBType, oldCType, oldBModuleType;
+    const probe = (fn) => { try { return { val: fn() }; } catch (e) { return { err: String(e?.message ?? e).slice(0, 300) }; } };
     const maxGen = Number(gens);
     for (let gen = 1; gen <= maxGen; gen++) {
         let host;
@@ -138,9 +156,36 @@ function childMain(gens) {
             // (the checker adapter resolves the host node by position).
             checker.getTypeAtLocation(firstIdentifier(sf));
         }
+        if (gen === 2) {
+            // Capture type handles the gen-3 edit will invalidate: b.ts is the
+            // overlay-edited file (module type changes), c.ts is untouched but
+            // its handle ids come from the same per-snapshot registry.
+            const sfB2 = program.getSourceFile(bPath);
+            const sfC2 = program.getSourceFile(cPath);
+            oldBType = checker.getTypeAtLocation(firstIdentifier(sfB2));
+            oldCType = checker.getTypeAtLocation(firstIdentifier(sfC2));
+            const modSymB = checker.getSymbolAtLocation(sfB2);
+            if (modSymB) oldBModuleType = checker.getTypeOfSymbolAtLocation(modSymB, sfB2);
+            staleProbe.captured.bTypeStr = checker.typeToString(oldBType);
+            staleProbe.captured.cTypeStr = checker.typeToString(oldCType);
+            staleProbe.captured.cArgsStr = checker.getTypeArguments(oldCType).map(t => checker.typeToString(t)).join(',');
+            if (oldBModuleType) staleProbe.captured.bModuleStr = checker.typeToString(oldBModuleType);
+            staleProbe.captured.bTypeId = oldBType.id;
+            staleProbe.captured.cTypeId = oldCType.id;
+            if (oldBModuleType) staleProbe.captured.bModuleId = oldBModuleType.id;
+        }
         if (gen === 3) {
             const sfB = program.getSourceFile(bPath);
             out.surface.editVisibleOnProgramSf = typeof sfB.text === 'string' && sfB.text.includes('__edited');
+            // Stale-handle negative test: the snapshot flipped when the overlay
+            // edit rebuilt the project, so the captured gen-2 handles no longer
+            // belong to the live registry. Probing them through the gen-3
+            // checker must either throw (loud) or serve the captured value —
+            // never a silently-different type at the same wire id.
+            staleProbe.probes.bTypeStr = probe(() => checker.typeToString(oldBType));
+            staleProbe.probes.cTypeStr = probe(() => checker.typeToString(oldCType));
+            staleProbe.probes.cArgsStr = probe(() => checker.getTypeArguments(oldCType).map(t => checker.typeToString(t)).join(','));
+            if (oldBModuleType) staleProbe.probes.bModuleStr = probe(() => checker.typeToString(oldBModuleType));
         }
     }
     globalThis.__tnbGen = 0;
@@ -195,6 +240,28 @@ function parentMain() {
     check('surface: endOfFileToken has numeric end', runA.surface.endOfFileTokenEnd === true, JSON.stringify(runA.surface));
     check('surface: token-level getChildren (GreaterThanToken present)', runA.surface.hasTokenChildren === true, JSON.stringify(runA.surface));
     check('surface: edit visible through program.getSourceFile (no stale content)', runC.surface.editVisibleOnProgramSf === true, JSON.stringify(runC.surface));
+    // Stale-handle negative test: every gen-2 handle probed after the gen-3
+    // snapshot flip must either die loudly (err) or serve the value it was
+    // captured with (val === captured). A silent different value means the
+    // per-snapshot registry resolved the stale id to the rebuilt snapshot's
+    // same-id type — the bug class this gate pins.
+    const staleProbes = runC.stale?.probes ?? {};
+    const staleCaptured = runC.stale?.captured ?? {};
+    let staleProbesSeen = 0;
+    for (const key of ['bTypeStr', 'cTypeStr', 'cArgsStr', 'bModuleStr']) {
+        const p = staleProbes[key];
+        if (p === undefined) continue;
+        staleProbesSeen++;
+        check(`stale: ${key} loud-error or serves captured value (never silent same-id type from new snapshot)`,
+            p.err !== undefined || p.val === staleCaptured[key],
+            JSON.stringify(p));
+    }
+    check('stale: at least one probe captured in gen 2', staleProbesSeen >= 2, `seen=${staleProbesSeen}`);
+    if (runC.stale?.captured?.bModuleStr === undefined) {
+        // b.ts module symbol/type missing is a capture failure, not a probe
+        // failure — surface it so a future harness break is visible.
+        check('stale: b.ts module type captured (probe present)', staleProbes.bModuleStr !== undefined, JSON.stringify(runC.stale?.captured));
+    }
 
     console.log(`rpc counters: gen1=${runA.rpc} gen1+2=${runB.rpc} gen1+2+3edit=${runC.rpc}`);
     if (failed) {
