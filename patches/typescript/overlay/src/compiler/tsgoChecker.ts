@@ -1327,7 +1327,8 @@ class ArenaClient {
                 break;
             case "symbolChain":
                 v.setBigUint64(16, BigInt(symbolId), true);
-                putHandle(String(params.enclosingDeclaration), 24);
+                if (params.enclosingDeclaration != null) putHandle(String(params.enclosingDeclaration), 24);
+                else { v.setUint32(24, 0, true); v.setUint32(28, 0, true); v.setUint32(32, 0, true); v.setUint32(36, 0, true); }
                 v.setUint32(40, params.meaning >>> 0, true);
                 v.setUint32(44, params.useOnlyExternalAliasing ? 1 : 0, true);
                 break;

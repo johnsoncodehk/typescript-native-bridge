@@ -388,9 +388,13 @@ func (s *Session) handleArenaRequest(method string) (any, error) {
 		return s.handleGetTypeAtPosition(ctx, &GetTypeAtPositionParams{Snapshot: snap, Project: proj, File: DocumentIdentifier{FileName: r.str(16)}, Position: r.u32(24)})
 	case MethodGetModuleSymbolForSourceFile:
 		return s.handleGetModuleSymbolForSourceFile(ctx, &GetSourceFileParams{Snapshot: snap, Project: proj, File: DocumentIdentifier{FileName: r.str(16)}})
-	// symbol u64 @16 + handle @24 + meaning u32 @40 + flags u8 @44
+	// symbol u64 @16 + handle @24 ("0.0." = none) + meaning u32 @40 + flags u8 @44
 	case MethodGetAccessibleSymbolChain:
-		return s.handleGetAccessibleSymbolChain(ctx, &GetAccessibleSymbolChainParams{Snapshot: snap, Project: proj, Symbol: SymbolID(r.u64(16)), EnclosingDeclaration: loc(24), Meaning: r.u32(40), UseOnlyExternalAliasing: r.u32(44) != 0})
+		enclosing := NodeHandle("")
+		if h := loc(24); h != "0.0." {
+			enclosing = h
+		}
+		return s.handleGetAccessibleSymbolChain(ctx, &GetAccessibleSymbolChainParams{Snapshot: snap, Project: proj, Symbol: SymbolID(r.u64(16)), EnclosingDeclaration: enclosing, Meaning: r.u32(40), UseOnlyExternalAliasing: r.u32(44) != 0})
 	// two handles @16/@32
 	case MethodGetCandidateSignaturesForStringLiteralCompletions:
 		return s.handleGetCandidateSignaturesForStringLiteralCompletions(ctx, &GetCandidateSignaturesForStringLiteralCompletionsParams{Snapshot: snap, Project: proj, Call: loc(16), EditingArgument: loc(32)})
