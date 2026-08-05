@@ -127,7 +127,12 @@ func (s *Session) handleArenaRequest(method string) (any, error) {
 	ctx := context.Background()
 	snap := SnapshotID(r.u64(0))
 	proj := ProjectID(r.str(8))
-	loc := func(off int) NodeHandle { return NodeHandle(r.nodeHandle(off)) }
+	loc := func(off int) NodeHandle {
+		if h := r.nodeHandle(off); h != "0.0." { // absent-handle sentinel (index 0, kind 0, empty path)
+			return NodeHandle(h)
+		}
+		return NodeHandle("")
+	}
 
 	switch Method(method) {
 	case MethodGetTypeAtLocation:
@@ -390,21 +395,13 @@ func (s *Session) handleArenaRequest(method string) (any, error) {
 		return s.handleGetModuleSymbolForSourceFile(ctx, &GetSourceFileParams{Snapshot: snap, Project: proj, File: DocumentIdentifier{FileName: r.str(16)}})
 	// symbol u64 @16 + handle @24 ("0.0." = none) + meaning u32 @40 + flags u8 @44
 	case MethodGetAccessibleSymbolChain:
-		enclosing := NodeHandle("")
-		if h := loc(24); h != "0.0." {
-			enclosing = h
-		}
-		return s.handleGetAccessibleSymbolChain(ctx, &GetAccessibleSymbolChainParams{Snapshot: snap, Project: proj, Symbol: SymbolID(r.u64(16)), EnclosingDeclaration: enclosing, Meaning: r.u32(40), UseOnlyExternalAliasing: r.u32(44) != 0})
+		return s.handleGetAccessibleSymbolChain(ctx, &GetAccessibleSymbolChainParams{Snapshot: snap, Project: proj, Symbol: SymbolID(r.u64(16)), EnclosingDeclaration: loc(24), Meaning: r.u32(40), UseOnlyExternalAliasing: r.u32(44) != 0})
 	// two handles @16/@32
 	case MethodGetCandidateSignaturesForStringLiteralCompletions:
 		return s.handleGetCandidateSignaturesForStringLiteralCompletions(ctx, &GetCandidateSignaturesForStringLiteralCompletionsParams{Snapshot: snap, Project: proj, Call: loc(16), EditingArgument: loc(32)})
 	// handle @16 + includeGlobalThis u8 @32 + container handle @36 ("0.0." = none)
 	case MethodTryGetThisTypeAt:
-		container := NodeHandle("")
-		if h := loc(36); h != "0.0." {
-			container = h
-		}
-		return s.handleTryGetThisTypeAt(ctx, &TryGetThisTypeAtParams{Snapshot: snap, Project: proj, Location: loc(16), IncludeGlobalThis: r.u32(32) != 0, Container: container})
+		return s.handleTryGetThisTypeAt(ctx, &TryGetThisTypeAtParams{Snapshot: snap, Project: proj, Location: loc(16), IncludeGlobalThis: r.u32(32) != 0, Container: loc(36)})
 	// symbol id array (ptr,count) @16
 	case MethodGetSymbolsDeclarations:
 		return s.handleGetSymbolsDeclarations(ctx, &GetSymbolsDeclarationsParams{Snapshot: snap, Symbols: r.symbolIDs(16)})

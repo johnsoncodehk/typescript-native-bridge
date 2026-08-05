@@ -1258,7 +1258,16 @@ class ArenaClient {
         // head: snapshot u64 @0, project str @8
         v.setBigUint64(0, BigInt(params.snapshot ?? 0), true);
         putStr(String(params.project ?? ""), 8);
-        const putHandle = (handle: string, off: number): void => {
+        const putHandle = (handle: string | undefined, off: number): void => {
+            if (handle == null) {
+                // Absent-handle sentinel (index 0, kind 0, empty path — decodes
+                // to "0.0." on the Go side; dispatchers map it to no node).
+                v.setUint32(off, 0, true);
+                v.setUint32(off + 4, 0, true);
+                v.setUint32(off + 8, 0, true);
+                v.setUint32(off + 12, 0, true);
+                return;
+            }
             // "index.kind.path" — split at the first two dots.
             const d1 = handle.indexOf(".");
             const d2 = handle.indexOf(".", d1 + 1);
@@ -1273,14 +1282,14 @@ class ArenaClient {
         const symbolId = params.symbol ?? params.objectId ?? 0;
         switch (ARENA_METHODS.get(method)![0]) {
             case "node":
-                putHandle(String(params.location), 16);
+                putHandle(params.location, 16);
                 break;
             case "contextual":
-                putHandle(String(params.location), 16);
+                putHandle(params.location, 16);
                 v.setInt32(32, params.contextFlags ?? 0, true);
                 break;
             case "contextualArg":
-                putHandle(String(params.location), 16);
+                putHandle(params.location, 16);
                 v.setInt32(32, params.argIndex ?? 0, true);
                 break;
             case "type":
@@ -1293,7 +1302,7 @@ class ArenaClient {
             case "typeStr":
                 v.setUint32(16, typeId >>> 0, true);
                 v.setInt32(20, params.flags ?? 0, true);
-                if (params.location != null) putHandle(String(params.location), 24);
+                if (params.location != null) putHandle(params.location, 24);
                 else { v.setUint32(24, 0, true); v.setUint32(28, 0, true); v.setUint32(32, 0, true); v.setUint32(36, 0, true); }
                 break;
             case "symbol":
@@ -1301,7 +1310,7 @@ class ArenaClient {
                 break;
             case "symbolNode":
                 v.setBigUint64(16, BigInt(symbolId), true);
-                putHandle(String(params.location), 24);
+                putHandle(params.location, 24);
                 break;
             case "filePos":
                 putStr(String(params.file ?? ""), 16);
@@ -1327,17 +1336,16 @@ class ArenaClient {
                 break;
             case "symbolChain":
                 v.setBigUint64(16, BigInt(symbolId), true);
-                if (params.enclosingDeclaration != null) putHandle(String(params.enclosingDeclaration), 24);
-                else { v.setUint32(24, 0, true); v.setUint32(28, 0, true); v.setUint32(32, 0, true); v.setUint32(36, 0, true); }
+                putHandle(params.enclosingDeclaration, 24);
                 v.setUint32(40, params.meaning >>> 0, true);
                 v.setUint32(44, params.useOnlyExternalAliasing ? 1 : 0, true);
                 break;
             case "twoHandles":
-                putHandle(String(params.call), 16);
-                putHandle(String(params.editingArgument), 32);
+                putHandle(params.call, 16);
+                putHandle(params.editingArgument, 32);
                 break;
             case "thisAt":
-                putHandle(String(params.location), 16);
+                putHandle(params.location, 16);
                 v.setUint32(32, params.includeGlobalThis ? 1 : 0, true);
                 if (params.container != null) putHandle(String(params.container), 36);
                 else { v.setUint32(36, 0, true); v.setUint32(40, 0, true); v.setUint32(44, 0, true); v.setUint32(48, 0, true); }
