@@ -84,6 +84,13 @@ const strTab = [''];
 
 const putStr = (s, off, w) => { const n = arenaBuf.write(s, w.off, 'utf8'); view.setUint32(off, w.off, true); view.setUint32(off + 4, n, true); w.off += n; };
 const putHandle = (handle, off, w) => {
+	if (handle == null) {
+		view.setUint32(off, 0, true);
+		view.setUint32(off + 4, 0, true);
+		view.setUint32(off + 8, 0, true);
+		view.setUint32(off + 12, 0, true);
+		return;
+	}
 	const d1 = handle.indexOf('.'), d2 = handle.indexOf('.', d1 + 1);
 	view.setUint32(off, Number(handle.slice(0, d1)), true);
 	view.setUint32(off + 4, Number(handle.slice(d1 + 1, d2)), true);
@@ -111,9 +118,9 @@ function arenaCall(method, params) {
 	const typeId = params.type ?? params.objectId ?? 0;
 	switch (method) {
 		case 'getTypeAtLocation': case 'getSymbolAtLocation': case 'getResolvedSignature':
-			putHandle(String(params.location), 16, w); break;
+			putHandle(params.location, 16, w); break;
 		case 'getContextualType':
-			putHandle(String(params.location), 16, w); view.setInt32(32, params.contextFlags ?? 0, true); break;
+			putHandle(params.location, 16, w); view.setInt32(32, params.contextFlags ?? 0, true); break;
 		case 'typeToString':
 			view.setUint32(16, typeId >>> 0, true); view.setInt32(20, params.flags ?? 0, true);
 			if (params.location != null) putHandle(String(params.location), 24, w);
@@ -124,7 +131,7 @@ function arenaCall(method, params) {
 		case 'getTypeOfSymbol': case 'getDeclaredTypeOfSymbol':
 			view.setBigUint64(16, BigInt(params.symbol ?? 0), true); break;
 		case 'getTypeOfSymbolAtLocation':
-			view.setBigUint64(16, BigInt(params.symbol ?? 0), true); putHandle(String(params.location), 24, w); break;
+			view.setBigUint64(16, BigInt(params.symbol ?? 0), true); putHandle(params.location, 24, w); break;
 		case 'getSymbolAtPosition':
 			putStr(String(params.file ?? ''), 16, w); view.setUint32(24, params.position >>> 0, true); break;
 		case 'getTypeAtPosition': case 'getModuleSymbolForSourceFile':
@@ -147,7 +154,7 @@ function arenaCall(method, params) {
 		case 'getJsxIntrinsicTagNamesAt': case 'getPropertySymbolOfDestructuringAssignment':
 		case 'getSignatureFromDeclaration': case 'getExportSpecifierLocalTargetSymbol':
 		case 'resolveExternalModuleName':
-			putHandle(String(params.location), 16, w); break;
+			putHandle(params.location, 16, w); break;
 		case 'getPropertyOfType': case 'getTypeOfPropertyOfType': case 'getTypeOfPropertyOfContextualType':
 			view.setUint32(16, typeId >>> 0, true); putStr(String(params.name ?? ''), 20, w); break;
 		case 'getStringLiteralType': case 'getBigIntLiteralType':
@@ -160,9 +167,9 @@ function arenaCall(method, params) {
 			else { view.setUint32(24, 0, true); view.setUint32(28, 0, true); view.setUint32(32, 0, true); view.setUint32(36, 0, true); }
 			view.setUint32(40, params.meaning >>> 0, true); view.setUint32(44, params.useOnlyExternalAliasing ? 1 : 0, true); break;
 		case 'getCandidateSignaturesForStringLiteralCompletions':
-			putHandle(String(params.call), 16, w); putHandle(String(params.editingArgument), 32, w); break;
+			putHandle(params.call, 16, w); putHandle(params.editingArgument, 32, w); break;
 		case 'tryGetThisTypeAt':
-			putHandle(String(params.location), 16, w); view.setUint32(32, params.includeGlobalThis ? 1 : 0, true);
+			putHandle(params.location, 16, w); view.setUint32(32, params.includeGlobalThis ? 1 : 0, true);
 			view.setUint32(36, 0, true); view.setUint32(40, 0, true); view.setUint32(44, 0, true); view.setUint32(48, 0, true); break;
 		case 'getExpandedParameters':
 			view.setBigUint64(16, BigInt(params.signature ?? 0), true); view.setUint32(24, params.skipUnionExpanding ? 1 : 0, true); break;
@@ -940,6 +947,15 @@ query('getAccessibleSymbolChain', P({ symbol: symModel.id, enclosingDeclaration:
 // ("0.0.") — regressed as String(undefined) → node path "undefined" (issue:
 // computed-property completion details). JSON path sends undefined.
 query('getAccessibleSymbolChain', P({ symbol: symModel.id, enclosingDeclaration: undefined, meaning: 1 }), '(absent enclosing)');
+// Absent-handle sentinel round-trips for the other handle kinds: node,
+// contextual, contextualArg, symbolNode, twoHandles, thisAt. The JSON path
+// sends undefined; the arena path writes the "0.0." sentinel. Both must
+// behave identically (either both error or both resolve to no-node).
+query('getTypeAtLocation', P({ location: undefined }), '(absent node)');
+query('getContextualType', P({ location: undefined }), '(absent contextual)');
+query('getContextualTypeForArgumentAtIndex', P({ location: undefined, argIndex: 0 }), '(absent contextualArg)');
+query('getTypeOfSymbolAtLocation', P({ symbol: symModel.id, location: undefined }), '(absent symbolNode)');
+query('tryGetThisTypeAt', P({ location: undefined, includeGlobalThis: false }), '(absent thisAt)');
 // getCandidateSignaturesForStringLiteralCompletions needs call-expression and
 // argument handles (not producible from the surface — reachability convention).
 query('tryGetThisTypeAt', P({ location: symAdd.valueDeclaration, includeGlobalThis: true }));
