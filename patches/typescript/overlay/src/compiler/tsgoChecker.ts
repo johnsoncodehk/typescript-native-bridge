@@ -13226,21 +13226,12 @@ export function createTsgoChecker(program: any): any {
             ensureProject();
             const rpcSym = resolveRpcSymbol(symbol) ?? (isTsgoBridgeSymbol(symbol) ? symbol : undefined);
             if (!rpcSym) return undefined;
-            let tsgoEnclosing: any;
-            if (enclosingDeclaration) {
-                const sf = enclosingDeclaration.getSourceFile?.();
-                if (sf?.fileName) {
-                    let start: number | undefined;
-                    let end: number | undefined;
-                    try {
-                        start = enclosingDeclaration.getStart(sf);
-                        end = enclosingDeclaration.getEnd(sf);
-                    } catch { /* ignore */ }
-                    if (typeof start === "number") {
-                        tsgoEnclosing = findTsgoNodeAtPosition(sf.fileName, start, enclosingDeclaration.kind, end);
-                    }
-                }
-            }
+            // LS passes the dot token as enclosing for `a.` completions; the
+            // tsgo node index has no dot entry. mapHostEnclosingToTsgo falls
+            // back to the innermost node containing the position (the
+            // PropertyAccessExpression) so the scope walk matches stock's
+            // parent-chain walk instead of degrading to globals-only.
+            const tsgoEnclosing = mapHostEnclosingToTsgo(enclosingDeclaration);
             return project.checker.getAccessibleSymbolChain(rpcSym, tsgoEnclosing, meaning >>> 0, !!useOnlyExternalAliasing);
         },
         // Call-argument contextual type (object-literal member completions).
