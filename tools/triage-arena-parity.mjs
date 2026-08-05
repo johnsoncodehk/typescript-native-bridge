@@ -155,7 +155,9 @@ function arenaCall(method, params) {
 		case 'getNumberLiteralType':
 			view.setFloat64(16, Number(params.value ?? 0), true); break;
 		case 'getAccessibleSymbolChain':
-			view.setBigUint64(16, BigInt(params.symbol ?? 0), true); putHandle(String(params.enclosingDeclaration), 24, w);
+			view.setBigUint64(16, BigInt(params.symbol ?? 0), true);
+			if (params.enclosingDeclaration != null) putHandle(String(params.enclosingDeclaration), 24, w);
+			else { view.setUint32(24, 0, true); view.setUint32(28, 0, true); view.setUint32(32, 0, true); view.setUint32(36, 0, true); }
 			view.setUint32(40, params.meaning >>> 0, true); view.setUint32(44, params.useOnlyExternalAliasing ? 1 : 0, true); break;
 		case 'getCandidateSignaturesForStringLiteralCompletions':
 			putHandle(String(params.call), 16, w); putHandle(String(params.editingArgument), 32, w); break;
@@ -934,6 +936,10 @@ query('getTypeAtPosition', P({ file: aTs, position: pos('add(a: number') }));
 
 // symbolChain / twoHandles / thisAt
 query('getAccessibleSymbolChain', P({ symbol: symModel.id, enclosingDeclaration: symModel.valueDeclaration, meaning: 1 }));
+// Undefined enclosingDeclaration round-trips the arena absent-handle sentinel
+// ("0.0.") — regressed as String(undefined) → node path "undefined" (issue:
+// computed-property completion details). JSON path sends undefined.
+query('getAccessibleSymbolChain', P({ symbol: symModel.id, enclosingDeclaration: undefined, meaning: 1 }), '(absent enclosing)');
 // getCandidateSignaturesForStringLiteralCompletions needs call-expression and
 // argument handles (not producible from the surface — reachability convention).
 query('tryGetThisTypeAt', P({ location: symAdd.valueDeclaration, includeGlobalThis: true }));
