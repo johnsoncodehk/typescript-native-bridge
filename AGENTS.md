@@ -31,10 +31,11 @@ TNB is a tsgo-backed TypeScript fork: upstream `microsoft/TypeScript` and `micro
 ## Gates (run before committing behavior changes)
 
 - `npm run check:lib` / `check:enums` / `check:sourcefile-guard`
-- Witnesses: 68 across wg0–wg6, all wired in CI (`.github/workflows/ci.yml`), single source of truth `tools/ci-witness-groups.mjs` — `node tools/ci-witness-groups.mjs all` validates dup/missing/orphan/local-only/baseline wiring and emits the matrix (`matrix` mode feeds the ci.yml prepare job).
+- Witnesses: 70 across wg0–wg6, all wired in CI (`.github/workflows/ci.yml`), single source of truth `tools/ci-witness-groups.mjs` — `node tools/ci-witness-groups.mjs all` validates dup/missing/orphan/local-only/baseline wiring and emits the matrix (`matrix` mode feeds the ci.yml prepare job).
 - Local-only — run on demand, not in the matrix (reasons in the matrix header comment): framework-checks, external-edits, generation-retention, napi-fuzz, completion-latency, postedit-latency, perf-edit-rpc, perf-qi-rpc, typing-cpuprof.
 - Semantic witnesses (the rest of the matrix is bare stock-parity checks):
   - `triage-crossgen-reuse` — issue #11: cross-generation RemoteSourceFile reuse + edit invalidation; a pre-edit type handle must die, not re-resolve
+  - `triage-prototype-refresh` — issue #57: a replacement snapshot keeps Type prototype APIs routed to its live checker
   - `triage-nuxtui-exportstar` — issue #26: `./X.vue` with an on-disk `X.d.vue.ts` resolves to the declaration (@nuxt/ui dist pattern)
   - `triage-checker-differential` — checker-API stock differential: byte-equal canon per method@location, stale exemptions fail
   - `triage-type-field-audit` — every data field stock puts on a Type crosses the bridge equal or carries an inline exemption
