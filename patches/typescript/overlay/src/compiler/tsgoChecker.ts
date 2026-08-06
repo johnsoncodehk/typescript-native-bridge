@@ -8196,6 +8196,18 @@ export function createTsgoProgram(
             return result;
         },
         getTypeChecker: () => checker,
+        // Stock completion details compare these against the batch export map
+        // by object identity, so both symbols stay in the registry domain.
+        getCompletionEntryDataSymbols: (fileName: string | undefined, ambientModuleName: string | undefined, exportName: string) => {
+            const moduleSymbol = ambientModuleName
+                ? checker.tryFindAmbientModule(ambientModuleName)
+                : fileName
+                    ? checker.getModuleSymbolForSourceFile(thinProgram.getSourceFile(fileName))
+                    : undefined;
+            if (!moduleSymbol) return undefined;
+            const symbol = checker.getExportForCompletionEntryData(exportName, moduleSymbol);
+            return symbol ? { moduleSymbol, symbol } : undefined;
+        },
         getConfigFileParsingDiagnostics: () => configDiags,
         getOptionsDiagnostics: () => [],
         getSemanticDiagnostics: (sourceFile?: any) => {

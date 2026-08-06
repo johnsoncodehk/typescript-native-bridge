@@ -609,7 +609,7 @@ index 6034c9dfc3..0c9a6178db 100644
      let computedWithoutCacheCount = 0;
      const fixes = flatMap(exportInfo, (exportInfo, i) => {
 diff --git a/src/services/completions.ts b/src/services/completions.ts
-index 28d29136da..b15f4b0ea5 100644
+index 28d29136da..48fa363863 100644
 --- a/src/services/completions.ts
 +++ b/src/services/completions.ts
 @@ -175,6 +175,7 @@ import {
@@ -964,46 +964,40 @@ index 28d29136da..b15f4b0ea5 100644
          symbolToOriginInfoMap[symbols.length] = origin;
          symbolToSortTextMap[symbolId] = importStatementCompletion ? SortText.LocationPriority : SortText.AutoImportSuggestions;
          symbols.push(symbol);
-@@ -5383,19 +5511,34 @@ function getAutoImportSymbolFromCompletionEntryData(name: string, data: Completi
+@@ -5382,14 +5510,25 @@ function getRelevantTokens(position: number, sourceFile: SourceFile): { contextT
+ function getAutoImportSymbolFromCompletionEntryData(name: string, data: CompletionEntryData, program: Program, host: LanguageServiceHost): { symbol: Symbol; origin: SymbolOriginInfoExport | SymbolOriginInfoResolvedExport; } | undefined {
      const containingProgram = data.isPackageJsonImport ? host.getPackageJsonAutoImportProvider!()! : program;
      const checker = containingProgram.getTypeChecker();
-     const moduleSymbol = data.ambientModuleName ? checker.tryFindAmbientModule(data.ambientModuleName) :
+-    const moduleSymbol = data.ambientModuleName ? checker.tryFindAmbientModule(data.ambientModuleName) :
 -        data.fileName ? checker.getMergedSymbol(Debug.checkDefined(containingProgram.getSourceFile(data.fileName)).symbol) :
-+        data.fileName ? getModuleSymbolForCompletionEntryData(containingProgram, checker, data.fileName) :
-         undefined;
- 
+-        undefined;
+-
++    const tsgoProgram = containingProgram as Program & {
++        readonly isTsgoBackedProgram: true;
++        getCompletionEntryDataSymbols(fileName: string | undefined, ambientModuleName: string | undefined, exportName: string): { moduleSymbol: Symbol; symbol: Symbol; } | undefined;
++    };
++    let moduleSymbol: Symbol | undefined;
++    let symbol: Symbol | undefined;
++    if (tsgoProgram.isTsgoBackedProgram === true) {
++        const resolved = tsgoProgram.getCompletionEntryDataSymbols(data.fileName, data.ambientModuleName, data.exportName);
++        if (resolved) ({ moduleSymbol, symbol } = resolved);
++    }
++    else {
++        moduleSymbol = data.ambientModuleName ? checker.tryFindAmbientModule(data.ambientModuleName) :
++            data.fileName ? checker.getMergedSymbol(Debug.checkDefined(containingProgram.getSourceFile(data.fileName)).symbol) :
++            undefined;
++        symbol = moduleSymbol && (data.exportName === InternalSymbolName.ExportEquals
++            ? checker.resolveExternalModuleSymbol(moduleSymbol)
++            : checker.tryGetMemberInModuleExportsAndProperties(data.exportName, moduleSymbol));
++    }
      if (!moduleSymbol) return undefined;
 -    let symbol = data.exportName === InternalSymbolName.ExportEquals
 -        ? checker.resolveExternalModuleSymbol(moduleSymbol)
 -        : checker.tryGetMemberInModuleExportsAndProperties(data.exportName, moduleSymbol);
-+    const getBridgeExport = (checker as unknown as {
-+        getExportForCompletionEntryData?: (exportName: string, moduleSymbol: Symbol) => Symbol | undefined;
-+    }).getExportForCompletionEntryData;
-+    let symbol = getBridgeExport
-+        ? getBridgeExport(data.exportName, moduleSymbol)
-+        : data.exportName === InternalSymbolName.ExportEquals
-+            ? checker.resolveExternalModuleSymbol(moduleSymbol)
-+            : checker.tryGetMemberInModuleExportsAndProperties(data.exportName, moduleSymbol);
      if (!symbol) return undefined;
      const isDefaultExport = data.exportName === InternalSymbolName.Default;
      symbol = isDefaultExport && getLocalSymbolForExportDefault(symbol) || symbol;
-     return { symbol, origin: completionEntryDataToSymbolOriginInfo(data, name, moduleSymbol) };
- }
- 
-+function getModuleSymbolForCompletionEntryData(program: Program, checker: TypeChecker, fileName: string): Symbol {
-+    const sourceFile = Debug.checkDefined(program.getSourceFile(fileName));
-+    // tsgo-backed programs hand out a host-binder facade for sf.symbol whose
-+    // object identity does not match the registry-proxied symbols inside
-+    // export info maps; resolve through the bridged checker when it can answer
-+    // (absent on stock checkers — falls back to stock behavior).
-+    const forSourceFile = (checker as unknown as { getModuleSymbolForSourceFile?: (sourceFile: SourceFile) => Symbol | undefined; }).getModuleSymbolForSourceFile;
-+    return checker.getMergedSymbol(forSourceFile?.(sourceFile) ?? Debug.checkDefined(sourceFile.symbol));
-+}
-+
- interface CompletionEntryDisplayNameForSymbol {
-     readonly name: string;
-     readonly needsConvertPropertyAccess: boolean;
-@@ -6089,6 +6232,23 @@ function isDeprecated(symbol: Symbol, checker: TypeChecker) {
+@@ -6089,6 +6228,23 @@ function isDeprecated(symbol: Symbol, checker: TypeChecker) {
      return !!length(declarations) && every(declarations, isDeprecatedDeclaration);
  }
  
