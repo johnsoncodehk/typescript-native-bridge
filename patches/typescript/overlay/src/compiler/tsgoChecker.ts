@@ -19,7 +19,7 @@
 import * as ts from "./_namespaces/ts.js";
 import { bindSourceFile } from "./binder.js";
 import { createSourceFile } from "./parser.js";
-import { SyntaxKind, SymbolFlags, SymbolFormatFlags, NodeFlags, ModifierFlags, JSDocParsingMode, ModuleKind, StructureIsReused, EmitHint, EmitFlags, type Path, type Program, type TypeChecker } from "./types.js";
+import { SyntaxKind, SymbolFlags, SymbolFormatFlags, NodeFlags, ModifierFlags, JSDocParsingMode, ModuleKind, StructureIsReused, EmitHint, EmitFlags, InternalSymbolName, type Path, type Program, type TypeChecker } from "./types.js";
 import { getBuildInfoText, getTsBuildInfoEmitOutputFilePath, createPrinterWithRemoveComments } from "./emitter.js";
 import { usingSingleLineStringWriter, canHaveJSDoc } from "./utilities.js";
 import { getParseTreeNode, isFunctionLike } from "./utilitiesPublic.js";
@@ -1693,6 +1693,30 @@ class ArenaClient {
             if (fileName !== undefined) data.fileName = fileName;
             const moduleSpecifier = str(v.getUint32(off + 68, true));
             if (moduleSpecifier !== undefined) data.moduleSpecifier = moduleSpecifier;
+            if (flags & 128) {
+                const fixOff = v.getUint32(off + 88, true);
+                const fixFlags = v.getUint32(fixOff + 32, true);
+                const autoImport: any = {
+                    importKind: v.getUint32(fixOff + 8, true),
+                    addAsTypeOnly: v.getUint32(fixOff + 12, true),
+                    importIndex: v.getUint32(fixOff + 16, true),
+                };
+                const kind = v.getUint32(fixOff + 0, true);
+                if (kind) autoImport.kind = kind;
+                const fixName = str(v.getUint32(fixOff + 4, true));
+                if (fixName) autoImport.name = fixName;
+                if (fixFlags & 1) autoImport.useRequire = true;
+                if (moduleSpecifier) autoImport.moduleSpecifier = moduleSpecifier;
+                const namespacePrefix = str(v.getUint32(fixOff + 20, true));
+                if (namespacePrefix) autoImport.namespacePrefix = namespacePrefix;
+                if (fixFlags & 2) {
+                    autoImport.usagePosition = {
+                        line: v.getUint32(fixOff + 24, true),
+                        character: v.getUint32(fixOff + 28, true),
+                    };
+                }
+                data.tnbCompletionData = { autoImport };
+            }
             d.data = data;
         }
         if (flags & 64) d.isPackageJsonImport = true;
@@ -1712,7 +1736,7 @@ class ArenaClient {
         const entries = new Array(count);
         for (let i = 0; i < count; i++) {
             entries[i] = this.readCompletionEntry(p);
-            p += 88;
+            p += 96;
         }
         d.entries = entries;
         if (f2 & 1) d.flags = v.getUint32(off + 4, true);
@@ -8196,6 +8220,38 @@ export function createTsgoProgram(
             return result;
         },
         getTypeChecker: () => checker,
+        // Stock completion details compare these against the batch export map
+        // by object identity, so both symbols stay in the registry domain.
+        getCompletionEntryDataSymbols: (fileName: string | undefined, ambientModuleName: string | undefined, exportName: string) => {
+            const moduleSymbol = ambientModuleName
+                ? checker.tryFindAmbientModule(ambientModuleName)
+                : fileName
+                    ? checker.getModuleSymbolForSourceFile(thinProgram.getSourceFile(fileName))
+                    : undefined;
+            if (!moduleSymbol) return undefined;
+            const symbol = checker.getExportForCompletionEntryData(exportName, moduleSymbol);
+            return symbol ? { moduleSymbol, symbol } : undefined;
+        },
+        resolveCompletionItemTsgo: (fileName: string, position: number, name: string, source: string | undefined, data: any, formatOptions: any, preferences: any) => {
+            const proj = liveProject();
+            const result = proj.checker.client.apiRequest("resolveCompletionItem", {
+                snapshot: proj.checker.snapshotId,
+                project: proj.checker.project.id,
+                data: { fileName: tsgoFileArg(fileName), position, name, source, ...data },
+                preferences: { unstable: { ...formatOptions, ...preferences } },
+            });
+            if (!result) throw new Error(`resolveCompletionItem: file not found: ${fileName}`);
+            return {
+                description: result.detail,
+                changes: [{
+                    fileName,
+                    textChanges: result.textChanges.map((change: any) => ({
+                        span: { start: change.start, length: change.length },
+                        newText: change.newText,
+                    })),
+                }],
+            };
+        },
         getConfigFileParsingDiagnostics: () => configDiags,
         getOptionsDiagnostics: () => [],
         getSemanticDiagnostics: (sourceFile?: any) => {
@@ -10867,10 +10923,10 @@ export function createTsgoChecker(program: any): any {
         return true;
     }
 
-    function tryGetMemberInModuleExportsImpl(memberName: any, moduleSymbol: any): any {
+    function getMemberInModuleExportsRaw(memberName: any, moduleSymbol: any): any {
         if (moduleSymbol?.exports) {
             const sym = moduleSymbol.exports.get(memberName);
-            if (sym) return refineNavSymbol(sym);
+            if (sym) return sym;
             // Fall through on miss: the raw host table holds direct members only,
             // while stock's getExportsOfModule (checker.ts:5155) also resolves
             // `export *` chains — let the Go side answer those. Returning
@@ -10881,12 +10937,16 @@ export function createTsgoChecker(program: any): any {
         }
         ensureProject();
         try {
-            return refineNavSymbol(rpc().getMemberInModuleExports(moduleSymbol, memberName));
+            return rpc().getMemberInModuleExports(moduleSymbol, memberName);
         } catch { return undefined; }
     }
 
-    function tryGetMemberInModuleExportsAndPropertiesImpl(memberName: any, moduleSymbol: any): any {
-        const symbol = tryGetMemberInModuleExportsImpl(memberName, moduleSymbol);
+    function tryGetMemberInModuleExportsImpl(memberName: any, moduleSymbol: any): any {
+        return refineNavSymbol(getMemberInModuleExportsRaw(memberName, moduleSymbol));
+    }
+
+    function getMemberInModuleExportsAndPropertiesRaw(memberName: any, moduleSymbol: any): any {
+        const symbol = getMemberInModuleExportsRaw(memberName, moduleSymbol);
         if (symbol) return symbol;
 
         ensureProject();
@@ -10897,7 +10957,11 @@ export function createTsgoChecker(program: any): any {
         const exportEqualsType = getTypeOfSymbolForExportEquals(exportEquals);
         if (!exportEqualsType || !shouldTreatPropertiesOfExternalModuleAsExports(exportEqualsType)) return undefined;
 
-        return refineNavSymbol(resolvePropertyOfType(exportEqualsType, memberName));
+        return resolvePropertyOfType(exportEqualsType, memberName);
+    }
+
+    function tryGetMemberInModuleExportsAndPropertiesImpl(memberName: any, moduleSymbol: any): any {
+        return refineNavSymbol(getMemberInModuleExportsAndPropertiesRaw(memberName, moduleSymbol));
     }
 
     function getSymbolFlagsImpl(symbol: any, excludeLocalMeanings?: boolean): number {
@@ -13079,6 +13143,13 @@ export function createTsgoChecker(program: any): any {
         },
         tryGetMemberInModuleExportsAndProperties(memberName: any, moduleSymbol: any): any {
             return tryGetMemberInModuleExportsAndPropertiesImpl(memberName, moduleSymbol);
+        },
+        // Completion details match this result against the batch export map by
+        // object identity; navigation remapping would replace the registry symbol.
+        getExportForCompletionEntryData(exportName: any, moduleSymbol: any): any {
+            return exportName === InternalSymbolName.ExportEquals
+                ? resolveExternalModuleSymbolImpl(moduleSymbol)
+                : getMemberInModuleExportsAndPropertiesRaw(exportName, moduleSymbol);
         },
         resolveExternalModuleSymbol(moduleSymbol: any): any {
             return refineNavSymbol(resolveExternalModuleSymbolImpl(moduleSymbol));

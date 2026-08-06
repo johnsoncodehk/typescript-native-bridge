@@ -465,6 +465,25 @@ function arenaCall(method, params) {
 			if (fileName !== undefined) data.fileName = fileName;
 			const moduleSpecifier = str(view.getUint32(off + 68, true));
 			if (moduleSpecifier !== undefined) data.moduleSpecifier = moduleSpecifier;
+			if (flags & 128) {
+				const fixOff = view.getUint32(off + 88, true);
+				const fixFlags = view.getUint32(fixOff + 32, true);
+				const autoImport = {
+					importKind: view.getUint32(fixOff + 8, true),
+					addAsTypeOnly: view.getUint32(fixOff + 12, true),
+					importIndex: view.getUint32(fixOff + 16, true),
+				};
+				const fixKind = view.getUint32(fixOff, true);
+				if (fixKind) autoImport.kind = fixKind;
+				const fixName = str(view.getUint32(fixOff + 4, true));
+				if (fixName) autoImport.name = fixName;
+				if (fixFlags & 1) autoImport.useRequire = true;
+				if (moduleSpecifier) autoImport.moduleSpecifier = moduleSpecifier;
+				const namespacePrefix = str(view.getUint32(fixOff + 20, true));
+				if (namespacePrefix) autoImport.namespacePrefix = namespacePrefix;
+				if (fixFlags & 2) autoImport.usagePosition = { line: view.getUint32(fixOff + 24, true), character: view.getUint32(fixOff + 28, true) };
+				data.tnbCompletionData = { autoImport };
+			}
 			d.data = data;
 		}
 		if (flags & 64) d.isPackageJsonImport = true;
@@ -480,7 +499,7 @@ function arenaCall(method, params) {
 		const count = view.getUint32(off + 28, true);
 		let p = view.getUint32(off + 24, true);
 		const entries = new Array(count);
-		for (let i = 0; i < count; i++) { entries[i] = readCompletionEntry(p); p += 88; }
+		for (let i = 0; i < count; i++) { entries[i] = readCompletionEntry(p); p += 96; }
 		d.entries = entries;
 		if (f2 & 1) d.flags = view.getUint32(off + 4, true);
 		d.isGlobalCompletion = (f1 & 1) !== 0;

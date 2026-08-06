@@ -19,6 +19,7 @@ import (
 	"unsafe"
 
 	"github.com/microsoft/typescript-go/internal/checker"
+	"github.com/microsoft/typescript-go/internal/lsp/lsproto"
 )
 
 const (
@@ -818,10 +819,11 @@ func (a *arena) encodeExpandedParameters(v [][]SymbolID) {
 
 const (
 	completionInfoRecordSize  = 32
-	completionEntryRecordSize = 88
+	completionEntryRecordSize = 96
+	autoImportFixRecordSize   = 36
 )
 
-// encodeCompletionEntry writes a CompletionEntryResponse record (88 bytes fixed).
+// encodeCompletionEntry writes a CompletionEntryResponse record (96 bytes fixed).
 func (a *arena) encodeCompletionEntry(off int, r *CompletionEntryResponse) {
 	a.u32(off+0, a.str(r.Name))
 	a.u32(off+4, a.str(r.ElementKind))
@@ -872,11 +874,15 @@ func (a *arena) encodeCompletionEntry(off int, r *CompletionEntryResponse) {
 		flags |= 16
 	}
 	var dataExportName, dataFileName, dataModuleSpecifier string
+	var autoImportFix *lsproto.AutoImportFix
 	if r.Data != nil {
 		flags |= 32
 		dataExportName = r.Data.ExportName
 		dataFileName = r.Data.FileName
 		dataModuleSpecifier = r.Data.ModuleSpecifier
+		if r.Data.TnbCompletionData != nil {
+			autoImportFix = r.Data.TnbCompletionData.AutoImport
+		}
 	}
 	if r.IsPackageJsonImport != nil && *r.IsPackageJsonImport {
 		flags |= 64
@@ -889,6 +895,28 @@ func (a *arena) encodeCompletionEntry(off int, r *CompletionEntryResponse) {
 	a.u32(off+72, a.str(dataExportName))
 	a.u32(off+76, a.str(dataFileName))
 	a.displayParts(off+80, r.SourceDisplay)
+	if autoImportFix != nil {
+		flags |= 128
+		a.b(off+64, flags)
+		fixOff := a.pack(autoImportFixRecordSize)
+		a.u32(off+88, uint32(fixOff))
+		a.u32(fixOff+0, uint32(autoImportFix.Kind))
+		a.u32(fixOff+4, a.str(autoImportFix.Name))
+		a.u32(fixOff+8, uint32(autoImportFix.ImportKind))
+		a.u32(fixOff+12, uint32(autoImportFix.AddAsTypeOnly))
+		a.u32(fixOff+16, uint32(autoImportFix.ImportIndex))
+		a.u32(fixOff+20, a.str(autoImportFix.NamespacePrefix))
+		var fixFlags uint32
+		if autoImportFix.UseRequire {
+			fixFlags |= 1
+		}
+		if autoImportFix.UsagePosition != nil {
+			fixFlags |= 2
+			a.u32(fixOff+24, autoImportFix.UsagePosition.Line)
+			a.u32(fixOff+28, autoImportFix.UsagePosition.Character)
+		}
+		a.u32(fixOff+32, fixFlags)
+	}
 	// offset map (u32 unless noted):
 	//   0 name / 4 elementKind / 8 kindModifiers / 12 sortText / 16 insertText
 	//   20 filterText / 24 source / 28 detail / 32 labelDetail.detail
@@ -896,6 +924,10 @@ func (a *arena) encodeCompletionEntry(off int, r *CompletionEntryResponse) {
 	//   48 commitCharacters (ptr,count) / 56 symbolPtr / 60 kindU32 / 64 flags u8
 	//   65-67 pad / 68 dataModuleSpecifier / 72 dataExportName / 76 dataFileName
 	//   80 sourceDisplay (ptr,count of {text,kind} records)
+	//   88 autoImportFix pointer / 92 pad. The packed fix record is:
+	//   0 kind / 4 name / 8 importKind / 12 addAsTypeOnly / 16 importIndex
+	//   20 namespacePrefix / 24 usageLine / 28 usageChar / 32 flags
+	//   (useRequire, hasUsagePosition).
 }
 
 // encodeCompletionsResponse writes a CompletionInfoResponse record (32 bytes).
