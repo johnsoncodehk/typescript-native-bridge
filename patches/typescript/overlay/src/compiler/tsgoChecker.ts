@@ -10002,6 +10002,10 @@ export function createTsgoChecker(program: any): any {
         const refreshed = snapshot.getProject(ctx.configFilePath);
         if (!refreshed) return;
         project = refreshed;
+        // Wire objects route prototype API calls through their registry's
+        // project, so a replacement generation must own the live checker
+        // before it becomes reachable through the process-global caches.
+        project.__tnbTypeChecker = checkerProxyRef;
         _projectCache.set(ctx.configFilePath, refreshed);
         _currentProjectRef.project = refreshed;
         installTsgoBackedSourceFileLoader(() => project);
