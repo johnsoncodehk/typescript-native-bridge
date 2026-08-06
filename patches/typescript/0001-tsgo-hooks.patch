@@ -609,7 +609,7 @@ index 6034c9dfc3..0c9a6178db 100644
      let computedWithoutCacheCount = 0;
      const fixes = flatMap(exportInfo, (exportInfo, i) => {
 diff --git a/src/services/completions.ts b/src/services/completions.ts
-index 28d29136da..e267aa7847 100644
+index 28d29136da..b15f4b0ea5 100644
 --- a/src/services/completions.ts
 +++ b/src/services/completions.ts
 @@ -175,6 +175,7 @@ import {
@@ -964,7 +964,7 @@ index 28d29136da..e267aa7847 100644
          symbolToOriginInfoMap[symbols.length] = origin;
          symbolToSortTextMap[symbolId] = importStatementCompletion ? SortText.LocationPriority : SortText.AutoImportSuggestions;
          symbols.push(symbol);
-@@ -5383,7 +5511,7 @@ function getAutoImportSymbolFromCompletionEntryData(name: string, data: Completi
+@@ -5383,19 +5511,34 @@ function getAutoImportSymbolFromCompletionEntryData(name: string, data: Completi
      const containingProgram = data.isPackageJsonImport ? host.getPackageJsonAutoImportProvider!()! : program;
      const checker = containingProgram.getTypeChecker();
      const moduleSymbol = data.ambientModuleName ? checker.tryFindAmbientModule(data.ambientModuleName) :
@@ -973,7 +973,20 @@ index 28d29136da..e267aa7847 100644
          undefined;
  
      if (!moduleSymbol) return undefined;
-@@ -5396,6 +5524,16 @@ function getAutoImportSymbolFromCompletionEntryData(name: string, data: Completi
+-    let symbol = data.exportName === InternalSymbolName.ExportEquals
+-        ? checker.resolveExternalModuleSymbol(moduleSymbol)
+-        : checker.tryGetMemberInModuleExportsAndProperties(data.exportName, moduleSymbol);
++    const getBridgeExport = (checker as unknown as {
++        getExportForCompletionEntryData?: (exportName: string, moduleSymbol: Symbol) => Symbol | undefined;
++    }).getExportForCompletionEntryData;
++    let symbol = getBridgeExport
++        ? getBridgeExport(data.exportName, moduleSymbol)
++        : data.exportName === InternalSymbolName.ExportEquals
++            ? checker.resolveExternalModuleSymbol(moduleSymbol)
++            : checker.tryGetMemberInModuleExportsAndProperties(data.exportName, moduleSymbol);
+     if (!symbol) return undefined;
+     const isDefaultExport = data.exportName === InternalSymbolName.Default;
+     symbol = isDefaultExport && getLocalSymbolForExportDefault(symbol) || symbol;
      return { symbol, origin: completionEntryDataToSymbolOriginInfo(data, name, moduleSymbol) };
  }
  
@@ -990,7 +1003,7 @@ index 28d29136da..e267aa7847 100644
  interface CompletionEntryDisplayNameForSymbol {
      readonly name: string;
      readonly needsConvertPropertyAccess: boolean;
-@@ -6089,6 +6227,23 @@ function isDeprecated(symbol: Symbol, checker: TypeChecker) {
+@@ -6089,6 +6232,23 @@ function isDeprecated(symbol: Symbol, checker: TypeChecker) {
      return !!length(declarations) && every(declarations, isDeprecatedDeclaration);
  }
  
