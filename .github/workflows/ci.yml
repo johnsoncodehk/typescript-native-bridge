@@ -26,8 +26,7 @@ jobs:
 
       # tools/ci-witness-groups.mjs is the single source of truth for the
       # witness matrix — it validates the table (dupes, missing scripts,
-      # count, orphans, ownership, baselines) on every run, so a bad edit
-      # fails here before the witness jobs spawn.
+      # count) on every run, so a bad edit fails here before six jobs spawn.
       - id: groups
         run: echo "matrix=$(node tools/ci-witness-groups.mjs matrix)" >> "$GITHUB_OUTPUT"
 

@@ -14,7 +14,7 @@
 // parent-watch-acceptance / rpcsym-adversarial all run ≤1s; the real cost is
 // nine ~49-70s witnesses): each of wg1-wg4 carries two heavies (~126-131s),
 // wg5 carries the ninth plus all ≤11s witnesses (~125s). Rebalance by moving
-// names between lists; every invocation validates the full table (below).
+// names between lists; `all` validates the full table (below).
 //
 // 2026-08-03 convergence audit: 14 witnesses wired (13 in the audit, plus
 // triage-nuxtui-exportstar 2026-08-04 — unblocked by the bin symlink the
@@ -171,29 +171,10 @@ const toolsDir = path.dirname(fileURLToPath(import.meta.url));
 const flat = groups.flatMap(g => g.witnesses);
 const dupes = flat.filter((w, i) => flat.indexOf(w) !== i);
 const missing = flat.filter(w => !fs.existsSync(path.join(toolsDir, `${w}.mjs`)));
-const onDisk = fs.readdirSync(toolsDir)
-	.filter(f => f.startsWith('triage-') && f.endsWith('.mjs'))
-	.map(f => f.slice(0, -'.mjs'.length));
-const accounted = new Set([...flat, ...LOCAL_ONLY, ...OWNED_ELSEWHERE]);
-const orphans = onDisk.filter(w => !accounted.has(w));
-const missingLocal = [...LOCAL_ONLY, ...OWNED_ELSEWHERE].filter(w => !fs.existsSync(path.join(toolsDir, `${w}.mjs`)));
-const baselineDir = path.join(toolsDir, 'baselines');
-const groupSet = new Set(flat);
-const unwired = fs.existsSync(baselineDir)
-	? fs.readdirSync(baselineDir)
-		.filter(f => f.endsWith('.json') && f.startsWith('triage-'))
-		.map(f => f.slice(0, -'.json'.length))
-		.filter(w => !groupSet.has(w))
-	: [];
-const errors = [];
-if (dupes.length) errors.push(`duplicate witnesses: ${[...new Set(dupes)].join(', ')}`);
-if (missing.length) errors.push(`no tools/<name>.mjs for: ${missing.join(', ')}`);
-if (flat.length !== TOTAL) errors.push(`witness count ${flat.length} != TOTAL ${TOTAL} — update the table and TOTAL together`);
-if (orphans.length) errors.push(`orphan triage-*.mjs (no group, not local-only, not owned elsewhere): ${orphans.join(', ')}`);
-if (missingLocal.length) errors.push(`no tools/<name>.mjs for: ${missingLocal.join(', ')}`);
-if (unwired.length) errors.push(`baseline json without a wired witness: ${unwired.map(w => `${w}.json`).join(', ')}`);
-if (errors.length) {
-	for (const error of errors) console.error(error);
+if (dupes.length || missing.length || flat.length !== TOTAL) {
+	if (dupes.length) console.error(`duplicate witnesses: ${[...new Set(dupes)].join(', ')}`);
+	if (missing.length) console.error(`no tools/<name>.mjs for: ${missing.join(', ')}`);
+	if (flat.length !== TOTAL) console.error(`witness count ${flat.length} != TOTAL ${TOTAL} — update the table and TOTAL together`);
 	process.exit(1);
 }
 
@@ -219,5 +200,39 @@ if (arg === 'matrix') {
 		for (const w of g.witnesses) console.log(`  ${w}`);
 	});
 	console.log(`total: ${flat.length} witnesses in ${groups.length} groups`);
+
+	// Orphan sweep: every tools/triage-*.mjs must be in a group, LOCAL_ONLY,
+	// or OWNED_ELSEWHERE. LOCAL_ONLY/OWNED_ELSEWHERE names must exist on
+	// disk. tools/baselines/triage-<name>.json must map to a wired witness
+	// (reverse direction — a group witness without a baseline — is fine).
+	const errors = [];
+	const onDisk = fs.readdirSync(toolsDir)
+		.filter(f => f.startsWith('triage-') && f.endsWith('.mjs'))
+		.map(f => f.slice(0, -'.mjs'.length));
+	const accounted = new Set([...flat, ...LOCAL_ONLY, ...OWNED_ELSEWHERE]);
+	const orphans = onDisk.filter(w => !accounted.has(w));
+	if (orphans.length) {
+		errors.push(`orphan triage-*.mjs (no group, not local-only, not owned elsewhere): ${orphans.join(', ')}`);
+	}
+	const missingLocal = [...LOCAL_ONLY, ...OWNED_ELSEWHERE].filter(w => !fs.existsSync(path.join(toolsDir, `${w}.mjs`)));
+	if (missingLocal.length) {
+		errors.push(`no tools/<name>.mjs for: ${missingLocal.join(', ')}`);
+	}
+	const baselineDir = path.join(toolsDir, 'baselines');
+	if (fs.existsSync(baselineDir)) {
+		const groupSet = new Set(flat);
+		const unwired = fs.readdirSync(baselineDir)
+			.filter(f => f.endsWith('.json') && f.startsWith('triage-'))
+			.map(f => f.slice(0, -'.json'.length))
+			.filter(w => !groupSet.has(w));
+		if (unwired.length) {
+			errors.push(`baseline json without a wired witness: ${unwired.map(w => `${w}.json`).join(', ')}`);
+		}
+	}
+
+	if (errors.length) {
+		for (const e of errors) console.error(e);
+		process.exit(1);
+	}
 	console.log(`local-only (${LOCAL_ONLY.length}) and owned-elsewhere (${OWNED_ELSEWHERE.length}) files all present; ${onDisk.length} triage-*.mjs accounted, no orphans; baselines all wired`);
 }
