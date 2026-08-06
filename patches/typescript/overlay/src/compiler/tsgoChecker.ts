@@ -1693,6 +1693,30 @@ class ArenaClient {
             if (fileName !== undefined) data.fileName = fileName;
             const moduleSpecifier = str(v.getUint32(off + 68, true));
             if (moduleSpecifier !== undefined) data.moduleSpecifier = moduleSpecifier;
+            if (flags & 128) {
+                const fixOff = v.getUint32(off + 88, true);
+                const fixFlags = v.getUint32(fixOff + 32, true);
+                const autoImport: any = {
+                    importKind: v.getUint32(fixOff + 8, true),
+                    addAsTypeOnly: v.getUint32(fixOff + 12, true),
+                    importIndex: v.getUint32(fixOff + 16, true),
+                };
+                const kind = v.getUint32(fixOff + 0, true);
+                if (kind) autoImport.kind = kind;
+                const fixName = str(v.getUint32(fixOff + 4, true));
+                if (fixName) autoImport.name = fixName;
+                if (fixFlags & 1) autoImport.useRequire = true;
+                if (moduleSpecifier) autoImport.moduleSpecifier = moduleSpecifier;
+                const namespacePrefix = str(v.getUint32(fixOff + 20, true));
+                if (namespacePrefix) autoImport.namespacePrefix = namespacePrefix;
+                if (fixFlags & 2) {
+                    autoImport.usagePosition = {
+                        line: v.getUint32(fixOff + 24, true),
+                        character: v.getUint32(fixOff + 28, true),
+                    };
+                }
+                data.tnbCompletionData = { autoImport };
+            }
             d.data = data;
         }
         if (flags & 64) d.isPackageJsonImport = true;
@@ -1712,7 +1736,7 @@ class ArenaClient {
         const entries = new Array(count);
         for (let i = 0; i < count; i++) {
             entries[i] = this.readCompletionEntry(p);
-            p += 88;
+            p += 96;
         }
         d.entries = entries;
         if (f2 & 1) d.flags = v.getUint32(off + 4, true);
@@ -8207,6 +8231,26 @@ export function createTsgoProgram(
             if (!moduleSymbol) return undefined;
             const symbol = checker.getExportForCompletionEntryData(exportName, moduleSymbol);
             return symbol ? { moduleSymbol, symbol } : undefined;
+        },
+        resolveCompletionItemTsgo: (fileName: string, position: number, name: string, source: string | undefined, data: any, formatOptions: any, preferences: any) => {
+            const proj = liveProject();
+            const result = proj.checker.client.apiRequest("resolveCompletionItem", {
+                snapshot: proj.checker.snapshotId,
+                project: proj.checker.project.id,
+                data: { fileName: tsgoFileArg(fileName), position, name, source, ...data },
+                preferences: { unstable: { ...formatOptions, ...preferences } },
+            });
+            if (!result) throw new Error(`resolveCompletionItem: file not found: ${fileName}`);
+            return {
+                description: result.detail,
+                changes: [{
+                    fileName,
+                    textChanges: result.textChanges.map((change: any) => ({
+                        span: { start: change.start, length: change.length },
+                        newText: change.newText,
+                    })),
+                }],
+            };
         },
         getConfigFileParsingDiagnostics: () => configDiags,
         getOptionsDiagnostics: () => [],
