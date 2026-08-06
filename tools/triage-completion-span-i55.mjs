@@ -35,7 +35,7 @@ mk('tsconfig.json', JSON.stringify({
 }));
 mk('first/tsconfig.json', JSON.stringify({
 	compilerOptions: { composite: true, types: ['node'] },
-	include: ['../repro.ts', './.secondary/empty.d.ts'],
+	include: ['../repro.ts', '../.secondary/empty.d.ts'],
 }));
 mk('.secondary/tsconfig.json', JSON.stringify({
 	compilerOptions: { composite: true, types: ['node'] },
