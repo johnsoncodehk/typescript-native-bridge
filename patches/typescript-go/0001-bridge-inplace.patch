@@ -2002,7 +2002,7 @@ index dc0a1db7e..56820b267 100644
  
  	if symbol.Name == ast.InternalSymbolNameDefault || symbol.Name == ast.InternalSymbolNameExportEquals {
 diff --git a/internal/ls/autoimport/registry.go b/internal/ls/autoimport/registry.go
-index 6c6468095..95e9725b0 100644
+index 6c6468095..489622b9a 100644
 --- a/internal/ls/autoimport/registry.go
 +++ b/internal/ls/autoimport/registry.go
 @@ -244,6 +244,12 @@ type RegistryBucket struct {
@@ -2040,7 +2040,15 @@ index 6c6468095..95e9725b0 100644
  	}
  }
  
-@@ -549,10 +556,10 @@ func (b *registryBuilder) updateBucketAndDirectoryExistence(change RegistryChang
+@@ -399,6 +406,7 @@ func (r *Registry) Clone(ctx context.Context, change RegistryChange, host Regist
+ 	}
+ 	builder.updateBucketAndDirectoryExistence(change, logger)
+ 	builder.markBucketsDirty(change, logger)
++
+ 	if change.RequestedFile != "" {
+ 		builder.updateIndexes(ctx, change, logger)
+ 	}
+@@ -549,10 +557,10 @@ func (b *registryBuilder) updateBucketAndDirectoryExistence(change RegistryChang
  	start := time.Now()
  	neededProjects := make(map[tspath.Path]struct{})
  	neededDirectories := make(map[tspath.Path]string)
@@ -2053,7 +2061,7 @@ index 6c6468095..95e9725b0 100644
  		}
  		dir := fileName
  		dirPath := path
-@@ -568,13 +575,22 @@ func (b *registryBuilder) updateBucketAndDirectoryExistence(change RegistryChang
+@@ -568,13 +576,22 @@ func (b *registryBuilder) updateBucketAndDirectoryExistence(change RegistryChang
  			}
  			neededDirectories[dirPath] = dir
  		}
@@ -2077,7 +2085,7 @@ index 6c6468095..95e9725b0 100644
  		neededProjects[core.FirstResult(b.host.GetDefaultProject(change.RequestedFile))] = struct{}{}
  		if !b.specifierCache.Has(change.RequestedFile) {
  			b.specifierCache.Set(change.RequestedFile, &collections.SyncMap[tspath.Path, string]{})
-@@ -738,7 +754,12 @@ func (b *registryBuilder) markBucketsDirty(change RegistryChange, logger *loggin
+@@ -738,7 +755,12 @@ func (b *registryBuilder) markBucketsDirty(change RegistryChange, logger *loggin
  						// Look up the package name for granular updates
  						packageName := entry.Value().Paths[path]
  						entry.Change(func(bucket *RegistryBucket) { bucket.markNodeModulesDirty(packageName) })
@@ -2091,7 +2099,7 @@ index 6c6468095..95e9725b0 100644
  							delete(cleanNodeModulesBuckets, dirPath)
  						}
  					}
-@@ -750,7 +771,7 @@ func (b *registryBuilder) markBucketsDirty(change RegistryChange, logger *loggin
+@@ -750,7 +772,7 @@ func (b *registryBuilder) markBucketsDirty(change RegistryChange, logger *loggin
  						if packageName, ok := entry.Value().Paths[path]; ok {
  							// Use the package name for granular updates
  							entry.Change(func(bucket *RegistryBucket) { bucket.markNodeModulesDirty(packageName) })
@@ -2100,7 +2108,7 @@ index 6c6468095..95e9725b0 100644
  								delete(cleanNodeModulesBuckets, bucketDirPath)
  							}
  						}
-@@ -766,7 +787,7 @@ func (b *registryBuilder) markBucketsDirty(change RegistryChange, logger *loggin
+@@ -766,7 +788,7 @@ func (b *registryBuilder) markBucketsDirty(change RegistryChange, logger *loggin
  				if _, ok := entry.Value().Paths[path]; ok {
  					// Project buckets don't use package-based granular updates
  					entry.Change(func(bucket *RegistryBucket) { bucket.markProjectFileDirty(path) })
@@ -2109,7 +2117,7 @@ index 6c6468095..95e9725b0 100644
  						delete(cleanProjectBuckets, projectDirPath)
  					}
  				}
-@@ -781,10 +802,11 @@ func (b *registryBuilder) markBucketsDirty(change RegistryChange, logger *loggin
+@@ -781,10 +803,11 @@ func (b *registryBuilder) markBucketsDirty(change RegistryChange, logger *loggin
  
  func (b *registryBuilder) updateIndexes(ctx context.Context, change RegistryChange, logger *logging.LogTree) {
  	type nodeModulesBucketTask struct {
@@ -2125,7 +2133,7 @@ index 6c6468095..95e9725b0 100644
  
  		// For granular updates.
  		isUpdate       bool
-@@ -842,7 +864,7 @@ func (b *registryBuilder) updateIndexes(ctx context.Context, change RegistryChan
+@@ -842,7 +865,7 @@ func (b *registryBuilder) updateIndexes(ctx context.Context, change RegistryChan
  	tspath.ForEachAncestorDirectoryPath(change.RequestedFile, func(dirPath tspath.Path) (any, bool) {
  		if nodeModulesBucket, ok := b.nodeModules.Get(dirPath); ok {
  			dirName := core.FirstResult(b.directories.Get(dirPath)).Value().name
@@ -2134,7 +2142,7 @@ index 6c6468095..95e9725b0 100644
  			bucketState := nodeModulesBucket.Value().state
  			// !!! Optimization: handle different dependency set via granular updates
  			needsFullRebuild := bucketState.multipleFilesDirty ||
-@@ -854,20 +876,22 @@ func (b *registryBuilder) updateIndexes(ctx context.Context, change RegistryChan
+@@ -854,20 +877,22 @@ func (b *registryBuilder) updateIndexes(ctx context.Context, change RegistryChan
  
  			if needsFullRebuild {
  				nodeModulesTasks = append(nodeModulesTasks, &nodeModulesBucketTask{
@@ -2168,7 +2176,7 @@ index 6c6468095..95e9725b0 100644
  				})
  			}
  		}
-@@ -1004,7 +1028,7 @@ func (b *registryBuilder) updateIndexes(ctx context.Context, change RegistryChan
+@@ -1004,7 +1029,7 @@ func (b *registryBuilder) updateIndexes(ctx context.Context, change RegistryChan
  				)
  			} else {
  				b.buildNodeModulesBucket(
@@ -2177,7 +2185,7 @@ index 6c6468095..95e9725b0 100644
  					targetRecursivePackages, nodeModulesLogger.Fork(task.dirName),
  				)
  			}
-@@ -1291,34 +1315,41 @@ func (b *registryBuilder) buildProjectBucket(
+@@ -1291,34 +1316,41 @@ func (b *registryBuilder) buildProjectBucket(
  	}
  }
  
@@ -2224,7 +2232,7 @@ index 6c6468095..95e9725b0 100644
  }
  
  // discoveredPackage represents a package found during the discovery phase.
-@@ -1598,6 +1629,7 @@ func (b *registryBuilder) buildNodeModulesBucket(
+@@ -1598,6 +1630,7 @@ func (b *registryBuilder) buildNodeModulesBucket(
  	ctx context.Context,
  	result *bucketBuildResult,
  	dependencies *collections.Set[string],
@@ -2232,7 +2240,7 @@ index 6c6468095..95e9725b0 100644
  	dirPath tspath.Path,
  	discovered []*discoveredPackage,
  	directoryPackageNames *collections.Set[string],
-@@ -1632,11 +1664,12 @@ func (b *registryBuilder) buildNodeModulesBucket(
+@@ -1632,11 +1665,12 @@ func (b *registryBuilder) buildNodeModulesBucket(
  	}
  
  	result.bucket = &RegistryBucket{
@@ -2250,7 +2258,7 @@ index 6c6468095..95e9725b0 100644
  		state: BucketState{
  			buildPreferences:        bucketBuildPreferencesFromUserPreferences(b.userPreferences),
  			recursiveSearchPackages: recursiveSearchPackages.Clone(),
-@@ -1779,11 +1812,12 @@ func (b *registryBuilder) updateNodeModulesBucket(
+@@ -1779,11 +1813,12 @@ func (b *registryBuilder) updateNodeModulesBucket(
  	}
  
  	result.bucket = &RegistryBucket{
@@ -3768,7 +3776,7 @@ index 909b5aa4b..2237d958c 100644
  	existing, loaded := c.entries.LoadOrStore(key, entry)
  	if loaded {
 diff --git a/internal/project/session.go b/internal/project/session.go
-index 00f4056e5..6912d0931 100644
+index 00f4056e5..6003b3773 100644
 --- a/internal/project/session.go
 +++ b/internal/project/session.go
 @@ -26,6 +26,7 @@ import (
@@ -3856,7 +3864,7 @@ index 00f4056e5..6912d0931 100644
  func (s *Session) DidChangeFile(ctx context.Context, uri lsproto.DocumentUri, version int32, changes []lsproto.TextDocumentContentChangePartialOrWholeDocument) {
  	s.cancelDiagnosticsRefresh()
  	s.cancelWarmAutoImportCache()
-@@ -1153,6 +1198,37 @@ func (s *Session) GetLanguageServiceWithAutoImports(ctx context.Context, baseSna
+@@ -1153,6 +1198,38 @@ func (s *Session) GetLanguageServiceWithAutoImports(ctx context.Context, baseSna
  	return ls.NewLanguageService(project.configFilePath, project.GetProgram(), newSnapshot, uri.FileName()), nil
  }
  
@@ -3868,6 +3876,7 @@ index 00f4056e5..6912d0931 100644
 +	change := SnapshotChange{
 +		reason: UpdateReasonRequestedLanguageServiceWithAutoImports,
 +		ResourceRequest: ResourceRequest{
++			Documents:   []lsproto.DocumentUri{uri},
 +			AutoImports: uri,
 +		},
 +	}
