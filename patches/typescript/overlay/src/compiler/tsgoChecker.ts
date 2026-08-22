@@ -5926,6 +5926,22 @@ function extensionFromPathOrTs(fileName: string): any {
     return ts.Extension.Ts;
 }
 /**
+ * Issue #63: tsgo emits `{name}.d.{ext}.ts` for allowArbitraryExtensions
+ * source files (e.g. Button.vue → Button.vue.d.vue.ts), but the host
+ * convention (stock TypeScript + Volar) is `{name}.d.ts` (Button.vue.d.ts).
+ * Strip the redundant extra-extension segment from declaration output paths.
+ */
+function fixExtraExtDeclarationPath(fileName: string, extraExts: { extension: string }[] | undefined): string {
+    if (!extraExts?.length) return fileName;
+    for (const { extension } of extraExts) {
+        const suffix = `.d${extension}.ts`;
+        if (fileName.endsWith(suffix)) {
+            return fileName.slice(0, -suffix.length) + ".d.ts";
+        }
+    }
+    return fileName;
+}
+/**
  * Builds the `extraFileExtensions` field sent with tsgo snapshots.
  *
  * `runTsc` advertises language-plugin extensions through
@@ -8501,7 +8517,9 @@ export function createTsgoProgram(
             for (const o of outputs) {
                 // Go-computed output path — crosses the wire boundary before
                 // reaching writeFile/emittedFiles consumers.
-                const outFileName = wireFileNameToHost(o.fileName);
+                // Issue #63: strip the redundant extra-extension segment from
+                // declaration paths (e.g. Button.vue.d.vue.ts → Button.vue.d.ts).
+                const outFileName = fixExtraExtDeclarationPath(wireFileNameToHost(o.fileName), programCtx.pendingExtraFileExtensions);
                 // Builder wrappers mutate data (data.skippedDtsWrite on the
                 // dts-unchanged skip path in builder.ts), so a data object
                 // must always ride along — stock emitter threads one too.
