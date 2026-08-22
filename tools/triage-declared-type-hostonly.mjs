@@ -29,7 +29,12 @@ function write(relativePath, content) {
 }
 
 write('tsconfig.json', JSON.stringify({ compilerOptions: { strict: true }, include: ['main.ts'] }));
-const mainFile = write('main.ts', 'export const value = 1;\n');
+const mainFile = write('main.ts', [
+	'export const value = 1;',
+	'export class Foo {}',
+	'export interface Bar {}',
+	'export type Baz = { x: number };',
+].join('\n') + '\n');
 
 const logger = {
 	hasLevel: () => false,
@@ -70,7 +75,7 @@ const service = new ts.server.ProjectService({
 });
 
 try {
-	service.openClientFile(mainFile, 'export const value = 1;\n', ts.ScriptKind.TS);
+	service.openClientFile(mainFile, fs.readFileSync(mainFile, 'utf8'), ts.ScriptKind.TS);
 	const [project] = [...service.configuredProjects.values()];
 	const languageService = project.getLanguageService();
 	const program = languageService.getProgram();
@@ -84,6 +89,27 @@ try {
 	const realDeclared = checker.getDeclaredTypeOfSymbol(realSymbol);
 	if (realDeclared === undefined || realDeclared === null) {
 		throw new Error('real symbol leaked undefined from getDeclaredTypeOfSymbol');
+	}
+
+	// Host-bound class/interface/type-alias: the declaration exists in the
+	// tsgo program but the symbol is a host binder SymbolObject (node.symbol,
+	// not from checker.getSymbolAtLocation).  The fix ensures that when
+	// resolveRpcSymbol / tsgoSymbolForHostDeclaration falls back to the
+	// binder-set .symbol on the owning declaration node, getDeclaredTypeOfSymbol
+	// returns the real declared type instead of errorType.
+	const classDecl = sf.statements[1]; // export class Foo {}
+	const ifaceDecl = sf.statements[2]; // export interface Bar {}
+	const typeDecl = sf.statements[3];  // export type Baz = ...
+	for (const [label, decl] of [['class', classDecl], ['interface', ifaceDecl], ['type-alias', typeDecl]]) {
+		const hostSym = decl.symbol;
+		if (!hostSym) throw new Error(`host binder symbol missing for ${label}`);
+		const dt = checker.getDeclaredTypeOfSymbol(hostSym);
+		if (dt === undefined || dt === null) {
+			throw new Error(`getDeclaredTypeOfSymbol returned ${dt} for host-bound ${label} symbol`);
+		}
+		if (typeof dt.getFlags !== 'function' && typeof dt.flags !== 'number') {
+			throw new Error(`getDeclaredTypeOfSymbol returned non-Type for ${label}: ${typeof dt}`);
+		}
 	}
 
 	// Host-only symbol: no declarations / valueDeclaration to map to a tsgo

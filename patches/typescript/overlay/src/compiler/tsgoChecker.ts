@@ -10426,7 +10426,16 @@ export function createTsgoChecker(program: any): any {
             if (hostText != null && remoteText != null && String(hostText) !== String(remoteText)) return undefined;
         }
         try {
-            return project.checker.getSymbolAtLocation(tsgoNode) ?? undefined;
+            const sym = project.checker.getSymbolAtLocation(tsgoNode) ?? undefined;
+            if (sym) return sym;
+            // getSymbolAtLocation may miss declaration-name identifiers when
+            // the tsgo node's parent chain isn't traversed for the identity
+            // check.  The binder always sets .symbol on the owning declaration
+            // — use that as the fallback for declaration-name anchored lookups
+            // (node !== decl means we anchored on decl.name, so the parent is
+            // the declaration that owns the name).
+            if (node !== decl) return tsgoNode.parent?.symbol ?? undefined;
+            return tsgoNode.symbol ?? undefined;
         } catch {
             return undefined;
         }
