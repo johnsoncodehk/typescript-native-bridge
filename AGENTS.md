@@ -32,7 +32,7 @@ TNB is a tsgo-backed TypeScript fork: upstream `microsoft/TypeScript` and `micro
 
 - `npm run check:lib` / `check:enums` / `check:sourcefile-guard`
 - `npm run check:go-as-guards` — Go-side Type-cast guard: every `Type.As*()` chain deref and unguarded nil-family assignment in the tsgo patches/overlay is fixed or carries an inline `// asguard:exempt` reason (issues #69/#70 bug class)
-- Witnesses: 83 across wg0–wg6, all wired in CI (`.github/workflows/ci.yml`), single source of truth `tools/ci-witness-groups.mjs` — `node tools/ci-witness-groups.mjs all` validates dup/missing/orphan/local-only/baseline wiring and emits the matrix (`matrix` mode feeds the ci.yml prepare job).
+- Witnesses: 85 across wg0–wg6, all wired in CI (`.github/workflows/ci.yml`), single source of truth `tools/ci-witness-groups.mjs` — `node tools/ci-witness-groups.mjs all` validates dup/missing/orphan/local-only/baseline wiring and emits the matrix (`matrix` mode feeds the ci.yml prepare job).
 - Local-only — run on demand, not in the matrix (reasons in the matrix header comment): framework-checks, external-edits, generation-retention, napi-fuzz, completion-latency, postedit-latency, perf-edit-rpc, perf-qi-rpc, typing-cpuprof.
 - Semantic witnesses (the rest of the matrix is bare stock-parity checks):
   - `triage-crossgen-reuse` — issue #11: cross-generation RemoteSourceFile reuse + edit invalidation; a pre-edit type handle must die, not re-resolve
@@ -49,6 +49,8 @@ TNB is a tsgo-backed TypeScript fork: upstream `microsoft/TypeScript` and `micro
   - `triage-eslint-typeref-target` — issue #35: isTypeReference→target→getSymbol() reads back registry-identical objects
   - `triage-thistype-refguard` — issues #69/#70: ThisType() gates on the data shape, not objectFlags (cloned tuple references carry the Tuple flag with *TypeReference data); per-node thisType parity vs stock
   - `triage-importclause-nil-symbol` — issue #71: type-only ImportClause is a symbol-less IsTypeDeclaration; getTypeAtLocation must yield the error type, not a Go panic
+  - `triage-empty-tuple-basetypes` — issue #73: getBaseTypes on the literal-derived empty tuple (`const x: [] = []`, `[] as const`, `arr || []`) answers `never[]` per shape vs stock instead of nil-dereferencing in Go, a declared `readonly []` keeps `readonly never[]`, and the recomputed clone base is pinned to the same type instance as the memoized one; the four non-empty tuple rows (stock rejects them, target or reference, so the element loop and its variadic branch cannot be pinned differentially) are panic/recursion canaries marked as known divergences
+  - `triage-empty-file-position` — issue #72: a zero-length file through the project service reports the parser's (0, 0) — pos/end/eof/start metadata equal to stock — instead of the synthetic skeleton's -1
   - `triage-custom-transformers` — issue #40: emit with non-empty customTransformers must throw (tsgo can't execute JS transformers)
   - `triage-ambient-order` — issue #42 class: ambient-module index run-stable (Go map order must not leak onto the wire)
   - `triage-diag-determinism` — issues #42/#51: whole-program diagnostics byte-identical across fresh runs (strided checker assignment)

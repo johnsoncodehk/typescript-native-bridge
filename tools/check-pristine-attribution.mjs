@@ -49,6 +49,14 @@ const DUAL = [
 		test: 'TestTypePositionEntityInIndexedAccess',
 		signature: /resolved to any/,
 	},
+	{
+		key: 'tsgo-tuple-base-type-target',
+		branch: 'repro/empty-tuple-base-types-panic',
+		file: 'internal/checker/zz_repro_empty_tuple_base_types_test.go',
+		pkg: './internal/checker/',
+		test: 'TestEmptyTupleLiteralBaseTypes',
+		signature: /nil pointer dereference/,
+	},
 ];
 
 // ── Archival entries (no stopgap: reverted to pristine behavior by policy) ──

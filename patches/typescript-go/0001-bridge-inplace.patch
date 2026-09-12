@@ -960,7 +960,7 @@ index 91aab0904..48b7cabb1 100644
  	assert.NilError(t, err)
  
 diff --git a/internal/checker/checker.go b/internal/checker/checker.go
-index b639d488e..62c94e5da 100644
+index b639d488e..c3c0c16bc 100644
 --- a/internal/checker/checker.go
 +++ b/internal/checker/checker.go
 @@ -786,6 +786,7 @@ type Checker struct {
@@ -1243,7 +1243,81 @@ index b639d488e..62c94e5da 100644
  }
  
  func (c *Checker) getPropertyOfType(t *Type, name string) *ast.Symbol {
-@@ -22798,6 +22951,19 @@ func (c *Checker) getTypeFromTypeNodeWorker(node *ast.Node) *Type {
+@@ -19073,14 +19226,35 @@ func (c *Checker) getBaseTypes(t *Type) []*Type {
+ 	if t.objectFlags&(ObjectFlagsClassOrInterface|ObjectFlagsTuple) == 0 {
+ 		return nil
+ 	}
++	// Dispatch stays on t's own flags (as upstream writes it), but the tuple
++	// DATA does not live there: element types and the readonly modifier are on
++	// the target, and a reference to one carries neither. Only the arity-0
++	// array-literal clone still wears the Tuple flag createArrayLiteralType
++	// copied from the target while its data is the *TypeReference that function
++	// made, so it has no baseTypesResolved to read or write.
++	// Ledger(tsgo-tuple-base-type-target) — README behavior table row.
+ 	data := t.AsInterfaceType()
++	if data == nil {
++		// The clone lands here. Answer off the target as stock does — stock
++		// reads the reference's absent fields as undefined, which is what makes
++		// the answer the mutable array — and recompute per call, since the
++		// clone is a *TypeReference with no baseTypesResolved to memoize in.
++		// The recomputed type is the same cached one, so this is cost, not
++		// behavior. Returning nil is for a nil-data type that is not a tuple
++		// clone; no producer makes one today, and stock answers no base types
++		// for the shapes it reads as field-less.
++		if isTupleType(t) {
++			return []*Type{c.getTupleBaseType(t.Target(), t)}
++		}
++		return nil
++	}
+ 	if !data.baseTypesResolved {
+ 		if !c.pushTypeResolution(t, TypeSystemPropertyNameResolvedBaseTypes) {
+ 			return data.resolvedBaseTypes
+ 		}
+ 		switch {
+ 		case t.objectFlags&ObjectFlagsTuple != 0:
+-			data.resolvedBaseTypes = []*Type{c.getTupleBaseType(t)}
++			data.resolvedBaseTypes = []*Type{c.getTupleBaseType(t.Target(), t)}
+ 		case t.symbol.Flags&(ast.SymbolFlagsClass|ast.SymbolFlagsInterface) != 0:
+ 			if t.symbol.Flags&ast.SymbolFlagsClass != 0 {
+ 				c.resolveBaseTypesOfClass(t)
+@@ -19108,9 +19282,20 @@ func (c *Checker) getBaseTypes(t *Type) []*Type {
+ 	return data.resolvedBaseTypes
+ }
+ 
+-func (c *Checker) getTupleBaseType(t *Type) *Type {
+-	typeParameters := t.AsTupleType().TypeParameters()
+-	elementInfos := t.AsTupleType().elementInfos
++// getTupleBaseType builds the array base of a tuple. target carries the tuple
++// data (a reference to it has none), while asWritten is the type the caller
++// asked about: it alone decides the readonly modifier, because the reference
++// createArrayLiteralType makes has no such field for stock to read either — a
++// declared `readonly []` keeps its readonly base, the `([] as const)` clone
++// answers the mutable one.
++func (c *Checker) getTupleBaseType(target *Type, asWritten *Type) *Type {
++	// target is *TupleType data at both call sites, for different reasons: the
++	// nil-data arm gates on isTupleType(t) and passes t.Target(); the tuple arm
++	// gates on t's own ObjectFlagsTuple, which only createTupleTargetType sets,
++	// and that function allocates TupleType data and points the target at
++	// itself.
++	typeParameters := target.AsTupleType().TypeParameters() // asguard:exempt Tuple-flagged types always hold *TupleType data: createTupleTargetType is the only writer of ObjectFlagsTuple and it allocates one with target == self
++	elementInfos := target.AsTupleType().elementInfos       // asguard:exempt same single-writer invariant as the line above
+ 	elementTypes := make([]*Type, len(typeParameters))
+ 	for i, tp := range typeParameters {
+ 		if elementInfos[i].flags&ElementFlagsVariadic != 0 {
+@@ -19119,7 +19304,11 @@ func (c *Checker) getTupleBaseType(t *Type) *Type {
+ 			elementTypes[i] = tp
+ 		}
+ 	}
+-	return c.createArrayTypeEx(c.getUnionType(elementTypes), t.AsTupleType().readonly)
++	readonly := false
++	if tuple, ok := asWritten.data.(*TupleType); ok {
++		readonly = tuple.readonly
++	}
++	return c.createArrayTypeEx(c.getUnionType(elementTypes), readonly)
+ }
+ 
+ func (c *Checker) resolveBaseTypesOfClass(t *Type) {
+@@ -22798,6 +22987,19 @@ func (c *Checker) getTypeFromTypeNodeWorker(node *ast.Node) *Type {
  		return c.getTypeFromInferTypeNode(node)
  	case ast.KindImportType:
  		return c.getTypeFromImportTypeNode(node)
@@ -1263,7 +1337,7 @@ index b639d488e..62c94e5da 100644
  	default:
  		return c.errorType
  	}
-@@ -23584,6 +23750,14 @@ func (c *Checker) getDeclaredTypeOfSymbol(symbol *ast.Symbol) *Type {
+@@ -23584,6 +23786,14 @@ func (c *Checker) getDeclaredTypeOfSymbol(symbol *ast.Symbol) *Type {
  }
  
  func (c *Checker) tryGetDeclaredTypeOfSymbol(symbol *ast.Symbol) *Type {
@@ -1278,7 +1352,7 @@ index b639d488e..62c94e5da 100644
  	switch {
  	case symbol.Flags&(ast.SymbolFlagsClass|ast.SymbolFlagsInterface) != 0:
  		return c.getDeclaredTypeOfClassOrInterface(symbol)
-@@ -29109,6 +29283,13 @@ func (c *Checker) getContextualType(node *ast.Node, contextFlags ContextFlags) *
+@@ -29109,6 +29319,13 @@ func (c *Checker) getContextualType(node *ast.Node, contextFlags ContextFlags) *
  		return c.contextualInfos[index].t
  	}
  	parent := node.Parent

@@ -80,6 +80,19 @@ export function createSkeletonSourceFile(
     const eof = factory.createToken(SyntaxKind.EndOfFileToken);
     const sf = factory.createSourceFile([], eof, NodeFlags.None) as SourceFile;
     const anySf = sf as any;
+    // factory.createSourceFile goes through the base factory's
+    // createBaseSourceFileNode, which stamps the -1 "synthesized node" position
+    // (the real parser overrides it with the text range it parsed). This
+    // skeleton IS the file's real text, so take the parser's range: a
+    // zero-length file left at -1 made getStart() fail stock's own
+    // assertHasRealPosition, and callers that never synthesize anything —
+    // typescript-estree converting a program root — have no guard for that.
+    anySf.pos = 0;
+    anySf.end = text.length;
+    // The token is synthesized too, and the parser parks an empty file's EOF at
+    // the end of its (empty) text rather than leaving the synthetic -1.
+    (eof as any).pos = 0;
+    (eof as any).end = text.length;
     anySf.fileName = fileName;
     anySf.originalFileName = fileName;
     const normalized = normalizePath(fileName) as Path;
