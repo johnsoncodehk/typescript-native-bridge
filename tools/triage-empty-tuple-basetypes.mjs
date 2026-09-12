@@ -17,10 +17,12 @@
  * serializer, where the same tuple-reference data is read.
  *
  * Most shapes are compared in lockstep (typeToString + base-type arity +
- * base-type names); the two non-empty tuple rows are NOT — stock throws a
- * catchable TypeError there where the bridge answers no base types, so they are
- * pinned as known divergences instead. In-process, because a panic takes the
- * child with it.
+ * base-type names), including the tuple TARGET rows that pin the element loop.
+ * A non-empty tuple REFERENCE is not comparable — stock rejects the input
+ * (TypeError, or undefined for a repeat query on the same type object) where
+ * the bridge answers no base types — so those rows are pinned as known
+ * divergences and serve as panic canaries. In-process, because a panic ends
+ * this process.
  *
  * Stock side: STOCK_TYPESCRIPT_PATH, else derived from STOCK_TSSERVER_PATH
  * (CI), else /tmp/stock-ts-p3/package/lib/typescript.js.
@@ -51,6 +53,7 @@ export function words(text: string) {
 export declare const roEmpty: readonly [];
 export function variadic<T extends unknown[]>(x: [string, ...T]): void;
 export declare const targetable: [string, number];
+export declare const roTargetable: readonly [string, number];
 export declare const roOne: readonly [string];
 export type RoAlias = readonly [];
 export class Base {}
@@ -72,8 +75,9 @@ const CASES = [
 	{ label: 'readonly [] (identifier)', kind: 'VariableDeclaration', name: 'roEmpty', via: 'name' },
 	{ label: 'readonly [] (annotation node)', kind: 'TupleTypeNode', owner: 'roEmpty' },
 	{ label: 'readonly [string] (identifier)', kind: 'VariableDeclaration', name: 'roOne', via: 'name' },
-	{ label: 'tuple target [string, number]', kind: 'VariableDeclaration', name: 'targetable', via: 'type' },
-	{ label: 'tuple target [string, ...T]', kind: 'ParameterDeclaration', name: 'x', via: 'type' },
+	{ label: 'target [string, number]', kind: 'VariableDeclaration', name: 'targetable', via: 'target' },
+	{ label: 'target [string, ...T]', kind: 'ParameterDeclaration', name: 'x', via: 'target' },
+	{ label: 'target readonly [string, number]', kind: 'VariableDeclaration', name: 'roTargetable', via: 'target' },
 	{ label: 'Derived class', kind: 'Identifier', text: 'Derived' },
 	{ label: 'Child interface', kind: 'Identifier', text: 'Child' },
 	{ label: 'lit [string, number] (identifier)', kind: 'VariableDeclaration', name: 'lit', via: 'name' },
@@ -149,17 +153,13 @@ function resolveNode(engine, found, sourceFile, spec) {
 		if (!node) throw new Error(`${spec.label}: no tuple type node${spec.owner ? ` owned by ${spec.owner}` : ''}`);
 		return node;
 	}
-	if (spec.kind === 'VariableDeclaration') {
-		const node = found.declarations.find(n => engine.isIdentifier(n.name) && n.name.text === spec.name);
-		if (!node) throw new Error(`${spec.label}: no declaration named ${spec.name}`);
+	if (spec.kind === 'VariableDeclaration' || spec.kind === 'ParameterDeclaration') {
+		const pool = spec.kind === 'VariableDeclaration' ? found.declarations : found.parameters;
+		const node = pool.find(n => engine.isIdentifier(n.name) && n.name.text === spec.name);
+		if (!node) throw new Error(`${spec.label}: no ${spec.kind} named ${spec.name}`);
 		if (spec.via === 'name') return node.name;
 		if (spec.via === 'type') return node.type;
 		return node;
-	}
-	if (spec.kind === 'ParameterDeclaration') {
-		const node = found.parameters.find(n => engine.isIdentifier(n.name) && n.name.text === spec.name);
-		if (!node) throw new Error(`${spec.label}: no parameter named ${spec.name}`);
-		return spec.via === 'type' ? node.type : node;
 	}
 	const wanted = spec.kind === 'Identifier' ? spec.text : undefined;
 	const node = found.identifiers.find(n => n.getText(sourceFile) === wanted
@@ -174,10 +174,11 @@ function probe(engine) {
 	const checker = prog.getTypeChecker();
 	const sourceFile = prog.getSourceFile(path.join(dir, 'src.ts'));
 	const found = collect(engine, sourceFile);
-	const out = { _bases: {} };
+	const out = { _bases: {}, _reread: undefined };
 	for (const spec of CASES) {
 		const node = resolveNode(engine, found, sourceFile, spec);
-		const type = checker.getTypeAtLocation(node);
+		const resolved = checker.getTypeAtLocation(node);
+		const type = spec.via === 'target' ? (resolved.target ?? resolved) : resolved;
 		// Stock throws a catchable TypeError on a non-empty tuple (it reads
 		// undefined's `symbol`), so both sides canonicalize "rejected the
 		// input" to one token: the gate is about the answers, and a native
@@ -199,6 +200,13 @@ function probe(engine) {
 		};
 		out._bases[spec.label] = bases;
 	}
+	// One deliberate second read, for the repeat-read assertion above.
+	{
+		const spec = CASES.find(c => c.label === 'annotated [] (literal)');
+		const node = resolveNode(engine, found, sourceFile, spec);
+		const again = checker.getBaseTypes(checker.getTypeAtLocation(node));
+		out._reread = again?.[0];
+	}
 	close();
 	return out;
 }
@@ -217,17 +225,16 @@ const stk = probe(tss);
 // The two non-empty tuple rows: same known divergence, pinned instead of
 // compared, and kept out of the equality loop so a future convergence cannot
 // pass unnoticed either way.
-// The tuple TARGET rows join them for the same reason (stock rejects a
-// non-empty tuple wherever it is asked about it, target or reference), which is
-// also why getTupleBaseType's element loop and its variadic branch cannot be
-// pinned differentially at all: no engine answers there to compare against.
-// They stay in as panic/recursion canaries — a regression that made the target
-// arm recurse or panic shows up as a dead child, not a diff.
+// A non-empty tuple REFERENCE is rejected by stock and answered with no bases
+// by the bridge, so these rows cannot be compared — they stay as canaries (a
+// regression that made the arm recurse or panic ends this process, not a diff).
+// The tuple TARGET is a different story and IS compared: the `via: 'target'`
+// rows pin getTupleBaseType's element loop and its variadic branch, verified by
+// mutation (dropping the variadic indexed access, or indexing every element,
+// both fail here).
 const NON_GOALS = [
 	'lit [string, number] (identifier)',
 	'readonly [string] (identifier)',
-	'tuple target [string, number]',
-	'tuple target [string, ...T]',
 ];
 
 for (const spec of CASES) {
@@ -265,7 +272,10 @@ check(tnbBases['annotated [] (literal)'][0] === tnbBases['annotated [] (identifi
 	'the clone base and the declared mutable tuple base must be the same type instance');
 check(tnbBases['readonly [] (identifier)'][0] !== tnbBases['annotated [] (literal)'][0],
 	'the readonly tuple base must NOT be the mutable base type instance');
-check(tnbBases['annotated [] (literal)'][0] === tnbBases['annotated [] (literal)'][0],
+// A second read of the same type, through the engine, is what makes "the arm
+// recomputes but hands back the same registry type" a real assertion: the
+// previous version compared one capture with itself and could never fail.
+check(tnb._reread === tnbBases['annotated [] (literal)'][0],
 	'repeated reads must hand back the same base type instance');
 
 // Declared readonly tuples keep the readonly base: the primitive that the

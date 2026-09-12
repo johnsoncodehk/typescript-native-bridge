@@ -51,7 +51,10 @@ const DUAL = [
 	},
 	{
 		key: 'tsgo-tuple-base-type-target',
-		branch: 'repro/empty-tuple-base-types-panic',
+		// No repro branch to point at: the case is committed at
+		// tools/pristine-attribution/<file> instead, which is what the
+		// UPSTREAM-FIXED message now names.
+		branch: 'tools/pristine-attribution/zz_repro_empty_tuple_base_types_test.go',
 		file: 'internal/checker/zz_repro_empty_tuple_base_types_test.go',
 		pkg: './internal/checker/',
 		test: 'TestEmptyTupleLiteralBaseTypes',

@@ -34,7 +34,18 @@ TNB is a tsgo-backed TypeScript fork: upstream `microsoft/TypeScript` and `micro
 - `npm run check:go-as-guards` — Go-side Type-cast guard: every `Type.As*()` chain deref and unguarded nil-family assignment in the tsgo patches/overlay is fixed or carries an inline `// asguard:exempt` reason (issues #69/#70 bug class)
 - Witnesses: 85 across wg0–wg6, all wired in CI (`.github/workflows/ci.yml`), single source of truth `tools/ci-witness-groups.mjs` — `node tools/ci-witness-groups.mjs all` validates dup/missing/orphan/local-only/baseline wiring and emits the matrix (`matrix` mode feeds the ci.yml prepare job).
 - Local-only — run on demand, not in the matrix (reasons in the matrix header comment): framework-checks, external-edits, generation-retention, napi-fuzz, completion-latency, postedit-latency, perf-edit-rpc, perf-qi-rpc, typing-cpuprof.
-- Locally hostable gates: `check:sim-nav` and `check:sourcefile-guard` need a volar checkout — `git clone --depth 50 --branch master https://github.com/vuejs/language-tools.git /tmp/volar`, `git -C /tmp/volar checkout $VOLAR_SHA` (ci.yml env), point `pnpm-workspace.yaml`'s typescript override at this repo, then `pnpm install --no-frozen-lockfile && pnpm run build` and run with `VOLAR_ROOT=/tmp/volar` (plus `STOCK_TSSERVER_PATH=/tmp/stock-ts-p3/package/lib/tsserver.js` for the differential). Both were run in full for #72/#73. `check-pristine-attribution` clones pristine tsgo into `/tmp/tnb-pristine-tsgo` and refuses to run if anything is left in that clone — keep it clean.
+- Locally hostable gates: `check:sim-nav` and `check:sourcefile-guard` need a volar checkout. ci.yml's recipe, which is the one to copy (`VOLAR_SHA` is the ci.yml env pin — set it in your shell, a shallow clone does not carry the tag):
+  ```sh
+  export VOLAR_SHA=<.github/workflows/ci.yml value>
+  git clone --depth 50 --branch master https://github.com/vuejs/language-tools.git /tmp/volar
+  git -C /tmp/volar checkout "$VOLAR_SHA" || { git -C /tmp/volar fetch --deepen 50 origin master; git -C /tmp/volar checkout "$VOLAR_SHA"; }
+  # point /tmp/volar/pnpm-workspace.yaml's typescript override at this repo (link:<repo>)
+  cd /tmp/volar && corepack enable && pnpm install --no-frozen-lockfile && pnpm run build
+  cd <repo> && VOLAR_ROOT=/tmp/volar STOCK_TSSERVER_PATH=/tmp/stock-ts-p3/package/lib/tsserver.js npm run check:sim-nav
+  ```
+  `check:sourcefile-guard` needs only `VOLAR_ROOT`. Both were run in full for #72/#73. `check-pristine-attribution` clones pristine tsgo into `/tmp/tnb-pristine-tsgo` and refuses to run only if one of its own repro files is already present there — a stray file of another name goes unnoticed, so check `git -C /tmp/tnb-pristine-tsgo status --porcelain` yourself.
+- `node tools/ci-witness-groups.mjs all` (the orphan / local-only / baseline sweep) runs only locally and in nightly — ci.yml's prepare job calls `matrix` mode, so a witness added without a group entry is not caught per-commit.
+
 - Semantic witnesses (the rest of the matrix is bare stock-parity checks):
   - `triage-crossgen-reuse` — issue #11: cross-generation RemoteSourceFile reuse + edit invalidation; a pre-edit type handle must die, not re-resolve
   - `triage-prototype-refresh` — issue #57: a replacement snapshot keeps Type prototype APIs routed to its live checker
@@ -50,7 +61,7 @@ TNB is a tsgo-backed TypeScript fork: upstream `microsoft/TypeScript` and `micro
   - `triage-eslint-typeref-target` — issue #35: isTypeReference→target→getSymbol() reads back registry-identical objects
   - `triage-thistype-refguard` — issues #69/#70: ThisType() gates on the data shape, not objectFlags (cloned tuple references carry the Tuple flag with *TypeReference data); per-node thisType parity vs stock
   - `triage-importclause-nil-symbol` — issue #71: type-only ImportClause is a symbol-less IsTypeDeclaration; getTypeAtLocation must yield the error type, not a Go panic
-  - `triage-empty-tuple-basetypes` — issue #73: getBaseTypes on the literal-derived empty tuple (`const x: [] = []`, `[] as const`, `arr || []`) answers `never[]` per shape vs stock instead of nil-dereferencing in Go, a declared `readonly []` keeps `readonly never[]`, and the recomputed clone base is pinned to the same type instance as the memoized one; the four non-empty tuple rows (stock rejects them, target or reference, so the element loop and its variadic branch cannot be pinned differentially) are panic/recursion canaries marked as known divergences
+  - `triage-empty-tuple-basetypes` — issue #73: getBaseTypes on the literal-derived empty tuple (`const x: [] = []`, `[] as const`, `arr || []`) answers `never[]` per shape vs stock instead of nil-dereferencing in Go, a declared `readonly []` keeps `readonly never[]`, and the recomputed clone base is pinned to the same type instance as the memoized one (re-read through the engine, so the assertion can fail); tuple-target rows (`type.target`) pin getTupleBaseType's element loop and variadic branch, mutation-verified; the two non-empty tuple REFERENCE rows are panic/recursion canaries pinned as known divergences, since stock rejects that input outright
   - `triage-empty-file-position` — issue #72: a zero-length file through the project service reports the parser's (0, 0) — pos/end/eof/start metadata equal to stock — instead of the synthetic skeleton's -1
   - `triage-custom-transformers` — issue #40: emit with non-empty customTransformers must throw (tsgo can't execute JS transformers)
   - `triage-ambient-order` — issue #42 class: ambient-module index run-stable (Go map order must not leak onto the wire)
