@@ -277,8 +277,12 @@ the one matching your machine (the main package is pure JS):
 | Windows x64 | `@typescript-native-bridge/win32-x64` |
 | Windows arm64 | `@typescript-native-bridge/win32-arm64` |
 
-Linux packages target glibc 2.31 and are rejected by the release gate if they
-acquire a newer symbol requirement. **Alpine/musl is not supported**: Go's
+Linux packages target glibc 2.35 and are rejected by the release gate if they
+acquire a newer symbol requirement. (They targeted 2.31 until bridge.17, built
+on `debian:bullseye-slim`; Debian retired those packages from the
+bullseye-security pool in 2026-09 so the image can no longer install its own
+build dependencies, and the successor floor is Ubuntu 22.04 / jammy.)
+**Alpine/musl is not supported**: Go's
 `-buildmode=c-shared` runtime crashes at load on musl libc — even a trivial
 hello-world c-shared library segfaults, on Go 1.22 through 1.26 alike
 ([golang/go#13492](https://github.com/golang/go/issues/13492), a 10-year-open
