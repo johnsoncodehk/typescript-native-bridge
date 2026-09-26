@@ -4,7 +4,8 @@
  * bridge as `{edits, baseVersion}` deltas once an overlay base exists, and
  * Go's overlay text after the sequence must equal the host text — proven by
  * resolving identifiers inserted mid-sequence. Covers multi-file,
- * interleaved edits, and an astral (surrogate-pair) boundary before an edit.
+ * interleaved edits, an astral (surrogate-pair) boundary before an edit, and
+ * an open buffer emptied to "" (real content, not "no host content").
  *
  * Wire shape is asserted from the overlay.sync trace events (TNB_TRACE_RPC):
  * the first divergent sync is a full push (establishes the base), and the
@@ -102,6 +103,15 @@ await withTsserver(
 		const d4 = await qiAt(otherTs, 'other', 'round2');
 		if (!d4.includes('v2-longer')) fail(`round2 other: ${JSON.stringify(d4)}`);
 		else console.log(`ok round2 other: ${d4}`);
+
+		// Round 3: an open buffer emptied to "" is real content. A stale Go
+		// overlay still exports `other`; the emptied one is not a module (2306).
+		await edit(send, mainTs, hostText.get(mainTs).length, 0, 'import { other } from "./other";\nexport const useOther = other;\n');
+		await edit(send, otherTs, 0, hostText.get(otherTs).length, '');
+		const diags = await send('semanticDiagnosticsSync', { file: mainTs }, CMD);
+		const codes = (diags?.body ?? []).map(d => d.code);
+		if (!codes.includes(2306)) fail(`round3 emptied other.ts: expected 2306 on main.ts, got ${JSON.stringify(codes)}`);
+		else console.log(`ok round3 emptied buffer: ${JSON.stringify(codes)}`);
 	},
 );
 
