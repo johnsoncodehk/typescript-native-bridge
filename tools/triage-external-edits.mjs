@@ -16,9 +16,13 @@
  *               must surface the new file's error, output text stock-equal.
  *   - stablecache: external rewrite of a node_modules .d.ts under a
  *               constant-version host must re-materialize the host AST on the
- *               JS side (stock does; the bridge must evict its stable host-SF
- *               cache at the external-change choke so JS agrees with Go).
- * Usage: node tools/triage-external-edits.mjs [estree|tsserver|tscwatch|stablecache...]
+ *               JS side (stock does; the bridge's disk stamp must evict its
+ *               stable host-SF cache so JS agrees with Go).
+ *   - createprogram: repeated plain ts.createProgram with no watcher at all —
+ *               stock re-reads disk on every program; each rewrite (fresh
+ *               file, aged file rewritten to the same size, back-to-back
+ *               rewrite) must move the diagnostics like stock.
+ * Usage: node tools/triage-external-edits.mjs [estree|tsserver|tscwatch|stablecache|createprogram...]
  * Exit: 0 = PASS, 1 = FAIL. Network required on first run (stock pack).
  *
  * v5 classification: bridge-contract surface — stock's own watch/session
@@ -314,8 +318,8 @@ async function runTscwatchCase() {
 // re-reads disk on the next program (no cross-program AST cache), so both
 // stock and TNB must surface the NEW text. The host forces preferHostSourceFiles
 // via a divergent snapshot on the root file (the overlay path the stable
-// cache was built for); the external-change feed is injected directly
-// (white-box — the per-file watcher fires the same signal in a watch host).
+// cache was built for). No change signal is fed: a direct createProgram's
+// only freshness source is the bridge's disk stamp.
 
 const STABLE_DRIVER = `
 import { createRequire } from 'node:module';
@@ -360,11 +364,7 @@ const program1 = ts.createProgram({ ...opts, host: makeHost() });
 const sf1 = program1.getSourceFile(pkgDts);
 console.log('gen1 hasMarker:', !!sf1?.text?.includes('V1_MARKER'));
 
-// External rewrite, then feed the external-change signal. A real watch host's
-// per-file watcher (tnbWatchSourceFile) fires the same signal; the direct call
-// makes the stage deterministic (stock has no such export — guarded).
 fs.writeFileSync(pkgDts, 'export declare const stableValue: number; // V1_MARKER\\n');
-if (ts.tnbNoteExternalFileChange) ts.tnbNoteExternalFileChange(pkgDts);
 
 const program2 = ts.createProgram({ ...opts, host: makeHost() });
 const sf2 = program2.getSourceFile(pkgDts);
@@ -396,6 +396,63 @@ function runStablecacheCase() {
 	return true;
 }
 
+// ── Repro 5: repeated plain createProgram, no watcher ────────────────────
+// Build scripts, test runners and plugin checkers call ts.createProgram more
+// than once per process with a plain CompilerHost; stock re-reads disk every
+// time. Stages: a file written just before the first build (its first stamp
+// can't be ordered against Go's read), an aged file rewritten to the SAME
+// size (only mtime moves), and a back-to-back rewrite.
+
+const CREATEPROGRAM_DRIVER = `
+import { createRequire } from 'node:module';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
+
+const ts = createRequire(import.meta.url)(process.argv[2]);
+const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'tnb-cp-')));
+const a = path.join(dir, 'a.ts'), fresh = path.join(dir, 'fresh.ts');
+fs.writeFileSync(a, "export const a = 'y';\\n");
+fs.writeFileSync(path.join(dir, 'b.ts'), "import { a } from './a';\\nexport const s: 'x' = a;\\n");
+fs.writeFileSync(path.join(dir, 'tsconfig.json'), JSON.stringify({ compilerOptions: { strict: true, noEmit: true, types: [] }, include: ['*.ts'] }));
+const aged = new Date(Date.now() - 60_000);
+for (const f of ['a.ts', 'b.ts', 'tsconfig.json']) fs.utimesSync(path.join(dir, f), aged, aged);
+const tsconfig = path.join(dir, 'tsconfig.json');
+const build = () => {
+	const cfg = ts.getParsedCommandLineOfConfigFile(tsconfig, {}, { ...ts.sys, onUnRecoverableConfigFileDiagnostic() {} });
+	const p = ts.createProgram({ rootNames: cfg.fileNames, options: cfg.options, host: ts.createCompilerHost(cfg.options) });
+	return ts.getPreEmitDiagnostics(p).map(d => d.code).sort((x, y) => x - y);
+};
+fs.writeFileSync(fresh, 'export const f: number = 1;\\n');
+console.log('stage fresh-cold:', JSON.stringify(build()));
+fs.writeFileSync(fresh, 'export const f: number = "s";\\n');
+console.log('stage fresh-rewrite:', JSON.stringify(build()));
+fs.writeFileSync(a, "export const a = 'x';\\n");
+console.log('stage aged-same-size:', JSON.stringify(build()));
+fs.writeFileSync(a, "export const a = 'y';\\n");
+fs.writeFileSync(fresh, 'export const f: number = 1;\\n');
+console.log('stage back-to-back:', JSON.stringify(build()));
+`;
+
+function runCreateprogramCase() {
+	const driver = path.join(scratchRoot, 'createprogram-driver.mjs');
+	fs.mkdirSync(scratchRoot, { recursive: true });
+	fs.writeFileSync(driver, CREATEPROGRAM_DRIVER);
+	const parse = (out) => Object.fromEntries([...out.matchAll(/stage ([\w-]+): (\[[^\]]*\])/g)].map(m => [m[1], m[2]]));
+	const outTnb = runNode(driver, [path.join(repoRoot, 'lib', 'typescript.js')], scratchRoot);
+	const outStock = runNode(driver, [path.join(stockPkg, 'lib', 'typescript.js')], scratchRoot);
+	const tnb = parse(outTnb), stock = parse(outStock);
+	const expected = { 'fresh-cold': '[2322]', 'fresh-rewrite': '[2322,2322]', 'aged-same-size': '[2322]', 'back-to-back': '[2322]' };
+	if (JSON.stringify(stock) !== JSON.stringify(expected)) {
+		return fail('createprogram', `stock control diverged: ${JSON.stringify(stock)} (expected ${JSON.stringify(expected)})\n${outStock}`);
+	}
+	if (JSON.stringify(tnb) !== JSON.stringify(stock)) {
+		return fail('createprogram', `stage mismatch vs stock:\n  tnb:   ${JSON.stringify(tnb)}\n  stock: ${JSON.stringify(stock)}\n--- tnb output ---\n${outTnb}`);
+	}
+	console.log('[createprogram] ok (fresh / aged same-size / back-to-back rewrites reach tsgo across plain createProgram calls, stock-identical)');
+	return true;
+}
+
 // ── driver ───────────────────────────────────────────────────────────────
 
 function fail(name, msg) {
@@ -405,7 +462,7 @@ function fail(name, msg) {
 
 ensureStock();
 const wanted = process.argv.slice(2);
-const CASES = { estree: runEstree, tsserver: runTsserver, tscwatch: runTscwatchCase, stablecache: runStablecacheCase };
+const CASES = { estree: runEstree, tsserver: runTsserver, tscwatch: runTscwatchCase, stablecache: runStablecacheCase, createprogram: runCreateprogramCase };
 const names = wanted.length ? wanted : Object.keys(CASES);
 let ok = true;
 for (const name of names) {

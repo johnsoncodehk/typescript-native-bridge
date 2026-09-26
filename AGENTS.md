@@ -68,7 +68,7 @@ TNB is a tsgo-backed TypeScript fork: upstream `microsoft/TypeScript` and `micro
   - `triage-exit-codes` — CLI exit-code stock parity (DiagnosticsPresent_OutputsGenerated = 2; noEmitOnError ordering)
   - `triage-cli-only-flags` — CLI-only options (`--strict`, `--target`, …) ride updateSnapshot to Go; diagnostics must move like stock
   - `triage-electron-abi` — issue #44: win32 bridge.node loads under Electron-as-node (wired out-of-matrix: ci.yml build job + nightly test-bridge-win32)
-  - `triage-external-edits` — issue #49: disk rewrites reach tsgo across estree/tsserver/tsc-watch host classes (tsc-watch: the thin program registers a watcher per program file — it never passes files through getSourceFile, where stock creates them)
+  - `triage-external-edits` — issue #49: disk rewrites reach tsgo across estree/tsserver/tsc-watch host classes (tsc-watch: the thin program registers a watcher per program file — it never passes files through getSourceFile, where stock creates them) and across repeated plain `createProgram` calls with no watcher (fresh, aged same-size and back-to-back rewrites — the disk-stamp path)
   - `triage-generation-retention` — 100 edit+F12 rounds hold a ≈0 heapUsed slope (no closure pins a generation island)
   - `triage-framework-checks` — svelte-check/astro-check/glint vs stock parity (pinned framework versions installed under /tmp/tnb-fw-fixtures against stock typescript, then relinked to TNB/stock per run)
   - `triage-napi-fuzz` — NAPI payload fuzz: echo round-trips byte-identical on the string and binary paths
