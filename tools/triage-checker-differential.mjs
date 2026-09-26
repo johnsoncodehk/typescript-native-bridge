@@ -16,7 +16,10 @@
  * getConstructSignatures (param+return typeToString, signatureToString),
  * getBaseConstraintOfType / Type.getConstraint, getExportsOfModule,
  * resolveExternalModuleName, getTypeOfSymbolAtLocation /
- * getDeclaredTypeOfSymbol.
+ * getDeclaredTypeOfSymbol; relations — isTypeAssignableTo over every ordered
+ * pair of relations.ts's declared alias types, plus isArrayType /
+ * isTupleType / isArrayLikeType / isEmptyAnonymousObjectType / isNullableType
+ * per alias (stock's whole relation surface).
  *
  * Corpus features: plain module, default export + named/default re-export
  * chains, `export =` (separate cjs config), ambient module declaration,
@@ -211,6 +214,7 @@ const FW_KEYOF_TARGET = 'FW: target-slot name — stock names the Index/StringMa
 const FW_MAPPED_TARGET = 'FW: mapped-type target — stock links a mapped type (alias reference or instantiation) to its source via target, tsgo has no Reference-style target handle for mapped types (triage-type-field-audit conditionalExemption)';
 const FW_SUBST_CONSTRAINT = 'FW: substitution-constraint slot — stock\'s SubstitutionType exposes the NoInfer constraint as `constraint`, the bridge as the wire field `substConstraint` (with the stock name aliased onto it); the walk reads the wire name, so stock reads undefined while the bridge carries the constraint (AGENTS.md accepted tradeoff: SubstitutionType.constraint alias is code-path parity only — first reliable source-level trigger)';
 const FW_TUPLE_ELISION = 'FW: instantiated-tuple display — stock renders tuple references as [...] inside signature instantiations, tsgo renders the element types (stock tuple-reference display model)';
+const FW_TRUNC_BUDGET = 'FW: truncation-budget placement — at the 160-char typeToString budget stock shortens the first union it meets (`value: string | ... 1 more ... | undefined`), tsgo a later one; same total length. Engine printer (pristine tsgo @ 2bd066d8 prints TNB\'s string for [string, number?]#find)';
 const ERR_ABS = 'ERR: errored declaration resolution — stock resolves the abstract-instantiation error to the error type (rendered any), tsgo keeps the declared class type (engine error-type model on erroneous programs)';
 const JS_MODEL = 'JS: CJS module model — tsgo shapes module/exports symbols and require-destructured types differently from stock (exports = Property|ModuleExports vs ValueModule; module type = export object vs typeof import; literal widening through destructuring); engine checkJs model, pristine-tsgo attribution pending';
 const JS_ALIAS = 'JS: require-destructured binding model — stock models the binding as an alias symbol over the module export member, tsgo binds the member directly (alias model, checkJs path; pristine-tsgo attribution pending)';
@@ -250,6 +254,20 @@ const FULLWALK_KNOWN = new Map((() => {
 	add(FW_MAPPED_TARGET,
 		["field:target"],
 		["census.ts:825:Parameter[t]", "census.ts:825:Identifier[t]", "census.ts:825:Identifier[t1]", "census.ts:827:TypeReference[t]", "census.ts:846:Identifier[t]", "census.ts:846:Identifier[t1]", "census.ts:880:VariableDeclaration[t]", "census.ts:880:Identifier[t]", "census.ts:880:Identifier[t1]", "census.ts:887:TypeReference[t]", "census.ts:949:Identifier[t]", "census.ts:949:Identifier[t1]"]);
+	// relations.ts — the relation-battery aliases walked node by node: the
+	// same slot classes (Uppercase<string>; Record/Readonly/Partial mapped
+	// instantiations) plus one truncation-budget placement.
+	add(FW_KEYOF_TARGET,
+		["field:target"],
+		["relations.ts:770:TypeAliasDeclaration[t]", "relations.ts:782:Identifier[t]", "relations.ts:782:Identifier[t2]", "relations.ts:792:TypeReference[t]"]);
+	add(FW_MAPPED_TARGET,
+		["field:target"],
+		["relations.ts:1327:TypeAliasDeclaration[t]", "relations.ts:1339:Identifier[t]", "relations.ts:1339:Identifier[t2]", "relations.ts:1350:TypeReference[t]",
+			"relations.ts:3151:TypeAliasDeclaration[t]", "relations.ts:3163:Identifier[t]", "relations.ts:3163:Identifier[t2]", "relations.ts:3175:TypeReference[t]",
+			"relations.ts:3192:TypeAliasDeclaration[t]", "relations.ts:3204:Identifier[t]", "relations.ts:3204:Identifier[t2]", "relations.ts:3221:TypeReference[t]"]);
+	add(FW_TRUNC_BUDGET,
+		["getPropertiesOfType", "getApparentProperties"],
+		["relations.ts:1751:TypeAliasDeclaration", "relations.ts:1763:Identifier", "relations.ts:1774:TupleType"]);
 	add(FW_TUPLE_ELISION,
 		["getPropertiesOfType", "getApparentProperties"],
 		["types.ts:1128:Parameter", "types.ts:1128:Identifier", "types.ts:1133:TupleType", "types.ts:1188:Identifier"]);
@@ -539,6 +557,93 @@ export function unmap<T>(m: M2<T>): T { return m as unknown as T; }
 export const m1val: M1<E> = { id: 'x', tags: [] };
 export const unmapped = unmap(m1val); // ReverseMapped: M1 != M2 dodges the target identity fast path
 `,
+	// Relation battery: every R_* alias's declared type is related to every
+	// other one (isTypeAssignableTo, ordered pairs) plus the type predicates.
+	// Each group pins a relation rule the matrix exercises in both directions.
+	'relations.ts': `import { Animal, Dog, Color } from './types.js';
+import { Box, Shape } from './util.js';
+class PrivA { private p = 1; }
+class PrivB { private p = 1; }
+// top / bottom / unit
+export type R_any = any;
+export type R_unknown = unknown;
+export type R_never = never;
+export type R_void = void;
+export type R_undefined = undefined;
+export type R_null = null;
+// primitives, literals, widening, templates
+export type R_string = string;
+export type R_a = 'a';
+export type R_ab = 'a' | 'b';
+export type R_number = number;
+export type R_42 = 42;
+export type R_boolean = boolean;
+export type R_true = true;
+export type R_bigint = bigint;
+export type R_symbol = symbol;
+export type R_strOrUndef = string | undefined;
+export type R_tpl = \`pfx-\${string}\`;
+export type R_tplA = 'pfx-a';
+export type R_upper = Uppercase<string>;
+// object tops
+export type R_object = object;
+export type R_empty = {};
+export type R_Object = Object;
+// properties: optional / readonly / excess / weak / index signatures
+export type R_req = { a: string };
+export type R_opt = { a?: string };
+export type R_ro = { readonly a: string };
+export type R_extra = { a: string; b: number };
+export type R_aNum = { a: number };
+export type R_weak = { x?: number; y?: number };
+export type R_strIdx = { [k: string]: string };
+export type R_numIdx = { [k: number]: string };
+export type R_record = Record<string, unknown>;
+export type R_inter = { a: string } & { b: number };
+export type R_disc = { k: 'x'; v: string } | { k: 'y'; v: number };
+export type R_discX = { k: 'x'; v: string };
+// arrays / tuples
+export type R_arr = string[];
+export type R_roArr = readonly string[];
+export type R_numArr = number[];
+export type R_tup = [string, number];
+export type R_roTup = readonly [string, number];
+export type R_tupOpt = [string, number?];
+export type R_tupRest = [string, ...number[]];
+export type R_emptyTup = [];
+// functions: return covariance, strict parameter contravariance, method
+// bivariance, arity, generics, construct signatures
+export type R_fnRet = () => string;
+export type R_fnRetU = () => string | number;
+export type R_fnP = (x: string) => void;
+export type R_fnPU = (x: string | number) => void;
+export type R_fn2 = (x: string, y: number) => void;
+export type R_fnGen = <T>(x: T) => T;
+export type R_meth = { m(x: string): void };
+export type R_methU = { m(x: string | number): void };
+export type R_propFn = { m: (x: string) => void };
+export type R_propFnU = { m: (x: string | number) => void };
+export type R_ctor = new () => object;
+// nominal-ish: class hierarchy, private brands, enums
+export type R_Animal = Animal;
+export type R_Dog = Dog;
+export type R_PrivA = PrivA;
+export type R_PrivB = PrivB;
+export type R_structP = { p: number };
+export type R_Color = Color;
+export type R_ColorRed = Color.Red;
+// generics / lib references / type operators
+export type R_Shape = Shape;
+export type R_BoxShape = Box<Shape>;
+export type R_BoxObj = Box<object>;
+export type R_promise = Promise<string>;
+export type R_promiseLike = PromiseLike<string>;
+export type R_keyofShape = keyof Shape;
+export type R_shapeId = Shape['id'];
+export type R_mapped = { [K in 'a' | 'b']: string };
+export type R_roShape = Readonly<Shape>;
+export type R_partialShape = Partial<Shape>;
+`,
 	// JS project (checkJs): JSDoc-typed exports, object literals (JSLiteral
 	// objectFlags), module.exports — exercised through the js/ config only
 	'js/plain.js': `/**
@@ -648,6 +753,8 @@ const POINTS = [
 	{ proj: 'cjs', file: 'cjs/use.ts', label: 'cjs/use.ts:EqualAlias-export', needle: 'Equal as EqualAlias' },
 	{ proj: 'cjs', file: 'cjs/use.ts', label: 'cjs/use.ts:spec-equal', needle: "'./equal'", spec: true },
 ];
+
+const RELATION_PREDICATES = ['isArrayType', 'isTupleType', 'isArrayLikeType', 'isEmptyAnonymousObjectType', 'isNullableType'];
 
 // ── Full-walk machinery ─────────────────────────────────────────────────────
 // TNB_DIFF_FULLWALK=1 marks a child; TNB_DIFF_FILE=<rel> scopes a tnb child
@@ -1115,6 +1222,27 @@ function runSide(side, dir) {
 			rec('getImmediateAliasedSymbol.chain', at, alias ? chain : null);
 		};
 
+		// Stock exposes one relation (isTypeAssignableTo) plus type predicates;
+		// the ordered-pair matrix over relations.ts's declared alias types is
+		// what makes relation parity checkable without the big nets.
+		const relationBattery = () => {
+			const { text } = sfOf('relations.ts');
+			const types = [];
+			for (const [, name] of text.matchAll(/^export type (R_\w+) =/gm)) {
+				const sym = tryQ(() => checker.getSymbolAtLocation(locate({ file: 'relations.ts', label: name, needle: `${name} =` })));
+				const t = sym && !sym.$err ? tryQ(() => checker.getDeclaredTypeOfSymbol(sym)) : sym;
+				rec('relation:type', name, canonType(t));
+				if (t && !t.$err) types.push([name, t]);
+			}
+			if (types.length < 60) throw new Error(`relations.ts yielded ${types.length} alias types (${side})`);
+			for (const [name, t] of types) {
+				for (const pred of RELATION_PREDICATES) rec(pred, name, tryQ(() => checker[pred](t)));
+			}
+			for (const [sn, s] of types) {
+				for (const [tn, t] of types) rec('isTypeAssignableTo', `${sn}->${tn}`, tryQ(() => checker.isTypeAssignableTo(s, t)));
+			}
+		};
+
 		if (FULLWALK) {
 			for (const rel of FULLWALK_FILES) {
 				if (projOfFile(rel) !== proj) continue;
@@ -1169,6 +1297,7 @@ function runSide(side, dir) {
 				aliasBattery(sym, at);
 			}
 		}
+		if (proj === 'main') relationBattery();
 	}
 
 	for (const p of Object.values(programs)) p.watch.close?.();
@@ -1362,7 +1491,7 @@ function parentMain() {
 // needs a COVERAGE entry naming the battery that exercises it (or an exempt
 // reason). The two parse sources are the Go method set (proto.go constants)
 // and the JS-callable surface in tsgoChecker.ts (ARENA_METHODS keys + the
-// JSON-path literals). Relations, session lifecycle and IDE paths are exempt
+// JSON-path literals). Session lifecycle and IDE paths are exempt
 // by the documented tradeoffs (AGENTS.md) — the gate's job is the decision
 // being explicit, not the walk covering the whole surface.
 const COVERAGE = new Map([
@@ -1405,7 +1534,8 @@ const COVERAGE = new Map([
 	['getAliasTypeArgumentsOfType', 'field:aliasTypeArguments'],
 	// exempt — not reachable from the walk; the reason names where parity
 	// rests instead (services paths ride sim-nav/volar; IDE paths ride the
-	// IDE-sim and arena-parity witnesses; relations are an accepted tradeoff).
+	// IDE-sim and arena-parity witnesses). relation-battery = the curated-mode
+	// relations.ts matrix (triage-checker-differential, not the full walk).
 	['getResolvedSignature', 'exempt: signature-from-node lookup — IDE sims/volar path'],
 	['getContextualType', 'exempt: contextual typing — sim-nav/volar path'],
 	['getContextualTypeForArgumentAtIndex', 'exempt: contextual typing — sim-nav/volar path'],
@@ -1415,7 +1545,7 @@ const COVERAGE = new Map([
 	['getBaseTypes', 'exempt: services helper — sim-nav/volar path'],
 	['getSymbolOfType', 'exempt: Type.symbol backfill — sim-nav/volar path'],
 	['getTypesOfType', 'exempt: services helper — sim-nav/volar path'],
-	['isArrayType', 'exempt: services helper — sim-nav/volar path'],
+	['isArrayType', 'relation-battery'],
 	['getTypeOfSymbol', 'exempt: host-fast services path'],
 	['getSymbolAtPosition', 'exempt: position API — IDE sims'],
 	['quickinfo', 'exempt: IDE hover path — arena-parity + IDE sims'],
@@ -1443,10 +1573,10 @@ const COVERAGE = new Map([
 	['getExactOptionalProperties', 'exempt: services helper'],
 	['getPromisedTypeOfPromise', 'exempt: services helper'],
 	['getWidenedLiteralType', 'exempt: services helper'],
-	['isEmptyAnonymousObjectType', 'exempt: services helper'],
+	['isEmptyAnonymousObjectType', 'relation-battery'],
 	['isLibType', 'exempt: services helper'],
-	['isNullableType', 'exempt: services helper'],
-	['isTupleType', 'exempt: services helper'],
+	['isNullableType', 'relation-battery'],
+	['isTupleType', 'relation-battery'],
 	['typeHasCallOrConstructSignatures', 'exempt: services helper'],
 	['getFalseTypeOfConditionalType', 'exempt: services helper'],
 	['getTrueTypeOfConditionalType', 'exempt: services helper'],
@@ -1560,7 +1690,7 @@ function coverageGate() {
 		if (![...COVERAGE.values()].includes(`field:${p}`)) errors.push(`field:${p}: NESTED prop has no field: coverage entry — the closure must read every NESTED prop`);
 	}
 	for (const [m, v] of COVERAGE) {
-		if (!/^(battery|symbol-battery|spec-battery|module-battery|field:[A-Za-z0-9]+|exempt: .+)$/.test(v)) errors.push(`${m}: bad COVERAGE value ${JSON.stringify(v)}`);
+		if (!/^(battery|symbol-battery|spec-battery|module-battery|relation-battery|field:[A-Za-z0-9]+|exempt: .+)$/.test(v)) errors.push(`${m}: bad COVERAGE value ${JSON.stringify(v)}`);
 	}
 	let exempt = 0;
 	for (const v of COVERAGE.values()) if (v.startsWith('exempt:')) exempt++;
