@@ -1,0 +1,399 @@
+diff --git a/internal/checker/checker.go b/internal/checker/checker.go
+index b639d488e4..947ce0dbe6 100644
+--- a/internal/checker/checker.go
++++ b/internal/checker/checker.go
+@@ -786,6 +786,7 @@ type Checker struct {
+ 	typeofType                                  *Type
+ 	typeResolutions                             []TypeResolution
+ 	resolutionStart                             int
++	instantiatedSymbolActive                    map[*ast.Symbol]bool
+ 	inVarianceComputation                       bool
+ 	apparentArgumentCount                       *int
+ 	lastGetCombinedNodeFlagsNode                *ast.Node
+@@ -2144,7 +2145,12 @@ func (c *Checker) getImmediateAliasedSymbol(symbol *ast.Symbol) *ast.Symbol {
+ 	if links.immediateTarget == nil {
+ 		node := c.getDeclarationOfAliasSymbol(symbol)
+ 		if node == nil {
+-			panic("Unexpected nil in getImmediateAliasedSymbol")
++			// Synthetic aliases (e.g. the esModuleInterop default of a
++			// CommonJS module) have no declaration — stock 6.0.3 throws
++			// (Debug.fail) here, and bridge consumers arrive without the
++			// declarations guard upstream callers rely on.
++			// Ledger(tsgo-immaliased-nil) — README behavior table row.
++			return nil
+ 		}
+ 		links.immediateTarget = c.getTargetOfAliasDeclaration(node)
+ 	}
+@@ -16371,8 +16377,9 @@ func (c *Checker) GetTypeOfSymbolAtLocation(symbol *ast.Symbol, location *ast.No
+ 		// an dotted name expression, and if the location is not an assignment target, obtain the type
+ 		// of the expression (which will reflect control flow analysis). If the expression indeed
+ 		// resolved to the given symbol, return the narrowed type.
++		// Ledger(tsgo-typeat-nil-parent-guard) — README behavior table row.
+ 		if (ast.IsIdentifier(location) || ast.IsPrivateIdentifier(location)) &&
+-			!(ast.IsJsxTagName(location) || ast.IsJsxAttribute(location.Parent) || ast.IsJsxNamespacedName(location.Parent)) {
++			!(ast.IsJsxTagName(location) || (location.Parent != nil && (ast.IsJsxAttribute(location.Parent) || ast.IsJsxNamespacedName(location.Parent)))) {
+ 			if ast.IsRightSideOfQualifiedNameOrPropertyAccess(location) {
+ 				location = location.Parent
+ 			}
+@@ -16388,7 +16395,8 @@ func (c *Checker) GetTypeOfSymbolAtLocation(symbol *ast.Symbol, location *ast.No
+ 				}
+ 			}
+ 		}
+-		if ast.IsDeclarationName(location) && ast.IsSetAccessorDeclaration(location.Parent) && c.getAnnotatedAccessorTypeNode(location.Parent) != nil {
++		// Ledger(tsgo-typeat-nil-parent-guard) — README behavior table row.
++		if ast.IsDeclarationName(location) && location.Parent != nil && ast.IsSetAccessorDeclaration(location.Parent) && c.getAnnotatedAccessorTypeNode(location.Parent) != nil {
+ 			return c.getWriteTypeOfAccessors(location.Parent.Symbol())
+ 		}
+ 		// The location isn't a reference to the given symbol, meaning we're being asked
+@@ -16403,13 +16411,13 @@ func (c *Checker) GetTypeOfSymbolAtLocation(symbol *ast.Symbol, location *ast.No
+ 	return c.getNonMissingTypeOfSymbol(symbol)
+ }
+ 
+-func (c *Checker) getTypeOfSymbol(symbol *ast.Symbol) *Type {
++// getTypeOfSymbolByFlags mirrors stock getTypeOfSymbol's flag dispatch after the
++// Instantiated CheckFlags branch (checker.ts). Used when Instantiated links lack
++// target/mapper (cross-checker SymbolHandle reuse) so we never chase a nil target.
++func (c *Checker) getTypeOfSymbolByFlags(symbol *ast.Symbol) *Type {
+ 	if symbol.CheckFlags&ast.CheckFlagsDeferredType != 0 {
+ 		return c.getTypeOfSymbolWithDeferredType(symbol)
+ 	}
+-	if symbol.CheckFlags&ast.CheckFlagsInstantiated != 0 {
+-		return c.getTypeOfInstantiatedSymbol(symbol)
+-	}
+ 	if symbol.CheckFlags&ast.CheckFlagsMapped != 0 {
+ 		return c.getTypeOfMappedSymbol(symbol)
+ 	}
+@@ -16434,6 +16442,20 @@ func (c *Checker) getTypeOfSymbol(symbol *ast.Symbol) *Type {
+ 	return c.errorType
+ }
+ 
++func (c *Checker) getTypeOfSymbol(symbol *ast.Symbol) *Type {
++	// No re-entrancy guard here: legitimate circular resolution flows through
++	// this function and is handled by the pushTypeResolution machinery in the
++	// per-kind getters. Cross-checker SymbolHandle pathology (nil/cyclic
++	// Instantiated targets) is guarded in getTypeOfInstantiatedSymbol instead.
++	if symbol.CheckFlags&ast.CheckFlagsDeferredType != 0 {
++		return c.getTypeOfSymbolWithDeferredType(symbol)
++	}
++	if symbol.CheckFlags&ast.CheckFlagsInstantiated != 0 {
++		return c.getTypeOfInstantiatedSymbol(symbol)
++	}
++	return c.getTypeOfSymbolByFlags(symbol)
++}
++
+ func (c *Checker) getNonMissingTypeOfSymbol(symbol *ast.Symbol) *Type {
+ 	return c.removeMissingType(c.getTypeOfSymbol(symbol), symbol.Flags&ast.SymbolFlagsOptional != 0)
+ }
+@@ -16441,7 +16463,23 @@ func (c *Checker) getNonMissingTypeOfSymbol(symbol *ast.Symbol) *Type {
+ func (c *Checker) getTypeOfInstantiatedSymbol(symbol *ast.Symbol) *Type {
+ 	links := c.valueSymbolLinks.Get(symbol)
+ 	if links.resolvedType == nil {
+-		links.resolvedType = c.instantiateType(c.getTypeOfSymbol(links.target), links.mapper)
++		// Stock: instantiateType(getTypeOfSymbol(links.target!), links.mapper).
++		// Bridge: Instantiated CheckFlags live on *ast.Symbol, but target/mapper
++		// live in per-checker valueSymbolLinks. Cross-checker SymbolHandle reuse
++		// yields empty links (nil target) or cyclic target chains — dispatch by
++		// flags instead of chasing them. Stock guarantees target is a strictly
++		// less-instantiated symbol, so neither guard ever fires on stock data.
++		// Ledger(tsgo-instsymbol-active-guard) — README behavior table row.
++		if links.target == nil || c.instantiatedSymbolActive[symbol] {
++			links.resolvedType = c.getTypeOfSymbolByFlags(symbol)
++		} else {
++			if c.instantiatedSymbolActive == nil {
++				c.instantiatedSymbolActive = make(map[*ast.Symbol]bool)
++			}
++			c.instantiatedSymbolActive[symbol] = true
++			links.resolvedType = c.instantiateType(c.getTypeOfSymbol(links.target), links.mapper)
++			delete(c.instantiatedSymbolActive, symbol)
++		}
+ 	}
+ 	return links.resolvedType
+ }
+@@ -16449,7 +16487,16 @@ func (c *Checker) getTypeOfInstantiatedSymbol(symbol *ast.Symbol) *Type {
+ func (c *Checker) getWriteTypeOfInstantiatedSymbol(symbol *ast.Symbol) *Type {
+ 	links := c.valueSymbolLinks.Get(symbol)
+ 	if links.writeType == nil {
+-		links.writeType = c.instantiateType(c.getWriteTypeOfSymbol(links.target), links.mapper)
++		if links.target == nil || c.instantiatedSymbolActive[symbol] {
++			links.writeType = c.getTypeOfSymbolByFlags(symbol)
++		} else {
++			if c.instantiatedSymbolActive == nil {
++				c.instantiatedSymbolActive = make(map[*ast.Symbol]bool)
++			}
++			c.instantiatedSymbolActive[symbol] = true
++			links.writeType = c.instantiateType(c.getWriteTypeOfSymbol(links.target), links.mapper)
++			delete(c.instantiatedSymbolActive, symbol)
++		}
+ 	}
+ 	return links.writeType
+ }
+@@ -18765,28 +18812,28 @@ func (c *Checker) getPropertiesOfObjectType(t *Type) []*ast.Symbol {
+ 
+ func (c *Checker) getPropertiesOfUnionOrIntersectionType(t *Type) []*ast.Symbol {
+ 	d := t.AsUnionOrIntersectionType()
+-	if d.resolvedProperties == nil {
+-		var checked collections.Set[string]
+-		props := []*ast.Symbol{}
+-		for _, current := range d.types {
+-			for _, prop := range c.getPropertiesOfType(current) {
+-				if !checked.Has(prop.Name) {
+-					checked.Add(prop.Name)
+-					combinedProp := c.getPropertyOfUnionOrIntersectionType(t, prop.Name, t.flags&TypeFlagsIntersection != 0 /*skipObjectFunctionPropertyAugment*/)
+-					if combinedProp != nil {
+-						props = append(props, combinedProp)
+-					}
+-				}
+-			}
+-			// The properties of a union type are those that are present in all constituent types, so
+-			// we only need to check the properties of the first type without index signature
+-			if t.flags&TypeFlagsUnion != 0 && len(c.getIndexInfosOfType(current)) == 0 {
+-				break
++	if d.resolvedProperties != nil {
++		return d.resolvedProperties
++	}
++
++	// The per-type memo above is per-checker; reuse a program-level memo so the
++	// diagnostics and API checkers do not re-materialize the same member list.
++	if key, ok := c.resolvedPropertiesProgramKey(t); ok {
++		if cache := c.getResolvedPropertiesCache(); cache != nil {
++			if props := cache.load(key); props != nil {
++				d.resolvedProperties = props
++				return props
+ 			}
++			props := c.computePropertiesOfUnionOrIntersectionType(t, d)
++			d.resolvedProperties = props
++			cache.storeIfShareable(key, props)
++			return props
+ 		}
+-		d.resolvedProperties = props
+ 	}
+-	return d.resolvedProperties
++
++	props := c.computePropertiesOfUnionOrIntersectionType(t, d)
++	d.resolvedProperties = props
++	return props
+ }
+ 
+ func (c *Checker) getPropertyOfType(t *Type, name string) *ast.Symbol {
+@@ -19073,14 +19120,37 @@ func (c *Checker) getBaseTypes(t *Type) []*Type {
+ 	if t.objectFlags&(ObjectFlagsClassOrInterface|ObjectFlagsTuple) == 0 {
+ 		return nil
+ 	}
++	// Dispatch stays on t's own flags (as upstream writes it), but the tuple's
++	// STRUCTURAL data — elementInfos and the readonly modifier — lives on the
++	// target; a reference carries only its resolvedTypeArguments. The arity-0
++	// array-literal clone is the shape that has neither: createArrayLiteralType
++	// copied the target's Tuple flag onto the *TypeReference it made, so the
++	// flag points at data that is not there.
++	// Ledger(tsgo-tuple-base-type-target) — README behavior table row.
+ 	data := t.AsInterfaceType()
++	if data == nil {
++		// The clone lands here: element slots and elementInfos come off the
++		// target, the readonly modifier off asWritten (the clone, which has
++		// none) — which is what makes its answer the mutable array, matching
++		// stock, where the same fields are simply absent. Recomputed per call
++		// because a *TypeReference has no baseTypesResolved to memoize in; the
++		// recomputed type is the same cached one, so this is cost, not
++		// behavior. The trailing return is NAPI-boundary hardening, not a
++		// reachable shape (see the ledger row): a nil-data type that is not a
++		// tuple clone would otherwise dereference nil, and the boundary turns
++		// that into a process-fatal panic for every consumer.
++		if isTupleType(t) {
++			return []*Type{c.getTupleBaseType(t.Target(), t)}
++		}
++		return nil
++	}
+ 	if !data.baseTypesResolved {
+ 		if !c.pushTypeResolution(t, TypeSystemPropertyNameResolvedBaseTypes) {
+ 			return data.resolvedBaseTypes
+ 		}
+ 		switch {
+ 		case t.objectFlags&ObjectFlagsTuple != 0:
+-			data.resolvedBaseTypes = []*Type{c.getTupleBaseType(t)}
++			data.resolvedBaseTypes = []*Type{c.getTupleBaseType(t.Target(), t)}
+ 		case t.symbol.Flags&(ast.SymbolFlagsClass|ast.SymbolFlagsInterface) != 0:
+ 			if t.symbol.Flags&ast.SymbolFlagsClass != 0 {
+ 				c.resolveBaseTypesOfClass(t)
+@@ -19108,9 +19178,19 @@ func (c *Checker) getBaseTypes(t *Type) []*Type {
+ 	return data.resolvedBaseTypes
+ }
+ 
+-func (c *Checker) getTupleBaseType(t *Type) *Type {
+-	typeParameters := t.AsTupleType().TypeParameters()
+-	elementInfos := t.AsTupleType().elementInfos
++// getTupleBaseType builds the array base of a tuple. target carries the tuple
++// data (a reference to it has none), while asWritten is the type the caller
++// asked about: it alone decides the readonly modifier, because the reference
++// createArrayLiteralType makes has no such field for stock to read either — a
++// declared `readonly []` keeps its readonly base, the `([] as const)` clone
++// answers the mutable one.
++func (c *Checker) getTupleBaseType(target *Type, asWritten *Type) *Type {
++	// target is a real tuple target at both call sites: the nil-data arm
++	// returned every *TypeReference clone already, and the tuple arm is reached
++	// only with non-nil tuple data, whose sole allocator is
++	// createTupleTargetType — it points the target at itself.
++	typeParameters := target.AsTupleType().TypeParameters() // asguard:exempt callers pass a tuple target: the nil-data arm returned reference-data clones and the tuple arm runs only with non-nil InterfaceType data
++	elementInfos := target.AsTupleType().elementInfos       // asguard:exempt same call-site invariant as the line above
+ 	elementTypes := make([]*Type, len(typeParameters))
+ 	for i, tp := range typeParameters {
+ 		if elementInfos[i].flags&ElementFlagsVariadic != 0 {
+@@ -19119,7 +19199,11 @@ func (c *Checker) getTupleBaseType(t *Type) *Type {
+ 			elementTypes[i] = tp
+ 		}
+ 	}
+-	return c.createArrayTypeEx(c.getUnionType(elementTypes), t.AsTupleType().readonly)
++	readonly := false
++	if tuple, ok := asWritten.data.(*TupleType); ok {
++		readonly = tuple.readonly
++	}
++	return c.createArrayTypeEx(c.getUnionType(elementTypes), readonly)
+ }
+ 
+ func (c *Checker) resolveBaseTypesOfClass(t *Type) {
+@@ -22798,6 +22882,19 @@ func (c *Checker) getTypeFromTypeNodeWorker(node *ast.Node) *Type {
+ 		return c.getTypeFromInferTypeNode(node)
+ 	case ast.KindImportType:
+ 		return c.getTypeFromImportTypeNode(node)
++	// Fork parity: stock also resolves an identifier, qualified name, or
++	// property access as a type expression here — callers gate on
++	// isPartOfTypeNode, which admits entity names (checker.ts
++	// getTypeFromTypeNodeWorker). Upstream's default arm answered errorType,
++	// so GetTypeAtLocation on a type-name identifier (`P` in `[P, …]`,
++	// `Ns.Inner` in `x: Ns.Inner`) reported any (issue #30).
++	// Ledger(getTypeFromTypeNodeWorker) — README behavior table row.
++	case ast.KindIdentifier, ast.KindQualifiedName, ast.KindPropertyAccessExpression:
++		symbol := c.getSymbolAtLocation(node, false /*ignoreErrors*/)
++		if symbol != nil {
++			return c.getDeclaredTypeOfSymbol(symbol)
++		}
++		return c.errorType
+ 	default:
+ 		return c.errorType
+ 	}
+@@ -23584,6 +23681,14 @@ func (c *Checker) getDeclaredTypeOfSymbol(symbol *ast.Symbol) *Type {
+ }
+ 
+ func (c *Checker) tryGetDeclaredTypeOfSymbol(symbol *ast.Symbol) *Type {
++	// A symbol-less type declaration (e.g. a type-only ImportClause, which
++	// IsTypeDeclaration covers but the binder never gives a symbol) arrives
++	// here via getTypeOfNode; stock throws a catchable TypeError on the same
++	// call, a Go nil-deref is process-fatal on the NAPI boundary (issue #71).
++	// Ledger(tsgo-declaredtype-nil-symbol) — README behavior table row.
++	if symbol == nil {
++		return nil
++	}
+ 	switch {
+ 	case symbol.Flags&(ast.SymbolFlagsClass|ast.SymbolFlagsInterface) != 0:
+ 		return c.getDeclaredTypeOfClassOrInterface(symbol)
+@@ -29109,6 +29214,13 @@ func (c *Checker) getContextualType(node *ast.Node, contextFlags ContextFlags) *
+ 		return c.contextualInfos[index].t
+ 	}
+ 	parent := node.Parent
++	// Bridge-only guard: parsed trees always parent every non-root node, so
++	// this never fires on tsgo's own flows; the bridge's GetContextualType RPC
++	// can receive parentless nodes from stock-derived callers.
++	// Ledger(tsgo-ctx-initializer-nil-guard) — README behavior table row.
++	if parent == nil {
++		return nil
++	}
+ 	switch parent.Kind {
+ 	case ast.KindVariableDeclaration, ast.KindParameter, ast.KindPropertyDeclaration, ast.KindPropertySignature, ast.KindBindingElement:
+ 		return c.getContextualTypeForInitializerExpression(node, contextFlags)
+diff --git a/internal/checker/exports.go b/internal/checker/exports.go
+index 90162bdaeb..e2bdbf8579 100644
+--- a/internal/checker/exports.go
++++ b/internal/checker/exports.go
+@@ -62,14 +62,6 @@ func (c *Checker) GetUnknownSymbol() *ast.Symbol {
+ 	return c.unknownSymbol
+ }
+ 
+-func (c *Checker) GetUndefinedSymbol() *ast.Symbol {
+-	return c.undefinedSymbol
+-}
+-
+-func (c *Checker) GetArgumentsSymbol() *ast.Symbol {
+-	return c.argumentsSymbol
+-}
+-
+ func (c *Checker) GetUnionType(types []*Type) *Type {
+ 	return c.getUnionType(types)
+ }
+@@ -353,3 +345,8 @@ func (c *Checker) GetWidenedType(t *Type) *Type {
+ func (c *Checker) CompareSymbols(s1, s2 *ast.Symbol) int {
+ 	return c.compareSymbols(s1, s2)
+ }
++
++// Final-3 batch TypeChecker methods (implementations live in sibling files):
++//   GetMemberOverrideModifierStatus — override_status.go
++//   GetSymbolOfExpando               — expando.go
++//   CollectVisitedTypeParameters     — symbolwalker.go
+diff --git a/internal/checker/nodebuilderimpl.go b/internal/checker/nodebuilderimpl.go
+index 2c64872a69..b5aecd4eb9 100644
+--- a/internal/checker/nodebuilderimpl.go
++++ b/internal/checker/nodebuilderimpl.go
+@@ -1617,7 +1617,10 @@ func (b *NodeBuilderImpl) symbolToTypeParameterDeclarations(symbol *ast.Symbol)
+ 
+ func (b *NodeBuilderImpl) typeParametersToTypeParameterDeclarations(symbol *ast.Symbol) []*ast.Node {
+ 	targetSymbol := b.ch.getTargetSymbol(symbol)
+-	if targetSymbol.Flags&(ast.SymbolFlagsClass|ast.SymbolFlagsInterface|ast.SymbolFlagsAlias) != 0 {
++	// Stock checks SymbolFlags.TypeAlias here; SymbolFlagsAlias (import alias)
++	// was a mistranslation that dropped type parameters from type alias display.
++	// Ledger(tsgo-symbolflags-typealias-display) — README behavior table row.
++	if targetSymbol.Flags&(ast.SymbolFlagsClass|ast.SymbolFlagsInterface|ast.SymbolFlagsTypeAlias) != 0 {
+ 		var results []*ast.Node
+ 		params := b.ch.getLocalTypeParametersOfClassOrInterfaceOrTypeAlias(symbol)
+ 		for _, param := range params {
+diff --git a/internal/checker/services.go b/internal/checker/services.go
+index 12b9d40792..db9750b1af 100644
+--- a/internal/checker/services.go
++++ b/internal/checker/services.go
+@@ -222,6 +222,14 @@ func (c *Checker) IsUnknownSymbol(symbol *ast.Symbol) bool {
+ 	return symbol == c.unknownSymbol
+ }
+ 
++func (c *Checker) GetUndefinedSymbol() *ast.Symbol {
++	return c.undefinedSymbol
++}
++
++func (c *Checker) GetArgumentsSymbol() *ast.Symbol {
++	return c.argumentsSymbol
++}
++
+ func (c *Checker) IsUndefinedSymbol(symbol *ast.Symbol) bool {
+ 	return symbol == c.undefinedSymbol
+ }
+diff --git a/internal/checker/types.go b/internal/checker/types.go
+index bd13420922..4d7865fd00 100644
+--- a/internal/checker/types.go
++++ b/internal/checker/types.go
+@@ -746,6 +746,18 @@ func (t *Type) Target() *Type {
+ 	panic("Unhandled case in Type.Target")
+ }
+ 
++// ThisType returns the polymorphic this-type of a class/interface or tuple
++// target (stock InterfaceType.thisType); nil for other type kinds. Gate on
++// the data shape, not objectFlags: a reference re-created from a tuple's
++// objectFlags carries the Tuple flag while its data stays *TypeReference
++// (issues #69/#70), and stock keeps such references field-less.
++func (t *Type) ThisType() *Type {
++	if iface := t.data.AsInterfaceType(); iface != nil {
++		return iface.thisType
++	}
++	return nil
++}
++
+ func (t *Type) Mapper() *TypeMapper {
+ 	switch {
+ 	case t.flags&TypeFlagsObject != 0:
+@@ -903,6 +915,11 @@ type UniqueESSymbolType struct {
+ 	name string
+ }
+ 
++// Name is the unique-symbol type's escaped name — stock formats it
++// `__@<name>@<symbolId>` (UniqueESSymbolType.escapedName); the trailing
++// symbol ordinal is engine-internal and may differ from stock's.
++func (t *UniqueESSymbolType) Name() string { return t.name }
++
+ // ConstrainedType (type with computed base constraint)
+ 
+ type ConstrainedType struct {

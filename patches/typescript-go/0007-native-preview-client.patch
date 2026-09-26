@@ -1814,6 +1814,482 @@ index 1c8b5d7f0f..a131f9ea70 100644
      }
  
      get hasRestParameter(): boolean {
+diff --git a/_packages/native-preview/src/api/async/client.ts b/_packages/native-preview/src/api/async/client.ts
+index b4a123d537..6d3b9b8f35 100644
+--- a/_packages/native-preview/src/api/async/client.ts
++++ b/_packages/native-preview/src/api/async/client.ts
+@@ -90,7 +90,7 @@ export class Client {
+             }
+ 
+             this.process = spawn(resolveExePath(options), args, {
+-                stdio: ["pipe", "pipe", "inherit"],
++                stdio: ["pipe", "pipe", "pipe"],
+             });
+ 
+             this.process.once("error", error => {
+@@ -98,6 +98,11 @@ export class Client {
+             });
+ 
+             this.process.once("spawn", () => {
++                // stderr is piped (not inherited) so ResetStdio on the parent
++                // never shares a TTY/fd with the child; unref so it does not
++                // keep the parent event loop alive.
++                (this.process?.stderr as { unref?: () => void } | null | undefined)?.unref?.();
++                this.process?.unref();
+                 this.connected = true;
+                 resolve();
+             });
+diff --git a/_packages/native-preview/src/api/node/node.generated.ts b/_packages/native-preview/src/api/node/node.generated.ts
+index 60ee9cbf30..9ffce12957 100644
+--- a/_packages/native-preview/src/api/node/node.generated.ts
++++ b/_packages/native-preview/src/api/node/node.generated.ts
+@@ -43,7 +43,7 @@ export class RemoteNodeList extends Array<RemoteNode> implements NodeArray<Remot
+     }
+ 
+     parent: RemoteNode;
+-    hasTrailingComma?: boolean;
++    private _hasTrailingCommaMemo: boolean | undefined;
+     transformFlags: number = 0;
+     protected view: DataView;
+     protected index: number;
+@@ -67,6 +67,61 @@ export class RemoteNodeList extends Array<RemoteNode> implements NodeArray<Remot
+         return this.view.getUint32(this._byteIndex + NODE_OFFSET_NEXT, true);
+     }
+ 
++    // The wire format doesn't carry hasTrailingComma, but the list range covers
++    // the delimiter after the last element, so it can be recovered from source
++    // text: the first non-trivia character in [lastElement.end, list.end) is
++    // either "," or nothing. Consumers like the fork printer rely on it to
++    // faithfully re-emit parse-tree lists (e.g. object literal defaults).
++    get hasTrailingComma(): boolean {
++        if (this._hasTrailingCommaMemo === undefined) {
++            this._hasTrailingCommaMemo = this.computeHasTrailingComma();
++        }
++        return this._hasTrailingCommaMemo;
++    }
++
++    set hasTrailingComma(value: boolean | undefined) {
++        this._hasTrailingCommaMemo = value;
++    }
++
++    private computeHasTrailingComma(): boolean {
++        const len = this.length;
++        if (len === 0) return false;
++        const last = this.at(len - 1);
++        const start = last?.end;
++        const end = this.end;
++        if (typeof start !== "number" || start < 0 || end <= start) return false;
++        let fullText: string | undefined;
++        try {
++            fullText = (this.parent as any)?.getSourceFile?.()?.text;
++        }
++        catch {
++            return false;
++        }
++        if (typeof fullText !== "string" || end > fullText.length) return false;
++        const text = fullText.substring(start, end);
++        // Scan past trivia (whitespace + comments); the only token that can
++        // appear before the close bracket is the trailing delimiter.
++        for (let i = 0; i < text.length; i++) {
++            const ch = text[i];
++            if (ch === ",") return true;
++            if (ch === " " || ch === "\t" || ch === "\r" || ch === "\n") continue;
++            if (ch === "/" && text[i + 1] === "/") {
++                const nl = text.indexOf("\n", i + 2);
++                if (nl === -1) return false;
++                i = nl;
++                continue;
++            }
++            if (ch === "/" && text[i + 1] === "*") {
++                const close = text.indexOf("*/", i + 2);
++                if (close === -1) return false;
++                i = close + 1;
++                continue;
++            }
++            return false;
++        }
++        return false;
++    }
++
+     private get data(): number {
+         return this.view.getUint32(this._byteIndex + NODE_OFFSET_DATA, true);
+     }
+@@ -227,7 +282,7 @@ export class RemoteNode extends RemoteNodeBase implements Node {
+     }
+     protected _sourceFile: SourceFileInfo;
+     get id(): string {
+-        return `${this.index}.${this.kind}.${this.sourceFile.path}`;
++        return `${this.index}.${this._rawKind}.${this.sourceFile.path}`;
+     }
+ 
+     constructor(view: DataView, index: number, parent: RemoteNode, sourceFile: SourceFileInfo, offsetNodes: number) {
+@@ -254,7 +309,7 @@ export class RemoteNode extends RemoteNodeBase implements Node {
+                         }
+                     }
+                 }
+-                else if (child.kind !== SyntaxKind.JSDoc) {
++                else if (child._rawKind !== SyntaxKind.JSDoc) {
+                     const result = visitNode(child);
+                     if (result) {
+                         return result;
+@@ -274,7 +329,7 @@ export class RemoteNode extends RemoteNodeBase implements Node {
+         let next = this.index + 1;
+         do {
+             const child = this.getOrCreateChildAtNodeIndex(next);
+-            if (!(child instanceof RemoteNodeList) && child.kind === SyntaxKind.JSDoc) {
++            if (!(child instanceof RemoteNodeList) && child._rawKind === SyntaxKind.JSDoc) {
+                 (result ??= []).push(child);
+             }
+             next = child.next;
+@@ -353,7 +408,44 @@ export class RemoteNode extends RemoteNodeBase implements Node {
+     }
+ 
+     private getNamedChild(propertyName: string): RemoteNode | RemoteNodeList | undefined {
+-        const kind = this.kind;
++        // JSDocPropertyTag and JSDocParameterTag have runtime-dependent child order based on isNameFirst.
++        // Handle them before the general childProperties lookup.
++        const kind = this._rawKind;
++        if (kind === SyntaxKind.JSDocPropertyTag) {
++            let order: number;
++            switch (propertyName) {
++                case "name":
++                    order = this.isNameFirst ? 0 : 1;
++                    break;
++                case "typeExpression":
++                    order = this.isNameFirst ? 1 : 0;
++                    break;
++                default:
++                    return undefined;
++            }
++            return this.getChildAtOrder(order);
++        }
++        else if (kind === SyntaxKind.JSDocParameterTag) {
++            let order: number;
++            switch (propertyName) {
++                case "tagName":
++                    order = 0;
++                    break;
++                case "name":
++                    order = this.isNameFirst ? 1 : 2;
++                    break;
++                case "typeExpression":
++                    order = this.isNameFirst ? 2 : 1;
++                    break;
++                case "comment":
++                    order = 3;
++                    break;
++                default:
++                    return undefined;
++            }
++            return this.getChildAtOrder(order);
++        }
++
+         const propertyNames = childProperties[kind];
+         if (!propertyNames) {
+             return undefined;
+@@ -414,7 +506,7 @@ export class RemoteNode extends RemoteNodeBase implements Node {
+         const result = [];
+         result.push(`index: ${this.index}`);
+         result.push(`byteIndex: ${this._byteIndex}`);
+-        result.push(`kind: ${SyntaxKind[this.kind]}`);
++        result.push(`kind: ${SyntaxKind[this._rawKind]}`);
+         result.push(`pos: ${this.pos}`);
+         result.push(`end: ${this.end}`);
+         result.push(`next: ${this.next}`);
+@@ -426,7 +518,7 @@ export class RemoteNode extends RemoteNodeBase implements Node {
+         result.push(`dataType: ${dataType}`);
+         if (this.dataType === NODE_DATA_TYPE_CHILDREN) {
+             result.push(`childMask: ${this.childMask.toString(2).padStart(8, "0")}`);
+-            result.push(`childProperties: ${childProperties[this.kind]?.join(", ")}`);
++            result.push(`childProperties: ${childProperties[this._rawKind]?.join(", ")}`);
+         }
+         return result.join("\n");
+     }
+@@ -490,21 +582,21 @@ export class RemoteNode extends RemoteNodeBase implements Node {
+     // ═══ Generated SyntaxKind union property getters ═══
+ 
+     get keyword(): SyntaxKind | undefined {
+-        switch (this.kind) {
++        switch (this._rawKind) {
+             case SyntaxKind.ModuleDeclaration:
+                 return (this.data >> 24) & 0x1 ? SyntaxKind.NamespaceKeyword : SyntaxKind.ModuleKeyword;
+         }
+     }
+ 
+     get keywordToken(): SyntaxKind | undefined {
+-        switch (this.kind) {
++        switch (this._rawKind) {
+             case SyntaxKind.MetaProperty:
+                 return (this.data >> 24) & 0x1 ? SyntaxKind.NewKeyword : SyntaxKind.ImportKeyword;
+         }
+     }
+ 
+     get operator(): SyntaxKind | undefined {
+-        switch (this.kind) {
++        switch (this._rawKind) {
+             case SyntaxKind.PrefixUnaryExpression: {
+                 const idx = (this.data >> 24) & 0x7;
+                 if (idx === 1) return SyntaxKind.MinusToken;
+@@ -526,7 +618,7 @@ export class RemoteNode extends RemoteNodeBase implements Node {
+     }
+ 
+     get phaseModifier(): SyntaxKind | undefined {
+-        switch (this.kind) {
++        switch (this._rawKind) {
+             case SyntaxKind.ImportClause: {
+                 const idx = (this.data >> 24) & 0x3;
+                 if (idx === 0) return undefined;
+@@ -536,7 +628,7 @@ export class RemoteNode extends RemoteNodeBase implements Node {
+     }
+ 
+     get token(): SyntaxKind | undefined {
+-        switch (this.kind) {
++        switch (this._rawKind) {
+             case SyntaxKind.HeritageClause:
+                 return (this.data >> 24) & 0x1 ? SyntaxKind.ImplementsKeyword : SyntaxKind.ExtendsKeyword;
+             case SyntaxKind.ImportAttributes:
+@@ -545,7 +637,7 @@ export class RemoteNode extends RemoteNodeBase implements Node {
+     }
+ 
+     get templateFlags(): number | undefined {
+-        switch (this.kind) {
++        switch (this._rawKind) {
+             case SyntaxKind.TemplateHead:
+             case SyntaxKind.TemplateMiddle:
+             case SyntaxKind.TemplateTail:
+@@ -555,7 +647,7 @@ export class RemoteNode extends RemoteNodeBase implements Node {
+     }
+ 
+     get tokenFlags(): number {
+-        switch (this.kind) {
++        switch (this._rawKind) {
+             case SyntaxKind.StringLiteral:
+             case SyntaxKind.NumericLiteral:
+             case SyntaxKind.BigIntLiteral:
+@@ -861,7 +953,7 @@ export class RemoteNode extends RemoteNodeBase implements Node {
+     // ═══ Generated string property getters ═══
+ 
+     get text(): string | undefined {
+-        switch (this.kind) {
++        switch (this._rawKind) {
+             case SyntaxKind.Identifier:
+             case SyntaxKind.PrivateIdentifier:
+             case SyntaxKind.JsxText:
+@@ -888,8 +980,27 @@ export class RemoteNode extends RemoteNodeBase implements Node {
+         }
+     }
+ 
++    /**
++     * Stock Identifier/PrivateIdentifier carry `escapedText` (leading "__"
++     * escaped with an extra "_"); the JS printer's synthesized-node path
++     * (`idText`) reads it. tsgo stores the unescaped text, so escape here.
++     */
++    get escapedText(): string | undefined {
++        switch (this._rawKind) {
++            case SyntaxKind.Identifier:
++            case SyntaxKind.PrivateIdentifier: {
++                const text = this.text;
++                if (text === undefined) return undefined;
++                return text.length >= 2 && text.charCodeAt(0) === 0x5f && text.charCodeAt(1) === 0x5f
++                    ? "_" + text
++                    : text;
++            }
++        }
++        return undefined;
++    }
++
+     get rawText(): string | undefined {
+-        switch (this.kind) {
++        switch (this._rawKind) {
+             case SyntaxKind.TemplateHead:
+             case SyntaxKind.TemplateMiddle:
+             case SyntaxKind.TemplateTail:
+@@ -907,12 +1018,19 @@ export class RemoteNode extends RemoteNodeBase implements Node {
+         return this.view.getUint32(this._byteIndex + NODE_OFFSET_FLAGS, true);
+     }
+ 
++    /** Raw NodeFlags without fork remapping — used by tsgo internal dispatchers. */
++    get _rawFlags(): number {
++        return this.view.getUint32(this._byteIndex + NODE_OFFSET_FLAGS, true);
++    }
++
+     get modifierFlags(): ModifierFlags {
+         const mods = this.modifiers;
+         if (!mods) return ModifierFlags.None;
+         let flags: ModifierFlags = ModifierFlags.None;
+         for (const mod of mods) {
+-            flags |= modifierToFlag(mod.kind);
++            // modifierToFlag switches on raw tsgo SyntaxKind; `mod.kind` is the
++            // fork-remapped getter, so use `_rawKind` to keep the lookup aligned.
++            flags |= modifierToFlag(mod._rawKind);
+         }
+         return flags;
+     }
+diff --git a/_packages/native-preview/src/api/node/node.infrastructure.ts b/_packages/native-preview/src/api/node/node.infrastructure.ts
+index 92b2922877..fd418337e6 100644
+--- a/_packages/native-preview/src/api/node/node.infrastructure.ts
++++ b/_packages/native-preview/src/api/node/node.infrastructure.ts
+@@ -154,6 +154,11 @@ export class RemoteNodeBase {
+         return this.view.getUint32(this._byteIndex + NODE_OFFSET_KIND, true);
+     }
+ 
++    /** Raw kind without fork remapping — used by tsgo internal dispatchers. */
++    get _rawKind(): SyntaxKind {
++        return this.view.getUint32(this._byteIndex + NODE_OFFSET_KIND, true);
++    }
++
+     get pos(): number {
+         return this.view.getInt32(this._byteIndex + NODE_OFFSET_POS, true);
+     }
+diff --git a/_packages/native-preview/src/api/node/node.ts b/_packages/native-preview/src/api/node/node.ts
+index edea7d5ca4..95b1cb9b47 100644
+--- a/_packages/native-preview/src/api/node/node.ts
++++ b/_packages/native-preview/src/api/node/node.ts
+@@ -233,7 +233,7 @@ export class RemoteSourceFile extends RemoteNode implements SourceFileInfo {
+     }
+ 
+     get isDeclarationFile(): boolean {
+-        return (this.flags & NodeFlags.Ambient) !== 0;
++        return (this._rawFlags & NodeFlags.Ambient) !== 0;
+     }
+ 
+     get text(): string {
+diff --git a/_packages/native-preview/src/api/proto.ts b/_packages/native-preview/src/api/proto.ts
+index 1aba5087e5..72b3317083 100644
+--- a/_packages/native-preview/src/api/proto.ts
++++ b/_packages/native-preview/src/api/proto.ts
+@@ -24,6 +24,19 @@ export type { CompilerOptions } from "./compilerOptions.ts";
+  */
+ export type DocumentIdentifier = string | { uri: string; };
+ 
++/**
++ * A tsconfig to open/load. The object form may carry the client's effective
++ * compiler options (its merged CLI + tsconfig + extends parse); when present
++ * they replace the project's disk-parsed options, while file expansion still
++ * comes from the disk config. CLI-only flags never appear in the on-disk
++ * tsconfig, so clients whose options can outrun the tsconfig (tsc) must send
++ * them; clients whose options live entirely in the tsconfig (LSP) may send a
++ * plain DocumentIdentifier as before.
++ */
++export type OpenProjectIdentifier = DocumentIdentifier | {
++    fileName: string;
++    compilerOptions?: Record<string, unknown>;
++};
+ /**
+  * A position within a document, combining a document identifier with an offset.
+  */
+@@ -80,8 +93,10 @@ export interface LSPUpdateSnapshotParams {
+     /**
+      * tsconfig.json files to open/load in the new snapshot. Opens are ref-counted
+      * and persist across snapshots until closed via {@link closeProjects}.
++     * Entries carrying `compilerOptions` replace the project's disk-parsed
++     * options with the client's effective options (see OpenProjectIdentifier).
+      */
+-    openProjects?: DocumentIdentifier[];
++    openProjects?: OpenProjectIdentifier[];
+     /**
+      * tsconfig.json files to release in the new snapshot. A project is only unloaded
+      * once every API client that opened it closes it.
+@@ -144,6 +159,13 @@ export interface ProjectFileChanges {
+     changedFiles?: string[];
+     /** Source file paths removed from the project's program */
+     deletedFiles?: string[];
++    /**
++     * Source file paths newly present in the project's program. Blob caches
++     * need no invalidation for these (no stale entry can exist), but
++     * whole-program answers (builder file graph, source-file names) must not
++     * treat the project as unchanged.
++     */
++    addedFiles?: string[];
+ }
+ 
+ /**
+@@ -194,8 +216,11 @@ export interface SymbolResponse {
+      * The project the symbol was first observed in. Used as the default project for
+      * follow-up lookups that need a project context (e.g. members/exports), since symbols
+      * are shared snapshot-wide and such lookups can vary by project.
++     * Optional on the wire: TNB light payloads (ambient modules, export map,
++     * scope dedup) may omit it; node resolution then falls back to the
++     * requesting registry's project.
+      */
+-    project: Path;
++    project?: Path;
+     name: __String;
+     flags: number;
+     checkFlags: number;
+@@ -205,6 +230,36 @@ export interface SymbolResponse {
+     exportSymbol?: number;
+ }
+ 
++export interface ResolvedReferenceEntry {
++    start: number;
++    position: number;
++    symbolId: number;
++}
++
++export interface LightSymbolResponse {
++    id: number;
++    project?: Path;
++    name: __String;
++    flags: number;
++    checkFlags: number;
++    parent?: number;
++}
++
++export interface GetResolvedReferencesInFileResponse {
++    references: ResolvedReferenceEntry[];
++    symbols: LightSymbolResponse[];
++}
++
++/**
++ * Dedup response shape for getSymbolsInScope: `known` ids were already
++ * materialized client-side by an earlier dedup response for the same snapshot;
++ * `symbols` carries full payloads for first-seen symbols.
++ */
++export interface GetSymbolsInScopeResponse {
++    known?: number[];
++    symbols?: SymbolResponse[];
++}
++
+ export interface TypeResponse {
+     id: number;
+     flags: number;
+@@ -234,6 +289,35 @@ export interface TypeResponse {
+     symbol?: number;
+ }
+ 
++export interface ObjectExpressionMemberResponse {
++    type: TypeResponse;
++    promisedType?: TypeResponse;
++}
++
++export interface ObjectExpressionFinalMemberResponse {
++    type: TypeResponse;
++    isArrayLike?: boolean;
++    invalidDueToUnionDiscriminant?: boolean;
++    hasCallOrConstructSignatures?: boolean;
++    /** Apparent properties, populated only for class members. */
++    apparentProperties?: SymbolResponse[];
++}
++
++/**
++ * Composite result of the stock Completions.getPropertiesForObjectExpression
++ * pipeline, computed server-side in one round trip so the client can seed its
++ * per-call checker caches.
++ */
++export interface GetPropertiesForObjectExpressionResponse {
++    members: ObjectExpressionMemberResponse[];
++    promiseFilteredType: TypeResponse;
++    mergedType?: TypeResponse;
++    finalMembers?: ObjectExpressionFinalMemberResponse[];
++    /** Final union members surviving the filter, in union order. */
++    filteredTypes?: number[];
++    properties?: SymbolResponse[];
++}
++
+ export interface SignatureResponse {
+     id: number;
+     flags: number;
 diff --git a/_packages/native-preview/src/api/sync/api.ts b/_packages/native-preview/src/api/sync/api.ts
 index 1a0296ac77..25b87f6ad0 100644
 --- a/_packages/native-preview/src/api/sync/api.ts
@@ -4380,6 +4856,452 @@ index 1a0296ac77..25b87f6ad0 100644
      }
  
      get hasRestParameter(): boolean {
+diff --git a/_packages/native-preview/src/api/sync/types.ts b/_packages/native-preview/src/api/sync/types.ts
+index 658d078065..8c37e42323 100644
+--- a/_packages/native-preview/src/api/sync/types.ts
++++ b/_packages/native-preview/src/api/sync/types.ts
+@@ -12,6 +12,7 @@ import type { ElementFlags } from "#enums/elementFlags";
+ import type { ObjectFlags } from "#enums/objectFlags";
+ import type { TypeFlags } from "#enums/typeFlags";
+ import type { TypePredicateKind } from "#enums/typePredicateKind";
++import type { __String } from "../../ast/ast.ts";
+ import type {
+     NodeHandle,
+     Symbol,
+@@ -334,6 +335,190 @@ export interface CompletionInfo {
+     readonly entries: readonly CompletionEntry[];
+ }
+ 
++/** One file produced by {@link Program.emit}. */
++export interface EmitOutputFile {
++    readonly fileName: string;
++    readonly text: string;
++    readonly writeByteOrderMark: boolean;
++}
++
++/** Result of {@link Program.emit}; output files are written by the caller. */
++export interface EmitResult {
++    readonly emitSkipped: boolean;
++    readonly diagnostics?: readonly Diagnostic[];
++    readonly emittedFiles?: readonly string[];
++    readonly outputFiles?: readonly EmitOutputFile[];
++}
++
++/**
++ * Per-file builder-state metadata returned by {@link Program.getBuilderFileGraph}.
++ * `refs` are canonical tsgo paths; `fileName` preserves original casing.
++ */
++export interface BuilderFileGraphEntry {
++    readonly fileName: string;
++    readonly version: string;
++    readonly affectsGlobalScope?: boolean;
++    readonly impliedNodeFormat?: number;
++    readonly refs?: readonly string[];
++}
++
++/** Stock PackageId field names, as carried by resolution/include-reason payloads. */
++export interface PackageIdWire {
++    readonly name: string;
++    readonly subModuleName?: string;
++    readonly version?: string;
++    readonly peerDependencies?: string;
++}
++
++/**
++ * One stock-shaped FileIncludeReason (stock FileIncludeKind numbering) from
++ * {@link Program.getFileIncludeReasons}. `file` is the referencing file for
++ * the referenced kinds; `index` addresses the referencing file's
++ * imports/referencedFiles/typeReferenceDirectives/libReferenceDirectives (or
++ * the root name / options.lib list for root/lib reasons).
++ */
++export interface FileIncludeReasonWire {
++    readonly kind: number;
++    readonly file?: string;
++    readonly index?: number;
++    readonly typeReference?: string;
++    readonly packageId?: PackageIdWire;
++}
++
++/** One included file paired with its include reasons. */
++export interface FileIncludeReasonsForFileWire {
++    readonly file: string;
++    readonly reasons: readonly FileIncludeReasonWire[];
++}
++
++/**
++ * One module resolution from {@link Program.getProgramResolutionInfo}.
++ * `mode` is the stock ResolutionMode (0 = none/undefined, 1 = CommonJS,
++ * 99 = ESNext). An empty `resolvedFileName` is an unresolved (failed)
++ * resolution — stock caches those too.
++ */
++export interface ModuleResolutionWire {
++    readonly moduleName: string;
++    readonly mode: number;
++    readonly resolvedFileName?: string;
++    readonly originalPath?: string;
++    readonly extension?: string;
++    readonly isExternalLibraryImport?: boolean;
++    readonly packageId?: PackageIdWire;
++    readonly resolvedUsingTsExtension?: boolean;
++    readonly alternateResult?: string;
++}
++
++/** One file's module resolution cache. */
++export interface FileModuleResolutionsWire {
++    readonly file: string;
++    readonly resolutions: readonly ModuleResolutionWire[];
++}
++
++/** One type-reference-directive resolution from {@link Program.getProgramResolutionInfo}. */
++export interface TypeRefResolutionWire {
++    readonly name: string;
++    readonly mode: number;
++    readonly resolvedFileName?: string;
++    readonly originalPath?: string;
++    readonly primary: boolean;
++    readonly isExternalLibraryImport?: boolean;
++    readonly packageId?: PackageIdWire;
++}
++
++/** One file's type-reference-directive resolution cache. */
++export interface FileTypeRefResolutionsWire {
++    readonly file: string;
++    readonly resolutions: readonly TypeRefResolutionWire[];
++}
++
++/** The program's full resolution state (see {@link Program.getProgramResolutionInfo}). */
++export interface ProgramResolutionInfoWire {
++    readonly modules: readonly FileModuleResolutionsWire[];
++    readonly typeReferenceDirectives: readonly FileTypeRefResolutionsWire[];
++    readonly automaticTypeDirectiveNames: readonly string[];
++    readonly automaticTypeDirectiveResolutions: readonly TypeRefResolutionWire[];
++}
++
++/**
++ * One program file's syntactic + semantic diagnostics from
++ * {@link Program.getDiagnosticsBatch}. `fileName` is the tsgo file name.
++ */
++export interface FileDiagnosticsBatchEntry {
++    readonly fileName: string;
++    readonly syntactic?: readonly Diagnostic[];
++    readonly semantic?: readonly Diagnostic[];
++}
++
++/** Light symbol wire shape (id/name/flags only). */
++export interface LightSymbolWire {
++    readonly id: number;
++    readonly name: __String;
++    readonly flags: number;
++    readonly checkFlags: number;
++}
++
++/** Wire response for {@link Checker.getAmbientModules}. */
++export interface AmbientModulesWireResponse {
++    readonly modules: readonly {
++        readonly moduleName: string;
++        readonly moduleSymbol: LightSymbolWire;
++    }[];
++}
++
++/** Materialized lightweight ambient-module index from {@link Checker.getAmbientModules}. */
++export interface AmbientModulesBatch {
++    readonly modules: readonly {
++        readonly moduleName: string;
++        readonly moduleSymbol: Symbol;
++    }[];
++}
++
++/** Materialized auto-import export index from {@link Program.getModuleExportMap}. */
++export interface ModuleExportMapBatch {
++    readonly modules: readonly {
++        readonly moduleFileName?: string | undefined;
++        readonly moduleName: string;
++        readonly moduleSymbol: Symbol;
++        readonly defaultExport?: {
++            readonly symbol: Symbol;
++            readonly tableKey: string;
++            readonly exportKind: number;
++            readonly targetFlags: number;
++        } | undefined;
++        readonly namedExports: readonly {
++            readonly symbol: Symbol;
++            readonly key: string;
++            readonly targetFlags: number;
++        }[];
++    }[];
++}
++
++/** Wire preferences for {@link Program.getModuleSpecifiersBatch}. */
++export interface ModuleSpecifiersBatchPreferencesWire {
++    readonly importModuleSpecifierPreference?: string;
++    readonly importModuleSpecifierEnding?: string;
++    readonly autoImportSpecifierExcludeRegexes?: readonly string[];
++}
++
++/** Wire response for {@link Program.getModuleSpecifiersBatch}. */
++export interface ModuleSpecifiersBatchWireResponse {
++    readonly results: readonly {
++        readonly moduleSymbol: number;
++        readonly kind?: string;
++        readonly moduleSpecifiers: readonly string[];
++    }[];
++}
++
++/** Materialized batch auto-import module specifiers from {@link Program.getModuleSpecifiersBatch}. */
++export interface ModuleSpecifiersBatch {
++    readonly results: readonly {
++        readonly moduleSymbol: Symbol;
++        readonly kind?: string | undefined;
++        readonly moduleSpecifiers: readonly string[];
++    }[];
++}
++
+ /**
+  * A diagnostic message from the TypeScript compiler.
+  */
+diff --git a/_packages/native-preview/src/api/syncChannel.ts b/_packages/native-preview/src/api/syncChannel.ts
+index 122203c85e..873d9000d4 100644
+--- a/_packages/native-preview/src/api/syncChannel.ts
++++ b/_packages/native-preview/src/api/syncChannel.ts
+@@ -149,7 +149,7 @@ export class SyncRpcChannel {
+             // real C-runtime fd backed by a proper HANDLE.
+             const pipePath = `\\\\.\\pipe\\tsgo-sync-${process.pid}-${Date.now()}`;
+             this.child = spawn(exe, [...args, "--pipe", pipePath], {
+-                stdio: ["ignore", "ignore", "inherit"],
++                stdio: ["ignore", "ignore", "ignore"],
+             });
+ 
+             // Retry openSync until the child creates the named pipe.
+@@ -178,12 +178,16 @@ export class SyncRpcChannel {
+         }
+         else {
+             // POSIX: use stdio pipe file descriptors directly.
++            // stderr must NOT inherit the parent's fd — sharing a TTY/pipe with
++            // the parent lets Node's SignalExit/ResetStdio storm fcntl on the
++            // shared fd when the embedded/sibling Go runtime is present.
+             this.child = spawn(exe, args, {
+-                stdio: ["pipe", "pipe", "inherit"],
++                stdio: ["pipe", "pipe", "pipe"],
+             });
+ 
+             const stdout = this.child.stdout! as StdoutWithHandle;
+             const stdin = this.child.stdin! as StdinWithHandle;
++            const stderr = this.child.stderr as StdoutWithHandle | null;
+ 
+             this.readFd = stdout._handle.fd;
+             this.writeFd = stdin._handle.fd;
+@@ -191,6 +195,7 @@ export class SyncRpcChannel {
+             if (typeof this.readFd !== "number" || this.readFd < 0 || typeof this.writeFd !== "number" || this.writeFd < 0) {
+                 stdout.destroy();
+                 stdin.destroy();
++                stderr?.destroy();
+                 this.child.kill();
+                 throw new Error(
+                     "SyncRpcChannel: could not obtain pipe file descriptors.",
+@@ -206,11 +211,13 @@ export class SyncRpcChannel {
+             stdout._handle.setBlocking?.(true);
+             stdin._handle.setBlocking?.(true);
+ 
+-            // Prevent Node's event-loop from reading stdout or keeping the
+-            // process alive – we will use fs.readSync exclusively.
++            // Prevent Node's event-loop from reading stdout/stderr or keeping
++            // the process alive – we will use fs.readSync exclusively.
+             stdout.pause();
+             stdout.unref();
+             stdin.unref();
++            stderr?.pause();
++            stderr?.unref();
+         }
+ 
+         // Track for auto-cleanup on process exit.
+@@ -256,6 +263,7 @@ export class SyncRpcChannel {
+             // and no longer prevent the event loop from draining.
+             this.child.stdout?.destroy();
+             this.child.stdin?.destroy();
++            this.child.stderr?.destroy();
+             this.child.kill();
+             this.readFd = -1;
+             this.writeFd = -1;
+diff --git a/_packages/native-preview/src/ast/ast.ts b/_packages/native-preview/src/ast/ast.ts
+index 3f5fa2c43a..4f9f730766 100644
+--- a/_packages/native-preview/src/ast/ast.ts
++++ b/_packages/native-preview/src/ast/ast.ts
+@@ -55,6 +55,8 @@ export interface NodeArray<T extends Node> extends ReadonlyArray<T>, ReadonlyTex
+ export interface Node extends ReadonlyTextRange {
+     readonly kind: SyntaxKind;
+     readonly flags: NodeFlags;
++    /** @internal Raw tsgo NodeFlags without fork bit-layout remapping (tsgo internal dispatchers only). */
++    readonly _rawFlags: NodeFlags;
+     readonly parent: Node;
+     readonly jsDoc?: readonly Node[] | undefined;
+     forEachChild<T>(visitor: (node: Node) => T, visitArray?: (nodes: NodeArray<Node>) => T): T | undefined;
+diff --git a/_packages/native-preview/src/ast/astnav.ts b/_packages/native-preview/src/ast/astnav.ts
+index 8005023f50..b2128fdc28 100644
+--- a/_packages/native-preview/src/ast/astnav.ts
++++ b/_packages/native-preview/src/ast/astnav.ts
+@@ -48,7 +48,7 @@ export function findNextToken(previousToken: Node, parent: Node, sourceFile: Sou
+         let foundNode: Node | undefined;
+ 
+         const visitChild = (node: Node) => {
+-            if (node.flags & NodeFlags.Reparsed) {
++            if (node._rawFlags & NodeFlags.Reparsed) {
+                 return undefined;
+             }
+             if (node.pos <= previousToken.end && node.end > previousToken.end) {
+@@ -69,7 +69,7 @@ export function findNextToken(previousToken: Node, parent: Node, sourceFile: Sou
+             nodes => {
+                 if (nodes.length > 0 && foundNode === undefined) {
+                     for (const node of nodes) {
+-                        if (node.flags & NodeFlags.Reparsed) continue;
++                        if (node._rawFlags & NodeFlags.Reparsed) continue;
+                         if (node.pos > previousToken.end) break;
+                         if (node.end > previousToken.end) {
+                             foundNode = node;
+@@ -162,7 +162,7 @@ function getTokenAtPositionImpl(
+         let skipSingleCommentChildren = false;
+ 
+         const visitNode = (node: Node) => {
+-            if (node.flags & NodeFlags.Reparsed) {
++            if (node._rawFlags & NodeFlags.Reparsed) {
+                 return undefined;
+             }
+             if (skipSingleCommentChildren && isJSDocCommentChildKind(node.kind)) {
+@@ -206,7 +206,7 @@ function getTokenAtPositionImpl(
+                 }
+                 if (nodeAfterLeft === undefined) {
+                     for (const node of nodes) {
+-                        if (!(node.flags & NodeFlags.Reparsed)) {
++                        if (!(node._rawFlags & NodeFlags.Reparsed)) {
+                             nodeAfterLeft = node;
+                             break;
+                         }
+@@ -227,7 +227,7 @@ function getTokenAtPositionImpl(
+                             state.left = node.end;
+                             nodeAfterLeft = undefined;
+                             for (let i = middle + 1; i < arr.length; i++) {
+-                                if (!(arr[i].flags & NodeFlags.Reparsed)) {
++                                if (!(arr[i]._rawFlags & NodeFlags.Reparsed)) {
+                                     nodeAfterLeft = arr[i];
+                                     break;
+                                 }
+@@ -317,7 +317,7 @@ export function getTokenPosOfNode(node: Node, sourceFile: SourceFile, includeJSD
+     if (includeJSDoc && node.jsDoc && node.jsDoc.length > 0) {
+         return getTokenPosOfNode(node.jsDoc[0], sourceFile, /*includeJSDoc*/ false);
+     }
+-    return skipTrivia(sourceFile.text, node.pos, /*stopAfterLineBreak*/ false, /*stopAtComments*/ false, /*inJSDoc*/ !!(node.flags & NodeFlags.JSDoc));
++    return skipTrivia(sourceFile.text, node.pos, /*stopAfterLineBreak*/ false, /*stopAtComments*/ false, /*inJSDoc*/ !!(node._rawFlags & NodeFlags.JSDoc));
+ }
+ 
+ function nodeIsMissing(node: Node): boolean {
+@@ -336,7 +336,7 @@ function findPrecedingTokenImpl(sourceFile: SourceFile, position: number, startN
+         // Visit JSDoc nodes first (mirrors Go's VisitEachChildAndJSDoc).
+         if (n.jsDoc) {
+             for (const jsdoc of n.jsDoc) {
+-                if (jsdoc.flags & NodeFlags.Reparsed) continue;
++                if (jsdoc._rawFlags & NodeFlags.Reparsed) continue;
+                 if (foundChild !== undefined) break;
+                 if (position < jsdoc.end && (prevChild === undefined || prevChild.end <= position)) {
+                     foundChild = jsdoc;
+@@ -350,7 +350,7 @@ function findPrecedingTokenImpl(sourceFile: SourceFile, position: number, startN
+         let skipSingleCommentChildrenImpl = false;
+         n.forEachChild(
+             node => {
+-                if (node.flags & NodeFlags.Reparsed) {
++                if (node._rawFlags & NodeFlags.Reparsed) {
+                     return undefined;
+                 }
+                 if (skipSingleCommentChildrenImpl && isJSDocCommentChildKind(node.kind)) {
+@@ -374,12 +374,12 @@ function findPrecedingTokenImpl(sourceFile: SourceFile, position: number, startN
+                 }
+                 if (nodes.length > 0 && !skipSingleCommentChildrenImpl) {
+                     const index = binarySearchForPrecedingToken(nodes, position);
+-                    if (index >= 0 && !(nodes[index].flags & NodeFlags.Reparsed)) {
++                    if (index >= 0 && !(nodes[index]._rawFlags & NodeFlags.Reparsed)) {
+                         foundChild = nodes[index];
+                     }
+                     const lookupIndex = index >= 0 ? index - 1 : nodes.length - 1;
+                     for (let i = lookupIndex; i >= 0; i--) {
+-                        if (!(nodes[i].flags & NodeFlags.Reparsed)) {
++                        if (!(nodes[i]._rawFlags & NodeFlags.Reparsed)) {
+                             if (prevChild === undefined) {
+                                 prevChild = nodes[i];
+                             }
+@@ -446,7 +446,7 @@ function findRightmostValidToken(sourceFile: SourceFile, endPos: number, contain
+         if (n.jsDoc) {
+             hasChildren = true;
+             for (const jsdoc of n.jsDoc) {
+-                if (jsdoc.flags & NodeFlags.Reparsed) continue;
++                if (jsdoc._rawFlags & NodeFlags.Reparsed) continue;
+                 if (jsdoc.end > endPos || getTokenPosOfNode(jsdoc, sourceFile) >= position) continue;
+                 if (isValidPrecedingNode(jsdoc, sourceFile)) {
+                     rightmostValidNode = jsdoc;
+@@ -457,7 +457,7 @@ function findRightmostValidToken(sourceFile: SourceFile, endPos: number, contain
+         let skipSingleCommentChildren = false;
+         n.forEachChild(
+             node => {
+-                if (node.flags & NodeFlags.Reparsed) {
++                if (node._rawFlags & NodeFlags.Reparsed) {
+                     return undefined;
+                 }
+                 if (skipSingleCommentChildren && isJSDocCommentChildKind(node.kind)) {
+@@ -480,7 +480,7 @@ function findRightmostValidToken(sourceFile: SourceFile, endPos: number, contain
+                     hasChildren = true;
+                     for (let i = nodes.length - 1; i >= 0; i--) {
+                         const node = nodes[i];
+-                        if (node.flags & NodeFlags.Reparsed) continue;
++                        if (node._rawFlags & NodeFlags.Reparsed) continue;
+                         if (node.end > endPos || getTokenPosOfNode(node, sourceFile) >= position) continue;
+                         if (isValidPrecedingNode(node, sourceFile)) {
+                             rightmostValidNode = node;
+@@ -617,11 +617,11 @@ function binarySearchNodeList(
+     while (lo <= hi) {
+         const mid = (lo + hi) >>> 1;
+         const node = nodes[mid];
+-        if (node.flags & NodeFlags.Reparsed) {
++        if (node._rawFlags & NodeFlags.Reparsed) {
+             // Skip reparsed nodes: try to find a non-reparsed node nearby
+             let found = false;
+             for (let i = mid + 1; i <= hi; i++) {
+-                if (!(nodes[i].flags & NodeFlags.Reparsed)) {
++                if (!(nodes[i]._rawFlags & NodeFlags.Reparsed)) {
+                     const cmp = testNode(nodes[i]);
+                     if (cmp < 0) {
+                         onLeft(nodes[i], i, nodes);
+@@ -665,7 +665,7 @@ function binarySearchForPrecedingToken(nodes: NodeArray<Node>, position: number)
+     while (lo <= hi) {
+         const mid = (lo + hi) >>> 1;
+         const node = nodes[mid];
+-        if (node.flags & NodeFlags.Reparsed) {
++        if (node._rawFlags & NodeFlags.Reparsed) {
+             lo = mid + 1;
+             continue;
+         }
+diff --git a/_packages/native-preview/src/ast/factory.generated.ts b/_packages/native-preview/src/ast/factory.generated.ts
+index f29cfc3d10..d3f48c5c4e 100644
+--- a/_packages/native-preview/src/ast/factory.generated.ts
++++ b/_packages/native-preview/src/ast/factory.generated.ts
+@@ -267,6 +267,8 @@ import {
+ export class NodeObject {
+     readonly kind: SyntaxKind;
+     flags: NodeFlags = 0 as NodeFlags;
++    /** @internal Synthetic factory nodes are never fork-remapped, so raw == flags. */
++    get _rawFlags(): NodeFlags { return this.flags; }
+     readonly pos: number = -1;
+     readonly end: number = -1;
+     parent: Node = undefined!;
+diff --git a/_packages/native-preview/src/ast/is.ts b/_packages/native-preview/src/ast/is.ts
+index 613ed0a0cc..8b11b26edf 100644
+--- a/_packages/native-preview/src/ast/is.ts
++++ b/_packages/native-preview/src/ast/is.ts
+@@ -257,7 +257,7 @@ function isJSDocTypeAssertion(node: ParenthesizedExpression): boolean {
+     }
+     const asExpression = expression as AsExpression;
+     return !!asExpression.type
+-        && (asExpression.type.flags & NodeFlags.Reparsed) !== 0;
++        && (asExpression.type._rawFlags & NodeFlags.Reparsed) !== 0;
+ }
+ 
+ export function isBindingPattern(node: Node): node is BindingPattern {
 diff --git a/_packages/native-preview/test/sync/api.test.ts b/_packages/native-preview/test/sync/api.test.ts
 index 6a90030eb2..fc58b512a8 100644
 --- a/_packages/native-preview/test/sync/api.test.ts
@@ -4423,2269 +5345,3 @@ index 6a90030eb2..fc58b512a8 100644
  describe("Symbol - getDocumentationComment and getJsDocTags", () => {
      const docFiles = {
          "/tsconfig.json": JSON.stringify({ compilerOptions: { strict: true } }),
-diff --git a/internal/api/proto.go b/internal/api/proto.go
-index 0917c385d6..b2c40e7440 100644
---- a/internal/api/proto.go
-+++ b/internal/api/proto.go
-@@ -67,37 +67,81 @@ const (
- 	// the connection itself and is not recorded.
- 	MethodResetServerTiming Method = "resetServerTiming"
- 
--	MethodInitialize               Method = "initialize"
--	MethodUpdateSnapshot           Method = "updateSnapshot"
--	MethodParseConfigFile          Method = "parseConfigFile"
--	MethodGetDefaultProjectForFile Method = "getDefaultProjectForFile"
--	MethodGetSymbolAtPosition      Method = "getSymbolAtPosition"
--	MethodGetSymbolsAtPositions    Method = "getSymbolsAtPositions"
--	MethodGetSymbolAtLocation      Method = "getSymbolAtLocation"
--	MethodGetSymbolsAtLocations    Method = "getSymbolsAtLocations"
--	MethodGetTypeOfSymbol          Method = "getTypeOfSymbol"
--	MethodGetTypesOfSymbols        Method = "getTypesOfSymbols"
--	MethodGetDeclaredTypeOfSymbol  Method = "getDeclaredTypeOfSymbol"
--	MethodGetSourceFile            Method = "getSourceFile"
--	MethodGetSourceFileNames       Method = "getSourceFileNames"
--	MethodGetSourceFileMetadata    Method = "getSourceFileMetadata"
--	MethodResolveName              Method = "resolveName"
--	MethodGetSignaturesOfType      Method = "getSignaturesOfType"
--	MethodGetResolvedSignature     Method = "getResolvedSignature"
--	MethodGetTypeAtLocation        Method = "getTypeAtLocation"
--	MethodGetTypeAtLocations       Method = "getTypeAtLocations"
--	MethodGetTypeAtPosition        Method = "getTypeAtPosition"
--	MethodGetTypesAtPositions      Method = "getTypesAtPositions"
-+	MethodGetSourceFileMetadata Method = "getSourceFileMetadata"
-+
-+	MethodInitialize                                          Method = "initialize"
-+	MethodUpdateSnapshot                                      Method = "updateSnapshot"
-+	MethodParseConfigFile                                     Method = "parseConfigFile"
-+	MethodGetDefaultProjectForFile                            Method = "getDefaultProjectForFile"
-+	MethodGetSymbolAtPosition                                 Method = "getSymbolAtPosition"
-+	MethodGetSymbolsAtPositions                               Method = "getSymbolsAtPositions"
-+	MethodGetSymbolAtLocation                                 Method = "getSymbolAtLocation"
-+	MethodGetSymbolsAtLocations                               Method = "getSymbolsAtLocations"
-+	MethodGetTypeOfSymbol                                     Method = "getTypeOfSymbol"
-+	MethodGetTypesOfSymbols                                   Method = "getTypesOfSymbols"
-+	MethodGetDeclaredTypeOfSymbol                             Method = "getDeclaredTypeOfSymbol"
-+	MethodGetSourceFile                                       Method = "getSourceFile"
-+	MethodGetSourceFileNames                                  Method = "getSourceFileNames"
-+	MethodGetBuilderFileGraph                                 Method = "getBuilderFileGraph"
-+	MethodGetMissingFilePaths                                 Method = "getMissingFilePaths"
-+	MethodGetFileIncludeReasons                               Method = "getFileIncludeReasons"
-+	MethodGetProgramResolutionInfo                            Method = "getProgramResolutionInfo"
-+	MethodGetClassifiableNames                                Method = "getClassifiableNames"
-+	MethodGetUsesUriStyleNodeCoreModules                      Method = "getUsesUriStyleNodeCoreModules"
-+	MethodGetAmbientModules                                   Method = "getAmbientModules"
-+	MethodGetModuleExportMap                                  Method = "getModuleExportMap"
-+	MethodGetModuleSpecifiersBatch                            Method = "getModuleSpecifiersBatch"
-+	MethodGetCompilerOptionsForFile                           Method = "getCompilerOptionsForFile"
-+	MethodGetImpliedNodeFormatForEmit                         Method = "getImpliedNodeFormatForEmit"
-+	MethodGetDefaultResolutionModeForFile                     Method = "getDefaultResolutionModeForFile"
-+	MethodGetEmitModuleFormatOfFile                           Method = "getEmitModuleFormatOfFile"
-+	MethodGetModeForUsageLocation                             Method = "getModeForUsageLocation"
-+	MethodGetEmitSyntaxForUsageLocation                       Method = "getEmitSyntaxForUsageLocation"
-+	MethodGetRedirectTargets                                  Method = "getRedirectTargets"
-+	MethodResolveName                                         Method = "resolveName"
-+	MethodGetSymbolsInScope                                   Method = "getSymbolsInScope"
-+	MethodGetSignaturesOfType                                 Method = "getSignaturesOfType"
-+	MethodGetResolvedSignature                                Method = "getResolvedSignature"
-+	MethodGetResolvedSignatureForSignatureHelp                Method = "getResolvedSignatureForSignatureHelp"
-+	MethodGetExpandedParameters                               Method = "getExpandedParameters"
-+	MethodHasEffectiveRestParameter                           Method = "hasEffectiveRestParameter"
-+	MethodGetLocalTypeParametersOfClassOrInterfaceOrTypeAlias Method = "getLocalTypeParametersOfClassOrInterfaceOrTypeAlias"
-+	MethodGetContextualTypeForObjectLiteralElement            Method = "getContextualTypeForObjectLiteralElement"
-+	MethodIsOptionalParameter                                 Method = "isOptionalParameter"
-+	MethodIsImplementationOfOverload                          Method = "isImplementationOfOverload"
-+	MethodGetTypeAtLocation                                   Method = "getTypeAtLocation"
-+	MethodGetTypeAtLocations                                  Method = "getTypeAtLocations"
-+	MethodGetTypeAtPosition                                   Method = "getTypeAtPosition"
-+	MethodGetTypesAtPositions                                 Method = "getTypesAtPositions"
- 
- 	// Symbol sub-property methods
--	MethodGetParentOfSymbol       Method = "getParentOfSymbol"
-+	MethodGetParentOfSymbol Method = "getParentOfSymbol"
-+	// MethodGetParentsOfSymbols batch-resolves symbol parents. Same
-+	// registry-only read as getParentOfSymbol; a null entry is a confirmed
-+	// "no parent" the client can memoize instead of issuing one lazy RPC per
-+	// scope symbol whose wire payload omitted the parent handle.
-+	MethodGetParentsOfSymbols     Method = "getParentsOfSymbols"
- 	MethodGetMembersOfSymbol      Method = "getMembersOfSymbol"
- 	MethodGetExportsOfSymbol      Method = "getExportsOfSymbol"
- 	MethodGetExportSymbolOfSymbol Method = "getExportSymbolOfSymbol"
-+	// MethodGetGlobalExportsOfSymbol returns the global-exports table of the
-+	// source file whose module symbol is the argument (the `export as
-+	// namespace` UMD case). tsgo keeps the table on the SourceFile
-+	// (ast.SourceFile.GlobalExports) while stock surfaces it as
-+	// file.symbol.globalExports; the bridge symbol carries no file handle, so
-+	// the RPC resolves symbol → declaration SourceFile → table.
-+	MethodGetGlobalExportsOfSymbol Method = "getGlobalExportsOfSymbol"
-+	// MethodGetSymbolDeclarations fetches the full declaration set of a symbol
-+	// by id. Used to lazily upgrade "light" prefetch symbols (id/name/flags
-+	// only) when a consumer actually reads symbol.declarations /
-+	// symbol.valueDeclaration (e.g. the scope manager building variable defs).
-+	MethodGetSymbolDeclarations  Method = "getSymbolDeclarations"
-+	MethodGetSymbolsDeclarations Method = "getSymbolsDeclarations"
- 
- 	// Type sub-property methods
- 	MethodGetSymbolOfType              Method = "getSymbolOfType"
- 	MethodGetTargetOfType              Method = "getTargetOfType"
-+	MethodGetThisTypeOfType            Method = "getThisTypeOfType"
- 	MethodGetFreshTypeOfType           Method = "getFreshTypeOfType"
- 	MethodGetRegularTypeOfType         Method = "getRegularTypeOfType"
- 	MethodGetTypesOfType               Method = "getTypesOfType"
-@@ -107,7 +151,7 @@ const (
- 	MethodGetAliasTypeArgumentsOfType  Method = "getAliasTypeArgumentsOfType"
- 	MethodGetAliasSymbolOfType         Method = "getAliasSymbolOfType"
- 	MethodGetObjectTypeOfType          Method = "getObjectTypeOfType"
--	MethodGetIndexTypeOfType           Method = "getIndexTypeOfType"
-+	MethodGetIndexTypeOfType           Method = "getIndexedAccessIndexType"
- 	MethodGetCheckTypeOfType           Method = "getCheckTypeOfType"
- 	MethodGetExtendsTypeOfType         Method = "getExtendsTypeOfType"
- 	MethodGetBaseTypeOfType            Method = "getBaseTypeOfType"
-@@ -120,44 +164,124 @@ const (
- 	MethodGetTargetOfSignature         Method = "getTargetOfSignature"
- 
- 	// Checker methods
--	MethodGetContextualType                 Method = "getContextualType"
--	MethodGetBaseTypeOfLiteralType          Method = "getBaseTypeOfLiteralType"
--	MethodGetNonNullableType                Method = "getNonNullableType"
--	MethodGetTypeFromTypeNode               Method = "getTypeFromTypeNode"
--	MethodGetWidenedType                    Method = "getWidenedType"
--	MethodGetParameterType                  Method = "getParameterType"
--	MethodIsArrayLikeType                   Method = "isArrayLikeType"
--	MethodIsTypeAssignableTo                Method = "isTypeAssignableTo"
--	MethodGetShorthandAssignmentValueSymbol Method = "getShorthandAssignmentValueSymbol"
--	MethodGetTypeOfSymbolAtLocation         Method = "getTypeOfSymbolAtLocation"
--	MethodTypeToTypeNode                    Method = "typeToTypeNode"
--	MethodSignatureToSignatureDeclaration   Method = "signatureToSignatureDeclaration"
--	MethodTypeToString                      Method = "typeToString"
--	MethodIsContextSensitive                Method = "isContextSensitive"
--	MethodGetReturnTypeOfSignature          Method = "getReturnTypeOfSignature"
--	MethodGetRestTypeOfSignature            Method = "getRestTypeOfSignature"
--	MethodGetTypePredicateOfSignature       Method = "getTypePredicateOfSignature"
--	MethodGetBaseTypes                      Method = "getBaseTypes"
--	MethodGetPropertiesOfType               Method = "getPropertiesOfType"
--	MethodGetApparentType                   Method = "getApparentType"
--	MethodGetPropertyOfType                 Method = "getPropertyOfType"
--	MethodGetIndexInfosOfType               Method = "getIndexInfosOfType"
--	MethodGetConstraintOfTypeParameter      Method = "getConstraintOfTypeParameter"
--	MethodGetBaseConstraintOfType           Method = "getBaseConstraintOfType"
--	MethodGetTypeArguments                  Method = "getTypeArguments"
--	MethodGetTrueTypeOfConditionalType      Method = "getTrueTypeOfConditionalType"
--	MethodGetFalseTypeOfConditionalType     Method = "getFalseTypeOfConditionalType"
--	MethodGetConstantValue                  Method = "getConstantValue"
--	MethodGetSignatureFromDeclaration       Method = "getSignatureFromDeclaration"
--	MethodGetExportSpecifierLocalTarget     Method = "getExportSpecifierLocalTargetSymbol"
--	MethodGetAliasedSymbol                  Method = "getAliasedSymbol"
--	MethodGetImmediateAliasedSymbol         Method = "getImmediateAliasedSymbol"
--	MethodGetExportsOfModule                Method = "getExportsOfModule"
--	MethodGetMemberInModuleExports          Method = "getMemberInModuleExports"
--	MethodGetJSDocTags                      Method = "getJsDocTags"
--	MethodGetDocumentationComment           Method = "getDocumentationComment"
--	MethodIsArrayType                       Method = "isArrayType"
--	MethodIsTupleType                       Method = "isTupleType"
-+	MethodGetContextualType                                 Method = "getContextualType"
-+	MethodGetBaseTypeOfLiteralType                          Method = "getBaseTypeOfLiteralType"
-+	MethodGetNonNullableType                                Method = "getNonNullableType"
-+	MethodGetNonOptionalType                                Method = "getNonOptionalType"
-+	MethodGetTypeFromTypeNode                               Method = "getTypeFromTypeNode"
-+	MethodGetWidenedType                                    Method = "getWidenedType"
-+	MethodGetParameterType                                  Method = "getParameterType"
-+	MethodIsArrayLikeType                                   Method = "isArrayLikeType"
-+	MethodIsTypeAssignableTo                                Method = "isTypeAssignableTo"
-+	MethodGetUnionType                                      Method = "getUnionType"
-+	MethodGetPromisedTypeOfPromise                          Method = "getPromisedTypeOfPromise"
-+	MethodGetAllPossiblePropertiesOfTypes                   Method = "getAllPossiblePropertiesOfTypes"
-+	MethodIsTypeInvalidDueToUnionDiscriminant               Method = "isTypeInvalidDueToUnionDiscriminant"
-+	MethodTypeHasCallOrConstructSignatures                  Method = "typeHasCallOrConstructSignatures"
-+	MethodGetPropertiesForObjectExpression                  Method = "getPropertiesForObjectExpression"
-+	MethodGetShorthandAssignmentValueSymbol                 Method = "getShorthandAssignmentValueSymbol"
-+	MethodGetTypeOfSymbolAtLocation                         Method = "getTypeOfSymbolAtLocation"
-+	MethodTypeToTypeNode                                    Method = "typeToTypeNode"
-+	MethodTypeParameterToDeclaration                        Method = "typeParameterToDeclaration"
-+	MethodSymbolToTypeParameterDeclarations                 Method = "symbolToTypeParameterDeclarations"
-+	MethodSymbolToParameterDeclaration                      Method = "symbolToParameterDeclaration"
-+	MethodSignatureToSignatureDeclaration                   Method = "signatureToSignatureDeclaration"
-+	MethodSignatureToString                                 Method = "signatureToString"
-+	MethodTypeToString                                      Method = "typeToString"
-+	MethodIsContextSensitive                                Method = "isContextSensitive"
-+	MethodGetReturnTypeOfSignature                          Method = "getReturnTypeOfSignature"
-+	MethodGetRestTypeOfSignature                            Method = "getRestTypeOfSignature"
-+	MethodGetTypePredicateOfSignature                       Method = "getTypePredicateOfSignature"
-+	MethodGetBaseTypes                                      Method = "getBaseTypes"
-+	MethodGetPropertiesOfType                               Method = "getPropertiesOfType"
-+	MethodGetApparentType                                   Method = "getApparentType"
-+	MethodGetPropertyOfType                                 Method = "getPropertyOfType"
-+	MethodGetIndexInfosOfType                               Method = "getIndexInfosOfType"
-+	MethodGetIndexInfosAtLocation                           Method = "getIndexInfosAtLocation"
-+	MethodGetConstraintOfTypeParameter                      Method = "getConstraintOfTypeParameter"
-+	MethodGetBaseConstraintOfType                           Method = "getBaseConstraintOfType"
-+	MethodGetDefaultFromTypeParameter                       Method = "getDefaultFromTypeParameter"
-+	MethodGetTypeOfAssignmentPattern                        Method = "getTypeOfAssignmentPattern"
-+	MethodGetPrivateIdentifierPropertyOfType                Method = "getPrivateIdentifierPropertyOfType"
-+	MethodGetRecursionIdentity                              Method = "getRecursionIdentity"
-+	MethodGetTypeArgumentsForResolvedSignature              Method = "getTypeArgumentsForResolvedSignature"
-+	MethodGetTypeArguments                                  Method = "getTypeArguments"
-+	MethodGetTrueTypeOfConditionalType                      Method = "getTrueTypeOfConditionalType"
-+	MethodGetFalseTypeOfConditionalType                     Method = "getFalseTypeOfConditionalType"
-+	MethodGetConstantValue                                  Method = "getConstantValue"
-+	MethodGetSignatureFromDeclaration                       Method = "getSignatureFromDeclaration"
-+	MethodGetExportSpecifierLocalTarget                     Method = "getExportSpecifierLocalTargetSymbol"
-+	MethodGetAliasedSymbol                                  Method = "getAliasedSymbol"
-+	MethodGetImmediateAliasedSymbol                         Method = "getImmediateAliasedSymbol"
-+	MethodGetExportsOfModule                                Method = "getExportsOfModule"
-+	MethodGetModuleSymbolForSourceFile                      Method = "getModuleSymbolForSourceFile"
-+	MethodGetRootSymbols                                    Method = "getRootSymbols"
-+	MethodGetMemberInModuleExports                          Method = "getMemberInModuleExports"
-+	MethodResolveExternalModuleSymbol                       Method = "resolveExternalModuleSymbol"
-+	MethodGetJSDocTags                                      Method = "getJsDocTags"
-+	MethodGetDocumentationComment                           Method = "getDocumentationComment"
-+	MethodIsArrayType                                       Method = "isArrayType"
-+	MethodIsTupleType                                       Method = "isTupleType"
-+	MethodIsDeclarationVisible                              Method = "isDeclarationVisible"
-+	MethodTryGetThisTypeAt                                  Method = "tryGetThisTypeAt"
-+	MethodIsValidPropertyAccessForCompletions               Method = "isValidPropertyAccessForCompletions"
-+	MethodGetTypeArgumentConstraint                         Method = "getTypeArgumentConstraint"
-+	MethodGetExportsAndPropertiesOfModule                   Method = "getExportsAndPropertiesOfModule"
-+	MethodGetJsxIntrinsicTagNamesAt                         Method = "getJsxIntrinsicTagNamesAt"
-+	MethodIsPropertyAccessible                              Method = "isPropertyAccessible"
-+	MethodGetAccessibleSymbolChain                          Method = "getAccessibleSymbolChain"
-+	MethodGetContextualTypeForArgumentAtIndex               Method = "getContextualTypeForArgumentAtIndex"
-+	MethodGetContextualTypeForJsxAttribute                  Method = "getContextualTypeForJsxAttribute"
-+	MethodIsValidPropertyAccess                             Method = "isValidPropertyAccess"
-+	MethodGetCandidateSignaturesForStringLiteralCompletions Method = "getCandidateSignaturesForStringLiteralCompletions"
-+	MethodGetSymbolsOfParameterPropertyDeclaration          Method = "getSymbolsOfParameterPropertyDeclaration"
-+	MethodGetAwaitedType                                    Method = "getAwaitedType"
-+	MethodGetNullableType                                   Method = "getNullableType"
-+	MethodIsNullableType                                    Method = "isNullableType"
-+	MethodGetElementTypeOfArrayType                         Method = "getElementTypeOfArrayType"
-+	MethodGetIndexInfoOfType                                Method = "getIndexInfoOfType"
-+	MethodGetIndexTypeOfTypeForKind                         Method = "getIndexTypeOfType"
-+	MethodGetTypeOfPropertyOfType                           Method = "getTypeOfPropertyOfType"
-+	MethodGetTypeOfPropertyOfContextualType                 Method = "getTypeOfPropertyOfContextualType"
-+	MethodFillMissingTypeArguments                          Method = "fillMissingTypeArguments"
-+	MethodGetWidenedLiteralType                             Method = "getWidenedLiteralType"
-+	MethodGetUnmatchedProperties                            Method = "getUnmatchedProperties"
-+	MethodIsEmptyAnonymousObjectType                        Method = "isEmptyAnonymousObjectType"
-+	MethodIsLibType                                         Method = "isLibType"
-+	MethodSymbolIsValue                                     Method = "symbolIsValue"
-+	MethodRequiresAddingImplicitUndefined                   Method = "requiresAddingImplicitUndefined"
-+	MethodGetTypeOnlyAliasDeclaration                       Method = "getTypeOnlyAliasDeclaration"
-+	MethodResolveExternalModuleName                         Method = "resolveExternalModuleName"
-+	MethodGetPropertySymbolOfDestructuringAssignment        Method = "getPropertySymbolOfDestructuringAssignment"
-+	MethodIsSymbolAccessible                                Method = "isSymbolAccessible"
-+	MethodGetIndexInfosOfIndexSymbol                        Method = "getIndexInfosOfIndexSymbol"
-+	MethodContainsArgumentsReference                        Method = "containsArgumentsReference"
-+	MethodGetAugmentedPropertiesOfType                      Method = "getAugmentedPropertiesOfType"
-+	MethodGetSuggestedSymbolForNonexistentProperty          Method = "getSuggestedSymbolForNonexistentProperty"
-+	MethodGetSuggestedSymbolForNonexistentClassMember       Method = "getSuggestedSymbolForNonexistentClassMember"
-+	MethodGetSuggestedSymbolForNonexistentJSXAttribute      Method = "getSuggestedSymbolForNonexistentJSXAttribute"
-+	MethodGetSuggestedSymbolForNonexistentModule            Method = "getSuggestedSymbolForNonexistentModule"
-+	MethodGetSuggestedSymbolForNonexistentSymbol            Method = "getSuggestedSymbolForNonexistentSymbol"
-+	MethodSymbolToExpression                                Method = "symbolToExpression"
-+	MethodSymbolToNode                                      Method = "symbolToNode"
-+	MethodSymbolToEntityName                                Method = "symbolToEntityName"
-+	MethodTypePredicateToTypePredicateNode                  Method = "typePredicateToTypePredicateNode"
-+	MethodIndexInfoToIndexSignatureDeclaration              Method = "indexInfoToIndexSignatureDeclaration"
-+	MethodGetPromiseType                                    Method = "getPromiseType"
-+	MethodGetPromiseLikeType                                Method = "getPromiseLikeType"
-+	MethodGetAnyAsyncIterableType                           Method = "getAnyAsyncIterableType"
-+	MethodGetExactOptionalProperties                        Method = "getExactOptionalProperties"
-+	MethodGetJsxNamespace                                   Method = "getJsxNamespace"
-+	MethodGetJsxFragmentFactory                             Method = "getJsxFragmentFactory"
-+	MethodGetParameterIdentifierInfoAtPosition              Method = "getParameterIdentifierInfoAtPosition"
-+	MethodCreateArrayType                                   Method = "createArrayType"
-+	MethodCreatePromiseType                                 Method = "createPromiseType"
-+	MethodCreateTransientSymbolWithType                     Method = "createTransientSymbolWithType"
-+	MethodCreateSignatureFromParts                          Method = "createSignatureFromParts"
-+	MethodCreateAnonymousTypeFromParts                      Method = "createAnonymousTypeFromParts"
-+	MethodGetMemberOverrideModifierStatus                   Method = "getMemberOverrideModifierStatus"
-+	MethodGetSymbolOfExpando                                Method = "getSymbolOfExpando"
-+	MethodCollectVisitedTypeParameters                      Method = "collectVisitedTypeParameters"
- 
- 	// Reference methods
- 	MethodGetReferencesToSymbolInFile Method = "getReferencesToSymbolInFile"
-@@ -166,11 +290,19 @@ const (
- 
- 	// Language service methods
- 	MethodGetCompletionsAtPosition Method = "getCompletionsAtPosition"
-+	MethodResolveCompletionItem    Method = "resolveCompletionItem"
-+	MethodQuickinfo                Method = "quickinfo"
-+	MethodReferences               Method = "references"
-+	MethodDefinitionAndBoundSpan   Method = "definitionAndBoundSpan"
-+	MethodSignatureHelp            Method = "signatureHelp"
-+	MethodGetRenameInfo            Method = "getRenameInfo"
-+	MethodGetEditsForRename        Method = "getEditsForRename"
- 
- 	// Diagnostic methods
- 	MethodGetSyntacticDiagnostics         Method = "getSyntacticDiagnostics"
- 	MethodGetBindDiagnostics              Method = "getBindDiagnostics"
- 	MethodGetSemanticDiagnostics          Method = "getSemanticDiagnostics"
-+	MethodGetDiagnosticsBatch             Method = "getDiagnosticsBatch"
- 	MethodGetSuggestionDiagnostics        Method = "getSuggestionDiagnostics"
- 	MethodGetDeclarationDiagnostics       Method = "getDeclarationDiagnostics"
- 	MethodGetProgramDiagnostics           Method = "getProgramDiagnostics"
-@@ -178,20 +310,30 @@ const (
- 	MethodGetConfigFileParsingDiagnostics Method = "getConfigFileParsingDiagnostics"
- 
- 	// Emitter methods
--	MethodPrintNode Method = "printNode"
-+	MethodPrintNode     Method = "printNode"
-+	MethodEmit          Method = "emit"
-+	MethodEmitBuildInfo Method = "emitBuildInfo"
- 
- 	// Intrinsic type getters
--	MethodGetAnyType       Method = "getAnyType"
--	MethodGetStringType    Method = "getStringType"
--	MethodGetNumberType    Method = "getNumberType"
--	MethodGetBooleanType   Method = "getBooleanType"
--	MethodGetVoidType      Method = "getVoidType"
--	MethodGetUndefinedType Method = "getUndefinedType"
--	MethodGetNullType      Method = "getNullType"
--	MethodGetNeverType     Method = "getNeverType"
--	MethodGetUnknownType   Method = "getUnknownType"
--	MethodGetBigIntType    Method = "getBigIntType"
--	MethodGetESSymbolType  Method = "getESSymbolType"
-+	MethodGetAnyType          Method = "getAnyType"
-+	MethodGetErrorType        Method = "getErrorType"
-+	MethodGetStringType       Method = "getStringType"
-+	MethodGetNumberType       Method = "getNumberType"
-+	MethodGetBooleanType      Method = "getBooleanType"
-+	MethodGetVoidType         Method = "getVoidType"
-+	MethodGetUndefinedType    Method = "getUndefinedType"
-+	MethodGetNullType         Method = "getNullType"
-+	MethodGetNeverType        Method = "getNeverType"
-+	MethodGetUnknownType      Method = "getUnknownType"
-+	MethodGetBigIntType       Method = "getBigIntType"
-+	MethodGetESSymbolType     Method = "getESSymbolType"
-+	MethodGetOptionalType     Method = "getOptionalType"
-+	MethodGetNonPrimitiveType Method = "getNonPrimitiveType"
-+
-+	// Literal type factories
-+	MethodGetStringLiteralType Method = "getStringLiteralType"
-+	MethodGetNumberLiteralType Method = "getNumberLiteralType"
-+	MethodGetBigIntLiteralType Method = "getBigIntLiteralType"
- 
- 	// Well-known per-checker symbols
- 	MethodGetWellKnownSymbols Method = "getWellKnownSymbols"
-@@ -208,6 +350,10 @@ type InitializeResponse struct {
- 	UseCaseSensitiveFileNames bool `json:"useCaseSensitiveFileNames"`
- 	// CurrentDirectory is the server's current working directory.
- 	CurrentDirectory string `json:"currentDirectory"`
-+	// Version is the tsgo engine version (core.Version()). It is the version
-+	// stamped into .tsbuildinfo files emitted through this session, so hosts
-+	// can validate buildinfo currency against the engine that produced it.
-+	Version string `json:"version"`
- }
- 
- // DocumentIdentifier identifies a document by either a file name (plain string) or a URI object.
-@@ -217,6 +363,8 @@ type DocumentIdentifier struct {
- 	URI      lsproto.DocumentUri `json:"uri,omitempty"`
- }
- 
-+var _ json.UnmarshalerFrom = (*OpenProjectParams)(nil)
-+
- var _ json.UnmarshalerFrom = (*DocumentIdentifier)(nil)
- 
- func (d *DocumentIdentifier) UnmarshalJSONFrom(dec *json.Decoder) error {
-@@ -308,7 +456,9 @@ type APIFileChanges struct {
- type UpdateSnapshotParams struct {
- 	// OpenProjects lists tsconfig.json files to open/load in the new snapshot.
- 	// Opens are ref-counted and persist across snapshots until closed.
--	OpenProjects []DocumentIdentifier `json:"openProjects,omitempty"`
-+	// An entry may carry the client's effective compiler options, which then
-+	// replace the disk-parsed options for that project (see OpenProjectParams).
-+	OpenProjects []OpenProjectParams `json:"openProjects,omitempty"`
- 	// CloseProjects lists tsconfig.json files to release in the new snapshot.
- 	// A project is only unloaded once every API client that opened it closes it.
- 	CloseProjects []DocumentIdentifier `json:"closeProjects,omitempty"`
-@@ -324,6 +474,30 @@ type UpdateSnapshotParams struct {
- 	// CloseFiles lists files to release in the new snapshot. A file is only fully
- 	// closed once every API client that opened it closes it.
- 	CloseFiles []DocumentIdentifier `json:"closeFiles,omitempty"`
-+	// OpenFilesWithContent feeds file content from the client (host overlays)
-+	// instead of reading from disk. Each entry creates a SnapshotFS overlay,
-+	// making the client host the single source of truth for file content.
-+	// Used by the fork to avoid double disk reads and to inject Volar virtual
-+	// TS content (.vue/.mdx) that doesn't exist on disk.
-+	OpenFilesWithContent []OpenFileWithContent `json:"openFilesWithContent,omitempty"`
-+	// ExtraFileExtensions extends tsconfig file-name discovery for allowArbitraryExtensions
-+	// hosts (vue-tsc / Volar). Each entry uses core.ScriptKind values (7 = Deferred).
-+	ExtraFileExtensions []ExtraFileExtensionWire `json:"extraFileExtensions,omitempty"`
-+	// PrefetchDiagnostics starts the whole-program semantic pass for projects
-+	// opened by this request in the background, overlapping it with the
-+	// client's work between this response and its getGlobalDiagnostics call.
-+	// Solution-build clients (tsc -b) set this; interactive (LSP) clients must
-+	// not, or every keystroke would trigger a full check.
-+	PrefetchDiagnostics bool `json:"prefetchDiagnostics,omitempty"`
-+
-+	// AdditionalFiles lists extra files to add as program roots for projects
-+	// opened by this request (union with the tsconfig expansion; files the
-+	// program already contains are skipped). Use for host-computed root files
-+	// the config does not cover — e.g. ambient shim d.ts a LanguageService
-+	// host injects via getScriptFileNames (svelte-check) — which the
-+	// default-project search would exile to the inferred project (its
-+	// ancestor search stops at node_modules boundaries).
-+	AdditionalFiles []DocumentIdentifier `json:"additionalFiles,omitempty"`
- }
- 
- // ProjectFileChanges describes what source files changed within a single project.
-@@ -332,6 +506,11 @@ type ProjectFileChanges struct {
- 	ChangedFiles []tspath.Path `json:"changedFiles,omitempty"`
- 	// DeletedFiles lists source file paths removed from the project's program.
- 	DeletedFiles []tspath.Path `json:"deletedFiles,omitempty"`
-+	// AddedFiles lists source file paths newly present in the project's program.
-+	// Blob caches need no invalidation for these (no stale entry can exist),
-+	// but whole-program answers (builder file graph, source-file names) must
-+	// not treat the project as unchanged.
-+	AddedFiles []tspath.Path `json:"addedFiles,omitempty"`
- }
- 
- // SnapshotChanges describes what changed between the previous latest snapshot
-@@ -358,36 +537,66 @@ type UpdateSnapshotResponse struct {
- }
- 
- var unmarshalers = map[Method]func([]byte) (any, error){
--	MethodRelease:                  unmarshallerFor[ReleaseParams],
--	MethodInitialize:               noParams,
--	MethodUpdateSnapshot:           unmarshallerFor[UpdateSnapshotParams],
--	MethodParseConfigFile:          unmarshallerFor[ParseConfigFileParams],
--	MethodGetDefaultProjectForFile: unmarshallerFor[GetDefaultProjectForFileParams],
--	MethodGetSourceFile:            unmarshallerFor[GetSourceFileParams],
--	MethodGetSourceFileNames:       unmarshallerFor[GetSourceFileNamesParams],
--	MethodGetSourceFileMetadata:    unmarshallerFor[GetSourceFileParams],
--	MethodGetSymbolAtPosition:      unmarshallerFor[GetSymbolAtPositionParams],
--	MethodGetSymbolsAtPositions:    unmarshallerFor[GetSymbolsAtPositionsParams],
--	MethodGetSymbolAtLocation:      unmarshallerFor[GetSymbolAtLocationParams],
--	MethodGetSymbolsAtLocations:    unmarshallerFor[GetSymbolsAtLocationsParams],
--	MethodGetTypeOfSymbol:          unmarshallerFor[GetTypeOfSymbolParams],
--	MethodGetTypesOfSymbols:        unmarshallerFor[GetTypesOfSymbolsParams],
--	MethodGetDeclaredTypeOfSymbol:  unmarshallerFor[GetTypeOfSymbolParams],
--	MethodResolveName:              unmarshallerFor[ResolveNameParams],
--	MethodGetSignaturesOfType:      unmarshallerFor[GetSignaturesOfTypeParams],
--	MethodGetResolvedSignature:     unmarshallerFor[GetResolvedSignatureParams],
--	MethodGetTypeAtLocation:        unmarshallerFor[GetTypeAtLocationParams],
--	MethodGetTypeAtLocations:       unmarshallerFor[GetTypeAtLocationsParams],
--	MethodGetTypeAtPosition:        unmarshallerFor[GetTypeAtPositionParams],
--	MethodGetTypesAtPositions:      unmarshallerFor[GetTypesAtPositionsParams],
--
--	MethodGetParentOfSymbol:       unmarshallerFor[GetSymbolPropertyParams],
--	MethodGetMembersOfSymbol:      unmarshallerFor[GetSymbolPropertyParams],
--	MethodGetExportsOfSymbol:      unmarshallerFor[GetSymbolPropertyParams],
--	MethodGetExportSymbolOfSymbol: unmarshallerFor[GetSymbolPropertyParams],
-+	MethodGetSourceFileMetadata: unmarshallerFor[GetSourceFileParams],
-+
-+	MethodRelease:                                             unmarshallerFor[ReleaseParams],
-+	MethodInitialize:                                          noParams,
-+	MethodUpdateSnapshot:                                      unmarshallerFor[UpdateSnapshotParams],
-+	MethodParseConfigFile:                                     unmarshallerFor[ParseConfigFileParams],
-+	MethodGetDefaultProjectForFile:                            unmarshallerFor[GetDefaultProjectForFileParams],
-+	MethodGetSourceFile:                                       unmarshallerFor[GetSourceFileParams],
-+	MethodGetSourceFileNames:                                  unmarshallerFor[GetSourceFileNamesParams],
-+	MethodGetBuilderFileGraph:                                 unmarshallerFor[GetBuilderFileGraphParams],
-+	MethodGetMissingFilePaths:                                 unmarshallerFor[GetProgramInfoParams],
-+	MethodGetFileIncludeReasons:                               unmarshallerFor[GetProgramInfoParams],
-+	MethodGetProgramResolutionInfo:                            unmarshallerFor[GetProgramInfoParams],
-+	MethodGetClassifiableNames:                                unmarshallerFor[GetProgramInfoParams],
-+	MethodGetUsesUriStyleNodeCoreModules:                      unmarshallerFor[GetProgramInfoParams],
-+	MethodGetAmbientModules:                                   unmarshallerFor[GetAmbientModulesParams],
-+	MethodGetModuleExportMap:                                  unmarshallerFor[GetModuleExportMapParams],
-+	MethodGetModuleSpecifiersBatch:                            unmarshallerFor[GetModuleSpecifiersBatchParams],
-+	MethodGetCompilerOptionsForFile:                           unmarshallerFor[GetDiagnosticsParams],
-+	MethodGetImpliedNodeFormatForEmit:                         unmarshallerFor[GetDiagnosticsParams],
-+	MethodGetDefaultResolutionModeForFile:                     unmarshallerFor[GetDiagnosticsParams],
-+	MethodGetEmitModuleFormatOfFile:                           unmarshallerFor[GetDiagnosticsParams],
-+	MethodGetModeForUsageLocation:                             unmarshallerFor[GetModeForUsageLocationParams],
-+	MethodGetEmitSyntaxForUsageLocation:                       unmarshallerFor[GetModeForUsageLocationParams],
-+	MethodGetRedirectTargets:                                  unmarshallerFor[GetDiagnosticsParams],
-+	MethodGetSymbolAtPosition:                                 unmarshallerFor[GetSymbolAtPositionParams],
-+	MethodGetSymbolsAtPositions:                               unmarshallerFor[GetSymbolsAtPositionsParams],
-+	MethodGetSymbolAtLocation:                                 unmarshallerFor[GetSymbolAtLocationParams],
-+	MethodGetSymbolsAtLocations:                               unmarshallerFor[GetSymbolsAtLocationsParams],
-+	MethodGetTypeOfSymbol:                                     unmarshallerFor[GetTypeOfSymbolParams],
-+	MethodGetTypesOfSymbols:                                   unmarshallerFor[GetTypesOfSymbolsParams],
-+	MethodGetDeclaredTypeOfSymbol:                             unmarshallerFor[GetTypeOfSymbolParams],
-+	MethodResolveName:                                         unmarshallerFor[ResolveNameParams],
-+	MethodGetSymbolsInScope:                                   unmarshallerFor[GetSymbolsInScopeParams],
-+	MethodGetSignaturesOfType:                                 unmarshallerFor[GetSignaturesOfTypeParams],
-+	MethodGetResolvedSignature:                                unmarshallerFor[GetResolvedSignatureParams],
-+	MethodGetResolvedSignatureForSignatureHelp:                unmarshallerFor[GetResolvedSignatureForSignatureHelpParams],
-+	MethodGetExpandedParameters:                               unmarshallerFor[GetExpandedParametersParams],
-+	MethodHasEffectiveRestParameter:                           unmarshallerFor[HasEffectiveRestParameterParams],
-+	MethodGetLocalTypeParametersOfClassOrInterfaceOrTypeAlias: unmarshallerFor[CheckerSymbolParams],
-+	MethodGetContextualTypeForObjectLiteralElement:            unmarshallerFor[GetContextualTypeForObjectLiteralElementParams],
-+	MethodIsOptionalParameter:                                 unmarshallerFor[CheckerNodeParams],
-+	MethodIsImplementationOfOverload:                          unmarshallerFor[CheckerNodeParams],
-+	MethodGetTypeAtLocation:                                   unmarshallerFor[GetTypeAtLocationParams],
-+	MethodGetTypeAtLocations:                                  unmarshallerFor[GetTypeAtLocationsParams],
-+	MethodGetTypeAtPosition:                                   unmarshallerFor[GetTypeAtPositionParams],
-+	MethodGetTypesAtPositions:                                 unmarshallerFor[GetTypesAtPositionsParams],
-+
-+	MethodGetParentOfSymbol:        unmarshallerFor[GetSymbolPropertyParams],
-+	MethodGetParentsOfSymbols:      unmarshallerFor[GetSymbolsDeclarationsParams],
-+	MethodGetMembersOfSymbol:       unmarshallerFor[GetSymbolPropertyParams],
-+	MethodGetExportsOfSymbol:       unmarshallerFor[GetSymbolPropertyParams],
-+	MethodGetExportSymbolOfSymbol:  unmarshallerFor[GetSymbolPropertyParams],
-+	MethodGetGlobalExportsOfSymbol: unmarshallerFor[GetSymbolPropertyParams],
-+	MethodGetSymbolDeclarations:    unmarshallerFor[GetSymbolPropertyParams],
-+	MethodGetSymbolsDeclarations:   unmarshallerFor[GetSymbolsDeclarationsParams],
- 
- 	MethodGetSymbolOfType:               unmarshallerFor[GetTypePropertyParams],
- 	MethodGetTargetOfType:               unmarshallerFor[GetTypePropertyParams],
-+	MethodGetThisTypeOfType:             unmarshallerFor[GetTypePropertyParams],
- 	MethodGetFreshTypeOfType:            unmarshallerFor[GetTypePropertyParams],
- 	MethodGetRegularTypeOfType:          unmarshallerFor[GetTypePropertyParams],
- 	MethodGetTypesOfType:                unmarshallerFor[GetTypePropertyParams],
-@@ -410,70 +619,167 @@ var unmarshalers = map[Method]func([]byte) (any, error){
- 	MethodGetThisParameterOfSignature:  unmarshallerFor[GetSignaturePropertyParams],
- 	MethodGetTargetOfSignature:         unmarshallerFor[GetSignaturePropertyParams],
- 
--	MethodGetContextualType:                 unmarshallerFor[GetContextualTypeParams],
--	MethodGetBaseTypeOfLiteralType:          unmarshallerFor[GetBaseTypeOfLiteralTypeParams],
--	MethodGetNonNullableType:                unmarshallerFor[GetNonNullableTypeParams],
--	MethodGetTypeFromTypeNode:               unmarshallerFor[GetTypeFromTypeNodeParams],
--	MethodGetWidenedType:                    unmarshallerFor[GetWidenedTypeParams],
--	MethodGetParameterType:                  unmarshallerFor[GetParameterTypeParams],
--	MethodIsArrayLikeType:                   unmarshallerFor[IsArrayLikeTypeParams],
--	MethodIsTypeAssignableTo:                unmarshallerFor[IsTypeAssignableToParams],
--	MethodGetShorthandAssignmentValueSymbol: unmarshallerFor[GetTypeAtLocationParams],
--	MethodGetTypeOfSymbolAtLocation:         unmarshallerFor[GetTypeOfSymbolAtLocationParams],
--	MethodTypeToTypeNode:                    unmarshallerFor[TypeToTypeNodeParams],
--	MethodSignatureToSignatureDeclaration:   unmarshallerFor[SignatureToSignatureDeclarationParams],
--	MethodTypeToString:                      unmarshallerFor[TypeToTypeNodeParams],
--	MethodIsContextSensitive:                unmarshallerFor[GetContextualTypeParams],
--	MethodGetReturnTypeOfSignature:          unmarshallerFor[CheckerSignatureParams],
--	MethodGetRestTypeOfSignature:            unmarshallerFor[CheckerSignatureParams],
--	MethodGetTypePredicateOfSignature:       unmarshallerFor[CheckerSignatureParams],
--	MethodGetBaseTypes:                      unmarshallerFor[CheckerTypeParams],
--	MethodGetPropertiesOfType:               unmarshallerFor[CheckerTypeParams],
--	MethodGetApparentType:                   unmarshallerFor[CheckerTypeParams],
--	MethodGetPropertyOfType:                 unmarshallerFor[GetPropertyOfTypeParams],
--	MethodGetIndexInfosOfType:               unmarshallerFor[CheckerTypeParams],
--	MethodGetConstraintOfTypeParameter:      unmarshallerFor[CheckerTypeParams],
--	MethodGetBaseConstraintOfType:           unmarshallerFor[CheckerTypeParams],
--	MethodGetTypeArguments:                  unmarshallerFor[CheckerTypeParams],
--	MethodGetConstantValue:                  unmarshallerFor[CheckerNodeParams],
--	MethodGetSignatureFromDeclaration:       unmarshallerFor[CheckerNodeParams],
--	MethodGetExportSpecifierLocalTarget:     unmarshallerFor[CheckerNodeParams],
--	MethodGetAliasedSymbol:                  unmarshallerFor[CheckerSymbolParams],
--	MethodGetImmediateAliasedSymbol:         unmarshallerFor[CheckerSymbolParams],
--	MethodGetExportsOfModule:                unmarshallerFor[CheckerSymbolParams],
--	MethodGetMemberInModuleExports:          unmarshallerFor[GetMemberInModuleExportsParams],
--	MethodGetJSDocTags:                      unmarshallerFor[CheckerSymbolParams],
--	MethodGetDocumentationComment:           unmarshallerFor[CheckerSymbolParams],
--	MethodIsArrayType:                       unmarshallerFor[CheckerTypeParams],
--	MethodIsTupleType:                       unmarshallerFor[CheckerTypeParams],
--	MethodGetReferencesToSymbolInFile:       unmarshallerFor[GetReferencesToSymbolInFileParams],
--	MethodGetReferencedSymbolsForNode:       unmarshallerFor[GetReferencedSymbolsForNodeParams],
--	MethodGetSignatureUsages:                unmarshallerFor[GetSignatureUsagesParams],
--	MethodGetCompletionsAtPosition:          unmarshallerFor[GetCompletionsAtPositionParams],
--	MethodPrintNode:                         unmarshallerFor[PrintNodeParams],
--	MethodGetAnyType:                        unmarshallerFor[GetIntrinsicTypeParams],
--	MethodGetStringType:                     unmarshallerFor[GetIntrinsicTypeParams],
--	MethodGetNumberType:                     unmarshallerFor[GetIntrinsicTypeParams],
--	MethodGetBooleanType:                    unmarshallerFor[GetIntrinsicTypeParams],
--	MethodGetVoidType:                       unmarshallerFor[GetIntrinsicTypeParams],
--	MethodGetUndefinedType:                  unmarshallerFor[GetIntrinsicTypeParams],
--	MethodGetNullType:                       unmarshallerFor[GetIntrinsicTypeParams],
--	MethodGetNeverType:                      unmarshallerFor[GetIntrinsicTypeParams],
--	MethodGetUnknownType:                    unmarshallerFor[GetIntrinsicTypeParams],
--	MethodGetBigIntType:                     unmarshallerFor[GetIntrinsicTypeParams],
--	MethodGetESSymbolType:                   unmarshallerFor[GetIntrinsicTypeParams],
--	MethodGetWellKnownSymbols:               unmarshallerFor[GetIntrinsicTypeParams],
--	MethodGetSyntacticDiagnostics:           unmarshallerFor[GetDiagnosticsParams],
--	MethodGetBindDiagnostics:                unmarshallerFor[GetDiagnosticsParams],
--	MethodGetSemanticDiagnostics:            unmarshallerFor[GetDiagnosticsParams],
--	MethodGetSuggestionDiagnostics:          unmarshallerFor[GetDiagnosticsParams],
--	MethodGetDeclarationDiagnostics:         unmarshallerFor[GetDiagnosticsParams],
--	MethodGetProgramDiagnostics:             unmarshallerFor[GetProjectDiagnosticsParams],
--	MethodGetGlobalDiagnostics:              unmarshallerFor[GetProjectDiagnosticsParams],
--	MethodGetConfigFileParsingDiagnostics:   unmarshallerFor[GetProjectDiagnosticsParams],
--	MethodStartCPUProfile:                   unmarshallerFor[ProfileParams],
--	MethodStopCPUProfile:                    noParams,
--	MethodSaveHeapProfile:                   unmarshallerFor[ProfileParams],
-+	MethodGetWellKnownSymbols: unmarshallerFor[GetIntrinsicTypeParams],
-+
-+	MethodGetContextualType:                                 unmarshallerFor[GetContextualTypeParams],
-+	MethodGetBaseTypeOfLiteralType:                          unmarshallerFor[GetBaseTypeOfLiteralTypeParams],
-+	MethodGetNonNullableType:                                unmarshallerFor[GetNonNullableTypeParams],
-+	MethodGetNonOptionalType:                                unmarshallerFor[GetNonOptionalTypeParams],
-+	MethodGetTypeFromTypeNode:                               unmarshallerFor[GetTypeFromTypeNodeParams],
-+	MethodGetWidenedType:                                    unmarshallerFor[GetWidenedTypeParams],
-+	MethodGetParameterType:                                  unmarshallerFor[GetParameterTypeParams],
-+	MethodIsArrayLikeType:                                   unmarshallerFor[IsArrayLikeTypeParams],
-+	MethodIsTypeAssignableTo:                                unmarshallerFor[IsTypeAssignableToParams],
-+	MethodGetUnionType:                                      unmarshallerFor[GetUnionTypeParams],
-+	MethodGetPromisedTypeOfPromise:                          unmarshallerFor[CheckerTypeParams],
-+	MethodGetAllPossiblePropertiesOfTypes:                   unmarshallerFor[CheckerTypesParams],
-+	MethodIsTypeInvalidDueToUnionDiscriminant:               unmarshallerFor[IsTypeInvalidDueToUnionDiscriminantParams],
-+	MethodTypeHasCallOrConstructSignatures:                  unmarshallerFor[CheckerTypeParams],
-+	MethodGetPropertiesForObjectExpression:                  unmarshallerFor[GetPropertiesForObjectExpressionParams],
-+	MethodGetShorthandAssignmentValueSymbol:                 unmarshallerFor[GetTypeAtLocationParams],
-+	MethodGetTypeOfSymbolAtLocation:                         unmarshallerFor[GetTypeOfSymbolAtLocationParams],
-+	MethodTypeToTypeNode:                                    unmarshallerFor[TypeToTypeNodeParams],
-+	MethodTypeParameterToDeclaration:                        unmarshallerFor[TypeToTypeNodeParams],
-+	MethodSymbolToTypeParameterDeclarations:                 unmarshallerFor[SymbolToTypeParameterDeclarationsParams],
-+	MethodSymbolToParameterDeclaration:                      unmarshallerFor[SymbolToParameterDeclarationParams],
-+	MethodSignatureToSignatureDeclaration:                   unmarshallerFor[SignatureToSignatureDeclarationParams],
-+	MethodSignatureToString:                                 unmarshallerFor[SignatureToStringParams],
-+	MethodTypeToString:                                      unmarshallerFor[TypeToTypeNodeParams],
-+	MethodIsContextSensitive:                                unmarshallerFor[GetContextualTypeParams],
-+	MethodGetReturnTypeOfSignature:                          unmarshallerFor[CheckerSignatureParams],
-+	MethodGetRestTypeOfSignature:                            unmarshallerFor[CheckerSignatureParams],
-+	MethodGetTypePredicateOfSignature:                       unmarshallerFor[CheckerSignatureParams],
-+	MethodGetBaseTypes:                                      unmarshallerFor[CheckerTypeParams],
-+	MethodGetPropertiesOfType:                               unmarshallerFor[CheckerTypeParams],
-+	MethodGetApparentType:                                   unmarshallerFor[CheckerTypeParams],
-+	MethodGetPropertyOfType:                                 unmarshallerFor[GetPropertyOfTypeParams],
-+	MethodGetIndexInfosOfType:                               unmarshallerFor[CheckerTypeParams],
-+	MethodGetIndexInfosAtLocation:                           unmarshallerFor[CheckerNodeParams],
-+	MethodGetConstraintOfTypeParameter:                      unmarshallerFor[CheckerTypeParams],
-+	MethodGetDefaultFromTypeParameter:                       unmarshallerFor[CheckerTypeParams],
-+	MethodGetRecursionIdentity:                              unmarshallerFor[CheckerTypeParams],
-+	MethodGetTypeOfAssignmentPattern:                        unmarshallerFor[CheckerNodeParams],
-+	MethodGetTypeArgumentsForResolvedSignature:              unmarshallerFor[CheckerSignatureParams],
-+	MethodGetBaseConstraintOfType:                           unmarshallerFor[CheckerTypeParams],
-+	MethodGetTypeArguments:                                  unmarshallerFor[CheckerTypeParams],
-+	MethodGetConstantValue:                                  unmarshallerFor[CheckerNodeParams],
-+	MethodGetSignatureFromDeclaration:                       unmarshallerFor[CheckerNodeParams],
-+	MethodGetExportSpecifierLocalTarget:                     unmarshallerFor[CheckerNodeParams],
-+	MethodGetAliasedSymbol:                                  unmarshallerFor[CheckerSymbolParams],
-+	MethodGetImmediateAliasedSymbol:                         unmarshallerFor[CheckerSymbolParams],
-+	MethodGetExportsOfModule:                                unmarshallerFor[CheckerSymbolParams],
-+	MethodGetModuleSymbolForSourceFile:                      unmarshallerFor[GetSourceFileParams],
-+	MethodGetRootSymbols:                                    unmarshallerFor[CheckerSymbolParams],
-+	MethodGetMemberInModuleExports:                          unmarshallerFor[GetMemberInModuleExportsParams],
-+	MethodResolveExternalModuleSymbol:                       unmarshallerFor[CheckerSymbolParams],
-+	MethodGetJSDocTags:                                      unmarshallerFor[CheckerSymbolParams],
-+	MethodGetDocumentationComment:                           unmarshallerFor[CheckerSymbolParams],
-+	MethodIsArrayType:                                       unmarshallerFor[CheckerTypeParams],
-+	MethodIsTupleType:                                       unmarshallerFor[CheckerTypeParams],
-+	MethodIsDeclarationVisible:                              unmarshallerFor[CheckerNodeParams],
-+	MethodTryGetThisTypeAt:                                  unmarshallerFor[TryGetThisTypeAtParams],
-+	MethodIsValidPropertyAccessForCompletions:               unmarshallerFor[IsValidPropertyAccessForCompletionsParams],
-+	MethodGetTypeArgumentConstraint:                         unmarshallerFor[CheckerNodeParams],
-+	MethodGetExportsAndPropertiesOfModule:                   unmarshallerFor[CheckerSymbolParams],
-+	MethodGetJsxIntrinsicTagNamesAt:                         unmarshallerFor[CheckerNodeParams],
-+	MethodIsPropertyAccessible:                              unmarshallerFor[IsPropertyAccessibleParams],
-+	MethodGetAccessibleSymbolChain:                          unmarshallerFor[GetAccessibleSymbolChainParams],
-+	MethodGetContextualTypeForArgumentAtIndex:               unmarshallerFor[GetContextualTypeForArgumentAtIndexParams],
-+	MethodGetContextualTypeForJsxAttribute:                  unmarshallerFor[CheckerNodeParams],
-+	MethodIsValidPropertyAccess:                             unmarshallerFor[IsValidPropertyAccessParams],
-+	MethodGetCandidateSignaturesForStringLiteralCompletions: unmarshallerFor[GetCandidateSignaturesForStringLiteralCompletionsParams],
-+	MethodGetSymbolsOfParameterPropertyDeclaration:          unmarshallerFor[GetSymbolsOfParameterPropertyDeclarationParams],
-+	MethodGetAwaitedType:                                    unmarshallerFor[CheckerTypeParams],
-+	MethodGetNullableType:                                   unmarshallerFor[GetNullableTypeParams],
-+	MethodIsNullableType:                                    unmarshallerFor[CheckerTypeParams],
-+	MethodGetElementTypeOfArrayType:                         unmarshallerFor[CheckerTypeParams],
-+	MethodGetIndexInfoOfType:                                unmarshallerFor[GetIndexKindParams],
-+	MethodGetIndexTypeOfTypeForKind:                         unmarshallerFor[GetIndexKindParams],
-+	MethodGetTypeOfPropertyOfType:                           unmarshallerFor[GetPropertyOfTypeParams],
-+	MethodGetTypeOfPropertyOfContextualType:                 unmarshallerFor[GetPropertyOfTypeParams],
-+	MethodFillMissingTypeArguments:                          unmarshallerFor[FillMissingTypeArgumentsParams],
-+	MethodGetWidenedLiteralType:                             unmarshallerFor[CheckerTypeParams],
-+	MethodGetUnmatchedProperties:                            unmarshallerFor[GetUnmatchedPropertiesParams],
-+	MethodIsEmptyAnonymousObjectType:                        unmarshallerFor[CheckerTypeParams],
-+	MethodIsLibType:                                         unmarshallerFor[CheckerTypeParams],
-+	MethodSymbolIsValue:                                     unmarshallerFor[CheckerSymbolParams],
-+	MethodRequiresAddingImplicitUndefined:                   unmarshallerFor[CheckerNodeParams],
-+	MethodGetTypeOnlyAliasDeclaration:                       unmarshallerFor[CheckerSymbolParams],
-+	MethodResolveExternalModuleName:                         unmarshallerFor[CheckerNodeParams],
-+	MethodGetPropertySymbolOfDestructuringAssignment:        unmarshallerFor[CheckerNodeParams],
-+	MethodIsSymbolAccessible:                                unmarshallerFor[IsSymbolAccessibleParams],
-+	MethodGetIndexInfosOfIndexSymbol:                        unmarshallerFor[GetIndexInfosOfIndexSymbolParams],
-+	MethodContainsArgumentsReference:                        unmarshallerFor[CheckerNodeParams],
-+	MethodGetAugmentedPropertiesOfType:                      unmarshallerFor[CheckerTypeParams],
-+	MethodGetSuggestedSymbolForNonexistentProperty:          unmarshallerFor[GetSuggestedSymbolForNonexistentPropertyParams],
-+	MethodGetSuggestedSymbolForNonexistentClassMember:       unmarshallerFor[GetSuggestedSymbolForNonexistentClassMemberParams],
-+	MethodGetSuggestedSymbolForNonexistentJSXAttribute:      unmarshallerFor[GetSuggestedSymbolForNonexistentJSXAttributeParams],
-+	MethodGetSuggestedSymbolForNonexistentModule:            unmarshallerFor[GetSuggestedSymbolForNonexistentModuleParams],
-+	MethodGetSuggestedSymbolForNonexistentSymbol:            unmarshallerFor[GetSuggestedSymbolForNonexistentSymbolParams],
-+	MethodSymbolToExpression:                                unmarshallerFor[SymbolToNodeBuilderParams],
-+	MethodSymbolToNode:                                      unmarshallerFor[SymbolToNodeBuilderParams],
-+	MethodSymbolToEntityName:                                unmarshallerFor[SymbolToNodeBuilderParams],
-+	MethodTypePredicateToTypePredicateNode:                  unmarshallerFor[TypePredicateToTypePredicateNodeParams],
-+	MethodIndexInfoToIndexSignatureDeclaration:              unmarshallerFor[IndexInfoToIndexSignatureDeclarationParams],
-+	MethodGetPromiseType:                                    unmarshallerFor[GetIntrinsicTypeParams],
-+	MethodGetPromiseLikeType:                                unmarshallerFor[GetIntrinsicTypeParams],
-+	MethodGetAnyAsyncIterableType:                           unmarshallerFor[GetIntrinsicTypeParams],
-+	MethodGetExactOptionalProperties:                        unmarshallerFor[CheckerTypeParams],
-+	MethodGetJsxNamespace:                                   unmarshallerFor[CheckerNodeOptionalParams],
-+	MethodGetJsxFragmentFactory:                             unmarshallerFor[CheckerNodeParams],
-+	MethodGetParameterIdentifierInfoAtPosition:              unmarshallerFor[GetParameterIdentifierInfoAtPositionParams],
-+	MethodCreateArrayType:                                   unmarshallerFor[CheckerTypeParams],
-+	MethodCreatePromiseType:                                 unmarshallerFor[CheckerTypeParams],
-+	MethodCreateTransientSymbolWithType:                     unmarshallerFor[CreateTransientSymbolWithTypeParams],
-+	MethodCreateSignatureFromParts:                          unmarshallerFor[CreateSignatureFromPartsParams],
-+	MethodCreateAnonymousTypeFromParts:                      unmarshallerFor[CreateAnonymousTypeFromPartsParams],
-+	MethodGetMemberOverrideModifierStatus:                   unmarshallerFor[GetMemberOverrideModifierStatusParams],
-+	MethodGetSymbolOfExpando:                                unmarshallerFor[GetSymbolOfExpandoParams],
-+	MethodCollectVisitedTypeParameters:                      unmarshallerFor[CheckerTypeParams],
-+	MethodGetReferencesToSymbolInFile:                       unmarshallerFor[GetReferencesToSymbolInFileParams],
-+	MethodGetReferencedSymbolsForNode:                       unmarshallerFor[GetReferencedSymbolsForNodeParams],
-+	MethodGetSignatureUsages:                                unmarshallerFor[GetSignatureUsagesParams],
-+	MethodGetCompletionsAtPosition:                          unmarshallerFor[GetCompletionsAtPositionParams],
-+	MethodResolveCompletionItem:                             unmarshallerFor[ResolveCompletionItemParams],
-+	MethodQuickinfo:                                         unmarshallerFor[QuickinfoParams],
-+	MethodReferences:                                        unmarshallerFor[ReferencesParams],
-+	MethodDefinitionAndBoundSpan:                            unmarshallerFor[DefinitionAndBoundSpanParams],
-+	MethodSignatureHelp:                                     unmarshallerFor[SignatureHelpParams],
-+	MethodGetRenameInfo:                                     unmarshallerFor[RenameInfoParams],
-+	MethodGetEditsForRename:                                 unmarshallerFor[EditsForRenameParams],
-+	MethodPrintNode:                                         unmarshallerFor[PrintNodeParams],
-+	MethodGetAnyType:                                        unmarshallerFor[GetIntrinsicTypeParams],
-+	MethodGetErrorType:                                      unmarshallerFor[GetIntrinsicTypeParams],
-+	MethodGetStringType:                                     unmarshallerFor[GetIntrinsicTypeParams],
-+	MethodGetNumberType:                                     unmarshallerFor[GetIntrinsicTypeParams],
-+	MethodGetBooleanType:                                    unmarshallerFor[GetIntrinsicTypeParams],
-+	MethodGetVoidType:                                       unmarshallerFor[GetIntrinsicTypeParams],
-+	MethodGetUndefinedType:                                  unmarshallerFor[GetIntrinsicTypeParams],
-+	MethodGetOptionalType:                                   unmarshallerFor[GetIntrinsicTypeParams],
-+	MethodGetNonPrimitiveType:                               unmarshallerFor[GetIntrinsicTypeParams],
-+	MethodGetStringLiteralType:                              unmarshallerFor[GetLiteralTypeParams],
-+	MethodGetNumberLiteralType:                              unmarshallerFor[GetLiteralTypeParams],
-+	MethodGetBigIntLiteralType:                              unmarshallerFor[GetLiteralTypeParams],
-+	MethodGetPrivateIdentifierPropertyOfType:                unmarshallerFor[GetPrivateIdentifierPropertyOfTypeParams],
-+	MethodGetNullType:                                       unmarshallerFor[GetIntrinsicTypeParams],
-+	MethodGetNeverType:                                      unmarshallerFor[GetIntrinsicTypeParams],
-+	MethodGetUnknownType:                                    unmarshallerFor[GetIntrinsicTypeParams],
-+	MethodGetBigIntType:                                     unmarshallerFor[GetIntrinsicTypeParams],
-+	MethodGetESSymbolType:                                   unmarshallerFor[GetIntrinsicTypeParams],
-+	MethodGetSyntacticDiagnostics:                           unmarshallerFor[GetDiagnosticsParams],
-+	MethodGetBindDiagnostics:                                unmarshallerFor[GetDiagnosticsParams],
-+	MethodGetSemanticDiagnostics:                            unmarshallerFor[GetDiagnosticsParams],
-+	MethodGetDiagnosticsBatch:                               unmarshallerFor[GetProjectDiagnosticsParams],
-+	MethodGetSuggestionDiagnostics:                          unmarshallerFor[GetDiagnosticsParams],
-+	MethodGetDeclarationDiagnostics:                         unmarshallerFor[GetDiagnosticsParams],
-+	MethodEmit:                                              unmarshallerFor[EmitParams],
-+	MethodEmitBuildInfo:                                     unmarshallerFor[EmitBuildInfoParams],
-+	MethodGetProgramDiagnostics:                             unmarshallerFor[GetProjectDiagnosticsParams],
-+	MethodGetGlobalDiagnostics:                              unmarshallerFor[GetProjectDiagnosticsParams],
-+	MethodGetConfigFileParsingDiagnostics:                   unmarshallerFor[GetProjectDiagnosticsParams],
-+	MethodStartCPUProfile:                                   unmarshallerFor[ProfileParams],
-+	MethodStopCPUProfile:                                    noParams,
-+	MethodSaveHeapProfile:                                   unmarshallerFor[ProfileParams],
- }
- 
- type ParseConfigFileParams struct {
-@@ -558,6 +864,11 @@ type SymbolResponse struct {
- 	ValueDeclaration NodeHandle   `json:"valueDeclaration,omitempty"`
- 	Parent           SymbolID     `json:"parent,omitzero"`
- 	ExportSymbol     SymbolID     `json:"exportSymbol,omitzero"`
-+	// HasGlobalExports flags the `export as namespace` (UMD) case: stock sets
-+	// file.symbol.globalExports only there, so consumers read the field as a
-+	// Map when true and undefined otherwise. Computed from the symbol's
-+	// declaration SourceFiles in newSymbolResponse.
-+	HasGlobalExports bool `json:"hasGlobalExports,omitempty"`
- }
- 
- func symbolHandles(symbols []*ast.Symbol) []SymbolID {
-@@ -603,6 +914,15 @@ type TypeResponse struct {
- 	ElementFlags  []checker.ElementFlags `json:"elementFlags,omitempty"`
- 	FixedLength   *int                   `json:"fixedLength,omitempty"`
- 	TupleReadonly *bool                  `json:"readonly,omitempty"`
-+	// Stock TupleType.labeledElementDeclarations: one entry per element, nil
-+	// at unlabeled positions (NamedTupleMember | ParameterDeclaration at
-+	// labeled ones).
-+	LabeledElementDeclarations []*NodeHandle `json:"labeledElementDeclarations,omitempty"`
-+
-+	// Stock InterfaceType.thisType (also carried by tuple targets): the
-+	// polymorphic this-type. Absent on references — stock keeps it on the
-+	// target only.
-+	ThisType TypeID `json:"thisType,omitzero"`
- 
- 	// IndexedAccessType data
- 	ObjectType TypeID `json:"objectType,omitzero"`
-@@ -629,6 +949,9 @@ type TypeResponse struct {
- 	// IntrinsicType data
- 	IntrinsicName string `json:"intrinsicName,omitempty"`
- 
-+	// UniqueESSymbolType data (stock UniqueESSymbolType.escapedName)
-+	EscapedName string `json:"escapedName,omitempty"`
-+
- 	// TypeAlias data
- 	AliasTypeArguments []TypeID `json:"aliasTypeArguments,omitempty"`
- 	AliasSymbol        SymbolID `json:"aliasSymbol,omitzero"`
-@@ -660,6 +983,17 @@ func newTypeResponse(t *checker.Type, id TypeID) *TypeResponse {
- 		if flags&checker.TypeFlagsLiteral != 0 {
- 			resp.Value = literalValueToJSON(lit.Value())
- 		}
-+		if flags&checker.TypeFlagsBooleanLiteral != 0 {
-+			// Stock models boolean literals as IntrinsicType with intrinsicName
-+			// 'true'/'false' — fill it so bridge consumers (issue #22) see the
-+			// stock form. Arena reads the same field (arena.go off+88), so both
-+			// transports stay aligned.
-+			if lit.Value() == true {
-+				resp.IntrinsicName = "true"
-+			} else {
-+				resp.IntrinsicName = "false"
-+			}
-+		}
- 		if lit.FreshType() != nil {
- 			resp.FreshType = TypeHandle(lit.FreshType())
- 		}
-@@ -669,21 +1003,39 @@ func newTypeResponse(t *checker.Type, id TypeID) *TypeResponse {
- 	case flags&checker.TypeFlagsObject != 0:
- 		resp.ObjectFlags = uint32(t.ObjectFlags())
- 		objectFlags := t.ObjectFlags()
-+		// Stock InterfaceType.thisType / TupleType.thisType (public d.ts
-+		// field, issue #53). Type.ThisType gates on the ClassOrInterface|Tuple
-+		// mask, so references (which stock keeps field-less) get nil.
-+		if thisT := t.ThisType(); thisT != nil {
-+			resp.ThisType = TypeHandle(thisT)
-+		}
- 		if objectFlags&checker.ObjectFlagsReference != 0 {
--			var ref *checker.TypeReference
--			if objectFlags&checker.ObjectFlagsTuple != 0 {
--				tuple := t.AsTupleType()
--				ref = tuple.AsTypeReference()
--				resp.ElementFlags = tuple.ElementFlags()
--				fixedLen := tuple.FixedLength()
--				resp.FixedLength = &fixedLen
--				isReadonly := tuple.IsReadonly()
--				resp.TupleReadonly = &isReadonly
--			} else {
--				ref = t.AsTypeReference()
--			}
--			if ref.Target() != nil {
--				resp.Target = TypeHandle(ref.Target())
-+			ref := t.AsTypeReference() // asguard:exempt ObjectFlagsReference implies data embeds TypeReference (newObjectType: InterfaceType/TupleType/TypeReference)
-+			if target := ref.Target(); target != nil {
-+				resp.Target = TypeHandle(target)
-+				// Mirror checker.isTupleType: tuple-ness is a property of the
-+				// reference's target. A reference re-created from a tuple
-+				// type's objectFlags carries Tuple in its own flags while its
-+				// data stays *TypeReference — asserting *TupleType on the
-+				// reference itself panics on exactly that shape.
-+				if target.ObjectFlags()&checker.ObjectFlagsTuple != 0 {
-+					tuple := target.AsTupleType()
-+					resp.ElementFlags = tuple.ElementFlags()
-+					if infos := tuple.ElementInfos(); len(infos) > 0 {
-+						decls := make([]*NodeHandle, len(infos))
-+						for i, info := range infos {
-+							if d := info.LabeledDeclaration(); d != nil {
-+								h := nodeHandleFrom(d)
-+								decls[i] = &h
-+							}
-+						}
-+						resp.LabeledElementDeclarations = decls
-+					}
-+					fixedLen := tuple.FixedLength()
-+					resp.FixedLength = &fixedLen
-+					isReadonly := tuple.IsReadonly()
-+					resp.TupleReadonly = &isReadonly
-+				}
- 			}
- 		}
- 		if objectFlags&checker.ObjectFlagsClassOrInterface != 0 {
-@@ -716,6 +1068,8 @@ func newTypeResponse(t *checker.Type, id TypeID) *TypeResponse {
- 		resp.Target = TypeHandle(t.AsStringMappingType().Target())
- 	case flags&checker.TypeFlagsTypeParameter != 0:
- 		resp.IsThisType = t.AsTypeParameter().IsThisType()
-+	case flags&checker.TypeFlagsUniqueESSymbol != 0:
-+		resp.EscapedName = uniqueSymbolEscapedName(t.AsUniqueESSymbolType().Name()) // asguard:exempt case arm on TypeFlagsUniqueESSymbol; newUniqueESSymbolType pairs the flag with *UniqueESSymbolType data
- 	case flags&checker.TypeFlagsIntrinsic != 0:
- 		resp.IntrinsicName = t.AsIntrinsicType().IntrinsicName()
- 	}
-@@ -815,9 +1169,10 @@ type GetSignaturePropertyParams struct {
- 
- // GetContextualTypeParams returns the contextual type for a node.
- type GetContextualTypeParams struct {
--	Snapshot SnapshotID `json:"snapshot"`
--	Project  ProjectID  `json:"project"`
--	Location NodeHandle `json:"location"`
-+	Snapshot     SnapshotID `json:"snapshot"`
-+	Project      ProjectID  `json:"project"`
-+	Location     NodeHandle `json:"location"`
-+	ContextFlags int32      `json:"contextFlags,omitempty"`
- }
- 
- // GetTypeOfSymbolAtLocationParams returns the narrowed type of a symbol at a specific location.
-@@ -866,12 +1221,13 @@ type SignatureUsageResponse struct {
- 
- // GetCompletionsAtPositionParams are the parameters for the getCompletionsAtPosition method.
- type GetCompletionsAtPositionParams struct {
--	Snapshot         SnapshotID         `json:"snapshot"`
--	Project          ProjectID          `json:"project"`
--	File             DocumentIdentifier `json:"file"`
--	Position         uint32             `json:"position"`
--	TriggerCharacter *string            `json:"triggerCharacter,omitempty"`
--	IncludeSymbol    bool               `json:"includeSymbol,omitempty"`
-+	Snapshot         SnapshotID              `json:"snapshot"`
-+	Project          ProjectID               `json:"project"`
-+	File             DocumentIdentifier      `json:"file"`
-+	Position         uint32                  `json:"position"`
-+	TriggerCharacter *string                 `json:"triggerCharacter,omitempty"`
-+	IncludeSymbol    bool                    `json:"includeSymbol,omitempty"`
-+	Preferences      *CompletionsPreferences `json:"preferences,omitempty"`
- }
- 
- // CompletionEntryLabelDetailsResponse holds additional label display text for a completion entry.
-@@ -882,20 +1238,42 @@ type CompletionEntryLabelDetailsResponse struct {
- 
- // CompletionEntryResponse represents a single completion item.
- type CompletionEntryResponse struct {
--	Name         string                               `json:"name"`
--	Kind         uint32                               `json:"kind,omitempty"`
--	SortText     *string                              `json:"sortText,omitempty"`
--	InsertText   *string                              `json:"insertText,omitempty"`
--	FilterText   *string                              `json:"filterText,omitempty"`
--	Detail       *string                              `json:"detail,omitempty"`
--	LabelDetails *CompletionEntryLabelDetailsResponse `json:"labelDetails,omitempty"`
--	Symbol       *SymbolResponse                      `json:"symbol,omitempty"`
-+	Name              string                               `json:"name"`
-+	Kind              uint32                               `json:"kind,omitempty"`
-+	ElementKind       string                               `json:"elementKind,omitempty"`
-+	KindModifiers     string                               `json:"kindModifiers,omitempty"`
-+	SortText          *string                              `json:"sortText,omitempty"`
-+	InsertText        *string                              `json:"insertText,omitempty"`
-+	FilterText        *string                              `json:"filterText,omitempty"`
-+	Detail            *string                              `json:"detail,omitempty"`
-+	LabelDetails      *CompletionEntryLabelDetailsResponse `json:"labelDetails,omitempty"`
-+	Symbol            *SymbolResponse                      `json:"symbol,omitempty"`
-+	Source            string                               `json:"source,omitempty"`
-+	HasAction         *bool                                `json:"hasAction,omitzero"`
-+	IsRecommended     *bool                                `json:"isRecommended,omitzero"`
-+	ReplacementStart  *uint32                              `json:"replacementStart,omitempty"`
-+	ReplacementLength *uint32                              `json:"replacementLength,omitempty"`
-+	CommitCharacters  []string                             `json:"commitCharacters,omitempty"`
-+	Data              *CompletionEntryDataResponse         `json:"data,omitempty"`
-+	// Stock attaches sourceDisplay + isPackageJsonImport (not labelDetails) to
-+	// auto-import entries: sourceDisplay is the module specifier as a text
-+	// part; isPackageJsonImport marks candidates covered by the package.json
-+	// auto-import provider (dependencies/peerDependencies only).
-+	SourceDisplay       []DisplayPartResponse `json:"sourceDisplay,omitempty"`
-+	IsPackageJsonImport *bool                 `json:"isPackageJsonImport,omitzero"`
- }
- 
- // CompletionInfoResponse wraps a list of completion entries.
- type CompletionInfoResponse struct {
--	IsIncomplete bool                       `json:"isIncomplete"`
--	Entries      []*CompletionEntryResponse `json:"entries"`
-+	IsIncomplete            bool                       `json:"isIncomplete,omitzero"`
-+	Entries                 []*CompletionEntryResponse `json:"entries"`
-+	Flags                   *uint32                    `json:"flags,omitzero"`
-+	IsGlobalCompletion      bool                       `json:"isGlobalCompletion"`
-+	IsMemberCompletion      bool                       `json:"isMemberCompletion"`
-+	IsNewIdentifierLocation bool                       `json:"isNewIdentifierLocation"`
-+	OptionalSpanStart       *uint32                    `json:"optionalSpanStart,omitempty"`
-+	OptionalSpanLength      *uint32                    `json:"optionalSpanLength,omitempty"`
-+	DefaultCommitCharacters []string                   `json:"defaultCommitCharacters,omitempty"`
- }
- 
- // GetIntrinsicTypeParams is used for intrinsic type getters (anyType, stringType, etc.).
-@@ -1095,6 +1473,9 @@ type IndexInfoResponse struct {
- 	ValueType   TypeResponse `json:"valueType"`
- 	IsReadonly  bool         `json:"isReadonly,omitempty"`
- 	Declaration NodeHandle   `json:"declaration,omitempty"`
-+	// Symbol of the index-signature declaration (stock IndexSignatureDeclaration.symbol).
-+	// RemoteNode AST encoding omits node.symbol; createDefinitionFromSignatureDeclaration needs it.
-+	Symbol *SymbolResponse `json:"symbol,omitempty"`
- }
- 
- // SourceFileResponse contains the binary-encoded AST data for a source file.
-diff --git a/internal/api/session.go b/internal/api/session.go
-index 7e29c44b6f..9e3442635b 100644
---- a/internal/api/session.go
-+++ b/internal/api/session.go
-@@ -3,6 +3,7 @@ package api
- import (
- 	"context"
- 	"encoding/base64"
-+	"errors"
- 	"fmt"
- 	"slices"
- 	"strconv"
-@@ -17,8 +18,11 @@ import (
- 	"github.com/microsoft/typescript-go/internal/collections"
- 	"github.com/microsoft/typescript-go/internal/compiler"
- 	"github.com/microsoft/typescript-go/internal/core"
-+	"github.com/microsoft/typescript-go/internal/execute/incremental"
- 	"github.com/microsoft/typescript-go/internal/json"
- 	"github.com/microsoft/typescript-go/internal/ls"
-+	"github.com/microsoft/typescript-go/internal/ls/lsconv"
-+	"github.com/microsoft/typescript-go/internal/ls/lsutil"
- 	"github.com/microsoft/typescript-go/internal/lsp/lsproto"
- 	"github.com/microsoft/typescript-go/internal/nodebuilder"
- 	"github.com/microsoft/typescript-go/internal/pprof"
-@@ -53,8 +57,69 @@ type snapshotData struct {
- 	// the choice is stable. Guarded by symbolRegistryMu.
- 	symbolCanonicalProjects map[SymbolID]ProjectID
- 
-+	// scopeSentSymbols tracks symbol ids whose full SymbolResponse payload was
-+	// already delivered in a getSymbolsInScope dedup response for this
-+	// snapshot. Later dedup responses return those ids in Known instead of
-+	// re-marshalling the payload (the client registry retains materialized
-+	// symbols for the snapshot's lifetime). Guarded by symbolRegistryMu.
-+	scopeSentSymbols map[SymbolID]struct{}
-+
- 	projectRegistries   map[ProjectID]*projectRegistryData
- 	projectRegistriesMu sync.RWMutex
-+
-+	// semanticDiagMemo caches the per-file unfiltered semantic diagnostics of a
-+	// whole-program pass (handleGetGlobalDiagnostics), keyed by program identity
-+	// so a snapshot update naturally invalidates it. handleEmitBuildInfo seeds
-+	// the incremental snapshot from this instead of re-running the full check.
-+	// Only non-incremental projects take this route; incremental-capable
-+	// projects are served through incrementalPrograms below instead.
-+	// semanticDiagInflight singleflights concurrent passes over the same
-+	// program (a build-mode prefetch goroutine racing the getGlobalDiagnostics
-+	// RPC must share one pass, not run two).
-+	semanticDiagMemo     map[*compiler.Program]map[*ast.SourceFile][]*ast.Diagnostic
-+	semanticDiagInflight map[*compiler.Program]chan struct{}
-+	semanticDiagMemoMu   sync.Mutex
-+
-+	// prefetchCancels cancel the build-mode diagnostics prefetch goroutines
-+	// launched for this snapshot (handleUpdateSnapshot). Once a client sync
-+	// supersedes this snapshot (or it is released), its program is dead and
-+	// an in-flight whole-program pass on it is pure waste — worse, it holds
-+	// its pool's query checkers while the live snapshot's pass runs on
-+	// another pool, doubling checker pressure (elk build mode: an orphaned
-+	// prefetch stretched the live pass ~1.3s -> ~2.1s). prefetchDead makes
-+	// launches racing the cancel exit instead of starting new work.
-+	// Guarded by s.snapshotsMu.
-+	prefetchCancels []context.CancelFunc
-+	prefetchDead    bool
-+
-+	// incrementalPrograms lazily wraps the live program of each
-+	// incremental-capable project (incremental/composite) in an
-+	// incremental.Program seeded from the on-disk buildinfo — the read/serve
-+	// counterpart of handleEmitBuildInfo's write path, mirroring
-+	// performIncrementalCompilation in execute/tsc.go. Diagnostic RPCs route
-+	// through the wrapper so unchanged files hit the buildinfo's per-file
-+	// semantic diagnostics cache and only affected files are re-checked.
-+	// Keyed by program identity: a snapshot update replaces project programs,
-+	// which naturally invalidates the wrapper (and the rebuilt wrapper re-reads
-+	// the buildinfo handleEmitBuildInfo wrote back to disk in the meantime).
-+	incrementalPrograms   map[*compiler.Program]*incrementalProgramEntry
-+	incrementalProgramsMu sync.Mutex
-+
-+	// builderGraphMemo caches handleGetBuilderFileGraph results per program
-+	// identity (same invalidation rule as the maps above: snapshot updates
-+	// replace programs). The JS side asks once per thin-program instance, but
-+	// solution builds and editor sessions can recreate thin programs over the
-+	// same unchanged Go program — the graph is immutable per program, so
-+	// recomputing it (whole-program hash + referenced-files walk) is waste.
-+	builderGraphMemo   map[*compiler.Program][]incremental.BuilderFileGraphEntry
-+	builderGraphMemoMu sync.Mutex
-+
-+	// moduleExportMapMemo caches handleGetModuleExportMap results per program
-+	// identity (same invalidation rule as builderGraphMemo). The export index is
-+	// a pure function of the immutable program — cold auto-import populate asks
-+	// once per cache miss.
-+	moduleExportMapMemo   map[*compiler.Program]*moduleExportMapMemoEntry
-+	moduleExportMapMemoMu sync.Mutex
- }
- 
- // projectRegistryData holds per-project type and signature registries.
-@@ -96,7 +161,7 @@ func (sd *snapshotData) getProject(projectHandle ProjectID) (*project.Project, e
- 
- // nodeHandleFrom creates an index-based node handle (index.kind.path), building a node index table
- // for the file on-demand if needed.
--func (sd *snapshotData) nodeHandleFrom(node *ast.Node) NodeHandle {
-+func nodeHandleFrom(node *ast.Node) NodeHandle {
- 	sourceFile := ast.GetSourceFileOfNode(node)
- 	path := sourceFile.Path()
- 	table := encoder.GetNodeIndexTable(sourceFile)
-@@ -149,22 +214,26 @@ func (sd *snapshotData) newSymbolResponse(symbol *ast.Symbol, canonicalProject P
- 	if len(symbol.Declarations) > 0 {
- 		resp.Declarations = make([]NodeHandle, len(symbol.Declarations))
- 		for i, decl := range symbol.Declarations {
--			resp.Declarations[i] = sd.nodeHandleFrom(decl)
-+			resp.Declarations[i] = nodeHandleFrom(decl)
- 		}
- 	}
- 
- 	if symbol.ValueDeclaration != nil {
--		resp.ValueDeclaration = sd.nodeHandleFrom(symbol.ValueDeclaration)
-+		resp.ValueDeclaration = nodeHandleFrom(symbol.ValueDeclaration)
- 	}
- 
- 	if symbol.Parent != nil {
- 		resp.Parent = SymbolHandle(symbol.Parent)
-+		// Ensure parent is resolvable by handle from the JS registry cache path.
-+		sd.registerSymbol(symbol.Parent, project)
- 	}
- 
- 	if symbol.ExportSymbol != nil {
- 		resp.ExportSymbol = SymbolHandle(symbol.ExportSymbol)
- 	}
- 
-+	resp.HasGlobalExports = symbolHasGlobalExports(symbol)
-+
- 	return resp
- }
- 
-@@ -311,7 +380,7 @@ func (sd *snapshotData) newSignatureResponse(projectID ProjectID, sig *checker.S
- 	}
- 
- 	if sig.Declaration() != nil {
--		resp.Declaration = sd.nodeHandleFrom(sig.Declaration())
-+		resp.Declaration = nodeHandleFrom(sig.Declaration())
- 	}
- 
- 	if len(sig.TypeParameters()) > 0 {
-@@ -365,6 +434,10 @@ type Session struct {
- 	// This is set to true when using MessagePackProtocol.
- 	useBinaryResponses bool
- 
-+	// arena is the session's V8-allocated binary transport buffer for the hot
-+	// query path (part 3). nil unless the client installed one via SetArena.
-+	arena *arena
-+
- 	// snapshots maps snapshot handles to their data. Each snapshot has its own
- 	// symbol/type registries.
- 	//
-@@ -390,6 +463,20 @@ type Session struct {
- 	openProjects collections.Set[tspath.Path]
- 	openFiles    collections.Set[tspath.Path]
- 
-+	// overlayOpenFiles tracks files this session opened WITH CONTENT
-+	// (openFilesWithContent), i.e. files backed by an fs overlay. A close for
-+	// such a file must also enqueue an LSP-style didClose so the overlay is
-+	// removed — otherwise the overlay keeps the file's default project alive
-+	// (HandleAPIRequest skips closing projects that still own an overlay) and
-+	// a solution build accumulates open projects. Guarded by updateMu.
-+	overlayOpenFiles map[tspath.Path]lsproto.DocumentUri
-+
-+	// overlayVersions counts delta pushes applied per overlay file (0 after a
-+	// full-content push). The wire's baseVersion must match before edits are
-+	// spliced in — a silent gap corrupts every later text, so a mismatch is an
-+	// error, never a fallback. Guarded by updateMu.
-+	overlayVersions map[tspath.Path]int
-+
- 	// updateMu serializes the whole of handleUpdateSnapshot (and releaseOpenRefs)
- 	// against other updates. Unlike snapshotsMu it is held across the slow
- 	// projectSession.APIUpdate call, because building the request from
-@@ -400,6 +487,16 @@ type Session struct {
- 	// snapshots. Lock ordering is updateMu -> snapshotsMu (never the reverse).
- 	updateMu sync.Mutex
- 
-+	// encodedSourceFiles memoizes EncodeSourceFile output per AST identity for
-+	// disk-stable declaration files (node_modules + bundled libs — the same set
-+	// the parse-cache pin keeps alive). The pinned parse cache shares one
-+	// *ast.SourceFile across every project/snapshot that includes an unchanged
-+	// file, so multi-project sessions (lint runners, solution builds) request
-+	// the same AST once per project — and encoding a large .d.ts dominates
-+	// getSourceFile. Keyed by pointer identity: a changed file re-parses into a
-+	// new AST under a new parse-cache key, so entries can never serve stale data.
-+	encodedSourceFiles sync.Map // *ast.SourceFile -> []byte
-+
- 	cpuProfiler pprof.CPUProfiler
- }
- 
-@@ -564,6 +661,38 @@ func (s *Session) HandleRequest(ctx context.Context, method string, params json.
- 		return s.handleGetSourceFileNames(ctx, parsed.(*GetSourceFileNamesParams))
- 	case string(MethodGetSourceFileMetadata):
- 		return s.handleGetSourceFileMetadata(ctx, parsed.(*GetSourceFileParams))
-+	case string(MethodGetBuilderFileGraph):
-+		return s.handleGetBuilderFileGraph(ctx, parsed.(*GetBuilderFileGraphParams))
-+	case string(MethodGetMissingFilePaths):
-+		return s.handleGetMissingFilePaths(ctx, parsed.(*GetProgramInfoParams))
-+	case string(MethodGetFileIncludeReasons):
-+		return s.handleGetFileIncludeReasons(ctx, parsed.(*GetProgramInfoParams))
-+	case string(MethodGetProgramResolutionInfo):
-+		return s.handleGetProgramResolutionInfo(ctx, parsed.(*GetProgramInfoParams))
-+	case string(MethodGetClassifiableNames):
-+		return s.handleGetClassifiableNames(ctx, parsed.(*GetProgramInfoParams))
-+	case string(MethodGetUsesUriStyleNodeCoreModules):
-+		return s.handleGetUsesUriStyleNodeCoreModules(ctx, parsed.(*GetProgramInfoParams))
-+	case string(MethodGetAmbientModules):
-+		return s.handleGetAmbientModules(ctx, parsed.(*GetAmbientModulesParams))
-+	case string(MethodGetModuleExportMap):
-+		return s.handleGetModuleExportMap(ctx, parsed.(*GetModuleExportMapParams))
-+	case string(MethodGetModuleSpecifiersBatch):
-+		return s.handleGetModuleSpecifiersBatch(ctx, parsed.(*GetModuleSpecifiersBatchParams))
-+	case string(MethodGetCompilerOptionsForFile):
-+		return s.handleGetCompilerOptionsForFile(ctx, parsed.(*GetDiagnosticsParams))
-+	case string(MethodGetImpliedNodeFormatForEmit):
-+		return s.handleGetImpliedNodeFormatForEmit(ctx, parsed.(*GetDiagnosticsParams))
-+	case string(MethodGetDefaultResolutionModeForFile):
-+		return s.handleGetDefaultResolutionModeForFile(ctx, parsed.(*GetDiagnosticsParams))
-+	case string(MethodGetEmitModuleFormatOfFile):
-+		return s.handleGetEmitModuleFormatOfFile(ctx, parsed.(*GetDiagnosticsParams))
-+	case string(MethodGetModeForUsageLocation):
-+		return s.handleGetModeForUsageLocation(ctx, parsed.(*GetModeForUsageLocationParams))
-+	case string(MethodGetEmitSyntaxForUsageLocation):
-+		return s.handleGetEmitSyntaxForUsageLocation(ctx, parsed.(*GetModeForUsageLocationParams))
-+	case string(MethodGetRedirectTargets):
-+		return s.handleGetRedirectTargets(ctx, parsed.(*GetDiagnosticsParams))
- 	case string(MethodGetSymbolAtPosition):
- 		return s.handleGetSymbolAtPosition(ctx, parsed.(*GetSymbolAtPositionParams))
- 	case string(MethodGetSymbolsAtPositions):
-@@ -580,10 +709,26 @@ func (s *Session) HandleRequest(ctx context.Context, method string, params json.
- 		return s.handleGetDeclaredTypeOfSymbol(ctx, parsed.(*GetTypeOfSymbolParams))
- 	case string(MethodResolveName):
- 		return s.handleResolveName(ctx, parsed.(*ResolveNameParams))
-+	case string(MethodGetSymbolsInScope):
-+		return s.handleGetSymbolsInScope(ctx, parsed.(*GetSymbolsInScopeParams))
- 	case string(MethodGetSignaturesOfType):
- 		return s.handleGetSignaturesOfType(ctx, parsed.(*GetSignaturesOfTypeParams))
- 	case string(MethodGetResolvedSignature):
- 		return s.handleGetResolvedSignature(ctx, parsed.(*GetResolvedSignatureParams))
-+	case string(MethodGetResolvedSignatureForSignatureHelp):
-+		return s.handleGetResolvedSignatureForSignatureHelp(ctx, parsed.(*GetResolvedSignatureForSignatureHelpParams))
-+	case string(MethodGetExpandedParameters):
-+		return s.handleGetExpandedParameters(ctx, parsed.(*GetExpandedParametersParams))
-+	case string(MethodHasEffectiveRestParameter):
-+		return s.handleHasEffectiveRestParameter(ctx, parsed.(*HasEffectiveRestParameterParams))
-+	case string(MethodGetLocalTypeParametersOfClassOrInterfaceOrTypeAlias):
-+		return s.handleGetLocalTypeParametersOfClassOrInterfaceOrTypeAlias(ctx, parsed.(*CheckerSymbolParams))
-+	case string(MethodGetContextualTypeForObjectLiteralElement):
-+		return s.handleGetContextualTypeForObjectLiteralElement(ctx, parsed.(*GetContextualTypeForObjectLiteralElementParams))
-+	case string(MethodIsOptionalParameter):
-+		return s.handleIsOptionalParameter(ctx, parsed.(*CheckerNodeParams))
-+	case string(MethodIsImplementationOfOverload):
-+		return s.handleIsImplementationOfOverload(ctx, parsed.(*CheckerNodeParams))
- 	case string(MethodGetTypeAtLocation):
- 		return s.handleGetTypeAtLocation(ctx, parsed.(*GetTypeAtLocationParams))
- 	case string(MethodGetTypeAtLocations):
-@@ -594,16 +739,26 @@ func (s *Session) HandleRequest(ctx context.Context, method string, params json.
- 		return s.handleGetTypesAtPositions(ctx, parsed.(*GetTypesAtPositionsParams))
- 	case string(MethodGetParentOfSymbol):
- 		return s.handleGetParentOfSymbol(ctx, parsed.(*GetSymbolPropertyParams))
-+	case string(MethodGetParentsOfSymbols):
-+		return s.handleGetParentsOfSymbols(ctx, parsed.(*GetSymbolsDeclarationsParams))
- 	case string(MethodGetMembersOfSymbol):
- 		return s.handleGetMembersOfSymbol(ctx, parsed.(*GetSymbolPropertyParams))
- 	case string(MethodGetExportsOfSymbol):
- 		return s.handleGetExportsOfSymbol(ctx, parsed.(*GetSymbolPropertyParams))
- 	case string(MethodGetExportSymbolOfSymbol):
- 		return s.handleGetExportSymbolOfSymbol(ctx, parsed.(*GetSymbolPropertyParams))
-+	case string(MethodGetGlobalExportsOfSymbol):
-+		return s.handleGetGlobalExportsOfSymbol(ctx, parsed.(*GetSymbolPropertyParams))
-+	case string(MethodGetSymbolDeclarations):
-+		return s.handleGetSymbolDeclarations(ctx, parsed.(*GetSymbolPropertyParams))
-+	case string(MethodGetSymbolsDeclarations):
-+		return s.handleGetSymbolsDeclarations(ctx, parsed.(*GetSymbolsDeclarationsParams))
- 	case string(MethodGetSymbolOfType):
- 		return s.handleGetSymbolOfType(ctx, parsed.(*GetTypePropertyParams))
- 	case string(MethodGetTargetOfType):
- 		return s.handleGetTargetOfType(ctx, parsed.(*GetTypePropertyParams))
-+	case string(MethodGetThisTypeOfType):
-+		return s.handleGetThisTypeOfType(ctx, parsed.(*GetTypePropertyParams))
- 	case string(MethodGetFreshTypeOfType):
- 		return s.handleGetFreshTypeOfType(ctx, parsed.(*GetTypePropertyParams))
- 	case string(MethodGetRegularTypeOfType):
-@@ -650,6 +805,8 @@ func (s *Session) HandleRequest(ctx context.Context, method string, params json.
- 		return s.handleGetBaseTypeOfLiteralType(ctx, parsed.(*GetBaseTypeOfLiteralTypeParams))
- 	case string(MethodGetNonNullableType):
- 		return s.handleGetNonNullableType(ctx, parsed.(*GetNonNullableTypeParams))
-+	case string(MethodGetNonOptionalType):
-+		return s.handleGetNonOptionalType(ctx, parsed.(*GetNonOptionalTypeParams))
- 	case string(MethodGetTypeFromTypeNode):
- 		return s.handleGetTypeFromTypeNode(ctx, parsed.(*GetTypeFromTypeNodeParams))
- 	case string(MethodGetWidenedType):
-@@ -660,14 +817,34 @@ func (s *Session) HandleRequest(ctx context.Context, method string, params json.
- 		return s.handleIsArrayLikeType(ctx, parsed.(*IsArrayLikeTypeParams))
- 	case string(MethodIsTypeAssignableTo):
- 		return s.handleIsTypeAssignableTo(ctx, parsed.(*IsTypeAssignableToParams))
-+	case string(MethodGetUnionType):
-+		return s.handleGetUnionType(ctx, parsed.(*GetUnionTypeParams))
-+	case string(MethodGetPromisedTypeOfPromise):
-+		return s.handleGetPromisedTypeOfPromise(ctx, parsed.(*CheckerTypeParams))
-+	case string(MethodGetAllPossiblePropertiesOfTypes):
-+		return s.handleGetAllPossiblePropertiesOfTypes(ctx, parsed.(*CheckerTypesParams))
-+	case string(MethodIsTypeInvalidDueToUnionDiscriminant):
-+		return s.handleIsTypeInvalidDueToUnionDiscriminant(ctx, parsed.(*IsTypeInvalidDueToUnionDiscriminantParams))
-+	case string(MethodTypeHasCallOrConstructSignatures):
-+		return s.handleTypeHasCallOrConstructSignatures(ctx, parsed.(*CheckerTypeParams))
-+	case string(MethodGetPropertiesForObjectExpression):
-+		return s.handleGetPropertiesForObjectExpression(ctx, parsed.(*GetPropertiesForObjectExpressionParams))
- 	case string(MethodGetShorthandAssignmentValueSymbol):
- 		return s.handleGetShorthandAssignmentValueSymbol(ctx, parsed.(*GetTypeAtLocationParams))
- 	case string(MethodGetTypeOfSymbolAtLocation):
- 		return s.handleGetTypeOfSymbolAtLocation(ctx, parsed.(*GetTypeOfSymbolAtLocationParams))
- 	case string(MethodTypeToTypeNode):
- 		return s.handleTypeToTypeNode(ctx, parsed.(*TypeToTypeNodeParams))
-+	case string(MethodTypeParameterToDeclaration):
-+		return s.handleTypeParameterToDeclaration(ctx, parsed.(*TypeToTypeNodeParams))
-+	case string(MethodSymbolToTypeParameterDeclarations):
-+		return s.handleSymbolToTypeParameterDeclarations(ctx, parsed.(*SymbolToTypeParameterDeclarationsParams))
-+	case string(MethodSymbolToParameterDeclaration):
-+		return s.handleSymbolToParameterDeclaration(ctx, parsed.(*SymbolToParameterDeclarationParams))
- 	case string(MethodSignatureToSignatureDeclaration):
- 		return s.handleSignatureToSignatureDeclaration(ctx, parsed.(*SignatureToSignatureDeclarationParams))
-+	case string(MethodSignatureToString):
-+		return s.handleSignatureToString(ctx, parsed.(*SignatureToStringParams))
- 	case string(MethodTypeToString):
- 		return s.handleTypeToString(ctx, parsed.(*TypeToTypeNodeParams))
- 	case string(MethodPrintNode):
-@@ -690,10 +867,22 @@ func (s *Session) HandleRequest(ctx context.Context, method string, params json.
- 		return s.handleGetPropertyOfType(ctx, parsed.(*GetPropertyOfTypeParams))
- 	case string(MethodGetIndexInfosOfType):
- 		return s.handleGetIndexInfosOfType(ctx, parsed.(*CheckerTypeParams))
-+	case string(MethodGetIndexInfosAtLocation):
-+		return s.handleGetIndexInfosAtLocation(ctx, parsed.(*CheckerNodeParams))
- 	case string(MethodGetConstraintOfTypeParameter):
- 		return s.handleGetConstraintOfTypeParameter(ctx, parsed.(*CheckerTypeParams))
- 	case string(MethodGetBaseConstraintOfType):
- 		return s.handleGetBaseConstraintOfType(ctx, parsed.(*CheckerTypeParams))
-+	case string(MethodGetDefaultFromTypeParameter):
-+		return s.handleGetDefaultFromTypeParameter(ctx, parsed.(*CheckerTypeParams))
-+	case string(MethodGetTypeOfAssignmentPattern):
-+		return s.handleGetTypeOfAssignmentPattern(ctx, parsed.(*CheckerNodeParams))
-+	case string(MethodGetPrivateIdentifierPropertyOfType):
-+		return s.handleGetPrivateIdentifierPropertyOfType(ctx, parsed.(*GetPrivateIdentifierPropertyOfTypeParams))
-+	case string(MethodGetRecursionIdentity):
-+		return s.handleGetRecursionIdentity(ctx, parsed.(*CheckerTypeParams))
-+	case string(MethodGetTypeArgumentsForResolvedSignature):
-+		return s.handleGetTypeArgumentsForResolvedSignature(ctx, parsed.(*CheckerSignatureParams))
- 	case string(MethodGetTypeArguments):
- 		return s.handleGetTypeArguments(ctx, parsed.(*CheckerTypeParams))
- 	case string(MethodGetConstantValue):
-@@ -708,8 +897,14 @@ func (s *Session) HandleRequest(ctx context.Context, method string, params json.
- 		return s.handleGetImmediateAliasedSymbol(ctx, parsed.(*CheckerSymbolParams))
- 	case string(MethodGetExportsOfModule):
- 		return s.handleGetExportsOfModule(ctx, parsed.(*CheckerSymbolParams))
-+	case string(MethodGetModuleSymbolForSourceFile):
-+		return s.handleGetModuleSymbolForSourceFile(ctx, parsed.(*GetSourceFileParams))
-+	case string(MethodGetRootSymbols):
-+		return s.handleGetRootSymbols(ctx, parsed.(*CheckerSymbolParams))
- 	case string(MethodGetMemberInModuleExports):
- 		return s.handleGetMemberInModuleExports(ctx, parsed.(*GetMemberInModuleExportsParams))
-+	case string(MethodResolveExternalModuleSymbol):
-+		return s.handleResolveExternalModuleSymbol(ctx, parsed.(*CheckerSymbolParams))
- 	case string(MethodGetJSDocTags):
- 		return s.handleGetJSDocTags(ctx, parsed.(*CheckerSymbolParams))
- 	case string(MethodGetDocumentationComment):
-@@ -718,8 +913,130 @@ func (s *Session) HandleRequest(ctx context.Context, method string, params json.
- 		return s.handleIsArrayType(ctx, parsed.(*CheckerTypeParams))
- 	case string(MethodIsTupleType):
- 		return s.handleIsTupleType(ctx, parsed.(*CheckerTypeParams))
-+	case string(MethodIsDeclarationVisible):
-+		return s.handleIsDeclarationVisible(ctx, parsed.(*CheckerNodeParams))
-+	case string(MethodTryGetThisTypeAt):
-+		return s.handleTryGetThisTypeAt(ctx, parsed.(*TryGetThisTypeAtParams))
-+	case string(MethodIsValidPropertyAccessForCompletions):
-+		return s.handleIsValidPropertyAccessForCompletions(ctx, parsed.(*IsValidPropertyAccessForCompletionsParams))
-+	case string(MethodGetTypeArgumentConstraint):
-+		return s.handleGetTypeArgumentConstraint(ctx, parsed.(*CheckerNodeParams))
-+	case string(MethodGetExportsAndPropertiesOfModule):
-+		return s.handleGetExportsAndPropertiesOfModule(ctx, parsed.(*CheckerSymbolParams))
-+	case string(MethodGetJsxIntrinsicTagNamesAt):
-+		return s.handleGetJsxIntrinsicTagNamesAt(ctx, parsed.(*CheckerNodeParams))
-+	case string(MethodIsPropertyAccessible):
-+		return s.handleIsPropertyAccessible(ctx, parsed.(*IsPropertyAccessibleParams))
-+	case string(MethodGetAccessibleSymbolChain):
-+		return s.handleGetAccessibleSymbolChain(ctx, parsed.(*GetAccessibleSymbolChainParams))
-+	case string(MethodGetContextualTypeForArgumentAtIndex):
-+		return s.handleGetContextualTypeForArgumentAtIndex(ctx, parsed.(*GetContextualTypeForArgumentAtIndexParams))
-+	case string(MethodGetContextualTypeForJsxAttribute):
-+		return s.handleGetContextualTypeForJsxAttribute(ctx, parsed.(*CheckerNodeParams))
-+	case string(MethodIsValidPropertyAccess):
-+		return s.handleIsValidPropertyAccess(ctx, parsed.(*IsValidPropertyAccessParams))
-+	case string(MethodGetCandidateSignaturesForStringLiteralCompletions):
-+		return s.handleGetCandidateSignaturesForStringLiteralCompletions(ctx, parsed.(*GetCandidateSignaturesForStringLiteralCompletionsParams))
-+	case string(MethodGetSymbolsOfParameterPropertyDeclaration):
-+		return s.handleGetSymbolsOfParameterPropertyDeclaration(ctx, parsed.(*GetSymbolsOfParameterPropertyDeclarationParams))
-+	case string(MethodGetAwaitedType):
-+		return s.handleGetAwaitedType(ctx, parsed.(*CheckerTypeParams))
-+	case string(MethodGetNullableType):
-+		return s.handleGetNullableType(ctx, parsed.(*GetNullableTypeParams))
-+	case string(MethodIsNullableType):
-+		return s.handleIsNullableType(ctx, parsed.(*CheckerTypeParams))
-+	case string(MethodGetElementTypeOfArrayType):
-+		return s.handleGetElementTypeOfArrayType(ctx, parsed.(*CheckerTypeParams))
-+	case string(MethodGetIndexInfoOfType):
-+		return s.handleGetIndexInfoOfType(ctx, parsed.(*GetIndexKindParams))
-+	case string(MethodGetIndexTypeOfTypeForKind):
-+		return s.handleGetIndexTypeOfTypeForKind(ctx, parsed.(*GetIndexKindParams))
-+	case string(MethodGetTypeOfPropertyOfType):
-+		return s.handleGetTypeOfPropertyOfType(ctx, parsed.(*GetPropertyOfTypeParams))
-+	case string(MethodGetTypeOfPropertyOfContextualType):
-+		return s.handleGetTypeOfPropertyOfContextualType(ctx, parsed.(*GetPropertyOfTypeParams))
-+	case string(MethodFillMissingTypeArguments):
-+		return s.handleFillMissingTypeArguments(ctx, parsed.(*FillMissingTypeArgumentsParams))
-+	case string(MethodGetWidenedLiteralType):
-+		return s.handleGetWidenedLiteralType(ctx, parsed.(*CheckerTypeParams))
-+	case string(MethodGetUnmatchedProperties):
-+		return s.handleGetUnmatchedProperties(ctx, parsed.(*GetUnmatchedPropertiesParams))
-+	case string(MethodIsEmptyAnonymousObjectType):
-+		return s.handleIsEmptyAnonymousObjectType(ctx, parsed.(*CheckerTypeParams))
-+	case string(MethodIsLibType):
-+		return s.handleIsLibType(ctx, parsed.(*CheckerTypeParams))
-+	case string(MethodSymbolIsValue):
-+		return s.handleSymbolIsValue(ctx, parsed.(*CheckerSymbolParams))
-+	case string(MethodRequiresAddingImplicitUndefined):
-+		return s.handleRequiresAddingImplicitUndefined(ctx, parsed.(*CheckerNodeParams))
-+	case string(MethodGetTypeOnlyAliasDeclaration):
-+		return s.handleGetTypeOnlyAliasDeclaration(ctx, parsed.(*CheckerSymbolParams))
-+	case string(MethodResolveExternalModuleName):
-+		return s.handleResolveExternalModuleName(ctx, parsed.(*CheckerNodeParams))
-+	case string(MethodGetPropertySymbolOfDestructuringAssignment):
-+		return s.handleGetPropertySymbolOfDestructuringAssignment(ctx, parsed.(*CheckerNodeParams))
-+	case string(MethodIsSymbolAccessible):
-+		return s.handleIsSymbolAccessible(ctx, parsed.(*IsSymbolAccessibleParams))
-+	case string(MethodGetIndexInfosOfIndexSymbol):
-+		return s.handleGetIndexInfosOfIndexSymbol(ctx, parsed.(*GetIndexInfosOfIndexSymbolParams))
-+	case string(MethodContainsArgumentsReference):
-+		return s.handleContainsArgumentsReference(ctx, parsed.(*CheckerNodeParams))
-+	case string(MethodGetAugmentedPropertiesOfType):
-+		return s.handleGetAugmentedPropertiesOfType(ctx, parsed.(*CheckerTypeParams))
-+	case string(MethodGetSuggestedSymbolForNonexistentProperty):
-+		return s.handleGetSuggestedSymbolForNonexistentProperty(ctx, parsed.(*GetSuggestedSymbolForNonexistentPropertyParams))
-+	case string(MethodGetSuggestedSymbolForNonexistentClassMember):
-+		return s.handleGetSuggestedSymbolForNonexistentClassMember(ctx, parsed.(*GetSuggestedSymbolForNonexistentClassMemberParams))
-+	case string(MethodGetSuggestedSymbolForNonexistentJSXAttribute):
-+		return s.handleGetSuggestedSymbolForNonexistentJSXAttribute(ctx, parsed.(*GetSuggestedSymbolForNonexistentJSXAttributeParams))
-+	case string(MethodGetSuggestedSymbolForNonexistentModule):
-+		return s.handleGetSuggestedSymbolForNonexistentModule(ctx, parsed.(*GetSuggestedSymbolForNonexistentModuleParams))
-+	case string(MethodGetSuggestedSymbolForNonexistentSymbol):
-+		return s.handleGetSuggestedSymbolForNonexistentSymbol(ctx, parsed.(*GetSuggestedSymbolForNonexistentSymbolParams))
-+	case string(MethodSymbolToExpression):
-+		return s.handleSymbolToExpression(ctx, parsed.(*SymbolToNodeBuilderParams))
-+	case string(MethodSymbolToNode):
-+		return s.handleSymbolToNode(ctx, parsed.(*SymbolToNodeBuilderParams))
-+	case string(MethodSymbolToEntityName):
-+		return s.handleSymbolToEntityName(ctx, parsed.(*SymbolToNodeBuilderParams))
-+	case string(MethodTypePredicateToTypePredicateNode):
-+		return s.handleTypePredicateToTypePredicateNode(ctx, parsed.(*TypePredicateToTypePredicateNodeParams))
-+	case string(MethodIndexInfoToIndexSignatureDeclaration):
-+		return s.handleIndexInfoToIndexSignatureDeclaration(ctx, parsed.(*IndexInfoToIndexSignatureDeclarationParams))
-+	case string(MethodGetPromiseType):
-+		return s.handleGetIntrinsicType(ctx, parsed.(*GetIntrinsicTypeParams), (*checker.Checker).GetPromiseType)
-+	case string(MethodGetPromiseLikeType):
-+		return s.handleGetIntrinsicType(ctx, parsed.(*GetIntrinsicTypeParams), (*checker.Checker).GetPromiseLikeType)
-+	case string(MethodGetAnyAsyncIterableType):
-+		return s.handleGetAnyAsyncIterableType(ctx, parsed.(*GetIntrinsicTypeParams))
-+	case string(MethodGetExactOptionalProperties):
-+		return s.handleGetExactOptionalProperties(ctx, parsed.(*CheckerTypeParams))
-+	case string(MethodGetJsxNamespace):
-+		return s.handleGetJsxNamespace(ctx, parsed.(*CheckerNodeOptionalParams))
-+	case string(MethodGetJsxFragmentFactory):
-+		return s.handleGetJsxFragmentFactory(ctx, parsed.(*CheckerNodeParams))
-+	case string(MethodGetParameterIdentifierInfoAtPosition):
-+		return s.handleGetParameterIdentifierInfoAtPosition(ctx, parsed.(*GetParameterIdentifierInfoAtPositionParams))
-+	case string(MethodCreateArrayType):
-+		return s.handleCreateArrayType(ctx, parsed.(*CheckerTypeParams))
-+	case string(MethodCreatePromiseType):
-+		return s.handleCreatePromiseType(ctx, parsed.(*CheckerTypeParams))
-+	case string(MethodCreateTransientSymbolWithType):
-+		return s.handleCreateTransientSymbolWithType(ctx, parsed.(*CreateTransientSymbolWithTypeParams))
-+	case string(MethodCreateSignatureFromParts):
-+		return s.handleCreateSignatureFromParts(ctx, parsed.(*CreateSignatureFromPartsParams))
-+	case string(MethodCreateAnonymousTypeFromParts):
-+		return s.handleCreateAnonymousTypeFromParts(ctx, parsed.(*CreateAnonymousTypeFromPartsParams))
-+	case string(MethodGetMemberOverrideModifierStatus):
-+		return s.handleGetMemberOverrideModifierStatus(ctx, parsed.(*GetMemberOverrideModifierStatusParams))
-+	case string(MethodGetSymbolOfExpando):
-+		return s.handleGetSymbolOfExpando(ctx, parsed.(*GetSymbolOfExpandoParams))
-+	case string(MethodCollectVisitedTypeParameters):
-+		return s.handleCollectVisitedTypeParameters(ctx, parsed.(*CheckerTypeParams))
- 	case string(MethodGetAnyType):
- 		return s.handleGetIntrinsicType(ctx, parsed.(*GetIntrinsicTypeParams), (*checker.Checker).GetAnyType)
-+	case string(MethodGetErrorType):
-+		return s.handleGetIntrinsicType(ctx, parsed.(*GetIntrinsicTypeParams), (*checker.Checker).GetErrorType)
- 	case string(MethodGetStringType):
- 		return s.handleGetIntrinsicType(ctx, parsed.(*GetIntrinsicTypeParams), (*checker.Checker).GetStringType)
- 	case string(MethodGetNumberType):
-@@ -730,6 +1047,16 @@ func (s *Session) HandleRequest(ctx context.Context, method string, params json.
- 		return s.handleGetIntrinsicType(ctx, parsed.(*GetIntrinsicTypeParams), (*checker.Checker).GetVoidType)
- 	case string(MethodGetUndefinedType):
- 		return s.handleGetIntrinsicType(ctx, parsed.(*GetIntrinsicTypeParams), (*checker.Checker).GetUndefinedType)
-+	case string(MethodGetOptionalType):
-+		return s.handleGetIntrinsicType(ctx, parsed.(*GetIntrinsicTypeParams), (*checker.Checker).GetOptionalType)
-+	case string(MethodGetNonPrimitiveType):
-+		return s.handleGetIntrinsicType(ctx, parsed.(*GetIntrinsicTypeParams), (*checker.Checker).GetNonPrimitiveType)
-+	case string(MethodGetStringLiteralType):
-+		return s.handleGetStringLiteralType(ctx, parsed.(*GetLiteralTypeParams))
-+	case string(MethodGetNumberLiteralType):
-+		return s.handleGetNumberLiteralType(ctx, parsed.(*GetLiteralTypeParams))
-+	case string(MethodGetBigIntLiteralType):
-+		return s.handleGetBigIntLiteralType(ctx, parsed.(*GetLiteralTypeParams))
- 	case string(MethodGetNullType):
- 		return s.handleGetIntrinsicType(ctx, parsed.(*GetIntrinsicTypeParams), (*checker.Checker).GetNullType)
- 	case string(MethodGetNeverType):
-@@ -748,6 +1075,12 @@ func (s *Session) HandleRequest(ctx context.Context, method string, params json.
- 		return s.handleGetBindDiagnostics(ctx, parsed.(*GetDiagnosticsParams))
- 	case string(MethodGetSemanticDiagnostics):
- 		return s.handleGetSemanticDiagnostics(ctx, parsed.(*GetDiagnosticsParams))
-+	case string(MethodGetDiagnosticsBatch):
-+		return s.handleGetDiagnosticsBatch(ctx, parsed.(*GetProjectDiagnosticsParams))
-+	case string(MethodEmit):
-+		return s.handleEmit(ctx, parsed.(*EmitParams))
-+	case string(MethodEmitBuildInfo):
-+		return s.handleEmitBuildInfo(ctx, parsed.(*EmitBuildInfoParams))
- 	case string(MethodGetSuggestionDiagnostics):
- 		return s.handleGetSuggestionDiagnostics(ctx, parsed.(*GetDiagnosticsParams))
- 	case string(MethodGetDeclarationDiagnostics):
-@@ -772,6 +1105,20 @@ func (s *Session) HandleRequest(ctx context.Context, method string, params json.
- 		return s.handleGetSignatureUsages(ctx, parsed.(*GetSignatureUsagesParams))
- 	case string(MethodGetCompletionsAtPosition):
- 		return s.handleGetCompletionsAtPosition(ctx, parsed.(*GetCompletionsAtPositionParams))
-+	case string(MethodResolveCompletionItem):
-+		return s.handleResolveCompletionItem(ctx, parsed.(*ResolveCompletionItemParams))
-+	case string(MethodQuickinfo):
-+		return s.handleQuickinfo(ctx, parsed.(*QuickinfoParams))
-+	case string(MethodReferences):
-+		return s.handleReferences(ctx, parsed.(*ReferencesParams))
-+	case string(MethodDefinitionAndBoundSpan):
-+		return s.handleDefinitionAndBoundSpan(ctx, parsed.(*DefinitionAndBoundSpanParams))
-+	case string(MethodSignatureHelp):
-+		return s.handleSignatureHelp(ctx, parsed.(*SignatureHelpParams))
-+	case string(MethodGetRenameInfo):
-+		return s.handleGetRenameInfo(ctx, parsed.(*RenameInfoParams))
-+	case string(MethodGetEditsForRename):
-+		return s.handleGetEditsForRename(ctx, parsed.(*EditsForRenameParams))
- 	default:
- 		return nil, fmt.Errorf("unknown method: %s", method)
- 	}
-@@ -816,6 +1163,7 @@ func (s *Session) handleInitialize(ctx context.Context) (*InitializeResponse, er
- 	return &InitializeResponse{
- 		UseCaseSensitiveFileNames: s.projectSession.FS().UseCaseSensitiveFileNames(),
- 		CurrentDirectory:          s.projectSession.GetCurrentDirectory(),
-+		Version:                   core.Version(),
- 	}, nil
- }
- 
-@@ -832,6 +1180,17 @@ func (s *Session) handleUpdateSnapshot(ctx context.Context, params *UpdateSnapsh
- 	s.updateMu.Lock()
- 	defer s.updateMu.Unlock()
- 
-+	if len(params.ExtraFileExtensions) > 0 {
-+		extras := make([]tsoptions.FileExtensionInfo, 0, len(params.ExtraFileExtensions))
-+		for _, e := range params.ExtraFileExtensions {
-+			extras = append(extras, tsoptions.FileExtensionInfo{
-+				Extension:  e.Extension,
-+				ScriptKind: core.ScriptKind(e.ScriptKind),
-+			})
-+		}
-+		s.projectSession.SetAPIExtraFileExtensions(extras)
-+	}
-+
- 	fileChanges := s.toFileChangeSummary(params.FileChanges)
- 
- 	apiRequest := &project.APISnapshotRequest{}
-@@ -840,6 +1199,15 @@ func (s *Session) handleUpdateSnapshot(ctx context.Context, params *UpdateSnapsh
- 	var openedProjects []tspath.Path
- 	for _, p := range params.OpenProjects {
- 		configFileName := p.ToAbsoluteFileName(s.projectSession.GetCurrentDirectory())
-+		// Effective client options ride every open — new ref or already held —
-+		// so a later snapshot can refresh an open project's CLI flags without
-+		// closing it (mirrors AdditionalFiles below).
-+		if p.CompilerOptions != nil {
-+			if apiRequest.ProjectOptions == nil {
-+				apiRequest.ProjectOptions = make(map[string]*core.CompilerOptions, len(params.OpenProjects))
-+			}
-+			apiRequest.ProjectOptions[configFileName] = p.CompilerOptions
-+		}
- 		configPath := s.toPath(configFileName)
- 		if s.openProjects.Has(configPath) {
- 			continue
-@@ -850,6 +1218,18 @@ func (s *Session) handleUpdateSnapshot(ctx context.Context, params *UpdateSnapsh
- 		apiRequest.OpenProjects.Add(configFileName)
- 		openedProjects = append(openedProjects, configPath)
- 	}
-+	// AdditionalFiles ride project opens: attach them to every config this
-+	// request asks to keep open (new ref or already held).
-+	if len(params.AdditionalFiles) > 0 && len(params.OpenProjects) > 0 {
-+		files := make([]string, 0, len(params.AdditionalFiles))
-+		for _, f := range params.AdditionalFiles {
-+			files = append(files, f.ToAbsoluteFileName(s.projectSession.GetCurrentDirectory()))
-+		}
-+		apiRequest.AdditionalFiles = make(map[string][]string, len(params.OpenProjects))
-+		for _, p := range params.OpenProjects {
-+			apiRequest.AdditionalFiles[p.ToAbsoluteFileName(s.projectSession.GetCurrentDirectory())] = files
-+		}
-+	}
- 
- 	// Close projects: only release a ref we currently hold.
- 	var closedProjects []tspath.Path
-@@ -883,6 +1263,7 @@ func (s *Session) handleUpdateSnapshot(ctx context.Context, params *UpdateSnapsh
- 
- 	// Close files: only release a ref we currently hold.
- 	var closedFiles []tspath.Path
-+	var closeOverlayChanges []project.FileChange
- 	for _, f := range params.CloseFiles {
- 		path := s.toPath(f.ToURI(s.projectSession.GetCurrentDirectory()).FileName())
- 		if !s.openFiles.Has(path) {
-@@ -893,6 +1274,92 @@ func (s *Session) handleUpdateSnapshot(ctx context.Context, params *UpdateSnapsh
- 		}
- 		apiRequest.CloseFiles.Add(path)
- 		closedFiles = append(closedFiles, path)
-+		// The session fed content for this file (fs overlay): enqueue an
-+		// LSP-style close so the overlay is removed with this snapshot.
-+		if uri, ok := s.overlayOpenFiles[path]; ok {
-+			closeOverlayChanges = append(closeOverlayChanges, project.FileChange{
-+				Kind: project.FileChangeKindClose,
-+				URI:  uri,
-+			})
-+			delete(s.overlayOpenFiles, path)
-+			delete(s.overlayVersions, path)
-+		}
-+	}
-+
-+	// Open files with content: feed host-provided content as overlays by
-+	// enqueuing pending changes. APIUpdate (called below) will flush them
-+	// all at once and build ONE snapshot with overlays — avoiding N
-+	// individual DidOpenFile snapshot builds. Makes the client host the
-+	// single source of truth for file content (no disk double-read, and
-+	// Volar virtual TS content for .vue/.mdx can be injected). ContentOverride
-+	// replaces on-disk content for files already listed by tsconfig (via
-+	// extraFileExtensions) instead of treating them as separate LSP opens.
-+	cwd := s.projectSession.GetCurrentDirectory()
-+	var openFileChanges []project.FileChange
-+	for _, f := range params.OpenFilesWithContent {
-+		fileName := f.FileName
-+		// Windows-absolute paths (D:/...) don't start with "/" — the POSIX-only
-+		// prefix check prepended the cwd to every overlay on Windows, filing
-+		// the virtual content under a garbage path while the real .vue kept its
-+		// raw disk text ("not a module", empty auto-import signatures).
-+		if !tspath.IsRootedDiskPath(fileName) {
-+			fileName = cwd + "/" + fileName
-+		}
-+		// Escape properly (e.g. '#' in path segments) — raw "file://"+fileName
-+		// would parse the rest as a URI fragment and open the wrong path.
-+		uri := lsconv.FileNameToDocumentURI(fileName)
-+		path := s.toPath(fileName)
-+		content := f.Content
-+		if len(f.Edits) > 0 {
-+			// Delta push: splice the host's edits into the stored overlay text
-+			// instead of receiving full content. The base must be exactly the
-+			// text the client thinks we hold (baseVersion tripwire) — a silent
-+			// gap would corrupt every later text, so mismatch is an error.
-+			var spliced string
-+			var err error
-+			spliced, err = s.applyOverlayEdits(path, fileName, f)
-+			if err != nil {
-+				return nil, err
-+			}
-+			content = spliced
-+		} else {
-+			if s.overlayVersions == nil {
-+				s.overlayVersions = make(map[tspath.Path]int)
-+			}
-+			s.overlayVersions[path] = 0
-+		}
-+		// Register as API-open so the file is assigned to a configured project
-+		// (same as textDocument/didOpen). Overlays alone do not add root files
-+		// such as .vue that tsconfig discovery skips.
-+		if !s.openFiles.Has(path) {
-+			if apiRequest.OpenFiles == nil {
-+				apiRequest.OpenFiles = collections.NewSetWithSizeHint[lsproto.DocumentUri](len(params.OpenFilesWithContent))
-+			}
-+			apiRequest.OpenFiles.Add(uri)
-+			openedFiles = append(openedFiles, path)
-+		}
-+		languageKind := scriptKindToLanguageKind(f.ScriptKind)
-+		contentOverride := s.projectSession.FS().FileExists(fileName)
-+		openFileChanges = append(openFileChanges, project.FileChange{
-+			Kind:            project.FileChangeKindOpen,
-+			URI:             uri,
-+			Version:         1,
-+			Content:         content,
-+			ContentOverride: contentOverride,
-+			LanguageKind:    languageKind,
-+		})
-+		if s.overlayOpenFiles == nil {
-+			s.overlayOpenFiles = make(map[tspath.Path]lsproto.DocumentUri)
-+		}
-+		s.overlayOpenFiles[path] = uri
-+	}
-+	// Closes first: a file closed (previous project) and reopened (current
-+	// project) in the same request must be processed close-then-open.
-+	if len(closeOverlayChanges) > 0 {
-+		s.projectSession.EnqueueOpenFiles(closeOverlayChanges)
-+	}
-+	if len(openFileChanges) > 0 {
-+		s.projectSession.EnqueueOpenFiles(openFileChanges)
- 	}
- 
- 	// Even when nothing is opened or closed, APIUpdate ensures all projects and
-@@ -938,12 +1405,22 @@ func (s *Session) handleUpdateSnapshot(ctx context.Context, params *UpdateSnapsh
- 			refCount:                1,
- 			symbolRegistry:          make(map[SymbolID]*ast.Symbol),
- 			symbolCanonicalProjects: make(map[SymbolID]ProjectID),
-+			scopeSentSymbols:        make(map[SymbolID]struct{}),
- 			projectRegistries:       make(map[ProjectID]*projectRegistryData),
- 		}
- 		s.snapshots[handle] = sd
- 	}
- 	prevSD := s.snapshots[s.latestSnapshot]
- 	s.latestSnapshot = handle
-+	// A superseded snapshot's program is dead: kill its in-flight build-mode
-+	// prefetches so they stop holding checker slots (see prefetchCancels).
-+	if prevSD != nil && prevSD != sd {
-+		prevSD.prefetchDead = true
-+		for _, cancel := range prevSD.prefetchCancels {
-+			cancel()
-+		}
-+		prevSD.prefetchCancels = nil
-+	}
- 	s.snapshotsMu.Unlock()
- 
- 	// Build projects list
-@@ -962,6 +1439,57 @@ func (s *Session) handleUpdateSnapshot(ctx context.Context, params *UpdateSnapsh
- 		changes = computeSnapshotChanges(prevSD.snapshot, snapshot)
- 	}
- 
-+	// Build-mode diagnostics prefetch: start the whole-program semantic pass
-+	// for the affected projects now, so it overlaps with the client's work
-+	// between this response and its getGlobalDiagnostics RPC (which then
-+	// joins the in-flight pass via fullSemanticPass's singleflight).
-+	// Non-incremental projects only: incremental ones are served through the
-+	// buildinfo-backed wrapper, which is not safe to run concurrently.
-+	//
-+	// A project qualifies when this request opened it, or when its program
-+	// was rebuilt since the previous snapshot: a host that learns new file
-+	// membership from the first snapshot's own responses (TNB's tsc -b
-+	// overlay discovering node_modules .vue files via getSourceFileNames)
-+	// pushes a follow-up edit snapshot before the first diagnostics producer
-+	// arrives — prefetching only on project-open would leave that pass to
-+	// run synchronously inside getGlobalDiagnostics.
-+	if params.PrefetchDiagnostics {
-+		opened := collections.NewSetWithSizeHint[tspath.Path](len(openedProjects))
-+		for _, p := range openedProjects {
-+			opened.Add(p)
-+		}
-+		for _, proj := range projects {
-+			// ConfigFilePath panics on non-configured (inferred/external)
-+			// projects — the collection holds them whenever open files fell
-+			// outside every configured project.
-+			if proj.Kind != project.KindConfigured {
-+				continue
-+			}
-+			program := proj.GetProgram()
-+			if program == nil || program.Options().IsIncremental() {
-+				continue
-+			}
-+			if !opened.Has(proj.ConfigFilePath()) {
-+				if prevSD == nil || prevSD == sd {
-+					continue
-+				}
-+				if prevProj := prevSD.snapshot.ProjectCollection.ConfiguredProject(proj.ConfigFilePath()); prevProj != nil && prevProj.GetProgram() == program {
-+					continue
-+				}
-+			}
-+			pctx, cancel := context.WithCancel(context.WithoutCancel(ctx))
-+			s.snapshotsMu.Lock()
-+			if sd.prefetchDead {
-+				s.snapshotsMu.Unlock()
-+				cancel()
-+				continue
-+			}
-+			sd.prefetchCancels = append(sd.prefetchCancels, cancel)
-+			s.snapshotsMu.Unlock()
-+			go sd.fullSemanticPass(pctx, program)
-+		}
-+	}
-+
- 	return &UpdateSnapshotResponse{
- 		Snapshot: handle,
- 		Projects: projectResponses,
-@@ -985,6 +1513,11 @@ func (s *Session) handleRelease(ctx context.Context, params *ReleaseParams) (any
- 	sd.refCount--
- 	if sd.refCount <= 0 {
- 		delete(s.snapshots, params.Snapshot)
-+		sd.prefetchDead = true
-+		for _, cancel := range sd.prefetchCancels {
-+			cancel()
-+		}
-+		sd.prefetchCancels = nil
- 		// Release the API session's ref on the project snapshot.
- 		sd.snapshot.Deref(s.projectSession)
- 	}
-@@ -1061,8 +1594,8 @@ func (s *Session) handleGetSourceFile(ctx context.Context, params *GetSourceFile
- 		return nil, nil
- 	}
- 
--	// Encode the full source file.
--	data, _, err := encoder.EncodeSourceFile(sourceFile)
-+	// Encode the full source file (memoized per AST for stable declaration files)
-+	data, err := s.encodeSourceFileCached(sourceFile)
- 	if err != nil {
- 		return nil, fmt.Errorf("failed to encode source file: %w", err)
- 	}
-@@ -1512,27 +2045,27 @@ func (s *Session) handleGetTargetOfType(_ context.Context, params *GetTypeProper
- }
- 
- func (s *Session) handleGetFreshTypeOfType(_ context.Context, params *GetTypePropertyParams) (*TypeResponse, error) {
--	return s.resolveTypePropertyOfType(params, func(t *checker.Type) *checker.Type { return t.AsLiteralType().FreshType() })
-+	return s.resolveTypePropertyOfType(params, func(t *checker.Type) *checker.Type { return t.AsLiteralType().FreshType() }) // asguard:exempt registry identity: the JS accessor fires only when the wire record carries freshType, already cast from this *Type in newTypeResponse
- }
- 
- func (s *Session) handleGetRegularTypeOfType(_ context.Context, params *GetTypePropertyParams) (*TypeResponse, error) {
--	return s.resolveTypePropertyOfType(params, func(t *checker.Type) *checker.Type { return t.AsLiteralType().RegularType() })
-+	return s.resolveTypePropertyOfType(params, func(t *checker.Type) *checker.Type { return t.AsLiteralType().RegularType() }) // asguard:exempt registry identity: JS reads this field only when newTypeResponse emitted it from this same *Type
- }
- 
- func (s *Session) handleGetTypesOfType(_ context.Context, params *GetTypePropertyParams) ([]*TypeResponse, error) {
--	return s.resolveTypeArrayPropertyOfType(params, (*checker.Type).Types)
-+	return s.resolveTypeArrayPropertyOfType(params, func(t *checker.Type) []*checker.Type { return t.Types() })
- }
- 
- func (s *Session) handleGetTypeParametersOfType(_ context.Context, params *GetTypePropertyParams) ([]*TypeResponse, error) {
--	return s.resolveTypeArrayPropertyOfType(params, func(t *checker.Type) []*checker.Type { return t.AsInterfaceType().TypeParameters() })
-+	return s.resolveTypeArrayPropertyOfType(params, func(t *checker.Type) []*checker.Type { return t.AsInterfaceType().TypeParameters() }) // asguard:exempt registry identity: JS reads this field only when newTypeResponse emitted it from this same *Type
- }
- 
- func (s *Session) handleGetOuterTypeParametersOfType(_ context.Context, params *GetTypePropertyParams) ([]*TypeResponse, error) {
--	return s.resolveTypeArrayPropertyOfType(params, func(t *checker.Type) []*checker.Type { return t.AsInterfaceType().OuterTypeParameters() })
-+	return s.resolveTypeArrayPropertyOfType(params, func(t *checker.Type) []*checker.Type { return t.AsInterfaceType().OuterTypeParameters() }) // asguard:exempt registry identity: JS reads this field only when newTypeResponse emitted it from this same *Type
- }
- 
- func (s *Session) handleGetLocalTypeParametersOfType(_ context.Context, params *GetTypePropertyParams) ([]*TypeResponse, error) {
--	return s.resolveTypeArrayPropertyOfType(params, func(t *checker.Type) []*checker.Type { return t.AsInterfaceType().LocalTypeParameters() })
-+	return s.resolveTypeArrayPropertyOfType(params, func(t *checker.Type) []*checker.Type { return t.AsInterfaceType().LocalTypeParameters() }) // asguard:exempt registry identity: JS reads this field only when newTypeResponse emitted it from this same *Type
- }
- 
- func (s *Session) handleGetAliasTypeArgumentsOfType(_ context.Context, params *GetTypePropertyParams) ([]*TypeResponse, error) {
-@@ -1554,27 +2087,27 @@ func (s *Session) handleGetAliasSymbolOfType(_ context.Context, params *GetTypeP
- }
- 
- func (s *Session) handleGetObjectTypeOfType(_ context.Context, params *GetTypePropertyParams) (*TypeResponse, error) {
--	return s.resolveTypePropertyOfType(params, func(t *checker.Type) *checker.Type { return t.AsIndexedAccessType().ObjectType() })
-+	return s.resolveTypePropertyOfType(params, func(t *checker.Type) *checker.Type { return t.AsIndexedAccessType().ObjectType() }) // asguard:exempt registry identity: JS reads this field only when newTypeResponse emitted it from this same *Type
- }
- 
- func (s *Session) handleGetIndexTypeOfType(_ context.Context, params *GetTypePropertyParams) (*TypeResponse, error) {
--	return s.resolveTypePropertyOfType(params, func(t *checker.Type) *checker.Type { return t.AsIndexedAccessType().IndexType() })
-+	return s.resolveTypePropertyOfType(params, func(t *checker.Type) *checker.Type { return t.AsIndexedAccessType().IndexType() }) // asguard:exempt registry identity: JS reads this field only when newTypeResponse emitted it from this same *Type
- }
- 
- func (s *Session) handleGetCheckTypeOfType(_ context.Context, params *GetTypePropertyParams) (*TypeResponse, error) {
--	return s.resolveTypePropertyOfType(params, func(t *checker.Type) *checker.Type { return t.AsConditionalType().CheckType() })
-+	return s.resolveTypePropertyOfType(params, func(t *checker.Type) *checker.Type { return t.AsConditionalType().CheckType() }) // asguard:exempt registry identity: JS reads this field only when newTypeResponse emitted it from this same *Type
- }
- 
- func (s *Session) handleGetExtendsTypeOfType(_ context.Context, params *GetTypePropertyParams) (*TypeResponse, error) {
--	return s.resolveTypePropertyOfType(params, func(t *checker.Type) *checker.Type { return t.AsConditionalType().ExtendsType() })
-+	return s.resolveTypePropertyOfType(params, func(t *checker.Type) *checker.Type { return t.AsConditionalType().ExtendsType() }) // asguard:exempt registry identity: JS reads this field only when newTypeResponse emitted it from this same *Type
- }
- 
- func (s *Session) handleGetBaseTypeOfType(_ context.Context, params *GetTypePropertyParams) (*TypeResponse, error) {
--	return s.resolveTypePropertyOfType(params, func(t *checker.Type) *checker.Type { return t.AsSubstitutionType().BaseType() })
-+	return s.resolveTypePropertyOfType(params, func(t *checker.Type) *checker.Type { return t.AsSubstitutionType().BaseType() }) // asguard:exempt registry identity: JS reads this field only when newTypeResponse emitted it from this same *Type
- }
- 
- func (s *Session) handleGetConstraintOfType(_ context.Context, params *GetTypePropertyParams) (*TypeResponse, error) {
--	return s.resolveTypePropertyOfType(params, func(t *checker.Type) *checker.Type { return t.AsSubstitutionType().SubstConstraint() })
-+	return s.resolveTypePropertyOfType(params, func(t *checker.Type) *checker.Type { return t.AsSubstitutionType().SubstConstraint() }) // asguard:exempt registry identity: JS reads this field only when newTypeResponse emitted it from this same *Type
- }
- 
- func (s *Session) handleGetTypeParametersOfSignature(_ context.Context, params *GetSignaturePropertyParams) ([]*TypeResponse, error) {
-@@ -1819,7 +2352,7 @@ func (s *Session) handleGetContextualType(ctx context.Context, params *GetContex
- 		return nil, nil
- 	}
- 
--	t := setup.checker.GetContextualType(node, checker.ContextFlagsNone)
-+	t := setup.checker.GetContextualType(node, checker.ContextFlags(params.ContextFlags))
- 	if t == nil {
- 		return nil, nil
- 	}
-@@ -2313,6 +2846,61 @@ func (s *Session) handleIsTupleType(ctx context.Context, params *CheckerTypePara
- 	return checker.IsTupleType(t), nil
- }
- 
-+func (s *Session) handleGetSuggestedSymbolForNonexistentSymbol(ctx context.Context, params *GetSuggestedSymbolForNonexistentSymbolParams) (*SymbolResponse, error) {
-+	setup, err := s.setupChecker(ctx, params.Snapshot, params.Project)
-+	if err != nil {
-+		return nil, err
-+	}
-+	defer setup.done()
-+
-+	node, err := setup.sd.resolveNodeHandle(setup.program, params.Location)
-+	if err != nil {
-+		return nil, err
-+	}
-+	if node == nil {
-+		return nil, nil
-+	}
-+	symbol := setup.checker.GetSuggestedSymbolForNonexistentSymbol(node, params.Name, ast.SymbolFlags(params.Meaning))
-+	if symbol == nil {
-+		return nil, nil
-+	}
-+	return setup.newSymbolResponse(symbol), nil
-+}
-+
-+// handleGetAnyAsyncIterableType returns AsyncIterable<any,any,any> or nil.
-+func (s *Session) handleGetAnyAsyncIterableType(ctx context.Context, params *GetIntrinsicTypeParams) (*TypeResponse, error) {
-+	setup, err := s.setupChecker(ctx, params.Snapshot, params.Project)
-+	if err != nil {
-+		return nil, err
-+	}
-+	defer setup.done()
-+
-+	t := setup.checker.GetAnyAsyncIterableType()
-+	if t == nil {
-+		return nil, nil
-+	}
-+	return setup.newTypeResponse(t), nil
-+}
-+
-+// handleCreateArrayType returns T[] for element type T.
-+func (s *Session) handleCreateArrayType(ctx context.Context, params *CheckerTypeParams) (*TypeResponse, error) {
-+	setup, err := s.setupChecker(ctx, params.Snapshot, params.Project)
-+	if err != nil {
-+		return nil, err
-+	}
-+	defer setup.done()
-+
-+	t, err := setup.resolveTypeHandle(params.Type)
-+	if err != nil {
-+		return nil, err
-+	}
-+	result := setup.checker.CreateArrayType(t)
-+	if result == nil {
-+		return nil, nil
-+	}
-+	return setup.newTypeResponse(result), nil
-+}
-+
- // handleGetBaseTypes returns the base types of an interface/class type.
- func (s *Session) handleGetBaseTypes(ctx context.Context, params *CheckerTypeParams) ([]*TypeResponse, error) {
- 	setup, err := s.setupChecker(ctx, params.Snapshot, params.Project)
-@@ -2412,13 +3000,41 @@ func (s *Session) handleGetIndexInfosOfType(ctx context.Context, params *Checker
- 			IsReadonly: info.IsReadonly(),
- 		}
- 		if info.Declaration() != nil {
--			results[i].Declaration = setup.sd.nodeHandleFrom(info.Declaration())
-+			results[i].Declaration = nodeHandleFrom(info.Declaration())
-+			if sym := setup.checker.GetSymbolOfDeclaration(info.Declaration()); sym != nil {
-+				results[i].Symbol = setup.newSymbolResponse(sym)
-+			}
- 		}
- 	}
- 
- 	return results, nil
- }
- 
-+// handleGetTypeOfAssignmentPattern computes the type of a destructuring
-+// assignment pattern (object/array literal in an assignment position).
-+func (s *Session) handleGetTypeOfAssignmentPattern(ctx context.Context, params *CheckerNodeParams) (*TypeResponse, error) {
-+	setup, err := s.setupChecker(ctx, params.Snapshot, params.Project)
-+	if err != nil {
-+		return nil, err
-+	}
-+	defer setup.done()
-+
-+	node, err := setup.sd.resolveNodeHandle(setup.program, params.Location)
-+	if err != nil {
-+		return nil, err
-+	}
-+	if node == nil {
-+		return nil, nil
-+	}
-+
-+	t := setup.checker.GetTypeOfAssignmentPattern(node)
-+	if t == nil {
-+		return nil, nil
-+	}
-+
-+	return setup.newTypeResponse(t), nil
-+}
-+
- // handleGetConstraintOfTypeParameter returns the constraint of a type parameter.
- func (s *Session) handleGetConstraintOfTypeParameter(ctx context.Context, params *CheckerTypeParams) (*TypeResponse, error) {
- 	setup, err := s.setupChecker(ctx, params.Snapshot, params.Project)
-@@ -2430,6 +3046,7 @@ func (s *Session) handleGetConstraintOfTypeParameter(ctx context.Context, params
- 	t, err := setup.resolveTypeHandle(params.Type)
- 	if err != nil {
- 		return nil, err
-+
- 	}
- 
- 	constraint := setup.checker.GetConstraintOfTypeParameter(t)
-@@ -2830,7 +3447,9 @@ func computeSnapshotChanges(prev *project.Snapshot, next *project.Snapshot) *Sna
- 			var projectChanges ProjectFileChanges
- 			core.DiffMaps(
- 				oldFiles, newFiles,
--				nil, // onAdded: new file in project, not a change.
-+				func(path tspath.Path, _ *ast.SourceFile) {
-+					projectChanges.AddedFiles = append(projectChanges.AddedFiles, path)
-+				},
- 				func(path tspath.Path, _ *ast.SourceFile) {
- 					projectChanges.DeletedFiles = append(projectChanges.DeletedFiles, path)
- 				},
-@@ -2838,7 +3457,7 @@ func computeSnapshotChanges(prev *project.Snapshot, next *project.Snapshot) *Sna
- 					projectChanges.ChangedFiles = append(projectChanges.ChangedFiles, path)
- 				},
- 			)
--			if len(projectChanges.ChangedFiles) > 0 || len(projectChanges.DeletedFiles) > 0 {
-+			if len(projectChanges.ChangedFiles) > 0 || len(projectChanges.DeletedFiles) > 0 || len(projectChanges.AddedFiles) > 0 {
- 				if changes.ChangedProjects == nil {
- 					changes.ChangedProjects = make(map[ProjectID]*ProjectFileChanges)
- 				}
-@@ -2853,11 +3472,23 @@ func computeSnapshotChanges(prev *project.Snapshot, next *project.Snapshot) *Sna
- // Close closes the session and releases all active snapshots,
- // regardless of their ref counts.
- func (s *Session) Close() {
-+	// Drop the arena first: the JS side frees the V8-allocated buffer when it
-+	// disposes the session, so a Close that kept s.arena would leave a dangling
-+	// pointer into freed memory for the session's lifetime. All calls are
-+	// synchronous on the JS thread, so a plain nil assignment cannot race a
-+	// handler; SetArena reinstalls if the session were ever reused.
-+	s.arena = nil
-+
- 	s.releaseOpenRefs()
- 
- 	s.snapshotsMu.Lock()
- 	defer s.snapshotsMu.Unlock()
- 	for handle, sd := range s.snapshots {
-+		sd.prefetchDead = true
-+		for _, cancel := range sd.prefetchCancels {
-+			cancel()
-+		}
-+		sd.prefetchCancels = nil
- 		sd.snapshot.Deref(s.projectSession)
- 		delete(s.snapshots, handle)
- 	}
-@@ -2979,7 +3610,6 @@ func (s *Session) handleGetBindDiagnostics(ctx context.Context, params *GetDiagn
- 
- // handleGetSemanticDiagnostics returns semantic diagnostics for a file or all files.
- func (s *Session) handleGetSemanticDiagnostics(ctx context.Context, params *GetDiagnosticsParams) ([]*DiagnosticResponse, error) {
--	ctx = core.WithCheckerLifetime(ctx, core.CheckerLifetimeDiagnostics)
- 	sd, err := s.getSnapshotData(params.Snapshot)
- 	if err != nil {
- 		return nil, err
-@@ -2995,6 +3625,19 @@ func (s *Session) handleGetSemanticDiagnostics(ctx context.Context, params *GetD
- 		return nil, err
- 	}
- 
-+	// Incremental-capable projects answer from the buildinfo-backed wrapper:
-+	// unchanged files return their cached per-file diagnostics and only
-+	// affected files hit the checker — the same path `tsgo --incremental`
-+	// serves diagnostics from. Non-incremental projects keep the plain
-+	// whole-program path, as in the native CLI.
-+	if incrementalProgram := sd.getIncrementalProgram(program); incrementalProgram != nil {
-+		diags := incrementalProgram.GetSemanticDiagnostics(ctx, sourceFile)
-+		if ctx.Err() != nil {
-+			return nil, ctx.Err()
-+		}
-+		return NewDiagnosticResponses(diags), nil
-+	}
-+
- 	diags := program.GetSemanticDiagnostics(ctx, sourceFile)
- 	return NewDiagnosticResponses(diags), nil
- }
-@@ -3077,7 +3720,6 @@ func (s *Session) handleGetProgramDiagnostics(ctx context.Context, params *GetPr
- 
- // handleGetGlobalDiagnostics returns global (non-file-specific) semantic diagnostics.
- func (s *Session) handleGetGlobalDiagnostics(ctx context.Context, params *GetProjectDiagnosticsParams) ([]*DiagnosticResponse, error) {
--	ctx = core.WithCheckerLifetime(ctx, core.CheckerLifetimeDiagnostics)
- 	sd, err := s.getSnapshotData(params.Snapshot)
- 	if err != nil {
- 		return nil, err
-@@ -3094,11 +3736,27 @@ func (s *Session) handleGetGlobalDiagnostics(ctx context.Context, params *GetPro
- 	}
- 
- 	// Global diagnostics are accumulated lazily by the project's checker pool as
--	// files are checked. Force a full semantic pass so any global (non-file-specific)
--	// diagnostics are produced; otherwise this would return an empty result for
--	// projects using an external checker pool (the typical API case), since
--	// compiler.Program.GetGlobalDiagnostics only reports for the internal pool.
--	program.GetSemanticDiagnostics(ctx, nil)
-+	// files are checked. Ensure the semantic pass has run so any global
-+	// (non-file-specific) diagnostics are produced; otherwise this would return
-+	// an empty result for projects using an external checker pool (the typical
-+	// API case), since compiler.Program.GetGlobalDiagnostics only reports for
-+	// the internal pool.
-+	//
-+	// Incremental-capable projects run the pass through the buildinfo-backed
-+	// wrapper: only files affected since the last build are checked, so a
-+	// clean rebuild creates no checkers at all — exactly the native `tsgo
-+	// --incremental` behavior, where global diagnostics of a fully cached run
-+	// come out empty because nothing was checked. Non-incremental projects
-+	// force the whole-program pass; its per-file results are memoized on the
-+	// snapshot so handleEmitBuildInfo can serialize without repeating it.
-+	if incrementalProgram := sd.getIncrementalProgram(program); incrementalProgram != nil {
-+		incrementalProgram.GetSemanticDiagnostics(ctx, nil)
-+		if ctx.Err() != nil {
-+			return nil, ctx.Err()
-+		}
-+	} else {
-+		sd.fullSemanticPass(ctx, program)
-+	}
- 
- 	diags := core.Filter(proj.GetProjectDiagnostics(ctx), func(d *ast.Diagnostic) bool {
- 		return d.File() == nil
-@@ -3143,7 +3801,7 @@ func (s *Session) handleGetReferencesToSymbolInFile(ctx context.Context, params
- 	nodes := setup.checker.GetReferencesToSymbolInFile(sourceFile, symbol)
- 	result := make([]NodeHandle, len(nodes))
- 	for i, node := range nodes {
--		result[i] = setup.sd.nodeHandleFrom(node)
-+		result[i] = nodeHandleFrom(node)
- 	}
- 	return result, nil
- }
-@@ -3179,10 +3837,10 @@ func (s *Session) handleGetSignatureUsages(ctx context.Context, params *GetSigna
- 	result := make([]SignatureUsageResponse, 0, len(usages))
- 	for _, u := range usages {
- 		entry := SignatureUsageResponse{
--			Name: sd.nodeHandleFrom(u.Name),
-+			Name: nodeHandleFrom(u.Name),
- 		}
- 		if u.Call != nil {
--			entry.Call = sd.nodeHandleFrom(u.Call)
-+			entry.Call = nodeHandleFrom(u.Call)
- 		}
- 		result = append(result, entry)
- 	}
-@@ -3206,29 +3864,74 @@ func (s *Session) handleGetCompletionsAtPosition(ctx context.Context, params *Ge
- 	if sourceFile == nil {
- 		return nil, nil
- 	}
--	langSvc, err := s.setupLanguageService(sd, program, params.Project, "")
--	if err != nil {
--		return nil, err
--	}
- 	positionMap := sourceFile.GetPositionMap()
- 	internalPos := positionMap.UTF16ToUTF8(int(params.Position))
-+	// Always wrap the snapshot host: mergeCompletionsPreferences normalizes the
-+	// unset includeCompletionsForModuleExports tri-state to stock's off default,
-+	// and per-request tri-states override it when present.
-+	proj := sd.snapshot.ProjectCollection.GetProjectByPath(parseProjectHandle(params.Project))
-+	if proj == nil {
-+		return nil, fmt.Errorf("%w: project not found", ErrClientError)
-+	}
-+	langSvc := ls.NewLanguageService(proj.ID(), program, &completionsPrefsHost{
-+		Host:  sd.snapshot,
-+		prefs: mergeCompletionsPreferences(sd.snapshot.GetPreferences(""), params.Preferences),
-+	}, "")
- 	result, err := langSvc.GetCompletionsAtPosition(ctx, sourceFile, internalPos, params.TriggerCharacter, params.IncludeSymbol)
-+
-+	if errors.Is(err, ls.ErrNeedsAutoImports) {
-+		// The auto-import registry is not prepared for this file. Mirror the
-+		// LSP handler (registerLanguageServiceWithAutoImportsRequestHandler):
-+		// prepare it on a cloned snapshot and retry once.
-+		uri := params.File.ToURI(s.projectSession.GetCurrentDirectory())
-+		prepared, prepProj, prepErr := s.projectSession.GetSnapshotWithAutoImports(ctx, sd.snapshot, uri)
-+		if prepErr != nil {
-+			return nil, prepErr
-+		}
-+		defer prepared.Deref(s.projectSession)
-+		prepProgram := prepProj.GetProgram()
-+		sourceFile = prepProgram.GetSourceFile(params.File.ToFileName())
-+		if sourceFile == nil {
-+			return nil, nil
-+		}
-+		langSvc = ls.NewLanguageService(prepProj.ID(), prepProgram, &completionsPrefsHost{
-+			Host:  prepared,
-+			prefs: mergeCompletionsPreferences(prepared.GetPreferences(""), params.Preferences),
-+		}, "")
-+		result, err = langSvc.GetCompletionsAtPosition(ctx, sourceFile, internalPos, params.TriggerCharacter, params.IncludeSymbol)
-+
-+	}
- 	if err != nil || result == nil {
- 		return nil, err
- 	}
--	entries := make([]*CompletionEntryResponse, 0, len(result.Items))
--	for _, item := range result.Items {
-+	items, providerDeps := filterAutoImportItemsByPackageJsonVisibility(result.Items, params.File.ToFileName(), s.projectSession.FS())
-+	for _, item := range items {
-+		// The vscode-derived LSP layer appends "?" to optional members for its
-+		// client UI (completions.go:4507); stock tsserver never does — strip it
-+		// for protocol parity (name only; insertText/filterText were captured
-+		// before the suffix).
-+		if item.KindModifiers&lsutil.ScriptElementKindModifierOptional != 0 {
-+			item.Label = strings.TrimSuffix(item.Label, "?")
-+		}
-+	}
-+	sortCompletionItems(items)
-+	entries := make([]*CompletionEntryResponse, 0, len(items))
-+	for _, item := range items {
- 		entry := &CompletionEntryResponse{
--			Name:       item.Label,
--			SortText:   item.SortText,
--			InsertText: item.InsertText,
--			FilterText: item.FilterText,
--			Detail:     item.Detail,
-+			Name:          item.Label,
-+			SortText:      item.SortText,
-+			InsertText:    item.InsertText,
-+			FilterText:    item.FilterText,
-+			Detail:        item.Detail,
-+			ElementKind:   ls.ScriptElementKindString(item.ElementKind),
-+			KindModifiers: item.KindModifiersText,
- 		}
- 		if item.Kind != nil {
- 			entry.Kind = uint32(*item.Kind)
- 		}
--		if item.LabelDetails != nil {
-+		if item.LabelDetails != nil && (item.Data == nil || item.Data.Source == "") {
-+			// Stock omits labelDetails on auto-import (sourced) entries — it uses
-+			// sourceDisplay instead.
- 			entry.LabelDetails = &CompletionEntryLabelDetailsResponse{
- 				Detail:      item.LabelDetails.Detail,
- 				Description: item.LabelDetails.Description,
-@@ -3237,12 +3940,63 @@ func (s *Session) handleGetCompletionsAtPosition(ctx context.Context, params *Ge
- 		if item.Symbol != nil {
- 			entry.Symbol = sd.newSymbolResponse(item.Symbol, params.Project)
- 		}
-+		if item.Data != nil {
-+			entry.Source = item.Data.Source
-+			if item.Data.AutoImport != nil {
-+				entry.HasAction = ptrTrue()
-+			}
-+			// Stock attaches a data payload to every sourced (auto-import)
-+			// entry; consumers key on its presence (volar) or post it back to
-+			// getCompletionEntryDetails (stock resolves the module via
-+			// data.fileName + data.exportName).
-+			if item.Data.Source != "" {
-+				moduleSpecifier := item.Data.Source
-+				if item.Data.AutoImport != nil && item.Data.AutoImport.ModuleSpecifier != "" {
-+					moduleSpecifier = item.Data.AutoImport.ModuleSpecifier
-+				}
-+				entry.SourceDisplay = []DisplayPartResponse{{Text: moduleSpecifier, Kind: "text"}}
-+				if providerDeps != nil && item.Data.AutoImport != nil && providerDeps.Has(packageNameFromSpecifier(item.Data.AutoImport.ModuleSpecifier)) {
-+					entry.IsPackageJsonImport = ptrTrue()
-+				}
-+				entry.Data = &CompletionEntryDataResponse{
-+					ExportName: item.Data.Name,
-+					FileName:   item.ModuleFileName,
-+				}
-+				if item.Data.AutoImport != nil {
-+					entry.Data.ModuleSpecifier = item.Data.AutoImport.ModuleSpecifier
-+					entry.Data.TnbCompletionData = &TnbCompletionDataResponse{AutoImport: item.Data.AutoImport}
-+				}
-+			}
-+		}
-+		if item.Preselect != nil && *item.Preselect {
-+			entry.IsRecommended = ptrTrue()
-+		}
-+		if item.TextEdit != nil && item.TextEdit.TextEdit != nil {
-+			start, length := lspRangeToSpan(sourceFile, item.TextEdit.TextEdit.Range)
-+			entry.ReplacementStart = &start
-+			entry.ReplacementLength = &length
-+		}
-+		if item.CommitCharacters != nil {
-+			entry.CommitCharacters = *item.CommitCharacters
-+		}
- 		entries = append(entries, entry)
- 	}
--	return &CompletionInfoResponse{
--		IsIncomplete: result.IsIncomplete,
--		Entries:      entries,
--	}, nil
-+	resp := &CompletionInfoResponse{
-+		IsIncomplete:            result.IsIncomplete,
-+		Entries:                 entries,
-+		IsGlobalCompletion:      result.IsGlobalCompletion,
-+		IsMemberCompletion:      result.IsMemberCompletion,
-+		IsNewIdentifierLocation: result.IsNewIdentifierLocation,
-+	}
-+	if result.OptionalReplacementSpan != nil {
-+		start, length := lspRangeToSpan(sourceFile, *result.OptionalReplacementSpan)
-+		resp.OptionalSpanStart = &start
-+		resp.OptionalSpanLength = &length
-+	}
-+	if result.ItemDefaults != nil && result.ItemDefaults.CommitCharacters != nil {
-+		resp.DefaultCommitCharacters = *result.ItemDefaults.CommitCharacters
-+	}
-+	return resp, nil
- }
- 
- // handleGetReferencedSymbolsForNode returns node handles for all references found at a node.
-@@ -3284,11 +4038,11 @@ func (s *Session) handleGetReferencedSymbolsForNode(ctx context.Context, params
- 		var refs []NodeHandle
- 		for _, ref := range entry.References() {
- 			if ref.IsNodeEntry() {
--				refs = append(refs, sd.nodeHandleFrom(ref.Node()))
-+				refs = append(refs, nodeHandleFrom(ref.Node()))
- 			}
- 		}
- 		re := ReferencedSymbolEntry{
--			Definition: sd.nodeHandleFrom(defNode),
-+			Definition: nodeHandleFrom(defNode),
- 			References: refs,
- 		}
- 		if sym := entry.DefinitionSymbol(); sym != nil {

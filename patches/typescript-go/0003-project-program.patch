@@ -1,0 +1,1182 @@
+diff --git a/internal/compiler/fileloader.go b/internal/compiler/fileloader.go
+index f8d006e925..82e128ca2e 100644
+--- a/internal/compiler/fileloader.go
++++ b/internal/compiler/fileloader.go
+@@ -125,7 +125,7 @@ func processAllProgramFiles(
+ ) processedFiles {
+ 	compilerOptions := opts.Config.CompilerOptions()
+ 	rootFiles := opts.Config.FileNames()
+-	supportedExtensions := tsoptions.GetSupportedExtensions(compilerOptions, nil /*extraFileExtensions*/)
++	supportedExtensions := tsoptions.GetSupportedExtensions(compilerOptions, opts.Config.ExtraFileExtensions())
+ 	supportedExtensionsWithJsonIfResolveJsonModule := tsoptions.GetSupportedExtensionsWithJsonIfResolveJsonModule(compilerOptions, supportedExtensions)
+ 	var maxNodeModuleJsDepth int
+ 	if p := opts.Config.CompilerOptions().MaxNodeModuleJsDepth; p != nil {
+@@ -148,6 +148,18 @@ func processAllProgramFiles(
+ 	}
+ 	loader.addProjectReferenceTasks(singleThreaded)
+ 	loader.resolver = module.NewResolver(loader.projectReferenceFileMapper.host, compilerOptions, opts.TypingsLocation, opts.ProjectName)
++	// Ledger(tsgo-extra-file-extensions) — README behavior table row.
++	if extras := opts.Config.ExtraFileExtensions(); len(extras) > 0 {
++		extraExtensions := make([]string, 0, len(extras))
++		for _, x := range extras {
++			ext := x.Extension
++			if ext != "" && ext[0] != '.' {
++				ext = "." + ext
++			}
++			extraExtensions = append(extraExtensions, ext)
++		}
++		loader.resolver.SetExtraExtensions(extraExtensions)
++	}
+ 	if opts.Tracing != nil {
+ 		defer opts.Tracing.Push(tracing.PhaseProgram, "processRootFiles", map[string]any{"count": len(rootFiles)}, false)()
+ 	}
+@@ -431,7 +443,7 @@ func (p *fileLoader) getSourceFileFromReference(
+ 	return "", &sourceFileFromReferenceDiagnostic{message: diagnostics.Could_not_resolve_the_path_0_with_the_extensions_Colon_1, args: []any{diagnosticFileName, "'" + strings.Join(core.Flatten(p.supportedExtensions), "', '") + "'"}}
+ }
+ 
+-func (p *fileLoader) resolveTripleslashPathReference(moduleName string, containingFile string, index int) (*resolvedRef, *processingDiagnostic) {
++func (p *fileLoader) resolveTripleslashPathReference(moduleName string, containingFile string, index int) (*resolvedRef, *processingDiagnostic, string) {
+ 	basePath := tspath.GetDirectoryPath(containingFile)
+ 	referencedFileName := moduleName
+ 
+@@ -454,6 +466,17 @@ func (p *fileLoader) resolveTripleslashPathReference(moduleName string, containi
+ 		includeReason,
+ 	)
+ 	if diagnostic != nil {
++		// Ledger(tsgo-extra-file-extensions) — README behavior table row.
++		// Stock tracks referenced-but-not-found files in
++		// Program.missingFilePaths (the watch layer installs watchers that
++		// re-probe them). Report the attempted path so the caller can do the
++		// same — only true not-found failures; unsupported extensions and
++		// self-references are not missing files.
++		var missingPath string
++		if diagnostic.message == diagnostics.File_0_not_found ||
++			diagnostic.message == diagnostics.Could_not_resolve_the_path_0_with_the_extensions_Colon_1 {
++			missingPath = normalizedFileName
++		}
+ 		return nil, &processingDiagnostic{
+ 			kind: processingDiagnosticKindExplainingFileInclude,
+ 			data: &includeExplainingDiagnostic{
+@@ -461,13 +484,13 @@ func (p *fileLoader) resolveTripleslashPathReference(moduleName string, containi
+ 				message:          diagnostic.message,
+ 				args:             diagnostic.args,
+ 			},
+-		}
++		}, missingPath
+ 	}
+ 
+ 	return &resolvedRef{
+ 		fileName:      resolvedFileName,
+ 		includeReason: includeReason,
+-	}, nil
++	}, nil, ""
+ }
+ 
+ func (p *fileLoader) resolveTypeReferenceDirectives(t *parseTask) {
+@@ -590,8 +613,14 @@ func (p *fileLoader) resolveImportsAndModuleAugmentations(t *parseTask) {
+ 
+ 			resolvedFileName := resolvedModule.ResolvedFileName
+ 			isFromNodeModulesSearch := resolvedModule.IsExternalLibraryImport
+-			// Don't treat redirected files as JS files.
+-			isJsFile := !tspath.FileExtensionIsOneOf(resolvedFileName, tspath.SupportedTSExtensionsWithJsonFlat) && p.projectReferenceFileMapper.getRedirectParsedCommandLineForResolution(ast.NewHasFileName(resolvedFileName, p.toPath(resolvedFileName))) == nil
++			// Ledger(tsgo-extra-file-extensions) — README behavior table row.
++			// Extra-extension files get their script kind from host registration,
++			// not from the resolved path's suffix. Project-reference redirects
++			// also bypass suffix classification. Exclude both from the JavaScript
++			// file gate.
++			isJsFile := !p.resolver.IsExtraExtensionFile(resolvedFileName) &&
++				!tspath.FileExtensionIsOneOf(resolvedFileName, tspath.SupportedTSExtensionsWithJsonFlat) &&
++				p.projectReferenceFileMapper.getRedirectParsedCommandLineForResolution(ast.NewHasFileName(resolvedFileName, p.toPath(resolvedFileName))) == nil
+ 			isJsFileFromNodeModules := isFromNodeModulesSearch && isJsFile && strings.Contains(resolvedFileName, "/node_modules/")
+ 
+ 			// add file to program only if:
+diff --git a/internal/compiler/filesparser.go b/internal/compiler/filesparser.go
+index 5817fc6bb8..698abd084a 100644
+--- a/internal/compiler/filesparser.go
++++ b/internal/compiler/filesparser.go
+@@ -29,13 +29,16 @@ type parseTask struct {
+ 	includeReason               *FileIncludeReason
+ 	packageId                   module.PackageId
+ 
+-	metadata                     ast.SourceFileMetaData
+-	resolutionsInFile            module.ModeAwareCache[*module.ResolvedModule]
+-	resolutionsTrace             []module.DiagAndArgs
+-	typeResolutionsInFile        module.ModeAwareCache[*module.ResolvedTypeReferenceDirective]
+-	typeResolutionsTrace         []module.DiagAndArgs
+-	resolutionDiagnostics        []*ast.Diagnostic
+-	processingDiagnostics        []*processingDiagnostic
++	metadata              ast.SourceFileMetaData
++	resolutionsInFile     module.ModeAwareCache[*module.ResolvedModule]
++	resolutionsTrace      []module.DiagAndArgs
++	typeResolutionsInFile module.ModeAwareCache[*module.ResolvedTypeReferenceDirective]
++	typeResolutionsTrace  []module.DiagAndArgs
++	resolutionDiagnostics []*ast.Diagnostic
++	processingDiagnostics []*processingDiagnostic
++	// missingFiles records triple-slash path references that resolved to
++	// nothing on disk (stock Program.missingFilePaths parity).
++	missingFiles                 []string
+ 	importHelpersImportSpecifier *ast.StringLiteralNode
+ 	jsxRuntimeImportSpecifier    *jsxRuntimeImportSpecifier
+ 
+@@ -120,9 +123,12 @@ func (t *parseTask) load(loader *fileLoader) {
+ 	compilerOptions := loader.opts.Config.CompilerOptions()
+ 	if !compilerOptions.NoResolve.IsTrue() {
+ 		for index, ref := range file.ReferencedFiles {
+-			resolvedRef, processingDiagnostic := loader.resolveTripleslashPathReference(ref.FileName, file.FileName(), index)
++			resolvedRef, processingDiagnostic, missingPath := loader.resolveTripleslashPathReference(ref.FileName, file.FileName(), index)
+ 			if processingDiagnostic != nil {
+ 				t.processingDiagnostics = append(t.processingDiagnostics, processingDiagnostic)
++				if missingPath != "" {
++					t.missingFiles = append(t.missingFiles, missingPath)
++				}
+ 				continue
+ 			}
+ 			t.addSubTask(*resolvedRef, nil)
+@@ -478,6 +484,8 @@ func (w *filesParser) getProcessedFiles(loader *fileLoader) processedFiles {
+ 				includeProcessor.processingDiagnostics = append(includeProcessor.processingDiagnostics, task.processingDiagnostics...)
+ 			}
+ 
++			missingFiles = append(missingFiles, task.missingFiles...)
++
+ 			if file == nil {
+ 				missingFiles = append(missingFiles, task.normalizedFilePath)
+ 				continue
+diff --git a/internal/compiler/program.go b/internal/compiler/program.go
+index 74b2504d9e..d6a714c18b 100644
+--- a/internal/compiler/program.go
++++ b/internal/compiler/program.go
+@@ -116,6 +116,20 @@ type Program struct {
+ 	// Cached map of package names to whether they bundle types
+ 	packagesMapOnce sync.Once
+ 	packagesMap     map[string]bool
++
++	// resolvedPropertiesCache is shared across checker lifetimes so a union or
++	// intersection type's member list materialized by one checker (diagnostics)
++	// is reused by another (API), instead of being recomputed once per lifetime.
++	resolvedPropertiesCache *checker.ResolvedPropertiesCache
++}
++
++// GetResolvedPropertiesCache implements the checker.resolvedPropertiesCacheProvider
++// interface, exposing the program-level union/intersection member-list memo.
++func (p *Program) GetResolvedPropertiesCache() *checker.ResolvedPropertiesCache {
++	if p.resolvedPropertiesCache == nil {
++		p.resolvedPropertiesCache = &checker.ResolvedPropertiesCache{}
++	}
++	return p.resolvedPropertiesCache
+ }
+ 
+ // FileExists implements checker.Program.
+@@ -197,6 +211,10 @@ func (p *Program) GetRedirectForResolution(file ast.HasFileName) *tsoptions.Pars
+ 	return redirect
+ }
+ 
++func (p *Program) GetCompilerOptionsForFile(file ast.HasFileName) *core.CompilerOptions {
++	return p.projectReferenceFileMapper.getCompilerOptionsForFile(file)
++}
++
+ func (p *Program) GetParseFileRedirect(fileName string) string {
+ 	return p.projectReferenceFileMapper.getParseFileRedirect(ast.NewHasFileName(fileName, p.toPath(fileName)))
+ }
+@@ -234,7 +252,8 @@ func (p *Program) GetSourceFileFromReference(origin *ast.SourceFile, ref *ast.Fi
+ 	// Still, without the failed lookup reporting that only the loader does, this isn't terribly complicated
+ 
+ 	fileName := tspath.ResolvePath(tspath.GetDirectoryPath(origin.FileName()), ref.FileName)
+-	supportedExtensionsBase := tsoptions.GetSupportedExtensions(p.Options(), nil /*extraFileExtensions*/)
++	// Ledger(tsgo-extra-file-extensions) — README behavior table row.
++	supportedExtensionsBase := tsoptions.GetSupportedExtensions(p.Options(), p.CommandLine().ExtraFileExtensions())
+ 	supportedExtensions := tsoptions.GetSupportedExtensionsWithJsonIfResolveJsonModule(p.Options(), supportedExtensionsBase)
+ 	allowNonTsExtensions := p.Options().AllowNonTsExtensions.IsTrue()
+ 	if tspath.HasExtension(fileName) {
+@@ -585,18 +604,90 @@ func (p *Program) collectCheckerDiagnosticsFromFiles(ctx context.Context, source
+ 			diagnostics[fileIndex] = collect(ctx, c, file)
+ 		})
+ 	} else {
+-		wg := core.NewWorkGroup(p.SingleThreaded())
++		checkable := make([]int, 0, len(sourceFiles))
+ 		for i, file := range sourceFiles {
+-			if p.SkipTypeChecking(file, false) {
+-				continue
++			if !p.SkipTypeChecking(file, false) {
++				checkable = append(checkable, i)
+ 			}
++		}
++		// Ledger(tsgo-checker-pool-strides) — README behavior table row.
++		// Assign files to a fixed number of groups by original index stride
++		// (i % groups) — one task per group, one leased checker per task;
++		// below the group count this degenerates to one group per file.
++		// Plain queue pickup (the old shape) bound files to checkers by
++		// goroutine scheduling, so checker-local lazy state (merged global
++		// heritage resolution, report dedup) varied run to run and per-file
++		// blame appeared/disappeared across identical programs (issue #42).
++		// The stride mirrors the compiler pool's fileAssociations
++		// (checkerCount == the default 4 whenever the program has >= 4
++		// files), so the session's pass also matches the CLI's deterministic
++		// grouping instead of merely being stable. Routing small programs
++		// through a single dedicated checker (the old micro-program fast
++		// path) was stable but wrong the other way: merged-global heritage
++		// gates resolved once per pass, deterministically dropping TS2430
++		// blame sites that both stock tsc and the strided pool report.
++		// Which pool slot a group leases is irrelevant (checkers are
++		// symmetric) as long as no slot serves two groups, so groups never
++		// exceed the pool's query slots. The whole-program pass runs before
++		// query traffic on the paths that reach it (one-shot tsc/build,
++		// fresh snapshot), so the slots are free at pass start — and with
++		// releases deferred past RunAndWait (below, issue #51) no slot goes
++		// idle mid-pass, so the 1:1 pairing is guaranteed rather than
++		// scheduling-dependent.
++		groupCount := 4
++		if qp, ok := p.checkerPool.(interface{ QueryCheckerSlots() int }); ok {
++			groupCount = qp.QueryCheckerSlots()
++		}
++		groups := min(groupCount, len(checkable))
++		wg := core.NewWorkGroup(p.SingleThreaded())
++		dones := make([]func(), groups)
++		for g := 0; g < groups; g++ {
++			g := g
+ 			wg.Queue(func() {
+-				c, done := p.checkerPool.GetChecker(ctx, file)
+-				diagnostics[i] = collect(ctx, c, file)
+-				done()
++				c, done := p.checkerPool.GetChecker(ctx, nil)
++				// The nil lease names no file, so without this the group's
++				// files keep no file→checker affinity — queue pickup used to
++				// record it implicitly, and the per-file diagnostic RPCs
++				// after the pass (build-mode getDiagnosticsBatch,
++				// declaration emit) reacquire the warm checker through it.
++				// Without affinity every file re-resolved on a cold checker
++				// (~1.5s on elk's app project).
++				if ap, ok := p.checkerPool.(interface {
++					AssociateFiles(*checker.Checker, []*ast.SourceFile)
++				}); ok {
++					groupFiles := make([]*ast.SourceFile, 0, (len(checkable)+groups-1)/groups)
++					for _, i := range checkable {
++						if i%groups == g {
++							groupFiles = append(groupFiles, sourceFiles[i])
++						}
++					}
++					ap.AssociateFiles(c, groupFiles)
++				}
++				for _, i := range checkable {
++					if i%groups != g {
++						continue
++					}
++					if ctx.Err() != nil {
++						// Aborted (e.g. superseded-snapshot prefetch
++						// cancel): stop before the next collect — the
++						// checker is poisoned after cancellation and the
++						// pool disposes it on release.
++						break
++					}
++					diagnostics[i] = collect(ctx, c, sourceFiles[i])
++				}
++				dones[g] = done
+ 			})
+ 		}
+ 		wg.RunAndWait()
++		// Releases happen only after every group has leased and finished:
++		// the pool prefers an idle slot, so a checker released mid-pass
++		// could be re-leased by a later-scheduled group, carrying its
++		// checker-local lazy state (merged-global interfaceChecked gates)
++		// across groups and silently dropping that group's blame sites.
++		for _, done := range dones {
++			done()
++		}
+ 	}
+ 	return diagnostics
+ }
+diff --git a/internal/execute/incremental/programtosnapshot.go b/internal/execute/incremental/programtosnapshot.go
+index 44b9b4cbc6..0a8aafd0d4 100644
+--- a/internal/execute/incremental/programtosnapshot.go
++++ b/internal/execute/incremental/programtosnapshot.go
+@@ -14,13 +14,22 @@ import (
+ )
+ 
+ func programToSnapshot(program *compiler.Program, oldProgram *Program, hashWithText bool) *snapshot {
++	return programToSnapshotWithOptions(program, oldProgram, program.Options(), hashWithText)
++}
++
++// programToSnapshotWithOptions is programToSnapshot with an explicit options
++// view. The options normally come from the program itself; callers that layer
++// command-line-only flags on top of the program's tsconfig options (the API
++// bridge mirroring `tsc -b --noEmit`, whose flags never reach the tsconfig)
++// pass the merged view here so build-state decisions match build mode.
++func programToSnapshotWithOptions(program *compiler.Program, oldProgram *Program, options *core.CompilerOptions, hashWithText bool) *snapshot {
+ 	if oldProgram != nil && oldProgram.program == program {
+ 		return oldProgram.snapshot
+ 	}
+ 	snapshot := &snapshot{
+-		options:      program.Options(),
++		options:      options,
+ 		hashWithText: hashWithText,
+-		checkPending: program.Options().NoCheck.IsTrue(),
++		checkPending: options.NoCheck.IsTrue(),
+ 	}
+ 	to := &toProgramSnapshot{
+ 		program:    program,
+diff --git a/internal/module/resolver.go b/internal/module/resolver.go
+index 52400dc2b9..29afc19574 100644
+--- a/internal/module/resolver.go
++++ b/internal/module/resolver.go
+@@ -158,9 +158,31 @@ type Resolver struct {
+ 	compilerOptions *core.CompilerOptions
+ 	typingsLocation string
+ 	projectName     string
++	// extraExtensions are normalized suffixes registered through
++	// ExtraFileExtensions. They allow literal host files to resolve after the
++	// declaration probe.
++	extraExtensions []string
+ 	// reportDiagnostic: DiagnosticReporter
+ }
+ 
++// Ledger(tsgo-extra-file-extensions) — README behavior table row.
++// SetExtraExtensions registers host-provided file extensions (e.g. ".vue") so
++// the resolver can resolve module specifiers ending in them to the file itself.
++func (r *Resolver) SetExtraExtensions(extensions []string) {
++	r.extraExtensions = extensions
++}
++
++// IsExtraExtensionFile reports whether fileName uses an extension registered by
++// SetExtraExtensions.
++func (r *Resolver) IsExtraExtensionFile(fileName string) bool {
++	for _, extension := range r.extraExtensions {
++		if tspath.FileExtensionIs(fileName, extension) {
++			return true
++		}
++	}
++	return false
++}
++
+ type ResolverOptions struct {
+ 	PackageJsonCache *packagejson.InfoCache
+ }
+@@ -1195,6 +1217,15 @@ func (r *resolutionState) createResolvedTypeReferenceDirective(resolved *resolve
+ 		resolvedTypeReferenceDirective.ResolvedFileName = resolved.path
+ 		resolvedTypeReferenceDirective.Primary = primary
+ 		resolvedTypeReferenceDirective.PackageId = resolved.packageId
++		// Ledger(tsgo-extra-file-extensions) — README behavior table row.
++		// Stock stamps PackageId on every package-backed resolution; the
++		// typeRoot (@types) primary lookup above never fills it, so
++		// explainFiles / ATA messages lost stock's "with packageId" suffix.
++		if resolvedTypeReferenceDirective.PackageId.Name == "" {
++			if packageDirectory := ParseNodeModuleFromPath(resolved.path, false); packageDirectory != "" {
++				resolvedTypeReferenceDirective.PackageId = r.getPackageId(resolved.path, r.getPackageJsonInfo(packageDirectory))
++			}
++		}
+ 		resolvedTypeReferenceDirective.IsExternalLibraryImport = strings.Contains(resolved.path, "/node_modules/")
+ 
+ 		if r.compilerOptions.PreserveSymlinks != core.TSTrue {
+@@ -1558,11 +1589,28 @@ func (r *resolutionState) tryAddingExtensions(extensionless string, extensions e
+ 		}
+ 		return continueSearching()
+ 	default:
++		// Match TypeScript's declaration-first order for an explicit
++		// nonstandard extension: "./Component.vue" probes
++		// "Component.d.vue.ts" before the registered ".vue" file.
+ 		if extensions&extensionsDeclaration != 0 && !tspath.IsDeclarationFileName(extensionless+originalExtension) {
+ 			if resolved := r.tryExtension(".d"+originalExtension+".ts", extensionless, false); !resolved.shouldContinueSearching() {
+ 				return resolved
+ 			}
+ 		}
++		// Ledger(tsgo-extra-file-extensions) — README behavior table row.
++		// tsgo cannot invoke the language plugin's module-resolution host, so a
++		// registered extension authorizes the literal host file after the
++		// declaration probe misses.
++		if originalExtension != "" && slices.Contains(r.resolver.extraExtensions, originalExtension) {
++			if resolved := r.tryExtension(originalExtension, extensionless, false); !resolved.shouldContinueSearching() {
++				// Keep the host path so the loader applies its registered script
++				// kind. The extension is separate resolution metadata used by
++				// the checker to decide whether the import is typed; classify it
++				// as TypeScript so the host suffix does not trigger TS7016.
++				resolved.extension = tspath.ExtensionTs
++				return resolved
++			}
++		}
+ 		return continueSearching()
+ 	}
+ }
+diff --git a/internal/project/checkerpool.go b/internal/project/checkerpool.go
+index 32f68d413f..2fe5c76b1b 100644
+--- a/internal/project/checkerpool.go
++++ b/internal/project/checkerpool.go
+@@ -215,6 +215,34 @@ func (p *checkerPool) tryReacquireForRequest(requestID string, sem chan<- struct
+ 	return nil, nil, false
+ }
+ 
++// QueryCheckerSlots returns the number of query checker slots (MaxCheckers-1).
++// compiler.Program's whole-program diagnostics pass shards files into at most
++// this many deterministic groups so no slot ever serves two groups (issue #42).
++func (p *checkerPool) QueryCheckerSlots() int {
++	return p.opts.MaxCheckers - 1
++}
++
++// AssociateFiles records file→checker affinity for a currently leased query
++// checker. compiler.Program's whole-program diagnostics pass leases one
++// checker per stride group via GetChecker(nil), which names no file; without
++// this registration the pass leaves no affinity behind and the per-file
++// diagnostic RPCs that follow (build-mode getDiagnosticsBatch, declaration
++// emit) re-resolve every file on a cold checker instead of reacquiring the
++// warm one. Affinity never influences which checker checks which file during
++// the pass (the stride grouping decides that), so determinism is unaffected.
++func (p *checkerPool) AssociateFiles(c *checker.Checker, files []*ast.SourceFile) {
++	p.mu.Lock()
++	defer p.mu.Unlock()
++	for index, existing := range p.checkers {
++		if existing == c {
++			for _, file := range files {
++				p.fileAssociations[file] = index
++			}
++			return
++		}
++	}
++}
++
+ // getDiagnosticsChecker returns the dedicated diagnostics checker (index 0).
+ // Creates it on first use. Blocks on diagSem if it's currently in use.
+ func (p *checkerPool) getDiagnosticsChecker(ctx context.Context, requestID string) (*checker.Checker, func()) {
+diff --git a/internal/project/compilerhost.go b/internal/project/compilerhost.go
+index 212601d4b8..abb4d611de 100644
+--- a/internal/project/compilerhost.go
++++ b/internal/project/compilerhost.go
+@@ -3,6 +3,7 @@ package project
+ import (
+ 	"github.com/microsoft/typescript-go/internal/ast"
+ 	"github.com/microsoft/typescript-go/internal/compiler"
++	"github.com/microsoft/typescript-go/internal/core"
+ 	"github.com/microsoft/typescript-go/internal/diagnostics"
+ 	"github.com/microsoft/typescript-go/internal/locale"
+ 	"github.com/microsoft/typescript-go/internal/project/logging"
+@@ -96,7 +97,19 @@ func (c *compilerHost) GetResolvedProjectReference(fileName string, path tspath.
+ func (c *compilerHost) GetSourceFile(opts ast.SourceFileParseOptions) *ast.SourceFile {
+ 	c.ensureAlive()
+ 	if fh := c.sourceFS.GetFileByPath(opts.FileName, opts.Path); fh != nil {
+-		key := NewParseCacheKey(opts, fh.Hash(), fh.Kind())
++		// Ledger(tsgo-extra-file-extensions) — README behavior table row.
++		scriptKind := fh.Kind()
++		if scriptKind == core.ScriptKindUnknown {
++			var extras []tsoptions.FileExtensionInfo
++			if cmd := c.project.getCommandLineWithTypingsFiles(); cmd != nil {
++				extras = cmd.ExtraFileExtensions()
++			}
++			scriptKind = tsoptions.GetScriptKindForFileName(opts.FileName, extras)
++			if scriptKind == core.ScriptKindUnknown {
++				scriptKind = core.ScriptKindTS
++			}
++		}
++		key := NewParseCacheKey(opts, fh.Hash(), scriptKind)
+ 		return c.builder.parseCache.Acquire(key, fh)
+ 	}
+ 	return nil
+diff --git a/internal/project/configfileregistrybuilder.go b/internal/project/configfileregistrybuilder.go
+index 1d62a11880..59a6a8cdc6 100644
+--- a/internal/project/configfileregistrybuilder.go
++++ b/internal/project/configfileregistrybuilder.go
+@@ -31,6 +31,7 @@ type configFileRegistryBuilder struct {
+ 	snapshotID                   uint64
+ 	sessionOptions               *SessionOptions
+ 	customConfigFileName         string
++	extraFileExtensions          []tsoptions.FileExtensionInfo
+ 
+ 	base                        *ConfigFileRegistry
+ 	configs                     *dirty.SyncMap[tspath.Path, *configFileEntry]
+@@ -46,6 +47,7 @@ func newConfigFileRegistryBuilder(
+ 	snapshotID uint64,
+ 	sessionOptions *SessionOptions,
+ 	customConfigFileName string,
++	extraFileExtensions []tsoptions.FileExtensionInfo,
+ 	logger *logging.LogTree,
+ ) *configFileRegistryBuilder {
+ 	return &configFileRegistryBuilder{
+@@ -58,6 +60,7 @@ func newConfigFileRegistryBuilder(
+ 		snapshotID:                   snapshotID,
+ 		customConfigFileName:         customConfigFileName,
+ 		customConfigFileNameChanged:  customConfigFileName != oldConfigFileRegistry.customConfigFileName,
++		extraFileExtensions:          extraFileExtensions,
+ 
+ 		configs:         dirty.NewSyncMap(oldConfigFileRegistry.configs),
+ 		configFileNames: dirty.NewMap(oldConfigFileRegistry.configFileNames),
+@@ -125,7 +128,37 @@ func (c *configFileRegistryBuilder) reloadIfNeeded(entry *configFileEntry, fileN
+ 	case PendingReloadFull:
+ 		logger.Log("Loading config file: " + fileName)
+ 		oldCommandLine := entry.commandLine
+-		entry.commandLine, _ = tsoptions.GetParsedCommandLineOfConfigFilePath(fileName, path, nil, nil /*optionsRaw*/, c, c)
++		configFileText, ok := c.fs.ReadFile(fileName)
++		if !ok {
++			logger.Log("Failed to read config file: " + fileName)
++			entry.commandLine = nil
++		} else {
++			tsConfigSourceFile := tsoptions.NewTsconfigSourceFileFromFilePath(fileName, path, configFileText)
++			entry.commandLine = tsoptions.ParseJsonSourceFileConfigFileContent(
++				tsConfigSourceFile,
++				c,
++				tspath.GetDirectoryPath(fileName),
++				nil, /*existingOptions*/
++				nil, /*existingOptionsRaw*/
++				fileName,
++				nil, /*resolutionStack*/
++				c.extraFileExtensions,
++				c,
++			)
++			// Ledger(tsgo-extra-file-extensions) — README behavior table row.
++			// When host-provided extra file extensions are present (e.g. Volar
++			// registers ".vue"), enable allowArbitraryExtensions so the resolver
++			// may resolve those extensions to the file itself and the include
++			// check does not reject them. Mirrors Volar's runtime setting of
++			// options.allowArbitraryExtensions, which the on-disk tsconfig lacks.
++			// Only infer when the option is unset — an explicit `false` in
++			// tsconfig is the user opting out and must be respected.
++			if entry.commandLine != nil && len(c.extraFileExtensions) > 0 {
++				if opts := entry.commandLine.CompilerOptions(); opts.AllowArbitraryExtensions == core.TSUnknown {
++					opts.AllowArbitraryExtensions = core.TSTrue
++				}
++			}
++		}
+ 		c.updateExtendingConfigs(path, entry.commandLine, oldCommandLine)
+ 		c.updateRootFilesWatch(fileName, entry)
+ 		logger.Log("Finished loading config file")
+diff --git a/internal/project/filechange.go b/internal/project/filechange.go
+index edc209b397..21928e66ef 100644
+--- a/internal/project/filechange.go
++++ b/internal/project/filechange.go
+@@ -30,13 +30,18 @@ type FileChange struct {
+ 	Content      string                                                    // Only set for Open
+ 	LanguageKind lsproto.LanguageKind                                      // Only set for Open
+ 	Changes      []lsproto.TextDocumentContentChangePartialOrWholeDocument // Only set for Change
++	// ContentOverride marks this as a host-fed content override, not an LSP
++	// didOpen. The overlay is created (content used instead of disk) but
++	// result.Opened/Reopened are NOT set, so project reassignment is skipped.
++	ContentOverride bool
+ }
+ 
+ type FileChangeSummary struct {
+-	// Only one file can be opened at a time per request
+-	Opened lsproto.DocumentUri
+-	// Reopened is set if a close and open occurred for the same file in a single batch of changes.
+-	Reopened lsproto.DocumentUri
++	// Opened lists files opened in this batch (overlays created).
++	// Extended from a single URI to a set to support batch host-fed overlays.
++	Opened collections.Set[lsproto.DocumentUri]
++	// Reopened lists files that were closed and reopened in the same batch.
++	Reopened collections.Set[lsproto.DocumentUri]
+ 	Closed   collections.Set[lsproto.DocumentUri]
+ 	Changed  collections.Set[lsproto.DocumentUri]
+ 	// Only set when file watching is enabled
+@@ -52,7 +57,7 @@ type FileChangeSummary struct {
+ }
+ 
+ func (f FileChangeSummary) IsEmpty() bool {
+-	return !f.InvalidateAll && f.Opened == "" && f.Reopened == "" && f.Closed.Len() == 0 && f.Changed.Len() == 0 && f.Created.Len() == 0 && f.Deleted.Len() == 0
++	return !f.InvalidateAll && f.Opened.Len() == 0 && f.Reopened.Len() == 0 && f.Closed.Len() == 0 && f.Changed.Len() == 0 && f.Created.Len() == 0 && f.Deleted.Len() == 0
+ }
+ 
+ func (f FileChangeSummary) HasExcessiveWatchEvents() bool {
+diff --git a/internal/project/overlayfs.go b/internal/project/overlayfs.go
+index 1b300a0131..de14d03a09 100644
+--- a/internal/project/overlayfs.go
++++ b/internal/project/overlayfs.go
+@@ -300,15 +300,20 @@ func (fs *overlayFS) processChanges(changes []FileChange) (FileChangeSummary, ma
+ 		o := newOverlays[path]
+ 
+ 		if events.openChange != nil {
+-			if result.Opened != "" || result.Reopened != "" {
+-				panic("can only process one file open event at a time")
+-			}
+-			if o != nil && o.Content() != events.openChange.Content {
+-				result.Changed.Add(uri)
+-			} else if o == nil {
+-				result.Opened = uri
++			if !events.openChange.ContentOverride {
++				if o != nil && o.Content() != events.openChange.Content {
++					result.Changed.Add(uri)
++				} else if o == nil {
++					result.Opened.Add(uri)
++				} else {
++					result.Reopened.Add(uri)
++				}
+ 			} else {
+-				result.Reopened = uri
++				// Content override: mark as Changed so the project rebuilds
++				// with the new content, but don't set Opened/Reopened (no
++				// project reassignment — the file is already in its project
++				// from the configured tsconfig).
++				result.Changed.Add(uri)
+ 			}
+ 			scriptKind := lsconv.LanguageKindToScriptKind(events.openChange.LanguageKind)
+ 			if scriptKind == core.ScriptKindUnknown {
+diff --git a/internal/project/overlayfs_test.go b/internal/project/overlayfs_test.go
+index 4659530ff7..dfcd640209 100644
+--- a/internal/project/overlayfs_test.go
++++ b/internal/project/overlayfs_test.go
+@@ -34,7 +34,9 @@ func TestProcessChanges(t *testing.T) {
+ 		testURI2 = lsproto.DocumentUri("file:///test2.ts")
+ 	)
+ 
+-	t.Run("multiple opens should panic", func(t *testing.T) {
++	// Fork change: batch host-fed overlays allow multiple opens per change set
++	// (upstream panics on more than one open per batch).
++	t.Run("multiple opens are supported", func(t *testing.T) {
+ 		t.Parallel()
+ 		fs := createOverlayFS()
+ 
+@@ -55,15 +57,10 @@ func TestProcessChanges(t *testing.T) {
+ 			},
+ 		}
+ 
+-		assert.Assert(t, func() (panicked bool) {
+-			defer func() {
+-				if r := recover(); r != nil {
+-					panicked = true
+-				}
+-			}()
+-			fs.processChanges(changes)
+-			return false
+-		}())
++		result, overlays := fs.processChanges(changes)
++		assert.Assert(t, result.Opened.Has(testURI1), "first open should be marked as opened")
++		assert.Assert(t, result.Opened.Has(testURI2), "second open should be marked as opened")
++		assert.Equal(t, len(overlays), 2)
+ 	})
+ 
+ 	t.Run("watch create then delete becomes nothing", func(t *testing.T) {
+@@ -266,7 +263,7 @@ func TestProcessChanges(t *testing.T) {
+ 		})
+ 
+ 		// Should not be marked as opened since it was already open
+-		assert.Assert(t, result.Opened == "", "close then open should not mark as opened")
++		assert.Assert(t, result.Opened.Len() == 0, "close then open should not mark as opened")
+ 		// Should also be marked as changed since it was closed and reopened
+ 		assert.Assert(t, result.Changed.Has(testURI1), "close then open should mark as changed")
+ 		// Should have the new content
+diff --git a/internal/project/project.go b/internal/project/project.go
+index 39c77aa78d..a7c1805b3c 100644
+--- a/internal/project/project.go
++++ b/internal/project/project.go
+@@ -85,6 +85,28 @@ type Project struct {
+ 	installedTypingsInfo *ata.TypingsInfo
+ 	// typingsFiles are the root files added by the typings installer.
+ 	typingsFiles []string
++	// apiRootFiles are extra root files added for API-opened files that the
++	// tsconfig's file list misses (e.g. a .tsx root shadowed by a same-name .ts
++	// via wildcard extension priority). Fork-added: mirrors API hosts whose
++	// script file list — not the tsconfig — defines the program root set.
++	// Kept sorted for deterministic comparison.
++	apiRootFiles []string
++	// apiOptionsWrap memoizes the WithCompilerOptions wrap of the registry
++	// command line with the client's effective options (fork-added). See
++	// updateProgram — an unmemoized wrap would force a program rebuild on
++	// every snapshot.
++	apiOptionsWrap apiOptionsWrapMemo
++}
++
++// apiOptionsWrapMemo keys a ParsedCommandLine.WithCompilerOptions result by
++// the exact (registry command line, client options) pointer pair it was
++// built from. Both pointers are stable while their sources are unchanged:
++// the registry reparses on tsconfig change, and HandleAPIRequest dedups the
++// client options by value.
++type apiOptionsWrapMemo struct {
++	source  *tsoptions.ParsedCommandLine
++	options *core.CompilerOptions
++	wrapped *tsoptions.ParsedCommandLine
+ }
+ 
+ var _ ls.Project = (*Project)(nil)
+@@ -264,6 +286,8 @@ func (p *Project) Clone() *Project {
+ 
+ 		installedTypingsInfo: p.installedTypingsInfo,
+ 		typingsFiles:         p.typingsFiles,
++		apiRootFiles:         p.apiRootFiles,
++		apiOptionsWrap:       p.apiOptionsWrap,
+ 	}
+ }
+ 
+@@ -283,40 +307,46 @@ func (p *Project) SetCommandLine(commandLine *tsoptions.ParsedCommandLine) {
+ 	p.dirtyFilePath = ""
+ }
+ 
+-// getCommandLineWithTypingsFiles returns the command line augmented with typing files if ATA is enabled.
++// getCommandLineWithTypingsFiles returns the command line augmented with typing
++// files if ATA is enabled, and with API-added root files (fork-added).
+ func (p *Project) getCommandLineWithTypingsFiles() *tsoptions.ParsedCommandLine {
+-	if len(p.typingsFiles) == 0 {
+-		return p.CommandLine
++	typingsFiles := p.typingsFiles
++	if len(typingsFiles) > 0 {
++		// Check if ATA is enabled for this project
++		typeAcquisition := p.GetTypeAcquisition()
++		if typeAcquisition == nil || !typeAcquisition.Enable.IsTrue() {
++			typingsFiles = nil
++		}
+ 	}
+-
+-	// Check if ATA is enabled for this project
+-	typeAcquisition := p.GetTypeAcquisition()
+-	if typeAcquisition == nil || !typeAcquisition.Enable.IsTrue() {
++	if len(typingsFiles) == 0 && len(p.apiRootFiles) == 0 {
+ 		return p.CommandLine
+ 	}
+ 
+ 	p.commandLineWithTypingsFilesOnce.Do(func() {
+ 		if p.commandLineWithTypingsFiles == nil {
+-			// Create an augmented command line that includes typing files
+-			originalRootNames := p.CommandLine.FileNames()
+-			newRootNames := make([]string, 0, len(originalRootNames)+len(p.typingsFiles))
+-			newRootNames = append(newRootNames, originalRootNames...)
+-			newRootNames = append(newRootNames, p.typingsFiles...)
+-
+-			// Create a new ParsedCommandLine with the augmented root file names
+-			p.commandLineWithTypingsFiles = tsoptions.NewParsedCommandLine(
+-				p.CommandLine.CompilerOptions(),
+-				newRootNames,
+-				tspath.ComparePathsOptions{
+-					UseCaseSensitiveFileNames: p.host.FS().UseCaseSensitiveFileNames(),
+-					CurrentDirectory:          p.currentDirectory,
+-				},
+-			)
++			extraRootNames := make([]string, 0, len(typingsFiles)+len(p.apiRootFiles))
++			extraRootNames = append(extraRootNames, typingsFiles...)
++			extraRootNames = append(extraRootNames, p.apiRootFiles...)
++			// Clone preserving config metadata (ConfigFile, project references,
++			// extra file extensions) so the augmented program behaves like the
++			// original apart from the added roots.
++			p.commandLineWithTypingsFiles = p.CommandLine.WithAppendedFileNames(extraRootNames)
+ 		}
+ 	})
+ 	return p.commandLineWithTypingsFiles
+ }
+ 
++// setAPIRootFiles replaces the API-added root file set and invalidates the
++// memoized augmented command line so the next program update rebuilds with the
++// new roots. Must be called within a dirty entry Change().
++func (p *Project) setAPIRootFiles(fileNames []string) {
++	p.apiRootFiles = fileNames
++	p.commandLineWithTypingsFiles = nil
++	p.commandLineWithTypingsFilesOnce = sync.Once{}
++	p.dirty = true
++	p.dirtyFilePath = ""
++}
++
+ func (p *Project) setPotentialProjectReference(configFilePath tspath.Path) {
+ 	if p.potentialProjectReferences == nil {
+ 		p.potentialProjectReferences = &collections.Set[tspath.Path]{}
+diff --git a/internal/project/projectcollection.go b/internal/project/projectcollection.go
+index e38812bc45..ed707447fb 100644
+--- a/internal/project/projectcollection.go
++++ b/internal/project/projectcollection.go
+@@ -50,17 +50,50 @@ type APIState struct {
+ 	// keyed by file path. Files with no configured project are loaded into the
+ 	// inferred project.
+ 	openFiles map[tspath.Path]apiOpenedFile
++	// additionalFiles is the set of API-supplied extra program roots, keyed by
++	// config file path. Entries persist while the project stays API-open.
++	additionalFiles map[tspath.Path][]string
++	// projectOptions is the set of API-supplied effective compiler options,
++	// keyed by config file path. Entries persist while the project stays
++	// API-open and replace the project's disk-parsed options (fork-added:
++	// CLI-only flags never reach the on-disk tsconfig). Pointers are kept
++	// stable across snapshots (see HandleAPIRequest's DeepEqual dedup) so
++	// updateProgram's wrap memo can key on them.
++	projectOptions map[tspath.Path]*core.CompilerOptions
+ }
+ 
+ func (s APIState) clone() APIState {
++	var additionalFiles map[tspath.Path][]string
++	if s.additionalFiles != nil {
++		additionalFiles = make(map[tspath.Path][]string, len(s.additionalFiles))
++		for k, v := range s.additionalFiles {
++			additionalFiles[k] = slices.Clone(v)
++		}
++	}
+ 	return APIState{
+-		openProjects: maps.Clone(s.openProjects),
+-		openFiles:    maps.Clone(s.openFiles),
++		openProjects:    maps.Clone(s.openProjects),
++		openFiles:       maps.Clone(s.openFiles),
++		additionalFiles: additionalFiles,
++		projectOptions:  maps.Clone(s.projectOptions),
+ 	}
+ }
+ 
+ func (s APIState) equals(other APIState) bool {
+-	return maps.Equal(s.openProjects, other.openProjects) && maps.Equal(s.openFiles, other.openFiles)
++	if !maps.Equal(s.openProjects, other.openProjects) || !maps.Equal(s.openFiles, other.openFiles) {
++		return false
++	}
++	if len(s.additionalFiles) != len(other.additionalFiles) {
++		return false
++	}
++	for k, va := range s.additionalFiles {
++		vb, ok := other.additionalFiles[k]
++		if !ok || !slices.Equal(va, vb) {
++			return false
++		}
++	}
++	// Pointer equality is sufficient: writers dedup by DeepEqual and keep the
++	// prior pointer while the options are unchanged.
++	return maps.Equal(s.projectOptions, other.projectOptions)
+ }
+ 
+ // apiOpenedFile tracks a file kept open by API clients along with its ref count.
+diff --git a/internal/project/projectcollectionbuilder.go b/internal/project/projectcollectionbuilder.go
+index 3355b68878..e50bd3d09d 100644
+--- a/internal/project/projectcollectionbuilder.go
++++ b/internal/project/projectcollectionbuilder.go
+@@ -4,6 +4,7 @@ import (
+ 	"context"
+ 	"fmt"
+ 	"maps"
++	"reflect"
+ 	"slices"
+ 	"time"
+ 
+@@ -63,6 +64,7 @@ func newProjectCollectionBuilder(
+ 	compilerOptionsForInferredProjects *core.CompilerOptions,
+ 	sessionOptions *SessionOptions,
+ 	customConfigFileName string,
++	extraFileExtensions []tsoptions.FileExtensionInfo,
+ 	parseCache *ParseCache,
+ 	extendedConfigCache *ExtendedConfigCache,
+ 	client Client,
+@@ -76,7 +78,7 @@ func newProjectCollectionBuilder(
+ 		parseCache:                         parseCache,
+ 		extendedConfigCache:                extendedConfigCache,
+ 		base:                               oldProjectCollection,
+-		configFileRegistryBuilder:          newConfigFileRegistryBuilder(lsproto.GetClientCapabilities(ctx).Workspace.DidChangeWatchedFiles.RelativePatternSupport, fs, oldConfigFileRegistry, extendedConfigCache, newSnapshotID, sessionOptions, customConfigFileName, nil),
++		configFileRegistryBuilder:          newConfigFileRegistryBuilder(lsproto.GetClientCapabilities(ctx).Workspace.DidChangeWatchedFiles.RelativePatternSupport, fs, oldConfigFileRegistry, extendedConfigCache, newSnapshotID, sessionOptions, customConfigFileName, extraFileExtensions, nil),
+ 		newSnapshotID:                      newSnapshotID,
+ 		configuredProjects:                 dirty.NewSyncMap(oldProjectCollection.configuredProjects),
+ 		inferredProject:                    dirty.NewBox(oldProjectCollection.inferredProject),
+@@ -153,6 +155,8 @@ func (b *ProjectCollectionBuilder) HandleAPIRequest(apiRequest *APISnapshotReque
+ 				b.apiState.openProjects[projectPath] = count - 1
+ 			} else if count == 1 {
+ 				delete(b.apiState.openProjects, projectPath)
++				delete(b.apiState.additionalFiles, projectPath)
++				delete(b.apiState.projectOptions, projectPath)
+ 				if projectsToClose == nil {
+ 					projectsToClose = make(map[tspath.Path]struct{})
+ 				}
+@@ -177,6 +181,40 @@ func (b *ProjectCollectionBuilder) HandleAPIRequest(apiRequest *APISnapshotReque
+ 		}
+ 	}
+ 
++	// AdditionalFiles: refresh the extra-root mapping for any API-opened
++	// project named by the request (new ref or already held).
++	for configFileName, extra := range apiRequest.AdditionalFiles {
++		configPath := b.toPath(configFileName)
++		if _, isAPIOpen := b.apiState.openProjects[configPath]; !isAPIOpen {
++			continue
++		}
++		if b.apiState.additionalFiles == nil {
++			b.apiState.additionalFiles = make(map[tspath.Path][]string)
++		}
++		b.apiState.additionalFiles[configPath] = extra
++	}
++
++	// ProjectOptions: refresh the effective-options mapping for any API-opened
++	// project named by the request (same ride-every-open rule as
++	// AdditionalFiles — a later snapshot may carry new CLI flags for an
++	// already-held project). Freshly decoded options arrive on every request;
++	// keep the prior pointer while the values are unchanged so updateProgram's
++	// wrap memo and apiState.equals (both pointer-keyed) stay stable.
++	for configFileName, options := range apiRequest.ProjectOptions {
++		configPath := b.toPath(configFileName)
++		if _, isAPIOpen := b.apiState.openProjects[configPath]; !isAPIOpen {
++			continue
++		}
++		options = resolveWireOptionPaths(options, configFileName)
++		if existing, ok := b.apiState.projectOptions[configPath]; ok && reflect.DeepEqual(existing, options) {
++			continue
++		}
++		if b.apiState.projectOptions == nil {
++			b.apiState.projectOptions = make(map[tspath.Path]*core.CompilerOptions)
++		}
++		b.apiState.projectOptions[configPath] = options
++	}
++
+ 	if apiRequest.CloseFiles != nil {
+ 		for path := range apiRequest.CloseFiles.Keys() {
+ 			// Ref-counted close mirroring projects above.
+@@ -213,6 +251,14 @@ func (b *ProjectCollectionBuilder) HandleAPIRequest(apiRequest *APISnapshotReque
+ 		}
+ 	}
+ 
++	// Fork-added: mirror API hosts whose script file list extends the tsconfig
++	// root set. An API-opened file whose nearest config project (also API-opened)
++	// does not include it — e.g. component.tsx shadowed by component.ts through
++	// wildcard extension priority — is added as an extra root of that project,
++	// matching the client LanguageService whose getScriptFileNames() defines the
++	// program roots. LSP-driven projects are unaffected (apiState is API-only).
++	b.updateAPIRootFiles(logger)
++
+ 	for _, overlay := range b.fs.overlays {
+ 		if entry := b.findDefaultConfiguredProject(overlay.FileName(), b.toPath(overlay.FileName())); entry != nil {
+ 			delete(projectsToClose, entry.Value().configFilePath)
+@@ -252,7 +298,7 @@ func (b *ProjectCollectionBuilder) HandleAPIRequest(apiRequest *APISnapshotReque
+ }
+ 
+ func (b *ProjectCollectionBuilder) DidChangeFiles(summary FileChangeSummary, logger *logging.LogTree) {
+-	b.openFilesChanged = b.openFilesChanged || summary.Opened != "" || summary.Closed.Len() > 0
++	b.openFilesChanged = b.openFilesChanged || summary.Opened.Len() > 0 || summary.Closed.Len() > 0
+ 
+ 	changedFiles := make([]tspath.Path, 0, summary.Changed.Len())
+ 	for uri := range summary.Changed.Keys() {
+@@ -320,9 +366,17 @@ func (b *ProjectCollectionBuilder) DidChangeFiles(summary FileChangeSummary, log
+ 		return true
+ 	})
+ 
+-	// Handle opened file
+-	if summary.Opened != "" || summary.Reopened != "" {
+-		fileName := core.FirstNonZero(summary.Opened, summary.Reopened).FileName()
++	// Handle opened files — ensure each has a configured project + ancestors.
++	// (Extended from single-file to iterate the Opened/Reopened sets for
++	// batch host-fed overlays.)
++	for uri := range summary.Opened.Keys() {
++		fileName := uri.FileName()
++		path := b.toPath(fileName)
++		openFileResult := b.ensureConfiguredProjectAndAncestorsForFile(fileName, path, logger)
++		b.cleanupConfiguredProjects(&openFileResult.retain, logger)
++	}
++	for uri := range summary.Reopened.Keys() {
++		fileName := uri.FileName()
+ 		path := b.toPath(fileName)
+ 		openFileResult := b.ensureConfiguredProjectAndAncestorsForFile(fileName, path, logger)
+ 		b.cleanupConfiguredProjects(&openFileResult.retain, logger)
+@@ -1105,6 +1159,24 @@ func (b *ProjectCollectionBuilder) updateProgram(entry dirty.Value[*Project], lo
+ 				filesChanged = true
+ 				return
+ 			}
++			// Client-supplied effective options (CLI + tsconfig + extends,
++			// merged by the client host's own parse) replace the disk-parsed
++			// options; file expansion stays the disk config's. Memoize the
++			// wrap: updateProgram runs once per snapshot, and an unmemoized
++			// WithCompilerOptions would mint a new CommandLine pointer every
++			// time, tripping the pointer-inequality rebuild trigger below on
++			// every snapshot even when nothing changed.
++			if options := b.apiState.projectOptions[entry.Value().configFilePath]; options != nil {
++				if memo := entry.Value().apiOptionsWrap; memo.source == commandLine && memo.options == options {
++					commandLine = memo.wrapped
++				} else {
++					wrapped := commandLine.WithCompilerOptions(options)
++					entry.Change(func(p *Project) {
++						p.apiOptionsWrap = apiOptionsWrapMemo{source: commandLine, options: options, wrapped: wrapped}
++					})
++					commandLine = wrapped
++				}
++			}
+ 			if entry.Value().CommandLine != commandLine {
+ 				updateProgram = true
+ 				entry.Change(func(p *Project) {
+@@ -1137,7 +1209,11 @@ func (b *ProjectCollectionBuilder) updateProgram(entry dirty.Value[*Project], lo
+ 				project.host = newCompilerHost(project.currentDirectory, project, b, logger.Fork("CompilerHost"))
+ 				result := project.CreateProgram()
+ 				project.Program = result.Program
+-				project.checkerPool = result.Program.GetCheckerPool().(*checkerPool)
++				if cpp, ok := result.Program.GetCheckerPool().(*checkerPool); ok {
++					project.checkerPool = cpp
++				} else {
++					project.checkerPool = nil
++				}
+ 				project.ProgramUpdateKind = result.UpdateKind
+ 				project.ProgramLastUpdate = b.newSnapshotID
+ 				if result.UpdateKind == ProgramUpdateKindCloned {
+diff --git a/internal/project/refcountcache.go b/internal/project/refcountcache.go
+index 909b5aa4b1..2237d958c0 100644
+--- a/internal/project/refcountcache.go
++++ b/internal/project/refcountcache.go
+@@ -23,6 +23,13 @@ type RefCountCache[K comparable, V any, AcquireArgs any] struct {
+ 	entries collections.SyncMap[K, *refCountCacheEntry[V]]
+ 
+ 	parse func(K, AcquireArgs) V
++	// pin, when non-nil and true for a key, gives the entry one extra
++	// permanent ref at creation so its refcount can never reach zero and
++	// the entry is never evicted. Correctness is unaffected for content
++	// caches whose key includes a content hash (changed content misses and
++	// re-parses under a new key); the cost is memory, bounded by the union
++	// of pinned keys seen over the cache's lifetime.
++	pin func(K) bool
+ }
+ 
+ func NewRefCountCache[K comparable, V any, AcquireArgs any](
+@@ -35,6 +42,12 @@ func NewRefCountCache[K comparable, V any, AcquireArgs any](
+ 	}
+ }
+ 
++// SetPin installs a pin predicate (see the pin field). Must be called before
++// the cache is used; entries created earlier are not retroactively pinned.
++func (c *RefCountCache[K, V, AcquireArgs]) SetPin(pin func(K) bool) {
++	c.pin = pin
++}
++
+ // Acquire retrieves or creates a cache entry for the given identity and hash.
+ // If an entry exists with matching identity and hash, its refcount is incremented
+ // and the cached value is returned. Otherwise, parse() is called to create the
+@@ -94,9 +107,14 @@ func (c *RefCountCache[K, V, AcquireArgs]) Deref(identity K) {
+ 
+ // loadOrStoreNewLockedEntry loads an existing entry or creates a new one.
+ // The returned entry's mutex is locked and its refCount is incremented
+-// (or initialized to 1 in the case of a new entry).
++// (or initialized to 1 — plus one permanent pin ref for pinned keys —
++// in the case of a new entry).
+ func (c *RefCountCache[K, V, AcquireArgs]) loadOrStoreNewLockedEntry(key K) (*refCountCacheEntry[V], bool) {
+-	entry := &refCountCacheEntry[V]{refCount: 1}
++	newRefCount := 1
++	if c.pin != nil && c.pin(key) {
++		newRefCount = 2
++	}
++	entry := &refCountCacheEntry[V]{refCount: newRefCount}
+ 	entry.mu.Lock()
+ 	existing, loaded := c.entries.LoadOrStore(key, entry)
+ 	if loaded {
+diff --git a/internal/project/session.go b/internal/project/session.go
+index 00f4056e58..382d0bbd1b 100644
+--- a/internal/project/session.go
++++ b/internal/project/session.go
+@@ -26,6 +26,7 @@ import (
+ 	"github.com/microsoft/typescript-go/internal/project/ata"
+ 	"github.com/microsoft/typescript-go/internal/project/background"
+ 	"github.com/microsoft/typescript-go/internal/project/logging"
++	"github.com/microsoft/typescript-go/internal/tsoptions"
+ 	"github.com/microsoft/typescript-go/internal/tspath"
+ 	"github.com/microsoft/typescript-go/internal/vfs"
+ )
+@@ -110,6 +111,8 @@ type Session struct {
+ 	compilerOptionsForInferredProjects *core.CompilerOptions
+ 	typingsInstaller                   *ata.TypingsInstaller
+ 	backgroundQueue                    *background.Queue
++	// Host-provided extra file extensions (vue-tsc / Volar). Applied when parsing tsconfigs for API snapshots.
++	apiExtraFileExtensions []tsoptions.FileExtensionInfo
+ 
+ 	// snapshotID is the counter for snapshot IDs. It does not necessarily
+ 	// equal the `snapshot.ID`. It is stored on Session instead of globally
+@@ -136,6 +139,14 @@ type Session struct {
+ 	pendingFileChanges   []FileChange
+ 	pendingFileChangesMu sync.Mutex
+ 
++	// diskContentMtimes records the last-validated mtime per cached disk file
++	// for the snapshot-build staleness probe: a disk write that produces no
++	// host event (plain fs write from a CLI tool or an editor outside the
++	// session) otherwise leaves the cached read — and the auto-import registry
++	// built from it — stale forever (volar #5847).
++	diskContentMtimes   map[tspath.Path]time.Time
++	diskContentMtimesMu sync.Mutex
++
+ 	// pendingATAChanges are produced by Automatic Type Acquisition (ATA)
+ 	// installations and applied to the next snapshot update.
+ 	pendingATAChanges   map[tspath.Path]*ATAStateChange
+diff --git a/internal/project/snapshot.go b/internal/project/snapshot.go
+index 61af433d3c..77240f6725 100644
+--- a/internal/project/snapshot.go
++++ b/internal/project/snapshot.go
+@@ -8,6 +8,7 @@ import (
+ 	"sync/atomic"
+ 	"time"
+ 
++	"github.com/microsoft/typescript-go/internal/bundled"
+ 	"github.com/microsoft/typescript-go/internal/collections"
+ 	"github.com/microsoft/typescript-go/internal/core"
+ 	"github.com/microsoft/typescript-go/internal/ls"
+@@ -161,6 +162,17 @@ type APISnapshotRequest struct {
+ 	CloseProjects *collections.Set[tspath.Path]
+ 	OpenFiles     *collections.Set[lsproto.DocumentUri]
+ 	CloseFiles    *collections.Set[tspath.Path]
++	// AdditionalFiles maps an opened project's config file name to extra files
++	// to add as program roots (host-computed roots the tsconfig expansion
++	// misses — e.g. LanguageService getScriptFileNames shim d.ts). Applied
++	// regardless of the default-project search's node_modules boundary.
++	AdditionalFiles map[string][]string
++	// ProjectOptions maps an opened project's config file name to the client's
++	// effective compiler options (see api.OpenProjectParams). When set, they
++	// replace the project's disk-parsed options; file expansion still comes
++	// from the disk config. Fork-added: CLI-only flags never reach the on-disk
++	// tsconfig, so the disk parse alone diverges from the client's program.
++	ProjectOptions map[string]*core.CompilerOptions
+ }
+ 
+ type ProjectTreeRequest struct {
+@@ -265,7 +277,7 @@ func (s *Snapshot) Clone(ctx context.Context, change SnapshotChange, overlays ma
+ 		}
+ 		switch change.reason {
+ 		case UpdateReasonDidOpenFile:
+-			logger.Logf("Reason: DidOpenFile - %s", change.fileChanges.Opened)
++			logger.Logf("Reason: DidOpenFile - %v", change.fileChanges.Opened)
+ 		case UpdateReasonDidCloseFile:
+ 			logger.Logf("Reason: DidCloseFile - %v", change.fileChanges.Closed)
+ 		case UpdateReasonDidChangeCompilerOptionsForInferredProjects:
+@@ -287,6 +299,18 @@ func (s *Snapshot) Clone(ctx context.Context, change SnapshotChange, overlays ma
+ 
+ 	start := time.Now()
+ 	fs := newSnapshotFSBuilder(session.fs.fs, s.fs.overlays, overlays, s.fs.diskFiles, s.fs.diskDirectories, s.fs.nodeModulesRealpathAliases, session.options.PositionEncoding, s.toPath)
++	// Disk staleness probe: fold on-disk content changes that produced no host
++	// event into the change feed (see SnapshotFS.detectStaleDiskFiles).
++	{
++		session.diskContentMtimesMu.Lock()
++		if session.diskContentMtimes == nil {
++			session.diskContentMtimes = make(map[tspath.Path]time.Time)
++		}
++		for _, path := range s.fs.detectStaleDiskFiles(session.fs.fs, session.diskContentMtimes, bundled.LibPath()) {
++			change.fileChanges.Changed.Add(lsconv.FileNameToDocumentURI(string(path)))
++		}
++		session.diskContentMtimesMu.Unlock()
++	}
+ 	if change.fileChanges.HasExcessiveWatchEvents() {
+ 		invalidateStart := time.Now()
+ 		if change.fileChanges.InvalidateAll {
+@@ -333,6 +357,7 @@ func (s *Snapshot) Clone(ctx context.Context, change SnapshotChange, overlays ma
+ 		compilerOptionsForInferredProjects,
+ 		s.sessionOptions,
+ 		customConfigFileName,
++		session.apiExtraFileExtensions,
+ 		session.parseCache,
+ 		session.extendedConfigCache,
+ 		session.client,
+@@ -381,8 +406,8 @@ func (s *Snapshot) Clone(ctx context.Context, change SnapshotChange, overlays ma
+ 	// Clean cached disk files not touched by any open project on file open, close, delete,
+ 	// or when explicitly requested (e.g. by an idle timer).
+ 	shouldCleanDiskCache := change.cleanDiskCache ||
+-		change.fileChanges.Opened != "" ||
+-		change.fileChanges.Reopened != "" ||
++		change.fileChanges.Opened.Len() > 0 ||
++		change.fileChanges.Reopened.Len() > 0 ||
+ 		change.fileChanges.Closed.Len() > 0 ||
+ 		change.fileChanges.Deleted.Len() > 0
+ 	if shouldCleanDiskCache {
+diff --git a/internal/project/snapshotfs.go b/internal/project/snapshotfs.go
+index 0a9f391fa2..e57659b886 100644
+--- a/internal/project/snapshotfs.go
++++ b/internal/project/snapshotfs.go
+@@ -619,17 +619,20 @@ func (s *snapshotFSBuilder) collectFilesRecursive(dirPath tspath.Path, files *co
+ }
+ 
+ func (s *snapshotFSBuilder) convertOpenAndCloseToChanges(change FileChangeSummary) FileChangeSummary {
+-	if change.Opened != "" && !tspath.IsDynamicFileName(change.Opened.FileName()) {
+-		path := s.toPath(change.Opened.FileName())
++	for uri := range change.Opened.Keys() {
++		if tspath.IsDynamicFileName(uri.FileName()) {
++			continue
++		}
++		path := s.toPath(uri.FileName())
+ 		if entry, ok := s.diskFiles.Load(path); !ok || entry.Original() == nil {
+-			change.Created.Add(change.Opened)
++			change.Created.Add(uri)
+ 		} else if overlay, ok := s.overlays[path]; ok {
+ 			// The file already exists in the program, but the overlay content from
+ 			// didOpen may differ from what was originally read from disk (e.g. the
+ 			// editor normalizes line endings, or the file changed on disk since the
+ 			// project was loaded). Mark it as Changed so the project rebuilds.
+ 			if diskFile := entry.Original(); diskFile != nil && overlay.Hash() != diskFile.Hash() {
+-				change.Changed.Add(change.Opened)
++				change.Changed.Add(uri)
+ 			}
+ 		}
+ 	}
+diff --git a/internal/tsoptions/tsconfigparsing.go b/internal/tsoptions/tsconfigparsing.go
+index 4f85782753..07524b6290 100644
+--- a/internal/tsoptions/tsconfigparsing.go
++++ b/internal/tsoptions/tsconfigparsing.go
+@@ -1673,7 +1673,7 @@ func getFileNamesFromConfigSpecs(
+ 	host vfs.FS,
+ 	extraFileExtensions []FileExtensionInfo,
+ ) ([]string, int) {
+-	extraFileExtensions = []FileExtensionInfo{}
++	// Ledger(tsgo-extra-file-extensions) — README behavior table row.
+ 	basePath = tspath.NormalizePath(basePath)
+ 	keyMappper := func(value string) string { return tspath.GetCanonicalFileName(value, host.UseCaseSensitiveFileNames()) }
+ 	// Literal file names (provided via the "files" array in tsconfig.json) are stored in a
