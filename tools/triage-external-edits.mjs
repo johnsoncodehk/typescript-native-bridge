@@ -35,7 +35,7 @@ const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..'
 // The package the estree fixture links as `typescript`: lib's realpath parent,
 // since an isolated tools copy (the CI witness job) has lib/ but no package.json.
 const tnbPackageRoot = path.dirname(fs.realpathSync(path.join(repoRoot, 'lib')));
-const cacheRoot = process.env.TNB_FW_CACHE ?? '/tmp/tnb-fw-fixtures';
+const cacheRoot = '/tmp/tnb-fw-fixtures';
 const stockDir = path.join(cacheRoot, 'stock-ts');
 const estreeDir = path.join(cacheRoot, 'estree');
 const scratchRoot = '/tmp/tnb-49-repro';

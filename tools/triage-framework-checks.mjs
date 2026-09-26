@@ -3,7 +3,7 @@
  * Framework checker compatibility witness: svelte-check / astro-check / glint
  * against the TNB fork vs stock typescript. Each case builds a minimal project
  * in a cache dir (deps installed once, then reused), runs the tool with TNB
- * and with stock typescript@6.0.3 (packed on demand), and asserts the
+ * and with stock typescript (STOCK_TSSERVER_PATH's package), and asserts the
  * invariants for the failure modes that were fixed:
  *   - glint: must NOT be fail-silent (virtual App.gts→App.ts via readFile
  *     override reaches tsgo; was: 0 errors where stock reports them)
@@ -16,6 +16,11 @@
  * Usage: node tools/triage-framework-checks.mjs [svelte|astro|astro7|glint...]
  * Exit: 0 = PASS, 1 = FAIL. Network required on first run (npm installs).
  *
+ * Installs resolve against stock typescript: the fork's prerelease version
+ * (6.0.3-bridge.N) satisfies no `^6` peer range, and --legacy-peer-deps
+ * would drop every other peer too (@astrojs/check lost @emnapi/runtime and
+ * astro check never ran). node_modules/typescript is relinked per run.
+ *
  * v5 classification: the glint/svelte invariants are diagnostic-SET
  * semantics (bridge-contract surface, stock-gated). The astro full-text
  * parity covers diagnostic content (codes/spans — contract) but would also
@@ -23,14 +28,19 @@
  * choices, e.g. the TS6196 class); such a failure is a KNOWN registration
  * (pristine tsgo reference), not a revert-to-stock patch.
  */
-import { execFileSync, execSync } from 'node:child_process';
+import { execFileSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const cacheRoot = process.env.TNB_FW_CACHE ?? '/tmp/tnb-fw-fixtures';
-const stockDir = path.join(cacheRoot, 'stock-ts');
+// The CI witness job runs from an isolated tools copy whose lib/ symlinks
+// into the checkout; the package root is wherever lib/ really lives.
+const tnbPackageRoot = path.dirname(fs.realpathSync(path.join(repoRoot, 'lib')));
+const cacheRoot = '/tmp/tnb-fw-fixtures';
+if (!process.env.STOCK_TSSERVER_PATH) throw new Error('STOCK_TSSERVER_PATH is required (stock typescript package)');
+const stockPackage = path.resolve(path.dirname(process.env.STOCK_TSSERVER_PATH), '..');
+const stockVersion = JSON.parse(fs.readFileSync(path.join(stockPackage, 'package.json'), 'utf8')).version;
 const stripAnsi = (s) => s.replace(/\x1b\[[0-9;]*m/g, '');
 
 const TSCONFIG_BASE = {
@@ -40,13 +50,17 @@ const TSCONFIG_BASE = {
 	},
 };
 
+// The first astro invocation on a machine prints a one-time telemetry notice,
+// which would land on whichever of TNB/stock ran first.
+const astroEnv = { ...process.env, ASTRO_TELEMETRY_DISABLED: '1' };
+
 const CASES = {
 	glint: {
 		deps: {
-			'@glint/core': '^1.5.0',
-			'@glint/environment-ember-loose': '^1.5.0',
-			'@glint/environment-ember-template-imports': '^1.5.0',
-			'@glint/template': '^1.5.0',
+			'@glint/core': '1.5.2',
+			'@glint/environment-ember-loose': '1.5.2',
+			'@glint/environment-ember-template-imports': '1.5.2',
+			'@glint/template': '1.9.0',
 		},
 		files: {
 			'tsconfig.json': JSON.stringify({ ...TSCONFIG_BASE, include: ['src/**/*.ts', 'src/**/*.gts'], glint: { environment: ['ember-loose', 'ember-template-imports'] } }, null, 2),
@@ -70,7 +84,7 @@ export default class App extends Component<{ Args: Args }> {
 		},
 	},
 	svelte: {
-		deps: { svelte: '^5.0.0', 'svelte-check': '^4.0.0', tslib: '^2.6.0' },
+		deps: { svelte: '5.57.1', 'svelte-check': '4.7.6', tslib: '2.8.1' },
 		files: {
 			'tsconfig.json': JSON.stringify({ ...TSCONFIG_BASE, compilerOptions: { ...TSCONFIG_BASE.compilerOptions, allowJs: true, checkJs: true }, include: ['src/**/*.svelte', 'src/**/*.ts'] }, null, 2),
 			'src/util.ts': 'export function double(n: number): number { return n * 2; }\n',
@@ -118,7 +132,7 @@ export default class App extends Component<{ Args: Args }> {
 		},
 	},
 	astro: {
-		deps: { astro: '^5.0.0', '@astrojs/check': '^0.9.0' },
+		deps: { astro: '5.18.2', '@astrojs/check': '0.9.10' },
 		files: {
 			'tsconfig.json': JSON.stringify({ extends: 'astro/tsconfigs/strict', compilerOptions: { noEmit: true }, include: ['.astro/types.d.ts', 'src/**/*'] }, null, 2),
 			'src/util.ts': 'export function double(n: number): number { return n * 2; }\n',
@@ -131,13 +145,14 @@ const wrong: string = double(count);
 <p>{double(count)}</p>
 `,
 		},
-		run: (dir) => execFileSync('npx', ['astro', 'check'], { cwd: dir, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }),
+		run: (dir) => execFileSync('npx', ['astro', 'check'], { cwd: dir, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], env: astroEnv }),
 		check(out, outStock) {
 			const norm = (s) => stripAnsi(s)
 				.replace(/[^\n]*TNB ACTIVE[^\n]*\n?/g, '') // TNB banner line
 				.replace(/\d{2}:\d{2}:\d{2}/g, 'TT:TT:TT')
 				.replace(/\d+(?:\.\d+)?m?s\b/g, 'Xms');
 			const a = norm(out).trim(), b = norm(outStock).trim();
+			if (!/Result \(\d+ files?\)/.test(a)) return `astro check did not run:\n${a}`;
 			if (a !== b) return `output mismatch vs stock:\n--- tnb ---\n${a}\n--- stock ---\n${b}`;
 			return undefined;
 		},
@@ -167,7 +182,7 @@ const { title } = Astro.props;
 <div>{title}</div>
 `,
 		},
-		run: (dir) => execFileSync('npx', ['astro', 'check'], { cwd: dir, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }),
+		run: (dir) => execFileSync('npx', ['astro', 'check'], { cwd: dir, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], env: astroEnv }),
 		check(out, outStock) {
 			const t = stripAnsi(out);
 			if (/ts\(2304\):\s*Cannot find name 'Fragment'/.test(t)) return "false positive: global Fragment unresolved (#38 — plugin ambient roots dropped on snapshot rebuild)";
@@ -177,18 +192,12 @@ const { title } = Astro.props;
 				.replace(/\d{2}:\d{2}:\d{2}/g, 'TT:TT:TT')
 				.replace(/\d+(?:\.\d+)?m?s\b/g, 'Xms');
 			const a = norm(out).trim(), b = norm(outStock).trim();
+			if (!/Result \(\d+ files?\)/.test(a)) return `astro check did not run:\n${a}`;
 			if (a !== b) return `output mismatch vs stock:\n--- tnb ---\n${a}\n--- stock ---\n${b}`;
 			return undefined;
 		},
 	},
 };
-
-function ensureStock() {
-	if (fs.existsSync(path.join(stockDir, 'package', 'lib', 'typescript.js'))) return;
-	fs.mkdirSync(stockDir, { recursive: true });
-	execSync('npm pack typescript@6.0.3 --silent', { cwd: stockDir, stdio: 'ignore' });
-	execSync('tar -xzf typescript-6.0.3.tgz', { cwd: stockDir, stdio: 'ignore' });
-}
 
 function ensureCase(name, def) {
 	const dir = path.join(cacheRoot, name);
@@ -197,14 +206,18 @@ function ensureCase(name, def) {
 		fs.mkdirSync(path.dirname(path.join(dir, rel)), { recursive: true });
 		fs.writeFileSync(path.join(dir, rel), content);
 	}
-	const pkg = {
+	const pkg = JSON.stringify({
 		name: `tnb-fw-${name}`, private: true, type: 'module',
-		dependencies: { ...def.deps, typescript: `file:${repoRoot}` },
-	};
-	fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify(pkg, null, 2));
-	if (!fs.existsSync(path.join(dir, 'node_modules'))) {
-		console.log(`[${name}] installing deps (first run)…`);
-		execFileSync('npm', ['install', '--no-audit', '--no-fund', '--legacy-peer-deps'], { cwd: dir, stdio: 'inherit' });
+		dependencies: { ...def.deps, typescript: stockVersion },
+	}, null, 2);
+	const pkgPath = path.join(dir, 'package.json');
+	const nodeModules = path.join(dir, 'node_modules');
+	if (!fs.existsSync(nodeModules) || !fs.existsSync(pkgPath) || fs.readFileSync(pkgPath, 'utf8') !== pkg) {
+		console.log(`[${name}] installing deps…`);
+		fs.rmSync(nodeModules, { recursive: true, force: true });
+		fs.rmSync(path.join(dir, 'package-lock.json'), { force: true });
+		fs.writeFileSync(pkgPath, pkg);
+		execFileSync('npm', ['install', '--no-audit', '--no-fund'], { cwd: dir, stdio: 'inherit' });
 	}
 	return dir;
 }
@@ -213,13 +226,13 @@ function runCase(name, def) {
 	const dir = ensureCase(name, def);
 	const tsLink = path.join(dir, 'node_modules', 'typescript');
 	const linkTo = (target) => { fs.rmSync(tsLink, { force: true, recursive: true }); fs.symlinkSync(target, tsLink); };
-	linkTo(repoRoot);
+	linkTo(tnbPackageRoot);
 	let outTnb;
 	try { outTnb = def.run(dir); } catch (e) { outTnb = (e.stdout ?? '') + (e.stderr ?? ''); }
-	linkTo(path.join(stockDir, 'package'));
+	linkTo(stockPackage);
 	let outStock;
 	try { outStock = def.run(dir); } catch (e) { outStock = (e.stdout ?? '') + (e.stderr ?? ''); }
-	linkTo(repoRoot);
+	linkTo(tnbPackageRoot);
 	const problem = def.check(outTnb, outStock);
 	if (problem) {
 		console.error(`[${name}] FAIL: ${problem}`);
@@ -229,7 +242,6 @@ function runCase(name, def) {
 	return true;
 }
 
-ensureStock();
 const wanted = process.argv.slice(2);
 const names = wanted.length ? wanted : Object.keys(CASES);
 let ok = true;

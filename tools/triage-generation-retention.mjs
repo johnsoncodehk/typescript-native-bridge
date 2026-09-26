@@ -18,10 +18,12 @@
  * flat on this protocol, so the absolute floor dominates in practice.
  *
  * Usage:
- *   node tools/triage-generation-retention.mjs --tsserver=<path>
+ *   node tools/triage-generation-retention.mjs [--tsserver=<path>]
  *       [--label=tnb] [--rounds=100] [--marks=2,25,50,75,100]
  *       [--max-slope-mb=0.05] [--stock-tsserver=<path>]
  *       [--keep-fixture=1] [--out=<json>]
+ * --tsserver defaults to this repo's lib/tsserver.js, --stock-tsserver to
+ * STOCK_TSSERVER_PATH (the witness-matrix shape: no arguments).
  *
  * Exit 0 = within threshold, 1 = regression, 2 = setup/usage error.
  */
@@ -40,9 +42,9 @@ function argVal(name, dflt) {
     return m ? m.split('=')[1] : dflt;
 }
 
-const TSSERVER = argVal('tsserver', '');
-const STOCK_TSSERVER = argVal('stock-tsserver', '');
-const LABEL = argVal('label', 'target');
+const TSSERVER = argVal('tsserver', path.join(repoRoot, 'lib', 'tsserver.js'));
+const STOCK_TSSERVER = argVal('stock-tsserver', process.env.STOCK_TSSERVER_PATH ?? '');
+const LABEL = argVal('label', 'tnb');
 const ROUNDS = Number(argVal('rounds', '100'));
 const MARKS = argVal('marks', '2,25,50,75,100').split(',').map(Number).filter(n => n > 0).sort((a, b) => a - b);
 const MAX_SLOPE_MB = Number(argVal('max-slope-mb', '0.05'));
@@ -51,11 +53,10 @@ const OUT = argVal('out', '');
 
 function usage(msg) {
     if (msg) console.error(msg);
-    console.error('usage: node tools/triage-generation-retention.mjs --tsserver=<path> [--rounds=100] [--marks=2,25,50,75,100] [--max-slope-mb=0.05] [--stock-tsserver=<path>]');
+    console.error('usage: node tools/triage-generation-retention.mjs [--tsserver=<path>] [--rounds=100] [--marks=2,25,50,75,100] [--max-slope-mb=0.05] [--stock-tsserver=<path>]');
     process.exit(2);
 }
 
-if (!TSSERVER) usage('missing --tsserver');
 if (!fs.existsSync(TSSERVER)) usage(`missing tsserver: ${TSSERVER}`);
 if (STOCK_TSSERVER && !fs.existsSync(STOCK_TSSERVER)) usage(`missing stock tsserver: ${STOCK_TSSERVER}`);
 if (!fs.existsSync(gcMarksPath)) usage(`missing helper: ${gcMarksPath}`);

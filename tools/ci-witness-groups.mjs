@@ -28,11 +28,13 @@
 // 2026-09-26: triage-external-edits joined wg5 (~8s) once its estree fixture
 // self-provisions — local-only let plain `tsc -w` lose every source-file
 // watcher unnoticed.
+// 2026-09-26: framework-checks joined wg3 (pinned framework versions, peer
+// tree resolved against stock typescript — it had silently stopped running
+// astro check), generation-retention (defaults to lib/tsserver.js +
+// STOCK_TSSERVER_PATH calibration) and napi-fuzz joined wg4; wg3/wg4 were
+// the ~23s groups.
 // Witnesses intentionally NOT in the matrix are local-only — the machine-
-// readable list lives in LOCAL_ONLY below (reasons: framework-checks needs
-// the /tmp/tnb-fw-fixtures framework installs (network, heavy);
-// generation-retention needs in-child GC marks + --stock-tsserver slope
-// calibration; napi-fuzz is a NAPI payload fuzz probe; the perf series is
+// readable list lives in LOCAL_ONLY below (reason: the perf series is
 // measurement, not pass/fail). triage-electron-abi / triage-sim-nav-shard
 // are wired outside the matrix — OWNED_ELSEWHERE below (electron-abi:
 // direct ci.yml build-job step + nightly test-bridge-win32; sim-nav-shard:
@@ -46,13 +48,10 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const TOTAL = 86;
+const TOTAL = 89;
 
 // Witnesses intentionally NOT in the matrix — run on demand (reasons above).
 const LOCAL_ONLY = [
-	'triage-framework-checks',
-	'triage-generation-retention',
-	'triage-napi-fuzz',
 	'triage-completion-latency',
 	'triage-postedit-latency',
 	'triage-perf-edit-rpc',
@@ -92,12 +91,15 @@ const groups = [
 		witnesses: [
 			'triage-f2r5-defcases', // ~67s
 			'triage-tostring-gtd-vue', // ~61s
+			'triage-framework-checks', // ~28s cold (npm installs), ~12s warm
 		],
 	},
 	{
 		witnesses: [
 			'triage-qi-delete-min', // ~65s
 			'triage-f2r6-xvue', // ~62s
+			'triage-generation-retention', // ~4s (stock calibration + 100 tnb rounds)
+			'triage-napi-fuzz', // <1s
 		],
 	},
 	{

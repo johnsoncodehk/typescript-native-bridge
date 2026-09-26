@@ -32,8 +32,8 @@ TNB is a tsgo-backed TypeScript fork: upstream `microsoft/TypeScript` and `micro
 
 - `npm run check:lib` / `check:enums` / `check:sourcefile-guard`
 - `npm run check:go-as-guards` — Go-side Type-cast guard: every `Type.As*()` chain deref and unguarded nil-family assignment in the tsgo patches/overlay is fixed or carries an inline `// asguard:exempt` reason (issues #69/#70 bug class)
-- Witnesses: 86 across wg0–wg6, all wired in CI (`.github/workflows/ci.yml`), single source of truth `tools/ci-witness-groups.mjs` — `node tools/ci-witness-groups.mjs all` validates dup/missing/orphan/local-only/baseline wiring and emits the matrix (`matrix` mode feeds the ci.yml prepare job).
-- Local-only — run on demand, not in the matrix (reasons in the matrix header comment): framework-checks, generation-retention, napi-fuzz, completion-latency, postedit-latency, perf-edit-rpc, perf-qi-rpc, typing-cpuprof.
+- Witnesses: 89 across wg0–wg6, all wired in CI (`.github/workflows/ci.yml`), single source of truth `tools/ci-witness-groups.mjs` — `node tools/ci-witness-groups.mjs all` validates dup/missing/orphan/local-only/baseline wiring and emits the matrix (`matrix` mode feeds the ci.yml prepare job).
+- Local-only — run on demand, not in the matrix (measurement, not pass/fail): completion-latency, postedit-latency, perf-edit-rpc, perf-qi-rpc, typing-cpuprof.
 - Locally hostable gates: `check:sim-nav` and `check:sourcefile-guard` need a volar checkout. ci.yml's recipe, which is the one to copy (`VOLAR_SHA` is the ci.yml env pin — set it in your shell, a shallow clone does not carry the tag):
   ```sh
   export VOLAR_SHA=<.github/workflows/ci.yml value>
@@ -69,9 +69,9 @@ TNB is a tsgo-backed TypeScript fork: upstream `microsoft/TypeScript` and `micro
   - `triage-cli-only-flags` — CLI-only options (`--strict`, `--target`, …) ride updateSnapshot to Go; diagnostics must move like stock
   - `triage-electron-abi` — issue #44: win32 bridge.node loads under Electron-as-node (wired out-of-matrix: ci.yml build job + nightly test-bridge-win32)
   - `triage-external-edits` — issue #49: disk rewrites reach tsgo across estree/tsserver/tsc-watch host classes (tsc-watch: the thin program registers a watcher per program file — it never passes files through getSourceFile, where stock creates them)
-  - `triage-generation-retention` (local-only) — 100 edit+F12 rounds hold a ≈0 heapUsed slope (no closure pins a generation island)
-  - `triage-framework-checks` (local-only) — svelte-check/astro-check/glint vs stock parity (fixtures under /tmp/tnb-fw-fixtures)
-  - `triage-napi-fuzz` (local-only) — NAPI payload fuzz probe
+  - `triage-generation-retention` — 100 edit+F12 rounds hold a ≈0 heapUsed slope (no closure pins a generation island)
+  - `triage-framework-checks` — svelte-check/astro-check/glint vs stock parity (pinned framework versions installed under /tmp/tnb-fw-fixtures against stock typescript, then relinked to TNB/stock per run)
+  - `triage-napi-fuzz` — NAPI payload fuzz: echo round-trips byte-identical on the string and binary paths
   - `triage-display-tokens` — issue #4: decoded RemoteNode display tokens (optionality token, template-head rawText)
   - `triage-computed-literal` — binder-literal computed property names print as-written
   - `triage-refs-exportspec` / `triage-quickinfo-emptyparity` — wg0 sweep pair: refs on re-exported classes + quickinfo empty-result parity (sweep-ls-throws regenerates /tmp/tnb-sweep-fixtures first)
