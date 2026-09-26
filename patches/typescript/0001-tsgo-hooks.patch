@@ -338,10 +338,18 @@ index 04ca4db0fd..e1ed32c9eb 100644
          return {
              type: UpToDateStatusType.OutOfDateBuildInfoWithErrors,
 diff --git a/src/compiler/watchPublic.ts b/src/compiler/watchPublic.ts
-index 4bcedabb7e..5f2ce528d2 100644
+index 4bcedabb7e..735d965a58 100644
 --- a/src/compiler/watchPublic.ts
 +++ b/src/compiler/watchPublic.ts
-@@ -82,6 +82,7 @@ import {
+@@ -63,6 +63,7 @@ import {
+     ParsedCommandLine,
+     Path,
+     PollingInterval,
++    Program,
+     ProgramUpdateLevel,
+     ProjectReference,
+     ResolutionCache,
+@@ -82,6 +83,7 @@ import {
      StringLiteralLike,
      sys,
      System,
@@ -349,11 +357,12 @@ index 4bcedabb7e..5f2ce528d2 100644
      toPath,
      toPath as ts_toPath,
      updateErrorForNoInputFiles,
-@@ -448,6 +449,15 @@ export function createWatchProgram<T extends BuilderProgram>(host: WatchCompiler
+@@ -448,6 +450,16 @@ export function createWatchProgram<T extends BuilderProgram>(host: WatchCompiler
      let reportFileChangeDetectedOnCreateProgram = false; // True if synchronizeProgram should report "File change detected..." when a new program is created
  
      const sourceFilesCache = new Map<string, HostFileInfo>(); // Cache that stores the source file and version info
-+    // #49: per-file watchers the tsgo bridge registers lazily for materialized
++    // #49: per-file watchers for the tsgo bridge's thin program — registered
++    // for every program file in createNewProgram, and lazily for materialized
 +    // source files (compilerHost.tnbWatchSourceFile). The thin program never
 +    // pulls files through host getSourceFile, so sourceFilesCache stays empty
 +    // and stock's per-file watcher (watchFilePath at 775/788) never exists —
@@ -365,22 +374,17 @@ index 4bcedabb7e..5f2ce528d2 100644
      let missingFilePathsRequestedForRelease: Path[] | undefined; // These paths are held temporarily so that we can remove the entry from source file cache if the file is not tracked by missing files
      let hasChangedCompilerOptions = false; // True if the compiler options have changed between compilations
  
-@@ -516,6 +526,14 @@ export function createWatchProgram<T extends BuilderProgram>(host: WatchCompiler
+@@ -516,6 +528,9 @@ export function createWatchProgram<T extends BuilderProgram>(host: WatchCompiler
      compilerHost.getCurrentProgram = getCurrentProgram;
      compilerHost.writeLog = writeLog;
      compilerHost.getParsedCommandLine = getParsedCommandLine;
 +    // #49: lazy per-file watch registration for the tsgo bridge's thin
 +    // program (see tnbSourceFileWatchers above).
-+    (compilerHost as any).tnbWatchSourceFile = (fileName: string) => {
-+        const path = toPath(fileName);
-+        const cached = sourceFilesCache.get(path);
-+        if (tnbSourceFileWatchers.has(path) || (cached && (cached as FilePresentOnHost).fileWatcher)) return;
-+        tnbSourceFileWatchers.set(path, watchFilePath(path, fileName, onSourceFileChange, PollingInterval.Low, watchOptions, WatchType.SourceFile));
-+    };
++    (compilerHost as any).tnbWatchSourceFile = tnbWatchSourceFile;
  
      // Cache for the module resolution
      const resolutionCache = createResolutionCache(
-@@ -562,6 +580,7 @@ export function createWatchProgram<T extends BuilderProgram>(host: WatchCompiler
+@@ -562,6 +577,7 @@ export function createWatchProgram<T extends BuilderProgram>(host: WatchCompiler
      function close() {
          clearInvalidateResolutionsOfFailedLookupLocations();
          resolutionCache.clear();
@@ -388,9 +392,42 @@ index 4bcedabb7e..5f2ce528d2 100644
          clearMap(sourceFilesCache, value => {
              if (value && value.fileWatcher) {
                  value.fileWatcher.close();
-@@ -1054,6 +1073,9 @@ export function createWatchProgram<T extends BuilderProgram>(host: WatchCompiler
+@@ -706,6 +722,24 @@ export function createWatchProgram<T extends BuilderProgram>(host: WatchCompiler
+         if (needsUpdateInTypeRootWatch) {
+             resolutionCache.updateTypeRootsWatch();
+         }
++        // The thin tsgo program answers diagnostics from Go without ever
++        // materializing a file, so the lazy registration alone leaves plain
++        // `tsc -w` watching no source file: register every program file up
++        // front (stock watches each file getSourceFile returns) and release
++        // the ones that left the program (stock's onReleaseOldSourceFile).
++        const tnbFileNames = (builderProgram.getProgram() as Program & { getSourceFileNames?: () => readonly string[]; }).getSourceFileNames?.();
++        if (tnbFileNames) {
++            const live = new Set<Path>();
++            for (const fileName of tnbFileNames) {
++                live.add(toPath(fileName));
++                tnbWatchSourceFile(fileName);
++            }
++            tnbSourceFileWatchers.forEach((watcher, path) => {
++                if (live.has(path)) return;
++                watcher.close();
++                tnbSourceFileWatchers.delete(path);
++            });
++        }
+ 
+         if (missingFilePathsRequestedForRelease) {
+             // These are the paths that program creater told us as not in use any more but were missing on the disk.
+@@ -1053,7 +1087,17 @@ export function createWatchProgram<T extends BuilderProgram>(host: WatchCompiler
+         return watchFile(file, (fileName, eventKind) => callback(fileName, eventKind, path), pollingInterval, options, watchType);
      }
  
++    function tnbWatchSourceFile(fileName: string) {
++        const path = toPath(fileName);
++        const cached = sourceFilesCache.get(path);
++        if (tnbSourceFileWatchers.has(path) || (cached && (cached as FilePresentOnHost).fileWatcher)) return;
++        tnbSourceFileWatchers.set(path, watchFilePath(path, fileName, onSourceFileChange, PollingInterval.Low, watchOptions, WatchType.SourceFile));
++    }
++
      function onSourceFileChange(fileName: string, eventKind: FileWatcherEventKind, path: Path) {
 +        // #49: forward the signal to the bridge — the next overlay collect
 +        // decides the transport (overlay push vs fileChanges.changed).
@@ -398,7 +435,7 @@ index 4bcedabb7e..5f2ce528d2 100644
          updateCachedSystemWithFile(fileName, path, eventKind);
  
          // Update the source file cache
-@@ -1140,6 +1162,11 @@ export function createWatchProgram<T extends BuilderProgram>(host: WatchCompiler
+@@ -1140,6 +1184,11 @@ export function createWatchProgram<T extends BuilderProgram>(host: WatchCompiler
                      })
                  ) return;
  
