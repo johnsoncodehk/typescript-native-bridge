@@ -900,37 +900,50 @@ function openProjectParam(configFilePath: string, options: any): { fileName: str
     return { fileName: configFilePath, compilerOptions: toWireCompilerOptions(options) };
 }
 
-/** Last updateSnapshot params + project per config — identical repeat calls are skipped (watch-lint generations reissue the same params ~1000×). The params OBJECT is the fingerprint: retaining a JSON copy duplicated every overlay text (~15MB per config at hoppscotch scale, issue #41 B-2), while the content strings here are shared references with hostContentByFile, so equality below is O(1) per unchanged file. */
-const _lastUpdateParamsByConfig = new Map<string, { params: any; project: any }>();
 /** Per-generation getCompilerOptionsForFile memo, keyed by the live vendored project wrapper — see optionsForFile (no-project-references fast path). */
 const _optionsForFileMemo = new WeakMap<any, any>();
 
-/** Structural equality for updateSnapshot params (see _lastUpdateParamsByConfig). Small fields (compilerOptions, extraFileExtensions) compare via JSON; bulk texts compare by shared-reference string equality. */
-const sameUpdateParams = (a: any, b: any): boolean => {
+/** The state-bearing half of every updateSnapshot: what Go holds for a config
+ * once a send lands. Every field is idempotent on the Go side (options
+ * replace, open refs are a set, extras/additional roots are sticky), so
+ * re-sending an identical steady half changes nothing. */
+type SteadySyncParams = {
+    openProject: { fileName: string; compilerOptions: Record<string, any> };
+    openFiles?: string[];
+    extraFileExtensions?: any[];
+    additionalFiles?: string[];
+};
+/** The one-shot half: consumed by the send that carries it. */
+type SyncDelta = {
+    openFilesWithContent?: any[];
+    fileChanges?: { changed: string[] };
+    closeFiles?: string[];
+    closeProjects?: string[];
+    prefetchDiagnostics?: boolean;
+};
+
+function steadySyncParams(configFilePath: string, options: any, openFiles: string[]): SteadySyncParams {
+    const additionalFiles = _lastAdditionalFilesByConfig.get(configFilePath);
+    return {
+        openProject: openProjectParam(configFilePath, options),
+        ...(openFiles.length > 0 ? { openFiles } : {}),
+        ...(_lastExtraFileExtensions?.length ? { extraFileExtensions: _lastExtraFileExtensions } : {}),
+        ...(additionalFiles?.length ? { additionalFiles } : {}),
+    };
+}
+
+/** Last landed steady params + the project they yielded, per config. */
+const _lastSyncByConfig = new Map<string, { steady: SteadySyncParams; project: any }>();
+
+function sameSteadySyncParams(a: SteadySyncParams, b: SteadySyncParams): boolean {
     const names = (x: readonly string[] | undefined, y: readonly string[] | undefined): boolean =>
         x === y || (!!x && !!y && x.length === y.length && x.every((v, i) => v === y[i]));
-    const filesWithContent = (x: readonly any[] | undefined, y: readonly any[] | undefined): boolean =>
-        x === y || (!!x && !!y && x.length === y.length && x.every((f, i) => f.fileName === y[i].fileName && f.scriptKind === y[i].scriptKind && f.content === y[i].content
-            // Edit pushes carry content:"" plus the real change in edits — comparing content alone treats two different edits as equal and drops the push (sim-xfile s1 revert).
-            && f.baseVersion === y[i].baseVersion && JSON.stringify(f.edits) === JSON.stringify(y[i].edits)));
-    // Same-shape fileChanges must compare itemwise: a params object carrying
-    // changed entries vs one without (or with different ones) is a REAL state
-    // difference — treating them as equal would swallow the send (issue #49).
-    const fileChanges = (x: any, y: any): boolean =>
-        x === y || (!!x && !!y
-            && !!x.invalidateAll === !!y.invalidateAll
-            && names(x.changed, y.changed) && names(x.created, y.created) && names(x.deleted, y.deleted));
-    return names(a.openFiles, b.openFiles)
-        && names(a.closeFiles, b.closeFiles)
-        && names(a.closeProjects, b.closeProjects)
+    return a.openProject.fileName === b.openProject.fileName
+        && JSON.stringify(a.openProject.compilerOptions) === JSON.stringify(b.openProject.compilerOptions)
+        && names(a.openFiles, b.openFiles)
         && names(a.additionalFiles, b.additionalFiles)
-        && filesWithContent(a.openFilesWithContent, b.openFilesWithContent)
-        && fileChanges(a.fileChanges, b.fileChanges)
-        && !!a.prefetchDiagnostics === !!b.prefetchDiagnostics
-        && a.openProject?.fileName === b.openProject?.fileName
-        && JSON.stringify(a.openProject?.compilerOptions) === JSON.stringify(b.openProject?.compilerOptions)
         && JSON.stringify(a.extraFileExtensions) === JSON.stringify(b.extraFileExtensions);
-};
+}
 
 /** Open client tabs mirrored to the per-process tsgo session. tsgo OpenFiles
  * is additive-only (ref-counted, session.go): a tab closed in the editor
@@ -2471,33 +2484,76 @@ function forgetSyncedOverlay(fileName: string): void {
 	_pendingOverlayEditsByFile.delete(fileName);
 }
 
-/** Per-file overlay push decision: undefined = Go already holds exactly the
- * host text (nothing to send); an `{edits, baseVersion}` delta when splicing
- * the recorded host edits into the synced base reproduces the host text
- * (plain TS only — .vue-class virtual TS is regenerated per host change,
- * never edit-shaped, so it always takes the full-content path); full content
- * otherwise. Consumes the file's pending edits either way. */
-function decideOverlayPush(fileName: string, hostText: string, scriptKind: number): any | undefined {
+/** The per-file overlay rule every sync site shares. Returns the wire entry
+ * (undefined = Go already holds the host text) and whether host text
+ * diverges from disk (or disk lacks the file).
+ * - Diverging: nothing when the mirror already equals the host text; an
+ *   `{edits, baseVersion}` delta when splicing the recorded host edits into
+ *   the synced base reproduces it (plain TS only — .vue-class virtual TS is
+ *   regenerated per host change, never edit-shaped); full content otherwise.
+ * - Back at disk after a prior overlay: re-push the text once so Go stops
+ *   checking the stale overlay, and the mirror forgets the file. Host text
+ *   equal to CURRENT disk is not necessarily what Go saw — SnapshotFS froze
+ *   the first disk read; that case rides fileChanges.changed via the #49
+ *   pending set, not this rule.
+ * Consumes the file's pending edits either way. */
+function planOverlayPush(fileName: string, hostText: string, scriptKind: number): { entry: any | undefined; diverges: boolean } {
 	const synced = _syncedOverlayContentByFile.get(fileName);
-	if (synced === hostText) {
-		_pendingOverlayEditsByFile.delete(fileName);
-		return undefined;
+	if (!shouldSendHostOverlay(fileName, hostText)) {
+		if (synced === undefined) return { entry: undefined, diverges: false };
+		forgetSyncedOverlay(fileName);
+		return { entry: synced === hostText ? undefined : { fileName, content: hostText, scriptKind }, diverges: false };
 	}
 	const pendingEdits = _pendingOverlayEditsByFile.get(fileName);
 	_pendingOverlayEditsByFile.delete(fileName);
+	if (synced === hostText) return { entry: undefined, diverges: true };
 	if (synced !== undefined && pendingEdits?.length && !isExtraExtensionFileName(fileName)
 		&& applyOverlayEdits(synced, pendingEdits) === hostText) {
-		return { fileName, content: "", scriptKind, edits: pendingEdits, baseVersion: _syncedOverlayVersionByFile.get(fileName) ?? 0 };
+		return { entry: { fileName, content: "", scriptKind, edits: pendingEdits, baseVersion: _syncedOverlayVersionByFile.get(fileName) ?? 0 }, diverges: true };
 	}
-	return { fileName, content: hostText, scriptKind };
+	return { entry: { fileName, content: hostText, scriptKind }, diverges: true };
 }
 
 /** overlay.sync trace line for a send batch (witness + perf A/B read this). */
-function traceOverlaySync(openFilesWithContent: readonly any[], deduped: boolean): void {
+function traceOverlaySync(openFilesWithContent: readonly any[]): void {
 	if (openFilesWithContent.length === 0) return;
 	const deltaFiles = openFilesWithContent.filter(f => f.edits?.length);
 	const edits = deltaFiles.reduce((n, f) => n + f.edits.length, 0);
-	_rpcTraceEvent("overlay.sync", `files=${openFilesWithContent.length} deltaFiles=${deltaFiles.length} edits=${edits} bytes=${JSON.stringify(openFilesWithContent).length} deduped=${deduped} names=${openFilesWithContent.map(f => f.fileName.split("/").slice(-2).join("/") + (f.edits?.length ? "(d)" : "")).join(",")}`);
+	_rpcTraceEvent("overlay.sync", `files=${openFilesWithContent.length} deltaFiles=${deltaFiles.length} edits=${edits} bytes=${JSON.stringify(openFilesWithContent).length} names=${openFilesWithContent.map(f => f.fileName.split("/").slice(-2).join("/") + (f.edits?.length ? "(d)" : "")).join(",")}`);
+}
+
+/**
+ * The one updateSnapshot path. A send with an empty delta against the last
+ * landed steady params is skipped and the recorded project reused: every
+ * updateSnapshot REPLACES the Go snapshot and disposes the previous
+ * generation's handle registry, so a no-op send strands the reused thin
+ * program's cached handles ("symbol handle N not found in snapshot
+ * registry", sim-nav #5986 class), and watch-lint reissues identical
+ * params ~1000× (issue #11 perf). `snapshot` is undefined when skipped.
+ * The overlay mirror commits here, right after Go accepted the content.
+ */
+function syncSnapshot(configFilePath: string, steady: SteadySyncParams, delta: SyncDelta): { project: any; snapshot: any } {
+	const content = delta.openFilesWithContent ?? [];
+	const prev = _lastSyncByConfig.get(configFilePath);
+	if (content.length === 0 && !delta.fileChanges && !delta.closeFiles?.length && !delta.closeProjects?.length
+		&& !delta.prefetchDiagnostics && prev && sameSteadySyncParams(prev.steady, steady)) {
+		return { project: prev.project, snapshot: undefined };
+	}
+	traceOverlaySync(content);
+	const snapshot: any = _api.updateSnapshot({
+		...steady,
+		...(content.length > 0 ? { openFilesWithContent: content } : {}),
+		...(delta.fileChanges ? { fileChanges: delta.fileChanges } : {}),
+		...(delta.closeFiles?.length ? { closeFiles: delta.closeFiles } : {}),
+		...(delta.closeProjects?.length ? { closeProjects: delta.closeProjects } : {}),
+		...(delta.prefetchDiagnostics ? { prefetchDiagnostics: true } : {}),
+	});
+	for (const f of content) commitSyncedOverlay(f);
+	trackBuildProjectSnapshot(configFilePath, snapshot, [...(steady.openFiles ?? []), ...content.map(f => f.fileName)]);
+	const project = snapshot.getProject(configFilePath);
+	if (project) _lastSyncByConfig.set(configFilePath, { steady, project });
+	else _lastSyncByConfig.delete(configFilePath);
+	return { project, snapshot };
 }
 
 // Overlay-path cache: only files missing on disk are fed to tsgo as overlays
@@ -2560,6 +2616,7 @@ function beginBuildProject(configFilePath: string): { closeParams: any; staleSna
     _buildModeRef.active = { configFilePath, openedFiles: new Set(), snapshots: [] };
     if (!prev) return { closeParams: undefined, staleSnapshots: undefined };
     _projectCache.delete(prev.configFilePath);
+    _lastSyncByConfig.delete(prev.configFilePath);
     // The overlays are being closed in tsgo — forget the synced-content memo
     // so a later re-push of identical content is not skipped.
     for (const f of prev.openedFiles) forgetSyncedOverlay(f);
@@ -2742,8 +2799,8 @@ function collectTsgoOpenFileNames(syncHost: any, extra?: Iterable<string>): stri
     };
     // Extra (query-requested) names go LAST: hoisting them first makes the
     // collected order depend on the query target, which alternates the
-    // overlay push key between sibling queries and re-fires an empty
-    // updateSnapshot on every other request (see _lastOverlayPushKeyByConfig).
+    // steady openFiles between sibling queries and re-fires an empty
+    // updateSnapshot on every other request (see syncSnapshot).
     const scriptNames = syncHost?.getScriptFileNames?.();
     if (scriptNames) {
         for (const fn of scriptNames) add(fn);
@@ -5879,10 +5936,7 @@ function resolveLanguageServiceScriptKind(
     }
     return inferScriptKind(hostFileName);
 }
-/** Overlay when host snapshot text differs from disk (or file is absent on disk).
- * Same-as-current-disk host text is not necessarily same-as-Go-saw — SnapshotFS
- * froze the first disk read; that case rides fileChanges.changed via the #49
- * pending set, not this gate. */
+/** Host text differs from disk (or disk lacks the file) — see planOverlayPush. */
 function shouldSendHostOverlay(fileName: string, hostText: string): boolean {
     if (!isOverlayCandidatePath(fileName)) return false;
     if (!fileExistsOnDisk(fileName)) return true;
@@ -6833,19 +6887,6 @@ function tnbComputeNamedDeclarations(sourceFile: any): Map<string, any[]> {
  * module-level lsnav wire entry (tsgoLsApiRequest) can sync on demand. */
 const _overlaySyncByConfig = new Map<string, (requestedFileName?: string) => void>();
 
-/**
- * Last synced open-file set per config (join of the collected open names),
- * for the no-change fast path in pushHostOverlayToTsgo. Every updateSnapshot
- * REPLACES the Go snapshot and disposes the previous one's handle registry —
- * a query-only sync with the same open set and no content to push must be a
- * no-op, or every replayed lsnav query strands the reused thin program's
- * cached handles in a disposed snapshot ("symbol handle N not found in
- * snapshot registry", sim-nav #5986 class). ensureProject records the same
- * key after its own snapshot so the first query sync after a rebuild is a
- * no-op too.
- */
-const _lastOverlayPushKeyByConfig = new Map<string, string>();
-
 export function tsgoLsApiRequest(program: any, method: string, params: any): any {
     const configFilePath = program?.getCompilerOptions?.()?.configFilePath;
     let proj = configFilePath && _projectCache.get(configFilePath);
@@ -7142,22 +7183,9 @@ export function createTsgoProgram(
             // from the same host snapshot on first access), so program
             // creation pays text only, not one JS AST per virtual file (B-1).
             // Pure disk lint skips this and uses tsgo-backed single-parse.
-            if (!shouldSendHostOverlay(resolvedFn, content.text)) {
-                // Host matches disk again after a prior overlay — re-push on-disk text
-                // so tsgo does not keep checking stale overlay content.
-                const synced = _syncedOverlayContentByFile.get(resolvedFn);
-                if (synced !== undefined && synced !== content.text) {
-                    forgetSyncedOverlay(resolvedFn);
-                    overlays.push({ fileName: resolvedFn, content: content.text, scriptKind: content.scriptKind });
-                }
-                else if (synced !== undefined) {
-                    forgetSyncedOverlay(resolvedFn);
-                }
-                continue;
-            }
-            const entry = decideOverlayPush(resolvedFn, content.text, content.scriptKind);
+            const { entry, diverges } = planOverlayPush(resolvedFn, content.text, content.scriptKind);
             if (!entry) continue;
-            hostContentByFile.set(resolvedFn, content);
+            if (diverges) hostContentByFile.set(resolvedFn, content);
             overlays.push(entry);
             }
         }
@@ -9676,9 +9704,8 @@ export function createTsgoChecker(program: any): any {
             programCtx.pendingOverlays = undefined;
         }
 
-        const extraFileExtensions = programCtx?.pendingExtraFileExtensions;
+        if (programCtx?.pendingExtraFileExtensions) _lastExtraFileExtensions = programCtx.pendingExtraFileExtensions;
         if (programCtx) programCtx.pendingExtraFileExtensions = undefined;
-        if (extraFileExtensions) _lastExtraFileExtensions = extraFileExtensions;
 
         // Host-computed root set the tsconfig expansion may miss (LS
         // getScriptFileNames shims, glint readDirectory extras) — Go adds them
@@ -9688,7 +9715,6 @@ export function createTsgoChecker(program: any): any {
             _lastAdditionalFilesByConfig.set(configFilePath!, programCtx.pendingAdditionalFiles);
             programCtx.pendingAdditionalFiles = undefined;
         }
-        const additionalFiles = _lastAdditionalFilesByConfig.get(configFilePath!);
 
         // #49: files the host told us were rewritten on disk (or where a
         // host read diverged from disk at materialization). They are NOT
@@ -9734,55 +9760,20 @@ export function createTsgoChecker(program: any): any {
         // then joins the in-flight pass (Go-side singleflight). Never set for
         // interactive hosts: a full check per keystroke would be pure waste.
         const prefetchDiagnostics = !!(options as any).tscBuild;
-        // Watch-mode lint rebuilds the thin program per linted file with
-        // byte-identical updateSnapshot params (same open files, no new
-        // overlays): Go's answer is deterministic and already cached here —
-        // skip the round trip. Interactive-only: build mode's beginBuildProject
-        // / prefetch side effects must always fire. The fingerprint covers
-        // every value that can alter the response (open files, overlay
-        // contents, extras, close params, prefetch, fileChanges).
-        const updateParams = {
-            openProject: openProjectParam(configFilePath!, options),
-            ...(openFiles.length > 0 ? { openFiles } : {}),
-            ...(closedTabs?.length ? { closeFiles: closedTabs } : {}),
-            ...(openFilesWithContent.length > 0 ? { openFilesWithContent } : {}),
-            ...(extraFileExtensions ? { extraFileExtensions } : {}),
-            ...(additionalFiles?.length ? { additionalFiles } : {}),
+        const steady = steadySyncParams(configFilePath!, options, openFiles);
+        const synced = syncSnapshot(configFilePath!, steady, {
+            openFilesWithContent,
             ...(externalChanged?.length ? { fileChanges: { changed: externalChanged } } : {}),
-            ...(buildClose.closeParams ?? {}),
-            ...(prefetchDiagnostics ? { prefetchDiagnostics: true } : {}),
-        };
-        const prevUpdate = (options as any).tscBuild ? undefined : _lastUpdateParamsByConfig.get(configFilePath!);
-        const deduped = prevUpdate !== undefined && sameUpdateParams(prevUpdate.params, updateParams);
-        traceOverlaySync(openFilesWithContent, deduped);
-        const snapshot: any = deduped ? undefined : _api.updateSnapshot(updateParams);
+            ...(closedTabs?.length ? { closeFiles: closedTabs } : {}),
+            ...buildClose.closeParams,
+            prefetchDiagnostics,
+        });
         if (programCtx) programCtx.pendingReferencedProjects = undefined;
-        project = deduped ? prevUpdate!.project : snapshot.getProject(configFilePath!);
+        project = synced.project;
         if (!project) {
             throw new Error(`tsgoChecker: project not found for ${configFilePath}`);
         }
-        if (!deduped && !(options as any).tscBuild) {
-            // Fingerprint WITHOUT fileChanges (#49): external-change entries
-            // are one-shot — a later snapshot with identical steady-state
-            // params and no fileChanges must still dedupe against this one.
-            _lastUpdateParamsByConfig.set(configFilePath!, { params: { ...updateParams, fileChanges: undefined }, project });
-        }
-        if (snapshot) {
-            trackBuildProjectSnapshot(configFilePath!, snapshot, [
-                ...openFiles,
-                ...openFilesWithContent.map(f => f.fileName),
-            ]);
-            // Go now holds exactly this open set with all host content
-            // synced — record the query-path no-change key so the first
-            // pushHostOverlayToTsgo after a rebuild is a no-op instead of
-            // one empty updateSnapshot (which would dispose the handle
-            // registry the fresh program's caches just warmed).
-            _lastOverlayPushKeyByConfig.set(configFilePath!, openFiles.join("\n"));
-        }
         releaseStaleBuildSnapshots(buildClose.staleSnapshots);
-        for (const f of openFilesWithContent) {
-            commitSyncedOverlay(f);
-        }
         // Cross-project extra-extension imports (e.g. ../other/foo.vue): the
         // program can include host-virtual files that were not in this
         // project's root set, so no overlay was pushed for them and tsgo
@@ -9793,7 +9784,7 @@ export function createTsgoChecker(program: any): any {
         // host.getSourceFile. Only files not already overlaid are sent.
         {
             const sentOverlayFiles = new Set(openFilesWithContent.map(f => f.fileName));
-            const lateOverlays: { fileName: string; content: string; scriptKind: number }[] = [];
+            const lateOverlays: any[] = [];
             // names are host-form already (decode-boundary normalized in
             // tsgoSourceFileNames) — no per-entry re-normalization here.
             for (const hostFileName of tsgoSourceFileNames(configFilePath!, project).names) {
@@ -9801,33 +9792,18 @@ export function createTsgoChecker(program: any): any {
                 if (sentOverlayFiles.has(hostFileName) || _syncedOverlayContentByFile.has(hostFileName)) continue;
                 const content = getHostScriptContent(syncHost ?? programCtx?.overlayHostCtx?.host, hostFileName, options);
                 if (!content?.text || !content.fromHost) continue;
-                // Same-as-disk host content adds nothing (tsgo already parsed
-                // the disk text) — only genuine virtual content is pushed.
-                if (!shouldSendHostOverlay(hostFileName, content.text)) continue;
-                lateOverlays.push({ fileName: hostFileName, content: content.text, scriptKind: content.scriptKind });
+                const { entry } = planOverlayPush(hostFileName, content.text, content.scriptKind);
+                if (entry) lateOverlays.push(entry);
             }
             if (lateOverlays.length > 0) {
-                const lateSnapshot: any = _api.updateSnapshot({
-                    openProject: openProjectParam(configFilePath!, options),
-                    openFilesWithContent: lateOverlays,
-                    ...(extraFileExtensions ? { extraFileExtensions } : {}),
-                    // This push supersedes the snapshot that carried the
-                    // build-mode prefetch, and Go cancels a superseded
-                    // snapshot's in-flight pass — re-request it here so the
-                    // whole-program check restarts on the virtual-content
-                    // state and overlaps the remaining builder work instead
-                    // of running synchronously inside getGlobalDiagnostics.
-                    ...(prefetchDiagnostics ? { prefetchDiagnostics: true } : {}),
-                });
-                // The push advanced Go state — the params dedupe must not
-                // skip the next ensureProject's refresh for this config.
-                _lastUpdateParamsByConfig.delete(configFilePath!);
-                const refreshed = lateSnapshot.getProject(configFilePath!);
-                if (refreshed) {
-                    project = refreshed;
-                    trackBuildProjectSnapshot(configFilePath!, lateSnapshot, lateOverlays.map(f => f.fileName));
-                    for (const f of lateOverlays) commitSyncedOverlay(f);
-                }
+                // This push supersedes the snapshot that carried the
+                // build-mode prefetch, and Go cancels a superseded
+                // snapshot's in-flight pass — re-request it here so the
+                // whole-program check restarts on the virtual-content
+                // state and overlaps the remaining builder work instead
+                // of running synchronously inside getGlobalDiagnostics.
+                const late = syncSnapshot(configFilePath!, steady, { openFilesWithContent: lateOverlays, prefetchDiagnostics });
+                if (late.project) project = late.project;
             }
         }
         _projectCache.set(configFilePath!, project);
@@ -10153,70 +10129,20 @@ export function createTsgoChecker(program: any): any {
         // mirror the walk is about to reconcile — the same order as the collect.
         const externalChanged = drainExternalFileChanges()?.changed;
         const openFiles = collectTsgoOpenFileNames(syncHost, requestedFileName ? [requestedFileName] : undefined);
-        const openFilesWithContent: { fileName: string; content: string; scriptKind: number }[] = [];
+        const openFilesWithContent: any[] = [];
         for (const hostFileName of openFiles) {
             if (!isOverlayCandidatePath(hostFileName)) continue;
             const content = getHostScriptContent(syncHost, hostFileName, ctx.options);
             if (!content?.text) continue;
-            const hostOnly = !fileExistsOnDisk(hostFileName);
-            const inTsgo = !!project?.program?.getSourceFile?.(toTsgoFileName(hostFileName));
-            if (!hostOnly && inTsgo && !shouldSendHostOverlay(hostFileName, content.text)) {
-                const synced = _syncedOverlayContentByFile.get(hostFileName);
-                if (synced !== undefined && synced !== content.text) {
-                    forgetSyncedOverlay(hostFileName);
-                    openFilesWithContent.push({ fileName: hostFileName, content: content.text, scriptKind: content.scriptKind });
-                }
-                else if (synced !== undefined) {
-                    forgetSyncedOverlay(hostFileName);
-                }
-                continue;
-            }
-            if (!hostOnly) {
-                const entry = decideOverlayPush(hostFileName, content.text, content.scriptKind);
-                if (!entry) continue;
-                openFilesWithContent.push(entry);
-                continue;
-            }
-            openFilesWithContent.push({ fileName: hostFileName, content: content.text, scriptKind: content.scriptKind });
+            const { entry } = planOverlayPush(hostFileName, content.text, content.scriptKind);
+            if (entry) openFilesWithContent.push(entry);
         }
         if (!openFiles.length && !openFilesWithContent.length && !externalChanged) return;
-
-        // No-change fast path: bumping the snapshot here would dispose the
-        // handle registry the reused thin program's caches still reference
-        // (see _lastOverlayPushKeyByConfig). Content changes are detected
-        // upstream (decideOverlayPush / shouldSendHostOverlay), so identical
-        // open set + nothing to push means Go state already matches host.
-        // The key covers the open set only: the fast path requires empty
-        // content, and after any successful push the mirror holds whatever
-        // was pushed — recording the no-content form lets a content push and
-        // a following query-only sync compare equal instead of churning one
-        // empty snapshot. ensureProject records the same key after its own
-        // snapshot so the first query sync after a rebuild is a no-op too.
-        const pushKey = openFiles.join("\n");
-        if (openFilesWithContent.length === 0 && !externalChanged && _lastOverlayPushKeyByConfig.get(ctx.configFilePath) === pushKey) return;
-
-        traceOverlaySync(openFilesWithContent, /*deduped*/ false);
-        const snapshot: any = _api.updateSnapshot({
-            openProject: openProjectParam(ctx.configFilePath, ctx.options),
-            ...(openFiles.length > 0 ? { openFiles } : {}),
+        const { project: refreshed, snapshot } = syncSnapshot(ctx.configFilePath, steadySyncParams(ctx.configFilePath, ctx.options, openFiles), {
             openFilesWithContent,
             ...(externalChanged ? { fileChanges: { changed: externalChanged } } : {}),
-            ...(_lastExtraFileExtensions ? { extraFileExtensions: _lastExtraFileExtensions } : {}),
-            // Host-injected extra roots (svelte2tsx/glint shims) — without them
-            // every hook-driven rebuild drops the ambient shim files from the
-            // program (#5847 svelteHTML false positive).
-            ...(_lastAdditionalFilesByConfig.get(ctx.configFilePath)?.length ? { additionalFiles: _lastAdditionalFilesByConfig.get(ctx.configFilePath) } : {}),
         });
-        _lastOverlayPushKeyByConfig.set(ctx.configFilePath, pushKey);
-        // The push advanced Go state — the params dedupe must not skip the
-        // next ensureProject's refresh for this config.
-        _lastUpdateParamsByConfig.delete(ctx.configFilePath);
-        trackBuildProjectSnapshot(ctx.configFilePath, snapshot, [
-            ...openFiles,
-            ...openFilesWithContent.map(f => f.fileName),
-        ]);
-        const refreshed = snapshot.getProject(ctx.configFilePath);
-        if (!refreshed) return;
+        if (!snapshot || !refreshed) return;
         project = refreshed;
         // Wire objects route prototype API calls through their registry's
         // project, so a replacement generation must own the live checker
@@ -10225,7 +10151,6 @@ export function createTsgoChecker(program: any): any {
         _projectCache.set(ctx.configFilePath, refreshed);
         _currentProjectRef.project = refreshed;
         installTsgoBackedSourceFileLoader(() => project);
-        for (const f of openFilesWithContent) commitSyncedOverlay(f);
         for (const fileName of [...openFilesWithContent.map(f => f.fileName), ...(externalChanged ?? [])]) {
             tsgoSfCache.delete(fileName);
             nodeIndexCache.delete(fileName);
@@ -10242,7 +10167,7 @@ export function createTsgoChecker(program: any): any {
         // change or not. (The former "content-only" guard kept stale handles
         // across openFiles-only bumps, which is how replayed queries faulted
         // with "symbol handle N not found in snapshot registry", sim-nav
-        // #5986 class. The no-change fast path above is what keeps this from
+        // #5986 class. syncSnapshot's no-op skip is what keeps this from
         // costing re-resolution on every query.)
         _rpcTraceEvent(
             "overlay.refresh.clearCaches",
