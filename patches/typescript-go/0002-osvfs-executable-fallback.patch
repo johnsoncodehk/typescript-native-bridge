@@ -1,5 +1,5 @@
 diff --git a/internal/vfs/osvfs/os.go b/internal/vfs/osvfs/os.go
-index 7db6f338b..a2b8c5bb9 100644
+index 7db6f338b8..a2b8c5bb98 100644
 --- a/internal/vfs/osvfs/os.go
 +++ b/internal/vfs/osvfs/os.go
 @@ -60,7 +60,12 @@ var isFileSystemCaseSensitive = func() bool {

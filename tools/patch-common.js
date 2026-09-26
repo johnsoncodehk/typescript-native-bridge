@@ -146,14 +146,14 @@ function realignEolToHead(subDir) {
 	}
 }
 
-// Save: in-place edits to tracked files (git diff HEAD) -> single patch.
-// Optional exclude globs keep named files in separate patch files.
-function savePatch(subDir, patchPath, exclude = []) {
+// Save: in-place edits to tracked files (git diff HEAD) -> single patch,
+// restricted to `pathspecs` (`:(exclude)<path>` carves files out into their
+// own patch). --abbrev pins the `index` lines: git's default scales with the
+// object count, so a shallow submodule clone would rewrite every hash line.
+function savePatch(subDir, patchPath, pathspecs) {
 	guardNoStaged(subDir);
 	realignEolToHead(subDir);
-	const args = ["diff", "HEAD", "--", "."];
-	for (const ex of exclude) args.push(`:(exclude)${ex}`);
-	const diff = git(subDir, args);
+	const diff = git(subDir, ["diff", "--abbrev=10", "HEAD", "--", ...pathspecs]);
 	if (diff.status !== 0) {
 		console.error("save: git diff failed\n" + diff.stderr);
 		process.exit(1);

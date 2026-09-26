@@ -5,17 +5,13 @@
 
 const path = require("path");
 const { saveOverlay, savePatch } = require("./patch-common.js");
-const { spawnSync } = require("child_process");
 
 const repoRoot = path.resolve(__dirname, "..");
 const subDir = path.join(repoRoot, "typescript-go");
 const patchDir = path.join(repoRoot, "patches", "typescript-go");
 
-const git = (args) => spawnSync("git", ["-C", subDir, ...args], { encoding: "utf8" });
-
 // Files carved out of 0001 into their own focused patch (each rebases
-// independently). savePatch realigns EOL to HEAD first, so the per-file
-// diffs below inherit the same normalization.
+// independently).
 const osvfsRel = "internal/vfs/osvfs/os.go";
 const apiSurfaceRel = [
 	"internal/api/proto.go",
@@ -27,34 +23,8 @@ const apiSurfaceRel = [
 const noembedRel = "internal/bundled/noembed.go";
 
 saveOverlay(subDir, path.join(patchDir, "overlay"));
-savePatch(subDir, path.join(patchDir, "0001-bridge-inplace.patch"), [
-	osvfsRel,
-	...apiSurfaceRel,
-	noembedRel,
-]);
-
-function saveSingleFilePatch(rel, patchName) {
-	const diff = git(["diff", "HEAD", "--", rel]);
-	if (diff.status !== 0) {
-		console.error(`save: git diff ${rel} failed\n` + diff.stderr);
-		process.exit(1);
-	}
-	const patchPath = path.join(patchDir, patchName);
-	require("fs").writeFileSync(patchPath, diff.stdout);
-	console.log(`save: patch <- ${diff.stdout.length} bytes (${patchName})`);
-}
-
-function saveFilesPatch(rels, patchName) {
-	const diff = git(["diff", "HEAD", "--", ...rels]);
-	if (diff.status !== 0) {
-		console.error(`save: git diff ${rels.join(" ")} failed\n` + diff.stderr);
-		process.exit(1);
-	}
-	const patchPath = path.join(patchDir, patchName);
-	require("fs").writeFileSync(patchPath, diff.stdout);
-	console.log(`save: patch <- ${diff.stdout.length} bytes (${patchName})`);
-}
-
-saveSingleFilePatch(osvfsRel, "0002-osvfs-executable-fallback.patch");
-saveFilesPatch(apiSurfaceRel, "0004-api-surface.patch");
-saveSingleFilePatch(noembedRel, "0005-noembed-lib-path.patch");
+const carved = [osvfsRel, ...apiSurfaceRel, noembedRel];
+savePatch(subDir, path.join(patchDir, "0001-bridge-inplace.patch"), [".", ...carved.map(rel => `:(exclude)${rel}`)]);
+savePatch(subDir, path.join(patchDir, "0002-osvfs-executable-fallback.patch"), [osvfsRel]);
+savePatch(subDir, path.join(patchDir, "0004-api-surface.patch"), apiSurfaceRel);
+savePatch(subDir, path.join(patchDir, "0005-noembed-lib-path.patch"), [noembedRel]);
