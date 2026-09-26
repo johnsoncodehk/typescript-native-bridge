@@ -20,7 +20,7 @@ jobs:
     outputs:
       matrix: ${{ steps.groups.outputs.matrix }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 1
 
@@ -34,7 +34,7 @@ jobs:
     runs-on: macos-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 1
 
@@ -46,7 +46,7 @@ jobs:
 
       - name: Restore submodules (cache)
         id: sub-cache
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v6
         with:
           path: |
             typescript
@@ -63,7 +63,7 @@ jobs:
       # in sync with the vet job's (GitHub Actions has no step reuse).
       - name: Save submodules (cache)
         if: steps.sub-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v6
         with:
           path: |
             typescript
@@ -71,7 +71,7 @@ jobs:
             .git/modules
           key: submodules-v1-${{ steps.sub-sha.outputs.sha }}
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 24
           cache: npm
@@ -80,7 +80,7 @@ jobs:
             typescript/package-lock.json
             typescript-go/package-lock.json
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         with:
           go-version: "1.26" # typescript-go/go.mod
           cache-dependency-path: typescript-go/go.sum
@@ -129,7 +129,7 @@ jobs:
       # install + repointed store entries replaced them).
       - name: Clone volar (cache)
         id: volar-cache
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ${{ runner.temp }}/volar
@@ -165,7 +165,7 @@ jobs:
         run: npm run check:sourcefile-guard
 
       - name: Upload built outputs
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: built-outputs
           path: |
@@ -184,7 +184,7 @@ jobs:
     runs-on: macos-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 1
 
@@ -196,7 +196,7 @@ jobs:
 
       - name: Restore submodules (cache)
         id: sub-cache
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v6
         with:
           path: |
             typescript
@@ -213,7 +213,7 @@ jobs:
       # with the build job's (GitHub Actions has no step reuse).
       - name: Save submodules (cache)
         if: steps.sub-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v6
         with:
           path: |
             typescript
@@ -221,11 +221,11 @@ jobs:
             .git/modules
           key: submodules-v1-${{ steps.sub-sha.outputs.sha }}
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 24
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         with:
           go-version: "1.26" # typescript-go/go.mod
           cache-dependency-path: typescript-go/go.sum
@@ -245,11 +245,11 @@ jobs:
     runs-on: macos-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 1
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 24
           cache: npm
@@ -259,13 +259,13 @@ jobs:
         run: npm ci
 
       - name: Download built outputs
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: built-outputs
           path: .
 
       - name: Restore volar (cache)
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v6
         with:
           path: |
             ${{ runner.temp }}/volar
@@ -306,22 +306,22 @@ jobs:
       matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
     name: witnesses (wg${{ matrix.index }})
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 1
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 24
 
       - name: Download built outputs
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: built-outputs
           path: .
 
       - name: Restore volar (cache)
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v6
         with:
           path: |
             ${{ runner.temp }}/volar
@@ -395,7 +395,7 @@ jobs:
 
       - name: Upload witness log on failure
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: witness-log-wg${{ matrix.index }}
           path: |
@@ -423,22 +423,22 @@ jobs:
         index: [0, 1, 2, 3]
     name: sim-nav (shard ${{ matrix.index }})
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 1
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 24
 
       - name: Download built outputs
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: built-outputs
           path: .
 
       - name: Restore volar (cache)
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v6
         with:
           path: |
             ${{ runner.temp }}/volar
@@ -472,7 +472,7 @@ jobs:
           exit $rc
 
       - name: Upload shard result
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: sim-nav-shard-json-${{ matrix.index }}
           path: /tmp/tnb-sim-nav-shard${{ matrix.index }}.json
@@ -480,7 +480,7 @@ jobs:
 
       - name: Upload shard logs on failure
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: sim-nav-shard-logs-${{ matrix.index }}
           path: |
@@ -497,16 +497,16 @@ jobs:
     runs-on: macos-latest
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 1
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 24
 
       - name: Download shard results
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: sim-nav-shard-json-*
           path: /tmp/tnb-shards
@@ -520,7 +520,7 @@ jobs:
 
       - name: Upload sim-nav results
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: sim-nav-results
           path: /tmp/tnb-sim-nav-merged.json

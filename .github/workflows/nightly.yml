@@ -18,7 +18,7 @@ jobs:
     runs-on: macos-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 1
 
@@ -30,7 +30,7 @@ jobs:
 
       - name: Restore submodules (cache)
         id: sub-cache
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v6
         with:
           path: |
             typescript
@@ -48,7 +48,7 @@ jobs:
       # reuse): pristine-attribution + build-win32 here, build + vet in ci.yml.
       - name: Save submodules (cache)
         if: steps.sub-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v6
         with:
           path: |
             typescript
@@ -56,7 +56,7 @@ jobs:
             .git/modules
           key: submodules-v1-${{ steps.sub-sha.outputs.sha }}
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 24
           cache: npm
@@ -65,7 +65,7 @@ jobs:
             typescript/package-lock.json
             typescript-go/package-lock.json
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         with:
           go-version: "1.26" # typescript-go/go.mod
           cache-dependency-path: typescript-go/go.sum
@@ -99,7 +99,7 @@ jobs:
         # the sim-nav shards load the compiled plugin). Keys stay per-workflow
         # (nightly-v3 vs ci.yml's v5): first-writer-wins on a shared key would
         # let one workflow's write timing define the other's content.
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ${{ runner.temp }}/volar
@@ -127,7 +127,7 @@ jobs:
           tar -xzf typescript-6.0.3.tgz
 
       - name: Upload built outputs
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: built-outputs
           path: |
@@ -142,7 +142,7 @@ jobs:
     runs-on: macos-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 1
 
@@ -154,7 +154,7 @@ jobs:
 
       - name: Restore submodules (cache)
         id: sub-cache
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v6
         with:
           path: |
             typescript
@@ -171,7 +171,7 @@ jobs:
       # with the other submodule jobs (GitHub Actions has no step reuse).
       - name: Save submodules (cache)
         if: steps.sub-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v6
         with:
           path: |
             typescript
@@ -179,11 +179,11 @@ jobs:
             .git/modules
           key: submodules-v1-${{ steps.sub-sha.outputs.sha }}
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 24
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         with:
           go-version: "1.26" # typescript-go/go.mod
           cache-dependency-path: typescript-go/go.sum
@@ -211,22 +211,22 @@ jobs:
         index: [0, 1, 2, 3]
     name: sim-nav (shard ${{ matrix.index }})
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 1
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 24
 
       - name: Download built outputs
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: built-outputs
           path: .
 
       - name: Restore volar (cache)
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v6
         with:
           path: |
             ${{ runner.temp }}/volar
@@ -265,7 +265,7 @@ jobs:
           exit $rc
 
       - name: Upload shard result
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: sim-nav-shard-json-${{ matrix.index }}
           path: /tmp/tnb-sim-nav-shard${{ matrix.index }}.json
@@ -273,7 +273,7 @@ jobs:
 
       - name: Upload shard logs on failure
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: sim-nav-shard-logs-${{ matrix.index }}
           path: |
@@ -290,16 +290,16 @@ jobs:
     runs-on: macos-latest
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 1
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 24
 
       - name: Download shard results
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: sim-nav-shard-json-*
           path: /tmp/tnb-shards
@@ -313,7 +313,7 @@ jobs:
 
       - name: Upload sim-nav results
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: sim-nav-results
           path: /tmp/tnb-sim-nav-merged.json
@@ -322,7 +322,7 @@ jobs:
   build-win32:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 1
 
@@ -334,7 +334,7 @@ jobs:
 
       - name: Restore submodules (cache)
         id: sub-cache
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v6
         with:
           path: |
             typescript
@@ -352,7 +352,7 @@ jobs:
       # reuse).
       - name: Save submodules (cache)
         if: steps.sub-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v6
         with:
           path: |
             typescript
@@ -360,11 +360,11 @@ jobs:
             .git/modules
           key: submodules-v1-${{ steps.sub-sha.outputs.sha }}
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 24
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         with:
           go-version: "1.26" # typescript-go/go.mod
 
@@ -404,7 +404,7 @@ jobs:
           TNB_STRIP: 1
 
       - name: Upload lib payload
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: lib-dist-win32-nightly
           path: |
@@ -418,7 +418,7 @@ jobs:
           retention-days: 1
 
       - name: Upload win32 bridge
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: bridge-win32-x64-nightly
           path: native/
@@ -428,20 +428,20 @@ jobs:
     needs: build-win32
     runs-on: windows-latest
     steps:
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 24
 
       # Checkout must precede the artifact downloads: its default clean wipes
       # untracked paths, which include the downloaded staging/ and native/.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: bridge-win32-x64-nightly
           path: native
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: lib-dist-win32-nightly
           path: staging
