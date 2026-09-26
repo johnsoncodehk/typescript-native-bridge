@@ -27,9 +27,12 @@ if (!fs.existsSync(path.join(nodeInclude, "node_api.h"))) {
 
 fs.mkdirSync(nativeDir, { recursive: true });
 
-const args = ["build", "-tags=noembed", "-buildmode=c-shared"];
+// main.bridgeVersion: the stamp tsgoChecker's loader matches against its own
+// package.json before touching the bridge.
+const ldflags = [`-X main.bridgeVersion=${require(path.join(repoRoot, "package.json")).version}`];
 // TNB_STRIP=1: drop debug symbols for shipped binaries (release matrix).
-if (process.env.TNB_STRIP === "1") args.push("-ldflags=-s -w");
+if (process.env.TNB_STRIP === "1") ldflags.push("-s", "-w");
+const args = ["build", "-tags=noembed", "-buildmode=c-shared", `-ldflags=${ldflags.join(" ")}`];
 // Build the package (not just bridge.go) so platform-split files
 // (killself_unix.go / killself_windows.go) and the NAPI shim are included.
 args.push("-o", outPath, ".");

@@ -328,9 +328,14 @@ differs from tsgo itself — file an issue with a minimal repro.
 
 ### Missing native bridge
 
-Error mentioning `bridge.dylib` / `bridge.so` / `bridge.dll` / "unsupported platform" →
-see [Platform support](#platform-support) (build from source, or use a `link:` install
-built with `npm run setup`).
+"bridge shared library not found" → see [Platform support](#platform-support) (build
+from source, or use a `link:` install built with `npm run setup`).
+
+"bridge.node was built for typescript-native-bridge X, this bundle is Y" → the loaded
+native bridge comes from another release (typically a stale
+`@typescript-native-bridge/<platform>-<arch>` left in a package-manager store). Reinstall
+so the platform package matches the main package; from a source checkout, run
+`npm run build:bridge`.
 
 ### Debug a slow run
 

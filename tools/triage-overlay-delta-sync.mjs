@@ -111,7 +111,7 @@ const events = fs.existsSync(traceFile)
 	: [];
 if (events.length === 0) fail('no overlay.sync trace events (TNB_TRACE_RPC instrumentation missing?)');
 for (const e of events) console.log(`trace ${e}`);
-const sends = events.filter(e => /deduped=false/.test(e));
+const sends = events;
 if (!sends.some(e => /deltaFiles=0/.test(e))) fail(`expected an initial full push (deltaFiles=0): ${JSON.stringify(sends)}`);
 if (!sends.some(e => /deltaFiles=[1-9]/.test(e))) fail(`no delta-shaped sync after the second edit round: ${JSON.stringify(sends)}`);
 const byteLines = sends.map(e => +(e.match(/bytes=(\d+)/)?.[1] ?? Infinity));

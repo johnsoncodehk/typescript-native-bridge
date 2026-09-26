@@ -417,7 +417,19 @@ function loadBridgeDeps(): void {
     // The bridge is a NAPI addon (bridge.node) — Node dlopens it directly via
     // require(); no FFI library. napi_shim.c exposes plain JS functions
     // (strings/Buffer/bool/null/int64 in and out; errors are thrown).
-    _bridgeAddon = require(resolvedBridge);
+    const addon = require(resolvedBridge);
+    // A bridge from another release speaks another wire format and fails far
+    // from the cause (a stale platform package in a pnpm store paired with a
+    // newer bundle surfaced as an ArenaClient.readHandle error).
+    const expectedVersion: string = require(path.join(packageRoot, "package.json")).version;
+    if (addon.version !== expectedVersion) {
+        throw new Error(
+            `tsgoChecker: ${resolvedBridge} was built for typescript-native-bridge ${addon.version || "(unstamped)"}, ` +
+                `this bundle is ${expectedVersion}\n` +
+                `  Reinstall so the platform package matches, or from a source checkout: npm run build:bridge`,
+        );
+    }
+    _bridgeAddon = addon;
     // Hand the bundled lib dir to Go over NAPI — the only channel that
     // reaches Go from every host thread (issue #37: worker_threads never
     // propagate process.env writes to the environ Go reads, so an env-var
@@ -888,37 +900,50 @@ function openProjectParam(configFilePath: string, options: any): { fileName: str
     return { fileName: configFilePath, compilerOptions: toWireCompilerOptions(options) };
 }
 
-/** Last updateSnapshot params + project per config — identical repeat calls are skipped (watch-lint generations reissue the same params ~1000×). The params OBJECT is the fingerprint: retaining a JSON copy duplicated every overlay text (~15MB per config at hoppscotch scale, issue #41 B-2), while the content strings here are shared references with hostContentByFile, so equality below is O(1) per unchanged file. */
-const _lastUpdateParamsByConfig = new Map<string, { params: any; project: any }>();
 /** Per-generation getCompilerOptionsForFile memo, keyed by the live vendored project wrapper — see optionsForFile (no-project-references fast path). */
 const _optionsForFileMemo = new WeakMap<any, any>();
 
-/** Structural equality for updateSnapshot params (see _lastUpdateParamsByConfig). Small fields (compilerOptions, extraFileExtensions) compare via JSON; bulk texts compare by shared-reference string equality. */
-const sameUpdateParams = (a: any, b: any): boolean => {
+/** The state-bearing half of every updateSnapshot: what Go holds for a config
+ * once a send lands. Every field is idempotent on the Go side (options
+ * replace, open refs are a set, extras/additional roots are sticky), so
+ * re-sending an identical steady half changes nothing. */
+type SteadySyncParams = {
+    openProject: { fileName: string; compilerOptions: Record<string, any> };
+    openFiles?: string[];
+    extraFileExtensions?: any[];
+    additionalFiles?: string[];
+};
+/** The one-shot half: consumed by the send that carries it. */
+type SyncDelta = {
+    openFilesWithContent?: any[];
+    fileChanges?: { changed: string[] };
+    closeFiles?: string[];
+    closeProjects?: string[];
+    prefetchDiagnostics?: boolean;
+};
+
+function steadySyncParams(configFilePath: string, options: any, openFiles: string[]): SteadySyncParams {
+    const additionalFiles = _lastAdditionalFilesByConfig.get(configFilePath);
+    return {
+        openProject: openProjectParam(configFilePath, options),
+        ...(openFiles.length > 0 ? { openFiles } : {}),
+        ...(_lastExtraFileExtensions?.length ? { extraFileExtensions: _lastExtraFileExtensions } : {}),
+        ...(additionalFiles?.length ? { additionalFiles } : {}),
+    };
+}
+
+/** Last landed steady params + the project they yielded, per config. */
+const _lastSyncByConfig = new Map<string, { steady: SteadySyncParams; project: any }>();
+
+function sameSteadySyncParams(a: SteadySyncParams, b: SteadySyncParams): boolean {
     const names = (x: readonly string[] | undefined, y: readonly string[] | undefined): boolean =>
         x === y || (!!x && !!y && x.length === y.length && x.every((v, i) => v === y[i]));
-    const filesWithContent = (x: readonly any[] | undefined, y: readonly any[] | undefined): boolean =>
-        x === y || (!!x && !!y && x.length === y.length && x.every((f, i) => f.fileName === y[i].fileName && f.scriptKind === y[i].scriptKind && f.content === y[i].content
-            // Edit pushes carry content:"" plus the real change in edits — comparing content alone treats two different edits as equal and drops the push (sim-xfile s1 revert).
-            && f.baseVersion === y[i].baseVersion && JSON.stringify(f.edits) === JSON.stringify(y[i].edits)));
-    // Same-shape fileChanges must compare itemwise: a params object carrying
-    // changed entries vs one without (or with different ones) is a REAL state
-    // difference — treating them as equal would swallow the send (issue #49).
-    const fileChanges = (x: any, y: any): boolean =>
-        x === y || (!!x && !!y
-            && !!x.invalidateAll === !!y.invalidateAll
-            && names(x.changed, y.changed) && names(x.created, y.created) && names(x.deleted, y.deleted));
-    return names(a.openFiles, b.openFiles)
-        && names(a.closeFiles, b.closeFiles)
-        && names(a.closeProjects, b.closeProjects)
+    return a.openProject.fileName === b.openProject.fileName
+        && JSON.stringify(a.openProject.compilerOptions) === JSON.stringify(b.openProject.compilerOptions)
+        && names(a.openFiles, b.openFiles)
         && names(a.additionalFiles, b.additionalFiles)
-        && filesWithContent(a.openFilesWithContent, b.openFilesWithContent)
-        && fileChanges(a.fileChanges, b.fileChanges)
-        && !!a.prefetchDiagnostics === !!b.prefetchDiagnostics
-        && a.openProject?.fileName === b.openProject?.fileName
-        && JSON.stringify(a.openProject?.compilerOptions) === JSON.stringify(b.openProject?.compilerOptions)
         && JSON.stringify(a.extraFileExtensions) === JSON.stringify(b.extraFileExtensions);
-};
+}
 
 /** Open client tabs mirrored to the per-process tsgo session. tsgo OpenFiles
  * is additive-only (ref-counted, session.go): a tab closed in the editor
@@ -2459,33 +2484,76 @@ function forgetSyncedOverlay(fileName: string): void {
 	_pendingOverlayEditsByFile.delete(fileName);
 }
 
-/** Per-file overlay push decision: undefined = Go already holds exactly the
- * host text (nothing to send); an `{edits, baseVersion}` delta when splicing
- * the recorded host edits into the synced base reproduces the host text
- * (plain TS only — .vue-class virtual TS is regenerated per host change,
- * never edit-shaped, so it always takes the full-content path); full content
- * otherwise. Consumes the file's pending edits either way. */
-function decideOverlayPush(fileName: string, hostText: string, scriptKind: number): any | undefined {
+/** The per-file overlay rule every sync site shares. Returns the wire entry
+ * (undefined = Go already holds the host text) and whether host text
+ * diverges from disk (or disk lacks the file).
+ * - Diverging: nothing when the mirror already equals the host text; an
+ *   `{edits, baseVersion}` delta when splicing the recorded host edits into
+ *   the synced base reproduces it (plain TS only — .vue-class virtual TS is
+ *   regenerated per host change, never edit-shaped); full content otherwise.
+ * - Back at disk after a prior overlay: re-push the text once so Go stops
+ *   checking the stale overlay, and the mirror forgets the file. Host text
+ *   equal to CURRENT disk is not necessarily what Go saw — SnapshotFS froze
+ *   the first disk read; that case rides fileChanges.changed via the #49
+ *   pending set, not this rule.
+ * Consumes the file's pending edits either way. */
+function planOverlayPush(fileName: string, hostText: string, scriptKind: number): { entry: any | undefined; diverges: boolean } {
 	const synced = _syncedOverlayContentByFile.get(fileName);
-	if (synced === hostText) {
-		_pendingOverlayEditsByFile.delete(fileName);
-		return undefined;
+	if (!shouldSendHostOverlay(fileName, hostText)) {
+		if (synced === undefined) return { entry: undefined, diverges: false };
+		forgetSyncedOverlay(fileName);
+		return { entry: synced === hostText ? undefined : { fileName, content: hostText, scriptKind }, diverges: false };
 	}
 	const pendingEdits = _pendingOverlayEditsByFile.get(fileName);
 	_pendingOverlayEditsByFile.delete(fileName);
+	if (synced === hostText) return { entry: undefined, diverges: true };
 	if (synced !== undefined && pendingEdits?.length && !isExtraExtensionFileName(fileName)
 		&& applyOverlayEdits(synced, pendingEdits) === hostText) {
-		return { fileName, content: "", scriptKind, edits: pendingEdits, baseVersion: _syncedOverlayVersionByFile.get(fileName) ?? 0 };
+		return { entry: { fileName, content: "", scriptKind, edits: pendingEdits, baseVersion: _syncedOverlayVersionByFile.get(fileName) ?? 0 }, diverges: true };
 	}
-	return { fileName, content: hostText, scriptKind };
+	return { entry: { fileName, content: hostText, scriptKind }, diverges: true };
 }
 
 /** overlay.sync trace line for a send batch (witness + perf A/B read this). */
-function traceOverlaySync(openFilesWithContent: readonly any[], deduped: boolean): void {
+function traceOverlaySync(openFilesWithContent: readonly any[]): void {
 	if (openFilesWithContent.length === 0) return;
 	const deltaFiles = openFilesWithContent.filter(f => f.edits?.length);
 	const edits = deltaFiles.reduce((n, f) => n + f.edits.length, 0);
-	_rpcTraceEvent("overlay.sync", `files=${openFilesWithContent.length} deltaFiles=${deltaFiles.length} edits=${edits} bytes=${JSON.stringify(openFilesWithContent).length} deduped=${deduped} names=${openFilesWithContent.map(f => f.fileName.split("/").slice(-2).join("/") + (f.edits?.length ? "(d)" : "")).join(",")}`);
+	_rpcTraceEvent("overlay.sync", `files=${openFilesWithContent.length} deltaFiles=${deltaFiles.length} edits=${edits} bytes=${JSON.stringify(openFilesWithContent).length} names=${openFilesWithContent.map(f => f.fileName.split("/").slice(-2).join("/") + (f.edits?.length ? "(d)" : "")).join(",")}`);
+}
+
+/**
+ * The one updateSnapshot path. A send with an empty delta against the last
+ * landed steady params is skipped and the recorded project reused: every
+ * updateSnapshot REPLACES the Go snapshot and disposes the previous
+ * generation's handle registry, so a no-op send strands the reused thin
+ * program's cached handles ("symbol handle N not found in snapshot
+ * registry", sim-nav #5986 class), and watch-lint reissues identical
+ * params ~1000× (issue #11 perf). `snapshot` is undefined when skipped.
+ * The overlay mirror commits here, right after Go accepted the content.
+ */
+function syncSnapshot(configFilePath: string, steady: SteadySyncParams, delta: SyncDelta): { project: any; snapshot: any } {
+	const content = delta.openFilesWithContent ?? [];
+	const prev = _lastSyncByConfig.get(configFilePath);
+	if (content.length === 0 && !delta.fileChanges && !delta.closeFiles?.length && !delta.closeProjects?.length
+		&& !delta.prefetchDiagnostics && prev && sameSteadySyncParams(prev.steady, steady)) {
+		return { project: prev.project, snapshot: undefined };
+	}
+	traceOverlaySync(content);
+	const snapshot: any = _api.updateSnapshot({
+		...steady,
+		...(content.length > 0 ? { openFilesWithContent: content } : {}),
+		...(delta.fileChanges ? { fileChanges: delta.fileChanges } : {}),
+		...(delta.closeFiles?.length ? { closeFiles: delta.closeFiles } : {}),
+		...(delta.closeProjects?.length ? { closeProjects: delta.closeProjects } : {}),
+		...(delta.prefetchDiagnostics ? { prefetchDiagnostics: true } : {}),
+	});
+	for (const f of content) commitSyncedOverlay(f);
+	trackBuildProjectSnapshot(configFilePath, snapshot, [...(steady.openFiles ?? []), ...content.map(f => f.fileName)]);
+	const project = snapshot.getProject(configFilePath);
+	if (project) _lastSyncByConfig.set(configFilePath, { steady, project });
+	else _lastSyncByConfig.delete(configFilePath);
+	return { project, snapshot };
 }
 
 // Overlay-path cache: only files missing on disk are fed to tsgo as overlays
@@ -2548,6 +2616,7 @@ function beginBuildProject(configFilePath: string): { closeParams: any; staleSna
     _buildModeRef.active = { configFilePath, openedFiles: new Set(), snapshots: [] };
     if (!prev) return { closeParams: undefined, staleSnapshots: undefined };
     _projectCache.delete(prev.configFilePath);
+    _lastSyncByConfig.delete(prev.configFilePath);
     // The overlays are being closed in tsgo — forget the synced-content memo
     // so a later re-push of identical content is not skipped.
     for (const f of prev.openedFiles) forgetSyncedOverlay(f);
@@ -2730,8 +2799,8 @@ function collectTsgoOpenFileNames(syncHost: any, extra?: Iterable<string>): stri
     };
     // Extra (query-requested) names go LAST: hoisting them first makes the
     // collected order depend on the query target, which alternates the
-    // overlay push key between sibling queries and re-fires an empty
-    // updateSnapshot on every other request (see _lastOverlayPushKeyByConfig).
+    // steady openFiles between sibling queries and re-fires an empty
+    // updateSnapshot on every other request (see syncSnapshot).
     const scriptNames = syncHost?.getScriptFileNames?.();
     if (scriptNames) {
         for (const fn of scriptNames) add(fn);
@@ -5867,10 +5936,7 @@ function resolveLanguageServiceScriptKind(
     }
     return inferScriptKind(hostFileName);
 }
-/** Overlay when host snapshot text differs from disk (or file is absent on disk).
- * Same-as-current-disk host text is not necessarily same-as-Go-saw — SnapshotFS
- * froze the first disk read; that case rides fileChanges.changed via the #49
- * pending set, not this gate. */
+/** Host text differs from disk (or disk lacks the file) — see planOverlayPush. */
 function shouldSendHostOverlay(fileName: string, hostText: string): boolean {
     if (!isOverlayCandidatePath(fileName)) return false;
     if (!fileExistsOnDisk(fileName)) return true;
@@ -6821,19 +6887,6 @@ function tnbComputeNamedDeclarations(sourceFile: any): Map<string, any[]> {
  * module-level lsnav wire entry (tsgoLsApiRequest) can sync on demand. */
 const _overlaySyncByConfig = new Map<string, (requestedFileName?: string) => void>();
 
-/**
- * Last synced open-file set per config (join of the collected open names),
- * for the no-change fast path in pushHostOverlayToTsgo. Every updateSnapshot
- * REPLACES the Go snapshot and disposes the previous one's handle registry —
- * a query-only sync with the same open set and no content to push must be a
- * no-op, or every replayed lsnav query strands the reused thin program's
- * cached handles in a disposed snapshot ("symbol handle N not found in
- * snapshot registry", sim-nav #5986 class). ensureProject records the same
- * key after its own snapshot so the first query sync after a rebuild is a
- * no-op too.
- */
-const _lastOverlayPushKeyByConfig = new Map<string, string>();
-
 export function tsgoLsApiRequest(program: any, method: string, params: any): any {
     const configFilePath = program?.getCompilerOptions?.()?.configFilePath;
     let proj = configFilePath && _projectCache.get(configFilePath);
@@ -7130,22 +7183,9 @@ export function createTsgoProgram(
             // from the same host snapshot on first access), so program
             // creation pays text only, not one JS AST per virtual file (B-1).
             // Pure disk lint skips this and uses tsgo-backed single-parse.
-            if (!shouldSendHostOverlay(resolvedFn, content.text)) {
-                // Host matches disk again after a prior overlay — re-push on-disk text
-                // so tsgo does not keep checking stale overlay content.
-                const synced = _syncedOverlayContentByFile.get(resolvedFn);
-                if (synced !== undefined && synced !== content.text) {
-                    forgetSyncedOverlay(resolvedFn);
-                    overlays.push({ fileName: resolvedFn, content: content.text, scriptKind: content.scriptKind });
-                }
-                else if (synced !== undefined) {
-                    forgetSyncedOverlay(resolvedFn);
-                }
-                continue;
-            }
-            const entry = decideOverlayPush(resolvedFn, content.text, content.scriptKind);
+            const { entry, diverges } = planOverlayPush(resolvedFn, content.text, content.scriptKind);
             if (!entry) continue;
-            hostContentByFile.set(resolvedFn, content);
+            if (diverges) hostContentByFile.set(resolvedFn, content);
             overlays.push(entry);
             }
         }
@@ -9664,9 +9704,8 @@ export function createTsgoChecker(program: any): any {
             programCtx.pendingOverlays = undefined;
         }
 
-        const extraFileExtensions = programCtx?.pendingExtraFileExtensions;
+        if (programCtx?.pendingExtraFileExtensions) _lastExtraFileExtensions = programCtx.pendingExtraFileExtensions;
         if (programCtx) programCtx.pendingExtraFileExtensions = undefined;
-        if (extraFileExtensions) _lastExtraFileExtensions = extraFileExtensions;
 
         // Host-computed root set the tsconfig expansion may miss (LS
         // getScriptFileNames shims, glint readDirectory extras) — Go adds them
@@ -9676,7 +9715,6 @@ export function createTsgoChecker(program: any): any {
             _lastAdditionalFilesByConfig.set(configFilePath!, programCtx.pendingAdditionalFiles);
             programCtx.pendingAdditionalFiles = undefined;
         }
-        const additionalFiles = _lastAdditionalFilesByConfig.get(configFilePath!);
 
         // #49: files the host told us were rewritten on disk (or where a
         // host read diverged from disk at materialization). They are NOT
@@ -9722,55 +9760,20 @@ export function createTsgoChecker(program: any): any {
         // then joins the in-flight pass (Go-side singleflight). Never set for
         // interactive hosts: a full check per keystroke would be pure waste.
         const prefetchDiagnostics = !!(options as any).tscBuild;
-        // Watch-mode lint rebuilds the thin program per linted file with
-        // byte-identical updateSnapshot params (same open files, no new
-        // overlays): Go's answer is deterministic and already cached here —
-        // skip the round trip. Interactive-only: build mode's beginBuildProject
-        // / prefetch side effects must always fire. The fingerprint covers
-        // every value that can alter the response (open files, overlay
-        // contents, extras, close params, prefetch, fileChanges).
-        const updateParams = {
-            openProject: openProjectParam(configFilePath!, options),
-            ...(openFiles.length > 0 ? { openFiles } : {}),
-            ...(closedTabs?.length ? { closeFiles: closedTabs } : {}),
-            ...(openFilesWithContent.length > 0 ? { openFilesWithContent } : {}),
-            ...(extraFileExtensions ? { extraFileExtensions } : {}),
-            ...(additionalFiles?.length ? { additionalFiles } : {}),
+        const steady = steadySyncParams(configFilePath!, options, openFiles);
+        const synced = syncSnapshot(configFilePath!, steady, {
+            openFilesWithContent,
             ...(externalChanged?.length ? { fileChanges: { changed: externalChanged } } : {}),
-            ...(buildClose.closeParams ?? {}),
-            ...(prefetchDiagnostics ? { prefetchDiagnostics: true } : {}),
-        };
-        const prevUpdate = (options as any).tscBuild ? undefined : _lastUpdateParamsByConfig.get(configFilePath!);
-        const deduped = prevUpdate !== undefined && sameUpdateParams(prevUpdate.params, updateParams);
-        traceOverlaySync(openFilesWithContent, deduped);
-        const snapshot: any = deduped ? undefined : _api.updateSnapshot(updateParams);
+            ...(closedTabs?.length ? { closeFiles: closedTabs } : {}),
+            ...buildClose.closeParams,
+            prefetchDiagnostics,
+        });
         if (programCtx) programCtx.pendingReferencedProjects = undefined;
-        project = deduped ? prevUpdate!.project : snapshot.getProject(configFilePath!);
+        project = synced.project;
         if (!project) {
             throw new Error(`tsgoChecker: project not found for ${configFilePath}`);
         }
-        if (!deduped && !(options as any).tscBuild) {
-            // Fingerprint WITHOUT fileChanges (#49): external-change entries
-            // are one-shot — a later snapshot with identical steady-state
-            // params and no fileChanges must still dedupe against this one.
-            _lastUpdateParamsByConfig.set(configFilePath!, { params: { ...updateParams, fileChanges: undefined }, project });
-        }
-        if (snapshot) {
-            trackBuildProjectSnapshot(configFilePath!, snapshot, [
-                ...openFiles,
-                ...openFilesWithContent.map(f => f.fileName),
-            ]);
-            // Go now holds exactly this open set with all host content
-            // synced — record the query-path no-change key so the first
-            // pushHostOverlayToTsgo after a rebuild is a no-op instead of
-            // one empty updateSnapshot (which would dispose the handle
-            // registry the fresh program's caches just warmed).
-            _lastOverlayPushKeyByConfig.set(configFilePath!, openFiles.join("\n"));
-        }
         releaseStaleBuildSnapshots(buildClose.staleSnapshots);
-        for (const f of openFilesWithContent) {
-            commitSyncedOverlay(f);
-        }
         // Cross-project extra-extension imports (e.g. ../other/foo.vue): the
         // program can include host-virtual files that were not in this
         // project's root set, so no overlay was pushed for them and tsgo
@@ -9781,7 +9784,7 @@ export function createTsgoChecker(program: any): any {
         // host.getSourceFile. Only files not already overlaid are sent.
         {
             const sentOverlayFiles = new Set(openFilesWithContent.map(f => f.fileName));
-            const lateOverlays: { fileName: string; content: string; scriptKind: number }[] = [];
+            const lateOverlays: any[] = [];
             // names are host-form already (decode-boundary normalized in
             // tsgoSourceFileNames) — no per-entry re-normalization here.
             for (const hostFileName of tsgoSourceFileNames(configFilePath!, project).names) {
@@ -9789,33 +9792,18 @@ export function createTsgoChecker(program: any): any {
                 if (sentOverlayFiles.has(hostFileName) || _syncedOverlayContentByFile.has(hostFileName)) continue;
                 const content = getHostScriptContent(syncHost ?? programCtx?.overlayHostCtx?.host, hostFileName, options);
                 if (!content?.text || !content.fromHost) continue;
-                // Same-as-disk host content adds nothing (tsgo already parsed
-                // the disk text) — only genuine virtual content is pushed.
-                if (!shouldSendHostOverlay(hostFileName, content.text)) continue;
-                lateOverlays.push({ fileName: hostFileName, content: content.text, scriptKind: content.scriptKind });
+                const { entry } = planOverlayPush(hostFileName, content.text, content.scriptKind);
+                if (entry) lateOverlays.push(entry);
             }
             if (lateOverlays.length > 0) {
-                const lateSnapshot: any = _api.updateSnapshot({
-                    openProject: openProjectParam(configFilePath!, options),
-                    openFilesWithContent: lateOverlays,
-                    ...(extraFileExtensions ? { extraFileExtensions } : {}),
-                    // This push supersedes the snapshot that carried the
-                    // build-mode prefetch, and Go cancels a superseded
-                    // snapshot's in-flight pass — re-request it here so the
-                    // whole-program check restarts on the virtual-content
-                    // state and overlaps the remaining builder work instead
-                    // of running synchronously inside getGlobalDiagnostics.
-                    ...(prefetchDiagnostics ? { prefetchDiagnostics: true } : {}),
-                });
-                // The push advanced Go state — the params dedupe must not
-                // skip the next ensureProject's refresh for this config.
-                _lastUpdateParamsByConfig.delete(configFilePath!);
-                const refreshed = lateSnapshot.getProject(configFilePath!);
-                if (refreshed) {
-                    project = refreshed;
-                    trackBuildProjectSnapshot(configFilePath!, lateSnapshot, lateOverlays.map(f => f.fileName));
-                    for (const f of lateOverlays) commitSyncedOverlay(f);
-                }
+                // This push supersedes the snapshot that carried the
+                // build-mode prefetch, and Go cancels a superseded
+                // snapshot's in-flight pass — re-request it here so the
+                // whole-program check restarts on the virtual-content
+                // state and overlaps the remaining builder work instead
+                // of running synchronously inside getGlobalDiagnostics.
+                const late = syncSnapshot(configFilePath!, steady, { openFilesWithContent: lateOverlays, prefetchDiagnostics });
+                if (late.project) project = late.project;
             }
         }
         _projectCache.set(configFilePath!, project);
@@ -9849,20 +9837,82 @@ export function createTsgoChecker(program: any): any {
     // ── Position → tsgo Node finder (cached per file) ────────────────
     const tsgoSfCache = new Map<string, any>();
     const nodeAtPosCache = new Map<string, Map<string, any>>();
-    // Symbol cache keyed by (fileName, end-offset) — the fast path for
-    // getSymbolAtLocation, which resolves the vast majority of the ~30k
-    // scope-manager identifier queries without touching the node index.
-    const symByPos = new Map<string, Map<string, any>>();
+    // ── Snapshot-generation caches ───────────────────────────────────
+    // Every memo here holds handles bound to one Go snapshot generation.
+    // Each updateSnapshot disposes the previous generation's handle registry,
+    // content change or not, so a snapshot bump inside this checker's
+    // lifetime (pushHostOverlayToTsgo) replaces the whole object — a new
+    // snapshot-bound memo cannot be forgotten by a clear list. The per-file
+    // scan caches (tsgoSfCache, nodeIndexCache, nodeAtPosCache) stay outside:
+    // they reuse across generations and invalidate per changed file.
+    const newSnapshotCaches = () => ({
+        // Symbol cache keyed by (fileName, end-offset) — the fast path for
+        // getSymbolAtLocation, which resolves the vast majority of the ~30k
+        // scope-manager identifier queries without touching the node index.
+        symByPos: new Map<string, Map<string, any>>(),
+        // refineNavSymbol memo: the same symbol is refined once even when
+        // queried from many reference sites (e.g. 100 refs to `foo`). Keyed by
+        // symbol object identity (tsgo symbols are id-keyed singletons via
+        // objectRegistry; host-bound symbols are real TS symbol objects).
+        refinedSymBySym: new WeakMap<any, any>(),
+        // Files whose import/export module-specifier symbols were
+        // batch-resolved in one getSymbolsAtLocations RPC over the tsgo
+        // SourceFile's `imports` list (see
+        // ensureModuleSpecifierSymbolsPrefetched). Multi-project lint runners
+        // resolve every import literal of every program file (BuilderState
+        // dependency walks, cache hashing); per-literal RPC dominates without this.
+        moduleSpecPrefetched: new Set<string>(),
+        /** getSymbolsInScope memo — keyed (file:start:end:meaning); see adapter. */
+        symbolsInScopeCache: new Map<string, any[]>(),
+        /** tryFindAmbientModule memo — keyed unquoted module name; null = miss. */
+        ambientModuleByNameCache: new Map<string, any | null>(),
+        // Light ambient-module batch for builder referenced-files (module names +
+        // declaration merge only) via Checker.getAmbientModules. null = fetched
+        // and empty; undefined = not fetched.
+        ambientModuleBatchCache: undefined as any,
+        // Checker-quality ambient symbols for tryFindAmbientModule / export-info
+        // rehydrate. Binder-only light symbols lack merged exports and can hang
+        // getAliasedSymbol when auto-import walks ambient modules.
+        ambientModuleExportBatchCache: undefined as any,
+        /** Host→tsgo resolution memo (see rpc()). */
+        rpcSymbolCache: new Map<any, any>(),
+        nodeTypeCache: new Map<any, any>(),
+        typeOfSymbolCache: new Map<any, any>(),
+        propertiesCache: new Map<any, any>(),
+        // Per-type name→property map, built lazily from the memoized
+        // getPropertiesOfType result. Collapses N getPropertyOfType(name)
+        // RPCs into 1 getPropertiesOfType RPC + JS lookup per type.
+        propertyByNameCache: new Map<any, Map<string, any>>(),
+        // Types for which getPropertiesOfType was used to bulk-fill propertyByNameCache.
+        propertyBulkLoaded: new Set<any>(),
+        // Per-type signature cache keyed by SignatureKind. Unifies the proto
+        // (type.getCallSignatures/getConstructSignatures) and adapter
+        // (checker.getSignaturesOfType) paths onto one RPC per (type, kind).
+        signaturesByKindCache: new Map<any, Map<number, readonly any[]>>(),
+        // Per-type base-types cache. Unifies proto (type.getBaseTypes) and adapter
+        // (checker.getBaseTypes) onto one RPC per type.
+        baseTypesCache: new Map<any, readonly any[]>(),
+        // Object-literal completion batch (see ObjCompletionBatch).
+        objCompletionPending: undefined as { hostNode: any; tsgoNode: any; results: any[] } | undefined,
+        objCompletionBatch: undefined as ObjCompletionBatch | undefined,
+        // getHostBoundSf memo: refineNavSymbol resolves the module parent of
+        // ~2k scope symbols per completion, each walking declarations and
+        // calling getHostBoundSf per declaration file. Repeating the
+        // resolveHostFileName + getScriptVersion + sfCache probe per call
+        // burned most of the completion wall. null = confirmed not host-parsed.
+        hostBoundSfMemo: new Map<string, any>(),
+    });
+    let gen = newSnapshotCaches();
     const symCacheFileName = (fileName: string): string => {
         const h = hostForOverlaySyncLocal();
         return resolveHostFileName(fileName, h);
     };
     const getSymFileCache = (fileName: string, create = false): Map<string, any> | undefined => {
         const key = symCacheFileName(fileName);
-        let fc = symByPos.get(key);
+        let fc = gen.symByPos.get(key);
         if (!fc && create) {
             fc = new Map();
-            symByPos.set(key, fc);
+            gen.symByPos.set(key, fc);
         }
         return fc;
     };
@@ -9906,33 +9956,9 @@ export function createTsgoChecker(program: any): any {
         const fc = getSymFileCache(fileName, true)!;
         fc.set(`${start}:${end}`, sym);
     };
-    // refineNavSymbol memo: the same symbol is refined once even when queried
-    // from many reference sites (e.g. 100 refs to `foo`). Keyed by symbol
-    // object identity (tsgo symbols are id-keyed singletons via objectRegistry;
-    // host-bound symbols are real TS symbol objects). Cleared on snapshot
-    // refresh alongside symByPos.
-    let refinedSymBySym = new WeakMap<any, any>();
-    // Files whose import/export module-specifier symbols were batch-resolved
-    // in one getSymbolsAtLocations RPC over the tsgo SourceFile's `imports`
-    // list (see ensureModuleSpecifierSymbolsPrefetched). Multi-project lint
-    // runners resolve every import literal of every program file (BuilderState
-    // dependency walks, cache hashing); per-literal RPC dominates without this.
-    const moduleSpecPrefetched = new Set<string>();
-    /** getSymbolsInScope memo — keyed (file:start:end:meaning); see adapter. */
-    const symbolsInScopeCache = new Map<string, any[]>();
     // tsserver (projectService) needs full ambient export batch for exportInfoMap;
     // vue-tsc / builder hosts without projectService use the light batch.
     const isProjectServiceProgram = !!(programCtx?.lsHost as any)?.projectService;
-    /** tryFindAmbientModule memo — keyed unquoted module name; null = miss. */
-    const ambientModuleByNameCache = new Map<string, any | null>();
-    // Light ambient-module batch for builder referenced-files (module names +
-    // declaration merge only) via Checker.getAmbientModules. null = fetched
-    // and empty; undefined = not fetched.
-    let ambientModuleBatchCache: any = undefined;
-    // Checker-quality ambient symbols for tryFindAmbientModule / export-info
-    // rehydrate. Binder-only light symbols lack merged exports and can hang
-    // getAliasedSymbol when auto-import walks ambient modules.
-    let ambientModuleExportBatchCache: any = undefined;
     // Per-file index: start position → all tsgo nodes that start there.
     // Built once per file via a single AST walk, after which every
     // findTsgoNodeAtPosition call is an O(1) map lookup + a tiny kind/end
@@ -10107,7 +10133,7 @@ export function createTsgoChecker(program: any): any {
     function getPropertiesOfTypeForExportEquals(type: any): readonly any[] {
         if (!type) return [];
         ensureProject();
-        return memoGet(propertiesCache, type, () => project.checker.getPropertiesOfType(type) ?? []);
+        return memoGet(gen.propertiesCache, type, () => project.checker.getPropertiesOfType(type) ?? []);
     }
 
     function forEachExportEqualsProperties(moduleSymbol: any, cb: (symbol: any, key: string) => void): void {
@@ -10141,70 +10167,20 @@ export function createTsgoChecker(program: any): any {
         // mirror the walk is about to reconcile — the same order as the collect.
         const externalChanged = drainExternalFileChanges()?.changed;
         const openFiles = collectTsgoOpenFileNames(syncHost, requestedFileName ? [requestedFileName] : undefined);
-        const openFilesWithContent: { fileName: string; content: string; scriptKind: number }[] = [];
+        const openFilesWithContent: any[] = [];
         for (const hostFileName of openFiles) {
             if (!isOverlayCandidatePath(hostFileName)) continue;
             const content = getHostScriptContent(syncHost, hostFileName, ctx.options);
             if (!content?.text) continue;
-            const hostOnly = !fileExistsOnDisk(hostFileName);
-            const inTsgo = !!project?.program?.getSourceFile?.(toTsgoFileName(hostFileName));
-            if (!hostOnly && inTsgo && !shouldSendHostOverlay(hostFileName, content.text)) {
-                const synced = _syncedOverlayContentByFile.get(hostFileName);
-                if (synced !== undefined && synced !== content.text) {
-                    forgetSyncedOverlay(hostFileName);
-                    openFilesWithContent.push({ fileName: hostFileName, content: content.text, scriptKind: content.scriptKind });
-                }
-                else if (synced !== undefined) {
-                    forgetSyncedOverlay(hostFileName);
-                }
-                continue;
-            }
-            if (!hostOnly) {
-                const entry = decideOverlayPush(hostFileName, content.text, content.scriptKind);
-                if (!entry) continue;
-                openFilesWithContent.push(entry);
-                continue;
-            }
-            openFilesWithContent.push({ fileName: hostFileName, content: content.text, scriptKind: content.scriptKind });
+            const { entry } = planOverlayPush(hostFileName, content.text, content.scriptKind);
+            if (entry) openFilesWithContent.push(entry);
         }
         if (!openFiles.length && !openFilesWithContent.length && !externalChanged) return;
-
-        // No-change fast path: bumping the snapshot here would dispose the
-        // handle registry the reused thin program's caches still reference
-        // (see _lastOverlayPushKeyByConfig). Content changes are detected
-        // upstream (decideOverlayPush / shouldSendHostOverlay), so identical
-        // open set + nothing to push means Go state already matches host.
-        // The key covers the open set only: the fast path requires empty
-        // content, and after any successful push the mirror holds whatever
-        // was pushed — recording the no-content form lets a content push and
-        // a following query-only sync compare equal instead of churning one
-        // empty snapshot. ensureProject records the same key after its own
-        // snapshot so the first query sync after a rebuild is a no-op too.
-        const pushKey = openFiles.join("\n");
-        if (openFilesWithContent.length === 0 && !externalChanged && _lastOverlayPushKeyByConfig.get(ctx.configFilePath) === pushKey) return;
-
-        traceOverlaySync(openFilesWithContent, /*deduped*/ false);
-        const snapshot: any = _api.updateSnapshot({
-            openProject: openProjectParam(ctx.configFilePath, ctx.options),
-            ...(openFiles.length > 0 ? { openFiles } : {}),
+        const { project: refreshed, snapshot } = syncSnapshot(ctx.configFilePath, steadySyncParams(ctx.configFilePath, ctx.options, openFiles), {
             openFilesWithContent,
             ...(externalChanged ? { fileChanges: { changed: externalChanged } } : {}),
-            ...(_lastExtraFileExtensions ? { extraFileExtensions: _lastExtraFileExtensions } : {}),
-            // Host-injected extra roots (svelte2tsx/glint shims) — without them
-            // every hook-driven rebuild drops the ambient shim files from the
-            // program (#5847 svelteHTML false positive).
-            ...(_lastAdditionalFilesByConfig.get(ctx.configFilePath)?.length ? { additionalFiles: _lastAdditionalFilesByConfig.get(ctx.configFilePath) } : {}),
         });
-        _lastOverlayPushKeyByConfig.set(ctx.configFilePath, pushKey);
-        // The push advanced Go state — the params dedupe must not skip the
-        // next ensureProject's refresh for this config.
-        _lastUpdateParamsByConfig.delete(ctx.configFilePath);
-        trackBuildProjectSnapshot(ctx.configFilePath, snapshot, [
-            ...openFiles,
-            ...openFilesWithContent.map(f => f.fileName),
-        ]);
-        const refreshed = snapshot.getProject(ctx.configFilePath);
-        if (!refreshed) return;
+        if (!snapshot || !refreshed) return;
         project = refreshed;
         // Wire objects route prototype API calls through their registry's
         // project, so a replacement generation must own the live checker
@@ -10213,7 +10189,6 @@ export function createTsgoChecker(program: any): any {
         _projectCache.set(ctx.configFilePath, refreshed);
         _currentProjectRef.project = refreshed;
         installTsgoBackedSourceFileLoader(() => project);
-        for (const f of openFilesWithContent) commitSyncedOverlay(f);
         for (const fileName of [...openFilesWithContent.map(f => f.fileName), ...(externalChanged ?? [])]) {
             tsgoSfCache.delete(fileName);
             nodeIndexCache.delete(fileName);
@@ -10224,61 +10199,36 @@ export function createTsgoChecker(program: any): any {
             // AST against the new snapshot.
             programCtx?.thinProgram?.__tnbInvalidateHostSourceFile?.(fileName);
         }
-        // Every updateSnapshot REPLACES the Go snapshot and disposes the
-        // previous generation's handle registry — the caches below all hold
-        // snapshot-bound handles, so they must reset on ANY bump, content
-        // change or not. (The former "content-only" guard kept stale handles
-        // across openFiles-only bumps, which is how replayed queries faulted
-        // with "symbol handle N not found in snapshot registry", sim-nav
-        // #5986 class. The no-change fast path above is what keeps this from
-        // costing re-resolution on every query.)
+        // Any bump starts a new generation, content change or not (see
+        // newSnapshotCaches); syncSnapshot's no-op skip is what keeps this
+        // from costing re-resolution on every query.
         _rpcTraceEvent(
             "overlay.refresh.clearCaches",
             `files=${openFilesWithContent.length} paths=${openFilesWithContent.map(f => f.fileName).join(",")}`
-            + ` symByPosFiles=${symByPos.size} symbolsInScope=${symbolsInScopeCache.size}`
-            + ` nodeType=${nodeTypeCache.size} typeOfSymbol=${typeOfSymbolCache.size}`
-            + ` properties=${propertiesCache.size}`,
+            + ` symByPosFiles=${gen.symByPos.size} symbolsInScope=${gen.symbolsInScopeCache.size}`
+            + ` nodeType=${gen.nodeTypeCache.size} typeOfSymbol=${gen.typeOfSymbolCache.size}`
+            + ` properties=${gen.propertiesCache.size}`,
         );
-        symByPos.clear();
-        hostBoundSfMemo.clear();
-        moduleSpecPrefetched.clear();
-        symbolsInScopeCache.clear();
-        ambientModuleByNameCache.clear();
-        ambientModuleBatchCache = undefined;
-        ambientModuleExportBatchCache = undefined;
-        rpcSymbolCache.clear();
-        nodeTypeCache.clear();
-        typeOfSymbolCache.clear();
-        propertiesCache.clear();
-        propertyByNameCache.clear();
-        propertyBulkLoaded.clear();
-        signaturesByKindCache.clear();
-        baseTypesCache.clear();
-        _objCompletionPending = undefined;
-        _objCompletionBatch = undefined;
-        // Invalidate Symbol.parent memos pinned on instances that outlive the
-        // cleared maps (Soft-P′ / host-bound may still hold Symbol refs).
+        gen = newSnapshotCaches();
+        // Symbol.parent memos are stamped on instances that outlive gen.
         _tnbParentMemoEpoch++;
-        // WeakMap has no clear(); drop Soft-P′/S′ memo so remapped decls cannot
-        // stick across overlay content refresh (comment claimed this already).
-        refinedSymBySym = new WeakMap();
     }
 
     function getAmbientModuleBatch(): any {
-        if (ambientModuleBatchCache !== undefined) return ambientModuleBatchCache ?? undefined;
-        ambientModuleBatchCache = project.checker.getAmbientModules() ?? null;
-        return ambientModuleBatchCache ?? undefined;
+        if (gen.ambientModuleBatchCache !== undefined) return gen.ambientModuleBatchCache ?? undefined;
+        gen.ambientModuleBatchCache = project.checker.getAmbientModules() ?? null;
+        return gen.ambientModuleBatchCache ?? undefined;
     }
 
     function getAmbientModuleExportBatch(): any {
-        if (ambientModuleExportBatchCache !== undefined) return ambientModuleExportBatchCache ?? undefined;
+        if (gen.ambientModuleExportBatchCache !== undefined) return gen.ambientModuleExportBatchCache ?? undefined;
         try {
-            ambientModuleExportBatchCache = normalizeExportMapWireNames(project.checker.getModuleExportMap?.()) ?? null;
+            gen.ambientModuleExportBatchCache = normalizeExportMapWireNames(project.checker.getModuleExportMap?.()) ?? null;
         }
         catch {
-            ambientModuleExportBatchCache = null;
+            gen.ambientModuleExportBatchCache = null;
         }
-        return ambientModuleExportBatchCache ?? undefined;
+        return gen.ambientModuleExportBatchCache ?? undefined;
     }
 
     function getTsgoSourceFile(fileName: string): any {
@@ -10342,21 +10292,21 @@ export function createTsgoChecker(program: any): any {
      * import literal of every program file; per-literal positional RPC plus the
      * node-index fallback dominated lint wall time. Results (including
      * undefined for unresolved modules) are stored positionally so subsequent
-     * queries hit symByPos. Returns false when the file has no tsgo mirror.
+     * queries hit gen.symByPos. Returns false when the file has no tsgo mirror.
      */
     function ensureModuleSpecifierSymbolsPrefetched(fileName: string): boolean {
         const cacheName = symCacheFileName(fileName);
-        if (moduleSpecPrefetched.has(cacheName)) return true;
+        if (gen.moduleSpecPrefetched.has(cacheName)) return true;
         const sf = getTsgoSourceFile(fileName);
         if (!sf) return false;
-        moduleSpecPrefetched.add(cacheName);
+        gen.moduleSpecPrefetched.add(cacheName);
         const importNodes: readonly any[] = sf.imports ?? [];
         if (!importNodes.length) return true;
         let syms: readonly any[];
         try {
             syms = project.checker.getSymbolAtLocation(importNodes as any[]) ?? [];
         } catch {
-            moduleSpecPrefetched.delete(cacheName);
+            gen.moduleSpecPrefetched.delete(cacheName);
             return false;
         }
         for (let i = 0; i < importNodes.length; i++) {
@@ -10527,9 +10477,6 @@ export function createTsgoChecker(program: any): any {
     // direction (tsgo symbol → host navigation symbol) is refineNavSymbol.
     // Adapter methods therefore never branch on a symbol's origin.
 
-    /** Host→tsgo resolution memo; cleared with symByPos on overlay refresh. */
-    const rpcSymbolCache = new Map<any, any>();
-
     function tsgoSymbolForHostDeclaration(decl: any): any {
         const sf = decl?.getSourceFile?.();
         if (!sf?.fileName) return undefined;
@@ -10624,7 +10571,7 @@ export function createTsgoChecker(program: any): any {
     function resolveRpcSymbol(symbol: any): any {
         if (!symbol) return undefined;
         if (isTsgoBridgeSymbol(symbol)) return symbol;
-        if (rpcSymbolCache.has(symbol)) return rpcSymbolCache.get(symbol);
+        if (gen.rpcSymbolCache.has(symbol)) return gen.rpcSymbolCache.get(symbol);
         let resolved: any;
         const decls = symbol.declarations?.length
             ? symbol.declarations
@@ -10633,7 +10580,7 @@ export function createTsgoChecker(program: any): any {
             resolved = tsgoSymbolForHostDeclaration(decl);
             if (resolved) break;
         }
-        rpcSymbolCache.set(symbol, resolved);
+        gen.rpcSymbolCache.set(symbol, resolved);
         return resolved;
     }
 
@@ -10705,24 +10652,6 @@ export function createTsgoChecker(program: any): any {
         }
         return facade;
     }
-
-    // ── Caches ───────────────────────────────────────────────────────
-    const nodeTypeCache = new Map<any, any>();
-    const typeOfSymbolCache = new Map<any, any>();
-    const propertiesCache = new Map<any, any>();
-    // Per-type name→property map, built lazily from the memoized
-    // getPropertiesOfType result. Collapses N getPropertyOfType(name)
-    // RPCs into 1 getPropertiesOfType RPC + JS lookup per type.
-    const propertyByNameCache = new Map<any, Map<string, any>>();
-    // Per-type signature cache keyed by SignatureKind. Unifies the proto
-    // (type.getCallSignatures/getConstructSignatures) and adapter
-    // (checker.getSignaturesOfType) paths onto one RPC per (type, kind).
-    const signaturesByKindCache = new Map<any, Map<number, readonly any[]>>();
-    // Per-type base-types cache. Unifies proto (type.getBaseTypes) and adapter
-    // (checker.getBaseTypes) onto one RPC per type.
-    const baseTypesCache = new Map<any, readonly any[]>();
-    // Types for which getPropertiesOfType was used to bulk-fill propertyByNameCache.
-    const propertyBulkLoaded = new Set<any>();
 
     const memoGet = <K, V>(cache: Map<K, V>, key: K, compute: () => V): V => {
         if (cache.has(key)) return cache.get(key)!;
@@ -10799,8 +10728,6 @@ export function createTsgoChecker(program: any): any {
         filteredMembers: any[]; // final members surviving the stock filter
         properties: any[];
     }
-    let _objCompletionPending: { hostNode: any; tsgoNode: any; results: any[] } | undefined;
-    let _objCompletionBatch: ObjCompletionBatch | undefined;
 
     const sameTypeList = (a: readonly any[], b: readonly any[]): boolean =>
         a.length === b.length && a.every((t, i) => t === b[i]);
@@ -10810,9 +10737,9 @@ export function createTsgoChecker(program: any): any {
     // arrives, the next per-member call recomputes for the new node (the
     // discriminant verdicts are node-dependent).
     const activeObjCompletionBatch = (): ObjCompletionBatch | undefined => {
-        const b = _objCompletionBatch;
+        const b = gen.objCompletionBatch;
         if (!b) return undefined;
-        if (_objCompletionPending && _objCompletionPending.hostNode !== b.hostNode) return undefined;
+        if (gen.objCompletionPending && gen.objCompletionPending.hostNode !== b.hostNode) return undefined;
         return b;
     };
 
@@ -10822,7 +10749,7 @@ export function createTsgoChecker(program: any): any {
     // only: completions.ts reads `.types` before filtering, so the memo is
     // already populated and this check never issues an RPC of its own.
     const tryStartObjCompletionBatch = (memberType: any): ObjCompletionBatch | undefined => {
-        const pending = _objCompletionPending;
+        const pending = gen.objCompletionPending;
         const proj = _currentProjectRef.project;
         if (!pending || !proj || typeof proj.checker.getPropertiesForObjectExpression !== "function") return undefined;
         let contextualType: any;
@@ -10866,19 +10793,19 @@ export function createTsgoChecker(program: any): any {
             // before any checker call); leave them out so an unexpected query
             // falls through to the real RPC instead of a fabricated verdict.
             if ((fm.type.flags & TF.Primitive) === 0) verdicts.set(fm.type, fm);
-            if (fm.apparentProperties && !propertiesCache.has(fm.type)) {
-                propertiesCache.set(fm.type, fm.apparentProperties);
+            if (fm.apparentProperties && !gen.propertiesCache.has(fm.type)) {
+                gen.propertiesCache.set(fm.type, fm.apparentProperties);
             }
         }
         for (const t of info.filteredTypes) fixupType(t);
         const finalType = info.mergedType ?? info.promiseFilteredType;
         const isFinalUnion = info.finalMembers.length > 0;
         // Non-union final type: stock calls type.getApparentProperties() on it,
-        // which routes through propertiesCache — seed it.
-        if (!isFinalUnion && finalType && !propertiesCache.has(finalType)) {
-            propertiesCache.set(finalType, info.properties);
+        // which routes through gen.propertiesCache — seed it.
+        if (!isFinalUnion && finalType && !gen.propertiesCache.has(finalType)) {
+            gen.propertiesCache.set(finalType, info.properties);
         }
-        _objCompletionBatch = {
+        gen.objCompletionBatch = {
             hostNode: pending.hostNode,
             completionsType,
             promised,
@@ -10890,22 +10817,22 @@ export function createTsgoChecker(program: any): any {
             filteredMembers: info.filteredTypes,
             properties: info.properties as any[],
         };
-        return _objCompletionBatch;
+        return gen.objCompletionBatch;
     };
 
     const resolvePropertyOfType = (type: any, name: string): any => {
         const proj = projectForBridgeObject(type) ?? _currentProjectRef.project;
         if (!proj || !type) return undefined;
-        let byName = propertyByNameCache.get(type);
+        let byName = gen.propertyByNameCache.get(type);
         if (!byName) {
             byName = new Map<string, any>();
-            propertyByNameCache.set(type, byName);
+            gen.propertyByNameCache.set(type, byName);
         }
         if (byName.has(name)) return byName.get(name);
         // One getPropertiesOfType RPC per type replaces many getPropertyOfType RPCs.
-        if (!propertyBulkLoaded.has(type)) {
-            propertyBulkLoaded.add(type);
-            const props = memoGet(propertiesCache, type, () => proj.checker.getPropertiesOfType(type) ?? []);
+        if (!gen.propertyBulkLoaded.has(type)) {
+            gen.propertyBulkLoaded.add(type);
+            const props = memoGet(gen.propertiesCache, type, () => proj.checker.getPropertiesOfType(type) ?? []);
             for (const p of props) {
                 if (p?.name) byName.set(p.name, p);
             }
@@ -10919,8 +10846,8 @@ export function createTsgoChecker(program: any): any {
     const getSignaturesCached = (type: any, kind: number): readonly any[] => {
         const proj = projectForBridgeObject(type) ?? _currentProjectRef.project;
         if (!proj) return [];
-        let byKind = signaturesByKindCache.get(type);
-        if (!byKind) { byKind = new Map(); signaturesByKindCache.set(type, byKind); }
+        let byKind = gen.signaturesByKindCache.get(type);
+        if (!byKind) { byKind = new Map(); gen.signaturesByKindCache.set(type, byKind); }
         const hit = byKind.get(kind);
         if (hit !== undefined) return hit;
         const r = proj.checker.getSignaturesOfType(type, kind) ?? [];
@@ -10931,7 +10858,7 @@ export function createTsgoChecker(program: any): any {
     const getBaseTypesCached = (type: any): readonly any[] => {
         const proj = projectForBridgeObject(type) ?? _currentProjectRef.project;
         if (!proj) return [];
-        return memoGet(baseTypesCache, type, () => proj.checker.getBaseTypes(type) ?? []);
+        return memoGet(gen.baseTypesCache, type, () => proj.checker.getBaseTypes(type) ?? []);
     };
 
     // Faithful forward: tsgo GetTypeAtLocation (checker getTypeOfNode) handles
@@ -10946,14 +10873,8 @@ export function createTsgoChecker(program: any): any {
     }
 
     // ── Build adapter object ─────────────────────────────────────────
-    // Memoized per checker generation: refineNavSymbol resolves the module
-    // parent of ~2k scope symbols per completion, each walking declarations
-    // and calling getHostBoundSf per declaration file. Repeating the
-    // resolveHostFileName + getScriptVersion + sfCache probe per call burned
-    // most of the completion wall. null = confirmed not host-parsed.
-    const hostBoundSfMemo = new Map<string, any>();
     const getHostBoundSf = (fileName: string): any | undefined => {
-        const memo = hostBoundSfMemo.get(fileName);
+        const memo = gen.hostBoundSfMemo.get(fileName);
         if (memo !== undefined) return memo === null ? undefined : memo;
         // Lib files never take the host-parse path (getOrCreateSourceFile
         // gates preferHostSourceFiles on !isHostLibFile), so probing them
@@ -10962,7 +10883,7 @@ export function createTsgoChecker(program: any): any {
         // it. Skip the program lookup entirely.
         const hostFileName = toHostFileName(fileName);
         if (isBundledLibPath(fileName) || isHostLibFile(hostFileName)) {
-            hostBoundSfMemo.set(fileName, null);
+            gen.hostBoundSfMemo.set(fileName, null);
             return undefined;
         }
         // A .d.ts only needs host-bound remap when the host actually serves it
@@ -10976,7 +10897,7 @@ export function createTsgoChecker(program: any): any {
                 && isOverlayCandidatePath(hostFileName)
                 && (hostHasScriptSnapshot(hostForOverlaySyncLocal(), hostFileName, hostFileName)
                     || _syncedOverlayContentByFile.has(hostFileName)))) {
-            hostBoundSfMemo.set(fileName, null);
+            gen.hostBoundSfMemo.set(fileName, null);
             return undefined;
         }
         // Prefer THIS project's thin program: _hostProgramRef is module-global
@@ -10992,15 +10913,15 @@ export function createTsgoChecker(program: any): any {
         // Soft-P′ soft-bound disk/node_modules files carry binder fields
         // (ExportSpecifier.symbol) without the overlay identity brand.
         if (!isHostParsedSourceFile(sf)) {
-            hostBoundSfMemo.set(fileName, null);
+            gen.hostBoundSfMemo.set(fileName, null);
             return undefined;
         }
-        hostBoundSfMemo.set(fileName, sf);
+        gen.hostBoundSfMemo.set(fileName, sf);
         return sf;
     };
     const refineNavSymbol = (sym: any) => {
         if (!sym) return sym;
-        const cached = refinedSymBySym.get(sym);
+        const cached = gen.refinedSymBySym.get(sym);
         if (cached !== undefined) return cached;
         // Completion pulls ~1000 getSymbolsInScope globals per keystroke.
         // When host-bound (.vue) files exist, pure lib/ambient symbols with no
@@ -11023,7 +10944,7 @@ export function createTsgoChecker(program: any): any {
                 ensureSymbolContextualDocCompat(sym),
                 getHostBoundSf,
             );
-            refinedSymBySym.set(sym, light);
+            gen.refinedSymBySym.set(sym, light);
             return light;
         }
         if (!_hasHostBoundFiles) {
@@ -11033,14 +10954,14 @@ export function createTsgoChecker(program: any): any {
                 ensureClassLikeSymbolDeclarations(ensureSymbolContextualDocCompat(sym)),
                 getHostBoundSf,
             );
-            refinedSymBySym.set(sym, refinedNoHost);
+            gen.refinedSymBySym.set(sym, refinedNoHost);
             return refinedNoHost;
         }
         const refined = ensureClassLikeSymbolDeclarations(
             ensureSymbolContextualDocCompat(refineHostNavigationSymbol(sym, getHostBoundSf)),
         );
         if (_traceSymEnabled) traceSym(`refineNavSymbol in=${traceSymSymbol(sym)} out=${traceSymSymbol(refined)}`);
-        refinedSymBySym.set(sym, refined);
+        gen.refinedSymBySym.set(sym, refined);
         return refined;
     };
 
@@ -11130,7 +11051,7 @@ export function createTsgoChecker(program: any): any {
             // range): stock returns undefined for the comment container, and
             // allowing positional/cache hits here poisons quickinfo inside
             // param JSDoc (`/** left */ a`) after an earlier probe warms
-            // symByPos. Broader JSDoc* short-circuit breaks component-meta
+            // gen.symByPos. Broader JSDoc* short-circuit breaks component-meta
             // (JSDoc type/tag nodes still need normal resolution).
             case SyntaxKind.JSDocComment:
                 return { action: "undefined" };
@@ -11245,7 +11166,7 @@ export function createTsgoChecker(program: any): any {
             ensureProject();
             // Stock (checker.ts:1714-1716): getParseTreeNode(nodeIn) then
             // getTypeOfNode, else errorType. Walk original before position map.
-            return memoGet(nodeTypeCache, node, () => {
+            return memoGet(gen.nodeTypeCache, node, () => {
                 const t0 = process.env.TSGO_PROFILE === "1" ? Date.now() : 0;
                 const tsgoNode = resolveHostNodeToTsgo(node);
                 if (!tsgoNode) {
@@ -11317,7 +11238,7 @@ export function createTsgoChecker(program: any): any {
             // file's module symbol (sf.symbol), not a tsgo position hit on the
             // first statement (e.g. the codegen export const) which lacks the default export.
             if (node.kind === SyntaxKind.SourceFile && sf.symbol) {
-                // Return the module symbol directly. Do NOT write symByPos here:
+                // Return the module symbol directly. Do NOT write gen.symByPos here:
                 // this whole-file symbol has no single span, and caching it under
                 // position 0 would poison lookups for any real node at pos 0.
                 // This branch already short-circuits every SourceFile query, so a
@@ -11486,7 +11407,7 @@ export function createTsgoChecker(program: any): any {
             // dominant cross-file query in multi-project lint). If the literal
             // wasn't in the file's imports list (rare — e.g. require() text in
             // a non-module position), fall through to the per-node path.
-            if (!sf.__tnbHostBound && !moduleSpecPrefetched.has(cacheName) && isModuleSpecifierStringLiteral(node)) {
+            if (!sf.__tnbHostBound && !gen.moduleSpecPrefetched.has(cacheName) && isModuleSpecifierStringLiteral(node)) {
                 if (ensureModuleSpecifierSymbolsPrefetched(sf.fileName)) {
                     cached = probeSymCache(cacheName, start, end);
                     if (cached.found) {
@@ -11567,12 +11488,12 @@ export function createTsgoChecker(program: any): any {
             // completions asks these right before getPropertiesForObjectExpression,
             // which lets the per-member calls below collapse into one batch RPC.
             if ((node.kind === SyntaxKind.ObjectLiteralExpression || node.kind === SyntaxKind.JsxAttributes) && tsgoNode.kind === node.kind) {
-                const pending = _objCompletionPending;
+                const pending = gen.objCompletionPending;
                 if (pending && pending.hostNode === node) {
                     pending.results.push(t);
                 }
                 else {
-                    _objCompletionPending = { hostNode: node, tsgoNode, results: [t] };
+                    gen.objCompletionPending = { hostNode: node, tsgoNode, results: [t] };
                 }
             }
             return t;
@@ -11722,7 +11643,7 @@ export function createTsgoChecker(program: any): any {
         getTypeOfSymbol(symbol: any): any {
             if (!symbol) return undefined;
             ensureProject();
-            return memoGet(typeOfSymbolCache, symbol, () => {
+            return memoGet(gen.typeOfSymbolCache, symbol, () => {
                 const t = rpc().getTypeOfSymbol(symbol);
                 if (t) { fixupType(t); return t; }
                 // Stock getTypeOfSymbol never returns undefined (checker.ts:12960):
@@ -12000,7 +11921,7 @@ export function createTsgoChecker(program: any): any {
         getPropertiesOfType(type: any): readonly any[] {
             ensureProject();
             if (!type) return [];
-            return memoGet(propertiesCache, type, () => project.checker.getPropertiesOfType(type) ?? []);
+            return memoGet(gen.propertiesCache, type, () => project.checker.getPropertiesOfType(type) ?? []);
         },
         getPropertyOfType(type: any, name: string): any {
             ensureProject();
@@ -13213,8 +13134,8 @@ export function createTsgoChecker(program: any): any {
             if (!moduleName) return undefined;
             const key = moduleName.replace(/^"|"$/g, "");
             ensureProject();
-            if (ambientModuleByNameCache.has(key)) {
-                return ambientModuleByNameCache.get(key) ?? undefined;
+            if (gen.ambientModuleByNameCache.has(key)) {
+                return gen.ambientModuleByNameCache.get(key) ?? undefined;
             }
             try {
                 const batch = getAmbientModuleExportBatch();
@@ -13222,13 +13143,13 @@ export function createTsgoChecker(program: any): any {
                     if (mod.moduleFileName) continue;
                     const name = mod.moduleName?.replace(/^"|"$/g, "");
                     if (name === key) {
-                        ambientModuleByNameCache.set(key, mod.moduleSymbol);
+                        gen.ambientModuleByNameCache.set(key, mod.moduleSymbol);
                         return mod.moduleSymbol;
                     }
                 }
             }
             catch { /* empty */ }
-            ambientModuleByNameCache.set(key, null);
+            gen.ambientModuleByNameCache.set(key, null);
             return undefined;
         },
 
@@ -13245,7 +13166,7 @@ export function createTsgoChecker(program: any): any {
             const start = location.getStart(sf);
             const end = location.getEnd(sf);
             const scopeKey = `${symCacheFileName(sf.fileName)}:${start}:${end}:${meaning}`;
-            const memo = symbolsInScopeCache.get(scopeKey);
+            const memo = gen.symbolsInScopeCache.get(scopeKey);
             if (memo) return memo;
             let tsgoNode = findTsgoNodeAtPosition(sf.fileName, start, location.kind, end);
             if (!tsgoNode) {
@@ -13261,13 +13182,13 @@ export function createTsgoChecker(program: any): any {
                 // host binder locals so completion sortText uses === sourceFile.
                 if (isHostParsedSourceFile(sf)) {
                     result = mergeHostLocalScopeSymbols(result, location, meaning).map(sym =>
-                        refinedSymBySym.has(sym) ? sym : refineNavSymbol(sym),
+                        gen.refinedSymBySym.has(sym) ? sym : refineNavSymbol(sym),
                     );
                 }
                 // Stock never puts module-default / re-export aliases into scope;
                 // filtering them restores the `default` keyword completion slot.
                 result = result.filter((sym: any) => !isStolenDefaultKeywordScopeSymbol(sym));
-                symbolsInScopeCache.set(scopeKey, result);
+                gen.symbolsInScopeCache.set(scopeKey, result);
                 return result;
             }
             // Genuine host-only virtual files have no tsgo mirror; walk host

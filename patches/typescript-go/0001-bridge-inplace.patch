@@ -1,5 +1,5 @@
 diff --git a/_packages/native-preview/src/api/async/client.ts b/_packages/native-preview/src/api/async/client.ts
-index b4a123d53..6d3b9b8f3 100644
+index b4a123d537..6d3b9b8f35 100644
 --- a/_packages/native-preview/src/api/async/client.ts
 +++ b/_packages/native-preview/src/api/async/client.ts
 @@ -90,7 +90,7 @@ export class Client {
@@ -24,7 +24,7 @@ index b4a123d53..6d3b9b8f3 100644
                  resolve();
              });
 diff --git a/_packages/native-preview/src/api/node/node.generated.ts b/_packages/native-preview/src/api/node/node.generated.ts
-index 60ee9cbf3..9ffce1295 100644
+index 60ee9cbf30..9ffce12957 100644
 --- a/_packages/native-preview/src/api/node/node.generated.ts
 +++ b/_packages/native-preview/src/api/node/node.generated.ts
 @@ -43,7 +43,7 @@ export class RemoteNodeList extends Array<RemoteNode> implements NodeArray<Remot
@@ -310,7 +310,7 @@ index 60ee9cbf3..9ffce1295 100644
          return flags;
      }
 diff --git a/_packages/native-preview/src/api/node/node.infrastructure.ts b/_packages/native-preview/src/api/node/node.infrastructure.ts
-index 92b292287..fd418337e 100644
+index 92b2922877..fd418337e6 100644
 --- a/_packages/native-preview/src/api/node/node.infrastructure.ts
 +++ b/_packages/native-preview/src/api/node/node.infrastructure.ts
 @@ -154,6 +154,11 @@ export class RemoteNodeBase {
@@ -326,7 +326,7 @@ index 92b292287..fd418337e 100644
          return this.view.getInt32(this._byteIndex + NODE_OFFSET_POS, true);
      }
 diff --git a/_packages/native-preview/src/api/node/node.ts b/_packages/native-preview/src/api/node/node.ts
-index edea7d5ca..95b1cb9b4 100644
+index edea7d5ca4..95b1cb9b47 100644
 --- a/_packages/native-preview/src/api/node/node.ts
 +++ b/_packages/native-preview/src/api/node/node.ts
 @@ -233,7 +233,7 @@ export class RemoteSourceFile extends RemoteNode implements SourceFileInfo {
@@ -339,7 +339,7 @@ index edea7d5ca..95b1cb9b4 100644
  
      get text(): string {
 diff --git a/_packages/native-preview/src/api/proto.ts b/_packages/native-preview/src/api/proto.ts
-index 1aba5087e..72b331708 100644
+index 1aba5087e5..72b3317083 100644
 --- a/_packages/native-preview/src/api/proto.ts
 +++ b/_packages/native-preview/src/api/proto.ts
 @@ -24,6 +24,19 @@ export type { CompilerOptions } from "./compilerOptions.ts";
@@ -475,7 +475,7 @@ index 1aba5087e..72b331708 100644
      id: number;
      flags: number;
 diff --git a/_packages/native-preview/src/api/sync/types.ts b/_packages/native-preview/src/api/sync/types.ts
-index 658d07806..8c37e4232 100644
+index 658d078065..8c37e42323 100644
 --- a/_packages/native-preview/src/api/sync/types.ts
 +++ b/_packages/native-preview/src/api/sync/types.ts
 @@ -12,6 +12,7 @@ import type { ElementFlags } from "#enums/elementFlags";
@@ -678,7 +678,7 @@ index 658d07806..8c37e4232 100644
   * A diagnostic message from the TypeScript compiler.
   */
 diff --git a/_packages/native-preview/src/api/syncChannel.ts b/_packages/native-preview/src/api/syncChannel.ts
-index 122203c85..873d9000d 100644
+index 122203c85e..873d9000d4 100644
 --- a/_packages/native-preview/src/api/syncChannel.ts
 +++ b/_packages/native-preview/src/api/syncChannel.ts
 @@ -149,7 +149,7 @@ export class SyncRpcChannel {
@@ -741,7 +741,7 @@ index 122203c85..873d9000d 100644
              this.readFd = -1;
              this.writeFd = -1;
 diff --git a/_packages/native-preview/src/ast/ast.ts b/_packages/native-preview/src/ast/ast.ts
-index 3f5fa2c43..4f9f73076 100644
+index 3f5fa2c43a..4f9f730766 100644
 --- a/_packages/native-preview/src/ast/ast.ts
 +++ b/_packages/native-preview/src/ast/ast.ts
 @@ -55,6 +55,8 @@ export interface NodeArray<T extends Node> extends ReadonlyArray<T>, ReadonlyTex
@@ -754,7 +754,7 @@ index 3f5fa2c43..4f9f73076 100644
      readonly jsDoc?: readonly Node[] | undefined;
      forEachChild<T>(visitor: (node: Node) => T, visitArray?: (nodes: NodeArray<Node>) => T): T | undefined;
 diff --git a/_packages/native-preview/src/ast/astnav.ts b/_packages/native-preview/src/ast/astnav.ts
-index 8005023f5..b2128fdc2 100644
+index 8005023f50..b2128fdc28 100644
 --- a/_packages/native-preview/src/ast/astnav.ts
 +++ b/_packages/native-preview/src/ast/astnav.ts
 @@ -48,7 +48,7 @@ export function findNextToken(previousToken: Node, parent: Node, sourceFile: Sou
@@ -895,7 +895,7 @@ index 8005023f5..b2128fdc2 100644
              continue;
          }
 diff --git a/_packages/native-preview/src/ast/factory.generated.ts b/_packages/native-preview/src/ast/factory.generated.ts
-index f29cfc3d1..d3f48c5c4 100644
+index f29cfc3d10..d3f48c5c4e 100644
 --- a/_packages/native-preview/src/ast/factory.generated.ts
 +++ b/_packages/native-preview/src/ast/factory.generated.ts
 @@ -267,6 +267,8 @@ import {
@@ -908,7 +908,7 @@ index f29cfc3d1..d3f48c5c4 100644
      readonly end: number = -1;
      parent: Node = undefined!;
 diff --git a/_packages/native-preview/src/ast/is.ts b/_packages/native-preview/src/ast/is.ts
-index 613ed0a0c..8b11b26ed 100644
+index 613ed0a0cc..8b11b26edf 100644
 --- a/_packages/native-preview/src/ast/is.ts
 +++ b/_packages/native-preview/src/ast/is.ts
 @@ -257,7 +257,7 @@ function isJSDocTypeAssertion(node: ParenthesizedExpression): boolean {
@@ -921,7 +921,7 @@ index 613ed0a0c..8b11b26ed 100644
  
  export function isBindingPattern(node: Node): node is BindingPattern {
 diff --git a/internal/api/session_apistate_test.go b/internal/api/session_apistate_test.go
-index 91aab0904..48b7cabb1 100644
+index 91aab09042..48b7cabb11 100644
 --- a/internal/api/session_apistate_test.go
 +++ b/internal/api/session_apistate_test.go
 @@ -33,14 +33,14 @@ func TestSessionTracksAndReleasesAPIRefs(t *testing.T) {
@@ -960,7 +960,7 @@ index 91aab0904..48b7cabb1 100644
  	assert.NilError(t, err)
  
 diff --git a/internal/checker/checker.go b/internal/checker/checker.go
-index b639d488e..f46b47fef 100644
+index b639d488e4..f46b47fef6 100644
 --- a/internal/checker/checker.go
 +++ b/internal/checker/checker.go
 @@ -786,6 +786,7 @@ type Checker struct {
@@ -1368,7 +1368,7 @@ index b639d488e..f46b47fef 100644
  	case ast.KindVariableDeclaration, ast.KindParameter, ast.KindPropertyDeclaration, ast.KindPropertySignature, ast.KindBindingElement:
  		return c.getContextualTypeForInitializerExpression(node, contextFlags)
 diff --git a/internal/checker/exports.go b/internal/checker/exports.go
-index 90162bdae..4fdcc2a9f 100644
+index 90162bdaeb..4fdcc2a9fb 100644
 --- a/internal/checker/exports.go
 +++ b/internal/checker/exports.go
 @@ -3,7 +3,9 @@ package checker
@@ -1771,7 +1771,7 @@ index 90162bdae..4fdcc2a9f 100644
 +//   GetSymbolOfExpando               — expando.go
 +//   CollectVisitedTypeParameters     — symbolwalker.go
 diff --git a/internal/checker/nodebuilderimpl.go b/internal/checker/nodebuilderimpl.go
-index 2c64872a6..b5aecd4eb 100644
+index 2c64872a69..b5aecd4eb9 100644
 --- a/internal/checker/nodebuilderimpl.go
 +++ b/internal/checker/nodebuilderimpl.go
 @@ -1617,7 +1617,10 @@ func (b *NodeBuilderImpl) symbolToTypeParameterDeclarations(symbol *ast.Symbol)
@@ -1787,7 +1787,7 @@ index 2c64872a6..b5aecd4eb 100644
  		params := b.ch.getLocalTypeParametersOfClassOrInterfaceOrTypeAlias(symbol)
  		for _, param := range params {
 diff --git a/internal/checker/printer.go b/internal/checker/printer.go
-index 21704cc7d..2c1c23145 100644
+index 21704cc7da..2c1c23145a 100644
 --- a/internal/checker/printer.go
 +++ b/internal/checker/printer.go
 @@ -426,6 +426,24 @@ func (c *Checker) SignatureToSignatureDeclaration(signature *Signature, kind ast
@@ -1856,7 +1856,7 @@ index 21704cc7d..2c1c23145 100644
 +	return nodeBuilder.IndexInfoToIndexSignatureDeclaration(info, enclosingDeclaration, flags, nodebuilder.InternalFlagsNone, nil)
 +}
 diff --git a/internal/checker/services.go b/internal/checker/services.go
-index 12b9d4079..db9750b1a 100644
+index 12b9d40792..db9750b1af 100644
 --- a/internal/checker/services.go
 +++ b/internal/checker/services.go
 @@ -222,6 +222,14 @@ func (c *Checker) IsUnknownSymbol(symbol *ast.Symbol) bool {
@@ -1875,7 +1875,7 @@ index 12b9d4079..db9750b1a 100644
  	return symbol == c.undefinedSymbol
  }
 diff --git a/internal/checker/types.go b/internal/checker/types.go
-index bd1342092..4d7865fd0 100644
+index bd13420922..4d7865fd00 100644
 --- a/internal/checker/types.go
 +++ b/internal/checker/types.go
 @@ -746,6 +746,18 @@ func (t *Type) Target() *Type {
@@ -1910,7 +1910,7 @@ index bd1342092..4d7865fd0 100644
  
  type ConstrainedType struct {
 diff --git a/internal/compiler/fileloader.go b/internal/compiler/fileloader.go
-index f8d006e92..82e128ca2 100644
+index f8d006e925..82e128ca2e 100644
 --- a/internal/compiler/fileloader.go
 +++ b/internal/compiler/fileloader.go
 @@ -125,7 +125,7 @@ func processAllProgramFiles(
@@ -2002,7 +2002,7 @@ index f8d006e92..82e128ca2 100644
  
  			// add file to program only if:
 diff --git a/internal/compiler/filesparser.go b/internal/compiler/filesparser.go
-index 5817fc6bb..698abd084 100644
+index 5817fc6bb8..698abd084a 100644
 --- a/internal/compiler/filesparser.go
 +++ b/internal/compiler/filesparser.go
 @@ -29,13 +29,16 @@ type parseTask struct {
@@ -2053,7 +2053,7 @@ index 5817fc6bb..698abd084 100644
  				missingFiles = append(missingFiles, task.normalizedFilePath)
  				continue
 diff --git a/internal/compiler/program.go b/internal/compiler/program.go
-index 74b2504d9..d6a714c18 100644
+index 74b2504d9e..d6a714c18b 100644
 --- a/internal/compiler/program.go
 +++ b/internal/compiler/program.go
 @@ -116,6 +116,20 @@ type Program struct {
@@ -2196,7 +2196,7 @@ index 74b2504d9..d6a714c18 100644
  	return diagnostics
  }
 diff --git a/internal/execute/incremental/programtosnapshot.go b/internal/execute/incremental/programtosnapshot.go
-index 44b9b4cbc..0a8aafd0d 100644
+index 44b9b4cbc6..0a8aafd0d4 100644
 --- a/internal/execute/incremental/programtosnapshot.go
 +++ b/internal/execute/incremental/programtosnapshot.go
 @@ -14,13 +14,22 @@ import (
@@ -2225,7 +2225,7 @@ index 44b9b4cbc..0a8aafd0d 100644
  	to := &toProgramSnapshot{
  		program:    program,
 diff --git a/internal/ls/autoimport/export.go b/internal/ls/autoimport/export.go
-index cb5278fab..bf5b19e51 100644
+index cb5278fab0..bf5b19e515 100644
 --- a/internal/ls/autoimport/export.go
 +++ b/internal/ls/autoimport/export.go
 @@ -62,6 +62,10 @@ type Export struct {
@@ -2240,7 +2240,7 @@ index cb5278fab..bf5b19e51 100644
  	// The file where the export was found.
  	Path tspath.Path
 diff --git a/internal/ls/autoimport/extract.go b/internal/ls/autoimport/extract.go
-index dc0a1db7e..56820b267 100644
+index dc0a1db7e4..56820b2676 100644
 --- a/internal/ls/autoimport/extract.go
 +++ b/internal/ls/autoimport/extract.go
 @@ -297,8 +297,15 @@ func (e *symbolExtractor) createExport(symbol *ast.Symbol, moduleID ModuleID, mo
@@ -2270,7 +2270,7 @@ index dc0a1db7e..56820b267 100644
  
  	if symbol.Name == ast.InternalSymbolNameDefault || symbol.Name == ast.InternalSymbolNameExportEquals {
 diff --git a/internal/ls/autoimport/registry.go b/internal/ls/autoimport/registry.go
-index 6c6468095..489622b9a 100644
+index 6c6468095c..489622b9ab 100644
 --- a/internal/ls/autoimport/registry.go
 +++ b/internal/ls/autoimport/registry.go
 @@ -244,6 +244,12 @@ type RegistryBucket struct {
@@ -2545,7 +2545,7 @@ index 6c6468095..489622b9a 100644
  			buildPreferences:        bucketBuildPreferencesFromUserPreferences(b.userPreferences),
  			recursiveSearchPackages: recursiveSearchPackages.Clone(),
 diff --git a/internal/ls/autoimport/view.go b/internal/ls/autoimport/view.go
-index 9f8b144fa..4baa9e6e2 100644
+index 9f8b144fa5..4baa9e6e2e 100644
 --- a/internal/ls/autoimport/view.go
 +++ b/internal/ls/autoimport/view.go
 @@ -32,6 +32,13 @@ type View struct {
@@ -2625,7 +2625,7 @@ index 9f8b144fa..4baa9e6e2 100644
  					continue outer
  				}
 diff --git a/internal/ls/completions.go b/internal/ls/completions.go
-index 5e62661fc..9d58f85c6 100644
+index 5e62661fce..9d58f85c6e 100644
 --- a/internal/ls/completions.go
 +++ b/internal/ls/completions.go
 @@ -26,6 +26,7 @@ import (
@@ -2905,7 +2905,7 @@ index 5e62661fc..9d58f85c6 100644
  		}
  		current = current.Parent
 diff --git a/internal/ls/inlay_hints.go b/internal/ls/inlay_hints.go
-index a1923826c..aa562b80d 100644
+index a1923826cb..aa562b80d1 100644
 --- a/internal/ls/inlay_hints.go
 +++ b/internal/ls/inlay_hints.go
 @@ -177,15 +177,15 @@ func (s *inlayHintState) visitCallOrNewExpression(expr *ast.CallOrNewExpression)
@@ -3014,7 +3014,7 @@ index a1923826c..aa562b80d 100644
  	if ast.IsIdentifier(expr) {
  		return expr.Text() == parameterName
 diff --git a/internal/ls/languageservice.go b/internal/ls/languageservice.go
-index 7c7e1aced..b6d587aba 100644
+index 7c7e1aced7..b6d587aba9 100644
 --- a/internal/ls/languageservice.go
 +++ b/internal/ls/languageservice.go
 @@ -97,7 +97,8 @@ func (l *LanguageService) getPreparedAutoImportView(fromFile *ast.SourceFile) (*
@@ -3028,7 +3028,7 @@ index 7c7e1aced..b6d587aba 100644
  	}
  
 diff --git a/internal/ls/lsutil/symbol_display.go b/internal/ls/lsutil/symbol_display.go
-index 8ee6bd52b..1a94babdb 100644
+index 8ee6bd52b5..1a94babdb6 100644
 --- a/internal/ls/lsutil/symbol_display.go
 +++ b/internal/ls/lsutil/symbol_display.go
 @@ -1,6 +1,8 @@
@@ -3137,7 +3137,7 @@ index 8ee6bd52b..1a94babdb 100644
  	var modifierSet ScriptElementKindModifier
  	if len(symbol.Declarations) > 0 {
 diff --git a/internal/ls/signaturehelp.go b/internal/ls/signaturehelp.go
-index c83765666..5e3df8463 100644
+index c837656666..5e3df84635 100644
 --- a/internal/ls/signaturehelp.go
 +++ b/internal/ls/signaturehelp.go
 @@ -470,8 +470,9 @@ func (l *LanguageService) getSignatureHelpItem(candidate *checker.Signature, isT
@@ -3153,7 +3153,7 @@ index c83765666..5e3df8463 100644
  	predicate := c.GetTypePredicateOfSignature(candidateSignature)
  	if predicate != nil {
 diff --git a/internal/ls/string_completions.go b/internal/ls/string_completions.go
-index f5240bcf3..ba4a1873f 100644
+index f5240bcf32..ba4a1873fe 100644
 --- a/internal/ls/string_completions.go
 +++ b/internal/ls/string_completions.go
 @@ -173,9 +173,7 @@ func (l *LanguageService) convertStringLiteralCompletions(
@@ -3207,7 +3207,7 @@ index f5240bcf3..ba4a1873f 100644
  		extensions = append(extensions, ext...)
  	}
 diff --git a/internal/module/resolver.go b/internal/module/resolver.go
-index 52400dc2b..29afc1957 100644
+index 52400dc2b9..29afc19574 100644
 --- a/internal/module/resolver.go
 +++ b/internal/module/resolver.go
 @@ -158,9 +158,31 @@ type Resolver struct {
@@ -3288,7 +3288,7 @@ index 52400dc2b..29afc1957 100644
  	}
  }
 diff --git a/internal/project/checkerpool.go b/internal/project/checkerpool.go
-index 32f68d413..2fe5c76b1 100644
+index 32f68d413f..2fe5c76b1b 100644
 --- a/internal/project/checkerpool.go
 +++ b/internal/project/checkerpool.go
 @@ -215,6 +215,34 @@ func (p *checkerPool) tryReacquireForRequest(requestID string, sem chan<- struct
@@ -3327,7 +3327,7 @@ index 32f68d413..2fe5c76b1 100644
  // Creates it on first use. Blocks on diagSem if it's currently in use.
  func (p *checkerPool) getDiagnosticsChecker(ctx context.Context, requestID string) (*checker.Checker, func()) {
 diff --git a/internal/project/compilerhost.go b/internal/project/compilerhost.go
-index 212601d4b..abb4d611d 100644
+index 212601d4b8..abb4d611de 100644
 --- a/internal/project/compilerhost.go
 +++ b/internal/project/compilerhost.go
 @@ -3,6 +3,7 @@ package project
@@ -3360,7 +3360,7 @@ index 212601d4b..abb4d611d 100644
  	}
  	return nil
 diff --git a/internal/project/configfileregistrybuilder.go b/internal/project/configfileregistrybuilder.go
-index 1d62a1188..59a6a8cdc 100644
+index 1d62a11880..59a6a8cdc6 100644
 --- a/internal/project/configfileregistrybuilder.go
 +++ b/internal/project/configfileregistrybuilder.go
 @@ -31,6 +31,7 @@ type configFileRegistryBuilder struct {
@@ -3427,7 +3427,7 @@ index 1d62a1188..59a6a8cdc 100644
  		c.updateRootFilesWatch(fileName, entry)
  		logger.Log("Finished loading config file")
 diff --git a/internal/project/filechange.go b/internal/project/filechange.go
-index edc209b39..21928e66e 100644
+index edc209b397..21928e66ef 100644
 --- a/internal/project/filechange.go
 +++ b/internal/project/filechange.go
 @@ -30,13 +30,18 @@ type FileChange struct {
@@ -3463,7 +3463,7 @@ index edc209b39..21928e66e 100644
  
  func (f FileChangeSummary) HasExcessiveWatchEvents() bool {
 diff --git a/internal/project/overlayfs.go b/internal/project/overlayfs.go
-index 1b300a013..de14d03a0 100644
+index 1b300a0131..de14d03a09 100644
 --- a/internal/project/overlayfs.go
 +++ b/internal/project/overlayfs.go
 @@ -300,15 +300,20 @@ func (fs *overlayFS) processChanges(changes []FileChange) (FileChangeSummary, ma
@@ -3496,7 +3496,7 @@ index 1b300a013..de14d03a0 100644
  			scriptKind := lsconv.LanguageKindToScriptKind(events.openChange.LanguageKind)
  			if scriptKind == core.ScriptKindUnknown {
 diff --git a/internal/project/overlayfs_test.go b/internal/project/overlayfs_test.go
-index 4659530ff..dfcd64020 100644
+index 4659530ff7..dfcd640209 100644
 --- a/internal/project/overlayfs_test.go
 +++ b/internal/project/overlayfs_test.go
 @@ -34,7 +34,9 @@ func TestProcessChanges(t *testing.T) {
@@ -3540,7 +3540,7 @@ index 4659530ff..dfcd64020 100644
  		assert.Assert(t, result.Changed.Has(testURI1), "close then open should mark as changed")
  		// Should have the new content
 diff --git a/internal/project/project.go b/internal/project/project.go
-index 39c77aa78..a7c1805b3 100644
+index 39c77aa78d..a7c1805b3c 100644
 --- a/internal/project/project.go
 +++ b/internal/project/project.go
 @@ -85,6 +85,28 @@ type Project struct {
@@ -3651,7 +3651,7 @@ index 39c77aa78..a7c1805b3 100644
  	if p.potentialProjectReferences == nil {
  		p.potentialProjectReferences = &collections.Set[tspath.Path]{}
 diff --git a/internal/project/projectcollection.go b/internal/project/projectcollection.go
-index e38812bc4..ed707447f 100644
+index e38812bc45..ed707447fb 100644
 --- a/internal/project/projectcollection.go
 +++ b/internal/project/projectcollection.go
 @@ -50,17 +50,50 @@ type APIState struct {
@@ -3709,7 +3709,7 @@ index e38812bc4..ed707447f 100644
  
  // apiOpenedFile tracks a file kept open by API clients along with its ref count.
 diff --git a/internal/project/projectcollectionbuilder.go b/internal/project/projectcollectionbuilder.go
-index 3355b6887..c21b4d670 100644
+index 3355b68878..c21b4d6704 100644
 --- a/internal/project/projectcollectionbuilder.go
 +++ b/internal/project/projectcollectionbuilder.go
 @@ -4,6 +4,7 @@ import (
@@ -3996,7 +3996,7 @@ index 3355b6887..c21b4d670 100644
  				project.ProgramLastUpdate = b.newSnapshotID
  				if result.UpdateKind == ProgramUpdateKindCloned {
 diff --git a/internal/project/refcountcache.go b/internal/project/refcountcache.go
-index 909b5aa4b..2237d958c 100644
+index 909b5aa4b1..2237d958c0 100644
 --- a/internal/project/refcountcache.go
 +++ b/internal/project/refcountcache.go
 @@ -23,6 +23,13 @@ type RefCountCache[K comparable, V any, AcquireArgs any] struct {
@@ -4044,7 +4044,7 @@ index 909b5aa4b..2237d958c 100644
  	existing, loaded := c.entries.LoadOrStore(key, entry)
  	if loaded {
 diff --git a/internal/project/session.go b/internal/project/session.go
-index 00f4056e5..6003b3773 100644
+index 00f4056e58..6003b37730 100644
 --- a/internal/project/session.go
 +++ b/internal/project/session.go
 @@ -26,6 +26,7 @@ import (
@@ -4172,7 +4172,7 @@ index 00f4056e5..6003b3773 100644
  // snapshot so future requests benefit from the work already done. If the
  // session has moved on, the snapshot is discarded; the next request needing
 diff --git a/internal/project/snapshot.go b/internal/project/snapshot.go
-index 61af433d3..77240f672 100644
+index 61af433d3c..77240f6725 100644
 --- a/internal/project/snapshot.go
 +++ b/internal/project/snapshot.go
 @@ -8,6 +8,7 @@ import (
@@ -4249,7 +4249,7 @@ index 61af433d3..77240f672 100644
  		change.fileChanges.Deleted.Len() > 0
  	if shouldCleanDiskCache {
 diff --git a/internal/project/snapshotfs.go b/internal/project/snapshotfs.go
-index 0a9f391fa..582bb0de1 100644
+index 0a9f391fa2..582bb0de1d 100644
 --- a/internal/project/snapshotfs.go
 +++ b/internal/project/snapshotfs.go
 @@ -494,6 +494,45 @@ func (s *snapshotFSBuilder) markDirtyFiles(change FileChangeSummary) {
@@ -4324,7 +4324,7 @@ index 0a9f391fa..582bb0de1 100644
  		}
  	}
 diff --git a/internal/tsoptions/parsedcommandline.go b/internal/tsoptions/parsedcommandline.go
-index 9f0229165..0c1abcbe2 100644
+index 9f0229165b..0c1abcbe26 100644
 --- a/internal/tsoptions/parsedcommandline.go
 +++ b/internal/tsoptions/parsedcommandline.go
 @@ -89,6 +89,31 @@ func (p *ParsedCommandLine) ConfigName() string {
@@ -4415,7 +4415,7 @@ index 9f0229165..0c1abcbe2 100644
  	parsedConfig := *p.ParsedConfig
  	fileNames, literalFileNamesLen := getFileNamesFromConfigSpecs(
 diff --git a/internal/tsoptions/tsconfigparsing.go b/internal/tsoptions/tsconfigparsing.go
-index 4f8578275..07524b629 100644
+index 4f85782753..07524b6290 100644
 --- a/internal/tsoptions/tsconfigparsing.go
 +++ b/internal/tsoptions/tsconfigparsing.go
 @@ -1673,7 +1673,7 @@ func getFileNamesFromConfigSpecs(

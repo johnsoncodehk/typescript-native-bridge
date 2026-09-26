@@ -70,6 +70,7 @@ static void pin_module_in_process(void) {
 // cgo-exported Go entry points (bridge.go).
 struct BridgeText { char* data; long long kind; };
 struct BridgeBinary { void* data; long long len; unsigned long long handle; long long kind; };
+extern char* BridgeVersion(void);
 extern char* BridgeSetLibPath(char* dir);
 extern long long BridgeNewSession(char* cwd);
 extern struct BridgeText BridgeCall(int64_t session, char* method, char* paramsJson);
@@ -529,6 +530,10 @@ NAPI_MODULE_INIT() {
 		napi_throw_error(env, NULL, "tnb bridge: out of memory");
 		return NULL;
 	}
+	// `version`: the build stamp the JS loader checks before any other call.
+	char* version = BridgeVersion();
+	napi_set_named_property(env, exports, "version", js_string(env, version));
+	free(version);
 	set_fn(env, exports, "setLibPath", fn_set_lib_path);
 	set_fn(env, exports, "newSession", fn_new_session);
 	set_fn(env, exports, "call", fn_call);

@@ -184,6 +184,20 @@ func startOrphanWatchdog() {
 	})
 }
 
+// bridgeVersion is the typescript-native-bridge package version this binary
+// was built from, stamped by tools/build-bridge.js (-ldflags -X). The JS
+// loader refuses a bridge whose stamp differs from its own package.json: a
+// stale platform package would otherwise pair one release's JS with
+// another's wire format and fail far from the cause.
+var bridgeVersion string
+
+// BridgeVersion returns bridgeVersion as a malloc'd string the shim frees.
+//
+//export BridgeVersion
+func BridgeVersion() *C.char {
+	return C.CString(bridgeVersion)
+}
+
 // BridgeSetLibPath hands the JS host's bundled-lib dir to Go — the only
 // channel that reaches Go from every host thread (issue #37: worker
 // process.env writes never touch the environ Go reads, so an env-var
