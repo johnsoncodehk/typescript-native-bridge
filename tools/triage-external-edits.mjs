@@ -8,8 +8,10 @@
  *   - estree:   typescript-eslint classic `project:` path — watch program
  *               lints a.ts; external rewrite + unsaved-buffer code must both
  *               change the linted file's diagnostics like stock.
- *   - tsserver: external rewrite of a.ts + updateOpen re-send must clear the
- *               dependent b.ts diagnostic.
+ *   - tsserver: external rewrite of a.ts + the client's buffer re-sync
+ *               (re-open, updateOpen changedFiles, reload — issue #74) must
+ *               clear the dependent b.ts diagnostic and classify a.ts at its
+ *               new offsets.
  *   - tscwatch: plain `tsc -w` — content edit must clear the error, file add
  *               must surface the new file's error, output text stock-equal.
  *   - stablecache: external rewrite of a node_modules .d.ts under a
@@ -168,37 +170,57 @@ const send = (command, args) => new Promise((res) => {
 const openBoth = (aText) => send('updateOpen', { openFiles: [
 	{ file: a, fileContent: aText, scriptKindName: 'TS' },
 	{ file: b, fileContent: fs.readFileSync(b, 'utf8'), scriptKindName: 'TS' },
-] }); // fire-and-forget; the awaited diagnosticsSync below orders after it
+] }); // fire-and-forget; the awaited requests below order after it
 const bDiags = async () => (await send('semanticDiagnosticsSync', { file: b })).body?.length;
+const aSpans = async () => (await send('encodedSemanticClassifications-full',
+	{ file: a, start: 0, length: fs.readFileSync(a, 'utf8').length, format: '2020' })).body?.spans;
 
-openBoth(fs.readFileSync(a, 'utf8'));
+const v1 = fs.readFileSync(a, 'utf8');
+openBoth(v1);
 console.log('before external rewrite: diags(b.ts) =', await bDiags());
-fs.writeFileSync(a, 'export const alpha = "str";\\n');    // external tool rewrites a.ts
-openBoth(fs.readFileSync(a, 'utf8'));                     // IDE watcher re-sends the new disk text
+// Shifted offsets: a stale Go text answers classifications at v1 positions.
+fs.writeFileSync(a, '// shifted\\nfunction useThing() {}\\nexport const alpha = "str";\\nuseThing();\\n');
+const v2 = fs.readFileSync(a, 'utf8');
+// How the client re-syncs the open buffer after the rewrite (argv[3]).
+const resync = {
+	reopen: () => openBoth(v2),
+	changedFiles: () => send('updateOpen', { changedFiles: [{ fileName: a, textChanges: [
+		{ start: { line: 1, offset: 1 }, end: { line: v1.split('\\n').length, offset: 1 }, newText: v2 },
+	] }] }),
+	reload: () => send('reload', { file: a, tmpfile: a }),
+}[process.argv[3]];
+await resync();
 console.log('after external rewrite:  diags(b.ts) =', await bDiags());
+console.log('after external rewrite:  spans(a.ts) =', JSON.stringify(await aSpans()));
 srv.kill();
 process.exit(0);
 `;
+
+// reopen: #49 (openFiles re-send). changedFiles / reload: #74 — the reused
+// tsserver program only syncs through the query-path overlay push.
+const TSSERVER_RESYNC_MODES = ['reopen', 'changedFiles', 'reload'];
 
 function runTsserver() {
 	const driver = path.join(scratchRoot, 'tsserver-driver.mjs');
 	fs.mkdirSync(scratchRoot, { recursive: true });
 	fs.writeFileSync(driver, TSSERVER_DRIVER);
-	const outTnb = runNode(driver, [path.join(repoRoot, 'lib', 'tsserver.js')], scratchRoot);
-	const outStock = runNode(driver, [path.join(stockPkg, 'lib', 'tsserver.js')], scratchRoot);
-	const grab = (out, label) => {
-		const m = out.match(new RegExp(label + 'diags\\(b\\.ts\\) = (\\d+)'));
-		return m ? +m[1] : undefined;
-	};
-	const tnb = { before: grab(outTnb, 'before external rewrite: '), after: grab(outTnb, 'after external rewrite:  ') };
-	const stock = { before: grab(outStock, 'before external rewrite: '), after: grab(outStock, 'after external rewrite:  ') };
-	if (stock.before !== 1 || stock.after !== 0) {
-		return fail('tsserver', `stock control diverged from issue table: ${JSON.stringify(stock)}\n${outStock}`);
+	const parse = (out) => ({
+		before: +out.match(/before external rewrite: diags\(b\.ts\) = (\d+)/)?.[1],
+		after: +out.match(/after external rewrite:  diags\(b\.ts\) = (\d+)/)?.[1],
+		spans: out.match(/after external rewrite:  spans\(a\.ts\) = (.*)/)?.[1],
+	});
+	for (const mode of TSSERVER_RESYNC_MODES) {
+		const outTnb = runNode(driver, [path.join(repoRoot, 'lib', 'tsserver.js'), mode], scratchRoot);
+		const outStock = runNode(driver, [path.join(stockPkg, 'lib', 'tsserver.js'), mode], scratchRoot);
+		const tnb = parse(outTnb), stock = parse(outStock);
+		if (stock.before !== 1 || stock.after !== 0 || !stock.spans || stock.spans === '[]') {
+			return fail('tsserver', `${mode}: stock control diverged from issue table: ${JSON.stringify(stock)}\n${outStock}`);
+		}
+		if (JSON.stringify(tnb) !== JSON.stringify(stock)) {
+			return fail('tsserver', `${mode}: phase mismatch vs stock:\n  tnb:   ${JSON.stringify(tnb)}\n  stock: ${JSON.stringify(stock)}\n--- tnb output ---\n${outTnb}`);
+		}
 	}
-	if (tnb.before !== stock.before || tnb.after !== stock.after) {
-		return fail('tsserver', `phase mismatch vs stock:\n  tnb:   ${JSON.stringify(tnb)}\n  stock: ${JSON.stringify(stock)}\n--- tnb output ---\n${outTnb}`);
-	}
-	console.log('[tsserver] ok (before=1, after=0, stock-identical)');
+	console.log(`[tsserver] ok (${TSSERVER_RESYNC_MODES.join('/')}: before=1, after=0, rewritten-file classifications stock-identical)`);
 	return true;
 }
 
