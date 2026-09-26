@@ -9837,20 +9837,82 @@ export function createTsgoChecker(program: any): any {
     // ── Position → tsgo Node finder (cached per file) ────────────────
     const tsgoSfCache = new Map<string, any>();
     const nodeAtPosCache = new Map<string, Map<string, any>>();
-    // Symbol cache keyed by (fileName, end-offset) — the fast path for
-    // getSymbolAtLocation, which resolves the vast majority of the ~30k
-    // scope-manager identifier queries without touching the node index.
-    const symByPos = new Map<string, Map<string, any>>();
+    // ── Snapshot-generation caches ───────────────────────────────────
+    // Every memo here holds handles bound to one Go snapshot generation.
+    // Each updateSnapshot disposes the previous generation's handle registry,
+    // content change or not, so a snapshot bump inside this checker's
+    // lifetime (pushHostOverlayToTsgo) replaces the whole object — a new
+    // snapshot-bound memo cannot be forgotten by a clear list. The per-file
+    // scan caches (tsgoSfCache, nodeIndexCache, nodeAtPosCache) stay outside:
+    // they reuse across generations and invalidate per changed file.
+    const newSnapshotCaches = () => ({
+        // Symbol cache keyed by (fileName, end-offset) — the fast path for
+        // getSymbolAtLocation, which resolves the vast majority of the ~30k
+        // scope-manager identifier queries without touching the node index.
+        symByPos: new Map<string, Map<string, any>>(),
+        // refineNavSymbol memo: the same symbol is refined once even when
+        // queried from many reference sites (e.g. 100 refs to `foo`). Keyed by
+        // symbol object identity (tsgo symbols are id-keyed singletons via
+        // objectRegistry; host-bound symbols are real TS symbol objects).
+        refinedSymBySym: new WeakMap<any, any>(),
+        // Files whose import/export module-specifier symbols were
+        // batch-resolved in one getSymbolsAtLocations RPC over the tsgo
+        // SourceFile's `imports` list (see
+        // ensureModuleSpecifierSymbolsPrefetched). Multi-project lint runners
+        // resolve every import literal of every program file (BuilderState
+        // dependency walks, cache hashing); per-literal RPC dominates without this.
+        moduleSpecPrefetched: new Set<string>(),
+        /** getSymbolsInScope memo — keyed (file:start:end:meaning); see adapter. */
+        symbolsInScopeCache: new Map<string, any[]>(),
+        /** tryFindAmbientModule memo — keyed unquoted module name; null = miss. */
+        ambientModuleByNameCache: new Map<string, any | null>(),
+        // Light ambient-module batch for builder referenced-files (module names +
+        // declaration merge only) via Checker.getAmbientModules. null = fetched
+        // and empty; undefined = not fetched.
+        ambientModuleBatchCache: undefined as any,
+        // Checker-quality ambient symbols for tryFindAmbientModule / export-info
+        // rehydrate. Binder-only light symbols lack merged exports and can hang
+        // getAliasedSymbol when auto-import walks ambient modules.
+        ambientModuleExportBatchCache: undefined as any,
+        /** Host→tsgo resolution memo (see rpc()). */
+        rpcSymbolCache: new Map<any, any>(),
+        nodeTypeCache: new Map<any, any>(),
+        typeOfSymbolCache: new Map<any, any>(),
+        propertiesCache: new Map<any, any>(),
+        // Per-type name→property map, built lazily from the memoized
+        // getPropertiesOfType result. Collapses N getPropertyOfType(name)
+        // RPCs into 1 getPropertiesOfType RPC + JS lookup per type.
+        propertyByNameCache: new Map<any, Map<string, any>>(),
+        // Types for which getPropertiesOfType was used to bulk-fill propertyByNameCache.
+        propertyBulkLoaded: new Set<any>(),
+        // Per-type signature cache keyed by SignatureKind. Unifies the proto
+        // (type.getCallSignatures/getConstructSignatures) and adapter
+        // (checker.getSignaturesOfType) paths onto one RPC per (type, kind).
+        signaturesByKindCache: new Map<any, Map<number, readonly any[]>>(),
+        // Per-type base-types cache. Unifies proto (type.getBaseTypes) and adapter
+        // (checker.getBaseTypes) onto one RPC per type.
+        baseTypesCache: new Map<any, readonly any[]>(),
+        // Object-literal completion batch (see ObjCompletionBatch).
+        objCompletionPending: undefined as { hostNode: any; tsgoNode: any; results: any[] } | undefined,
+        objCompletionBatch: undefined as ObjCompletionBatch | undefined,
+        // getHostBoundSf memo: refineNavSymbol resolves the module parent of
+        // ~2k scope symbols per completion, each walking declarations and
+        // calling getHostBoundSf per declaration file. Repeating the
+        // resolveHostFileName + getScriptVersion + sfCache probe per call
+        // burned most of the completion wall. null = confirmed not host-parsed.
+        hostBoundSfMemo: new Map<string, any>(),
+    });
+    let gen = newSnapshotCaches();
     const symCacheFileName = (fileName: string): string => {
         const h = hostForOverlaySyncLocal();
         return resolveHostFileName(fileName, h);
     };
     const getSymFileCache = (fileName: string, create = false): Map<string, any> | undefined => {
         const key = symCacheFileName(fileName);
-        let fc = symByPos.get(key);
+        let fc = gen.symByPos.get(key);
         if (!fc && create) {
             fc = new Map();
-            symByPos.set(key, fc);
+            gen.symByPos.set(key, fc);
         }
         return fc;
     };
@@ -9894,33 +9956,9 @@ export function createTsgoChecker(program: any): any {
         const fc = getSymFileCache(fileName, true)!;
         fc.set(`${start}:${end}`, sym);
     };
-    // refineNavSymbol memo: the same symbol is refined once even when queried
-    // from many reference sites (e.g. 100 refs to `foo`). Keyed by symbol
-    // object identity (tsgo symbols are id-keyed singletons via objectRegistry;
-    // host-bound symbols are real TS symbol objects). Cleared on snapshot
-    // refresh alongside symByPos.
-    let refinedSymBySym = new WeakMap<any, any>();
-    // Files whose import/export module-specifier symbols were batch-resolved
-    // in one getSymbolsAtLocations RPC over the tsgo SourceFile's `imports`
-    // list (see ensureModuleSpecifierSymbolsPrefetched). Multi-project lint
-    // runners resolve every import literal of every program file (BuilderState
-    // dependency walks, cache hashing); per-literal RPC dominates without this.
-    const moduleSpecPrefetched = new Set<string>();
-    /** getSymbolsInScope memo — keyed (file:start:end:meaning); see adapter. */
-    const symbolsInScopeCache = new Map<string, any[]>();
     // tsserver (projectService) needs full ambient export batch for exportInfoMap;
     // vue-tsc / builder hosts without projectService use the light batch.
     const isProjectServiceProgram = !!(programCtx?.lsHost as any)?.projectService;
-    /** tryFindAmbientModule memo — keyed unquoted module name; null = miss. */
-    const ambientModuleByNameCache = new Map<string, any | null>();
-    // Light ambient-module batch for builder referenced-files (module names +
-    // declaration merge only) via Checker.getAmbientModules. null = fetched
-    // and empty; undefined = not fetched.
-    let ambientModuleBatchCache: any = undefined;
-    // Checker-quality ambient symbols for tryFindAmbientModule / export-info
-    // rehydrate. Binder-only light symbols lack merged exports and can hang
-    // getAliasedSymbol when auto-import walks ambient modules.
-    let ambientModuleExportBatchCache: any = undefined;
     // Per-file index: start position → all tsgo nodes that start there.
     // Built once per file via a single AST walk, after which every
     // findTsgoNodeAtPosition call is an O(1) map lookup + a tiny kind/end
@@ -10095,7 +10133,7 @@ export function createTsgoChecker(program: any): any {
     function getPropertiesOfTypeForExportEquals(type: any): readonly any[] {
         if (!type) return [];
         ensureProject();
-        return memoGet(propertiesCache, type, () => project.checker.getPropertiesOfType(type) ?? []);
+        return memoGet(gen.propertiesCache, type, () => project.checker.getPropertiesOfType(type) ?? []);
     }
 
     function forEachExportEqualsProperties(moduleSymbol: any, cb: (symbol: any, key: string) => void): void {
@@ -10161,61 +10199,36 @@ export function createTsgoChecker(program: any): any {
             // AST against the new snapshot.
             programCtx?.thinProgram?.__tnbInvalidateHostSourceFile?.(fileName);
         }
-        // Every updateSnapshot REPLACES the Go snapshot and disposes the
-        // previous generation's handle registry — the caches below all hold
-        // snapshot-bound handles, so they must reset on ANY bump, content
-        // change or not. (The former "content-only" guard kept stale handles
-        // across openFiles-only bumps, which is how replayed queries faulted
-        // with "symbol handle N not found in snapshot registry", sim-nav
-        // #5986 class. syncSnapshot's no-op skip is what keeps this from
-        // costing re-resolution on every query.)
+        // Any bump starts a new generation, content change or not (see
+        // newSnapshotCaches); syncSnapshot's no-op skip is what keeps this
+        // from costing re-resolution on every query.
         _rpcTraceEvent(
             "overlay.refresh.clearCaches",
             `files=${openFilesWithContent.length} paths=${openFilesWithContent.map(f => f.fileName).join(",")}`
-            + ` symByPosFiles=${symByPos.size} symbolsInScope=${symbolsInScopeCache.size}`
-            + ` nodeType=${nodeTypeCache.size} typeOfSymbol=${typeOfSymbolCache.size}`
-            + ` properties=${propertiesCache.size}`,
+            + ` symByPosFiles=${gen.symByPos.size} symbolsInScope=${gen.symbolsInScopeCache.size}`
+            + ` nodeType=${gen.nodeTypeCache.size} typeOfSymbol=${gen.typeOfSymbolCache.size}`
+            + ` properties=${gen.propertiesCache.size}`,
         );
-        symByPos.clear();
-        hostBoundSfMemo.clear();
-        moduleSpecPrefetched.clear();
-        symbolsInScopeCache.clear();
-        ambientModuleByNameCache.clear();
-        ambientModuleBatchCache = undefined;
-        ambientModuleExportBatchCache = undefined;
-        rpcSymbolCache.clear();
-        nodeTypeCache.clear();
-        typeOfSymbolCache.clear();
-        propertiesCache.clear();
-        propertyByNameCache.clear();
-        propertyBulkLoaded.clear();
-        signaturesByKindCache.clear();
-        baseTypesCache.clear();
-        _objCompletionPending = undefined;
-        _objCompletionBatch = undefined;
-        // Invalidate Symbol.parent memos pinned on instances that outlive the
-        // cleared maps (Soft-P′ / host-bound may still hold Symbol refs).
+        gen = newSnapshotCaches();
+        // Symbol.parent memos are stamped on instances that outlive gen.
         _tnbParentMemoEpoch++;
-        // WeakMap has no clear(); drop Soft-P′/S′ memo so remapped decls cannot
-        // stick across overlay content refresh (comment claimed this already).
-        refinedSymBySym = new WeakMap();
     }
 
     function getAmbientModuleBatch(): any {
-        if (ambientModuleBatchCache !== undefined) return ambientModuleBatchCache ?? undefined;
-        ambientModuleBatchCache = project.checker.getAmbientModules() ?? null;
-        return ambientModuleBatchCache ?? undefined;
+        if (gen.ambientModuleBatchCache !== undefined) return gen.ambientModuleBatchCache ?? undefined;
+        gen.ambientModuleBatchCache = project.checker.getAmbientModules() ?? null;
+        return gen.ambientModuleBatchCache ?? undefined;
     }
 
     function getAmbientModuleExportBatch(): any {
-        if (ambientModuleExportBatchCache !== undefined) return ambientModuleExportBatchCache ?? undefined;
+        if (gen.ambientModuleExportBatchCache !== undefined) return gen.ambientModuleExportBatchCache ?? undefined;
         try {
-            ambientModuleExportBatchCache = normalizeExportMapWireNames(project.checker.getModuleExportMap?.()) ?? null;
+            gen.ambientModuleExportBatchCache = normalizeExportMapWireNames(project.checker.getModuleExportMap?.()) ?? null;
         }
         catch {
-            ambientModuleExportBatchCache = null;
+            gen.ambientModuleExportBatchCache = null;
         }
-        return ambientModuleExportBatchCache ?? undefined;
+        return gen.ambientModuleExportBatchCache ?? undefined;
     }
 
     function getTsgoSourceFile(fileName: string): any {
@@ -10279,21 +10292,21 @@ export function createTsgoChecker(program: any): any {
      * import literal of every program file; per-literal positional RPC plus the
      * node-index fallback dominated lint wall time. Results (including
      * undefined for unresolved modules) are stored positionally so subsequent
-     * queries hit symByPos. Returns false when the file has no tsgo mirror.
+     * queries hit gen.symByPos. Returns false when the file has no tsgo mirror.
      */
     function ensureModuleSpecifierSymbolsPrefetched(fileName: string): boolean {
         const cacheName = symCacheFileName(fileName);
-        if (moduleSpecPrefetched.has(cacheName)) return true;
+        if (gen.moduleSpecPrefetched.has(cacheName)) return true;
         const sf = getTsgoSourceFile(fileName);
         if (!sf) return false;
-        moduleSpecPrefetched.add(cacheName);
+        gen.moduleSpecPrefetched.add(cacheName);
         const importNodes: readonly any[] = sf.imports ?? [];
         if (!importNodes.length) return true;
         let syms: readonly any[];
         try {
             syms = project.checker.getSymbolAtLocation(importNodes as any[]) ?? [];
         } catch {
-            moduleSpecPrefetched.delete(cacheName);
+            gen.moduleSpecPrefetched.delete(cacheName);
             return false;
         }
         for (let i = 0; i < importNodes.length; i++) {
@@ -10464,9 +10477,6 @@ export function createTsgoChecker(program: any): any {
     // direction (tsgo symbol → host navigation symbol) is refineNavSymbol.
     // Adapter methods therefore never branch on a symbol's origin.
 
-    /** Host→tsgo resolution memo; cleared with symByPos on overlay refresh. */
-    const rpcSymbolCache = new Map<any, any>();
-
     function tsgoSymbolForHostDeclaration(decl: any): any {
         const sf = decl?.getSourceFile?.();
         if (!sf?.fileName) return undefined;
@@ -10561,7 +10571,7 @@ export function createTsgoChecker(program: any): any {
     function resolveRpcSymbol(symbol: any): any {
         if (!symbol) return undefined;
         if (isTsgoBridgeSymbol(symbol)) return symbol;
-        if (rpcSymbolCache.has(symbol)) return rpcSymbolCache.get(symbol);
+        if (gen.rpcSymbolCache.has(symbol)) return gen.rpcSymbolCache.get(symbol);
         let resolved: any;
         const decls = symbol.declarations?.length
             ? symbol.declarations
@@ -10570,7 +10580,7 @@ export function createTsgoChecker(program: any): any {
             resolved = tsgoSymbolForHostDeclaration(decl);
             if (resolved) break;
         }
-        rpcSymbolCache.set(symbol, resolved);
+        gen.rpcSymbolCache.set(symbol, resolved);
         return resolved;
     }
 
@@ -10642,24 +10652,6 @@ export function createTsgoChecker(program: any): any {
         }
         return facade;
     }
-
-    // ── Caches ───────────────────────────────────────────────────────
-    const nodeTypeCache = new Map<any, any>();
-    const typeOfSymbolCache = new Map<any, any>();
-    const propertiesCache = new Map<any, any>();
-    // Per-type name→property map, built lazily from the memoized
-    // getPropertiesOfType result. Collapses N getPropertyOfType(name)
-    // RPCs into 1 getPropertiesOfType RPC + JS lookup per type.
-    const propertyByNameCache = new Map<any, Map<string, any>>();
-    // Per-type signature cache keyed by SignatureKind. Unifies the proto
-    // (type.getCallSignatures/getConstructSignatures) and adapter
-    // (checker.getSignaturesOfType) paths onto one RPC per (type, kind).
-    const signaturesByKindCache = new Map<any, Map<number, readonly any[]>>();
-    // Per-type base-types cache. Unifies proto (type.getBaseTypes) and adapter
-    // (checker.getBaseTypes) onto one RPC per type.
-    const baseTypesCache = new Map<any, readonly any[]>();
-    // Types for which getPropertiesOfType was used to bulk-fill propertyByNameCache.
-    const propertyBulkLoaded = new Set<any>();
 
     const memoGet = <K, V>(cache: Map<K, V>, key: K, compute: () => V): V => {
         if (cache.has(key)) return cache.get(key)!;
@@ -10736,8 +10728,6 @@ export function createTsgoChecker(program: any): any {
         filteredMembers: any[]; // final members surviving the stock filter
         properties: any[];
     }
-    let _objCompletionPending: { hostNode: any; tsgoNode: any; results: any[] } | undefined;
-    let _objCompletionBatch: ObjCompletionBatch | undefined;
 
     const sameTypeList = (a: readonly any[], b: readonly any[]): boolean =>
         a.length === b.length && a.every((t, i) => t === b[i]);
@@ -10747,9 +10737,9 @@ export function createTsgoChecker(program: any): any {
     // arrives, the next per-member call recomputes for the new node (the
     // discriminant verdicts are node-dependent).
     const activeObjCompletionBatch = (): ObjCompletionBatch | undefined => {
-        const b = _objCompletionBatch;
+        const b = gen.objCompletionBatch;
         if (!b) return undefined;
-        if (_objCompletionPending && _objCompletionPending.hostNode !== b.hostNode) return undefined;
+        if (gen.objCompletionPending && gen.objCompletionPending.hostNode !== b.hostNode) return undefined;
         return b;
     };
 
@@ -10759,7 +10749,7 @@ export function createTsgoChecker(program: any): any {
     // only: completions.ts reads `.types` before filtering, so the memo is
     // already populated and this check never issues an RPC of its own.
     const tryStartObjCompletionBatch = (memberType: any): ObjCompletionBatch | undefined => {
-        const pending = _objCompletionPending;
+        const pending = gen.objCompletionPending;
         const proj = _currentProjectRef.project;
         if (!pending || !proj || typeof proj.checker.getPropertiesForObjectExpression !== "function") return undefined;
         let contextualType: any;
@@ -10803,19 +10793,19 @@ export function createTsgoChecker(program: any): any {
             // before any checker call); leave them out so an unexpected query
             // falls through to the real RPC instead of a fabricated verdict.
             if ((fm.type.flags & TF.Primitive) === 0) verdicts.set(fm.type, fm);
-            if (fm.apparentProperties && !propertiesCache.has(fm.type)) {
-                propertiesCache.set(fm.type, fm.apparentProperties);
+            if (fm.apparentProperties && !gen.propertiesCache.has(fm.type)) {
+                gen.propertiesCache.set(fm.type, fm.apparentProperties);
             }
         }
         for (const t of info.filteredTypes) fixupType(t);
         const finalType = info.mergedType ?? info.promiseFilteredType;
         const isFinalUnion = info.finalMembers.length > 0;
         // Non-union final type: stock calls type.getApparentProperties() on it,
-        // which routes through propertiesCache — seed it.
-        if (!isFinalUnion && finalType && !propertiesCache.has(finalType)) {
-            propertiesCache.set(finalType, info.properties);
+        // which routes through gen.propertiesCache — seed it.
+        if (!isFinalUnion && finalType && !gen.propertiesCache.has(finalType)) {
+            gen.propertiesCache.set(finalType, info.properties);
         }
-        _objCompletionBatch = {
+        gen.objCompletionBatch = {
             hostNode: pending.hostNode,
             completionsType,
             promised,
@@ -10827,22 +10817,22 @@ export function createTsgoChecker(program: any): any {
             filteredMembers: info.filteredTypes,
             properties: info.properties as any[],
         };
-        return _objCompletionBatch;
+        return gen.objCompletionBatch;
     };
 
     const resolvePropertyOfType = (type: any, name: string): any => {
         const proj = projectForBridgeObject(type) ?? _currentProjectRef.project;
         if (!proj || !type) return undefined;
-        let byName = propertyByNameCache.get(type);
+        let byName = gen.propertyByNameCache.get(type);
         if (!byName) {
             byName = new Map<string, any>();
-            propertyByNameCache.set(type, byName);
+            gen.propertyByNameCache.set(type, byName);
         }
         if (byName.has(name)) return byName.get(name);
         // One getPropertiesOfType RPC per type replaces many getPropertyOfType RPCs.
-        if (!propertyBulkLoaded.has(type)) {
-            propertyBulkLoaded.add(type);
-            const props = memoGet(propertiesCache, type, () => proj.checker.getPropertiesOfType(type) ?? []);
+        if (!gen.propertyBulkLoaded.has(type)) {
+            gen.propertyBulkLoaded.add(type);
+            const props = memoGet(gen.propertiesCache, type, () => proj.checker.getPropertiesOfType(type) ?? []);
             for (const p of props) {
                 if (p?.name) byName.set(p.name, p);
             }
@@ -10856,8 +10846,8 @@ export function createTsgoChecker(program: any): any {
     const getSignaturesCached = (type: any, kind: number): readonly any[] => {
         const proj = projectForBridgeObject(type) ?? _currentProjectRef.project;
         if (!proj) return [];
-        let byKind = signaturesByKindCache.get(type);
-        if (!byKind) { byKind = new Map(); signaturesByKindCache.set(type, byKind); }
+        let byKind = gen.signaturesByKindCache.get(type);
+        if (!byKind) { byKind = new Map(); gen.signaturesByKindCache.set(type, byKind); }
         const hit = byKind.get(kind);
         if (hit !== undefined) return hit;
         const r = proj.checker.getSignaturesOfType(type, kind) ?? [];
@@ -10868,7 +10858,7 @@ export function createTsgoChecker(program: any): any {
     const getBaseTypesCached = (type: any): readonly any[] => {
         const proj = projectForBridgeObject(type) ?? _currentProjectRef.project;
         if (!proj) return [];
-        return memoGet(baseTypesCache, type, () => proj.checker.getBaseTypes(type) ?? []);
+        return memoGet(gen.baseTypesCache, type, () => proj.checker.getBaseTypes(type) ?? []);
     };
 
     // Faithful forward: tsgo GetTypeAtLocation (checker getTypeOfNode) handles
@@ -10883,14 +10873,8 @@ export function createTsgoChecker(program: any): any {
     }
 
     // ── Build adapter object ─────────────────────────────────────────
-    // Memoized per checker generation: refineNavSymbol resolves the module
-    // parent of ~2k scope symbols per completion, each walking declarations
-    // and calling getHostBoundSf per declaration file. Repeating the
-    // resolveHostFileName + getScriptVersion + sfCache probe per call burned
-    // most of the completion wall. null = confirmed not host-parsed.
-    const hostBoundSfMemo = new Map<string, any>();
     const getHostBoundSf = (fileName: string): any | undefined => {
-        const memo = hostBoundSfMemo.get(fileName);
+        const memo = gen.hostBoundSfMemo.get(fileName);
         if (memo !== undefined) return memo === null ? undefined : memo;
         // Lib files never take the host-parse path (getOrCreateSourceFile
         // gates preferHostSourceFiles on !isHostLibFile), so probing them
@@ -10899,7 +10883,7 @@ export function createTsgoChecker(program: any): any {
         // it. Skip the program lookup entirely.
         const hostFileName = toHostFileName(fileName);
         if (isBundledLibPath(fileName) || isHostLibFile(hostFileName)) {
-            hostBoundSfMemo.set(fileName, null);
+            gen.hostBoundSfMemo.set(fileName, null);
             return undefined;
         }
         // A .d.ts only needs host-bound remap when the host actually serves it
@@ -10913,7 +10897,7 @@ export function createTsgoChecker(program: any): any {
                 && isOverlayCandidatePath(hostFileName)
                 && (hostHasScriptSnapshot(hostForOverlaySyncLocal(), hostFileName, hostFileName)
                     || _syncedOverlayContentByFile.has(hostFileName)))) {
-            hostBoundSfMemo.set(fileName, null);
+            gen.hostBoundSfMemo.set(fileName, null);
             return undefined;
         }
         // Prefer THIS project's thin program: _hostProgramRef is module-global
@@ -10929,15 +10913,15 @@ export function createTsgoChecker(program: any): any {
         // Soft-P′ soft-bound disk/node_modules files carry binder fields
         // (ExportSpecifier.symbol) without the overlay identity brand.
         if (!isHostParsedSourceFile(sf)) {
-            hostBoundSfMemo.set(fileName, null);
+            gen.hostBoundSfMemo.set(fileName, null);
             return undefined;
         }
-        hostBoundSfMemo.set(fileName, sf);
+        gen.hostBoundSfMemo.set(fileName, sf);
         return sf;
     };
     const refineNavSymbol = (sym: any) => {
         if (!sym) return sym;
-        const cached = refinedSymBySym.get(sym);
+        const cached = gen.refinedSymBySym.get(sym);
         if (cached !== undefined) return cached;
         // Completion pulls ~1000 getSymbolsInScope globals per keystroke.
         // When host-bound (.vue) files exist, pure lib/ambient symbols with no
@@ -10960,7 +10944,7 @@ export function createTsgoChecker(program: any): any {
                 ensureSymbolContextualDocCompat(sym),
                 getHostBoundSf,
             );
-            refinedSymBySym.set(sym, light);
+            gen.refinedSymBySym.set(sym, light);
             return light;
         }
         if (!_hasHostBoundFiles) {
@@ -10970,14 +10954,14 @@ export function createTsgoChecker(program: any): any {
                 ensureClassLikeSymbolDeclarations(ensureSymbolContextualDocCompat(sym)),
                 getHostBoundSf,
             );
-            refinedSymBySym.set(sym, refinedNoHost);
+            gen.refinedSymBySym.set(sym, refinedNoHost);
             return refinedNoHost;
         }
         const refined = ensureClassLikeSymbolDeclarations(
             ensureSymbolContextualDocCompat(refineHostNavigationSymbol(sym, getHostBoundSf)),
         );
         if (_traceSymEnabled) traceSym(`refineNavSymbol in=${traceSymSymbol(sym)} out=${traceSymSymbol(refined)}`);
-        refinedSymBySym.set(sym, refined);
+        gen.refinedSymBySym.set(sym, refined);
         return refined;
     };
 
@@ -11067,7 +11051,7 @@ export function createTsgoChecker(program: any): any {
             // range): stock returns undefined for the comment container, and
             // allowing positional/cache hits here poisons quickinfo inside
             // param JSDoc (`/** left */ a`) after an earlier probe warms
-            // symByPos. Broader JSDoc* short-circuit breaks component-meta
+            // gen.symByPos. Broader JSDoc* short-circuit breaks component-meta
             // (JSDoc type/tag nodes still need normal resolution).
             case SyntaxKind.JSDocComment:
                 return { action: "undefined" };
@@ -11182,7 +11166,7 @@ export function createTsgoChecker(program: any): any {
             ensureProject();
             // Stock (checker.ts:1714-1716): getParseTreeNode(nodeIn) then
             // getTypeOfNode, else errorType. Walk original before position map.
-            return memoGet(nodeTypeCache, node, () => {
+            return memoGet(gen.nodeTypeCache, node, () => {
                 const t0 = process.env.TSGO_PROFILE === "1" ? Date.now() : 0;
                 const tsgoNode = resolveHostNodeToTsgo(node);
                 if (!tsgoNode) {
@@ -11254,7 +11238,7 @@ export function createTsgoChecker(program: any): any {
             // file's module symbol (sf.symbol), not a tsgo position hit on the
             // first statement (e.g. the codegen export const) which lacks the default export.
             if (node.kind === SyntaxKind.SourceFile && sf.symbol) {
-                // Return the module symbol directly. Do NOT write symByPos here:
+                // Return the module symbol directly. Do NOT write gen.symByPos here:
                 // this whole-file symbol has no single span, and caching it under
                 // position 0 would poison lookups for any real node at pos 0.
                 // This branch already short-circuits every SourceFile query, so a
@@ -11423,7 +11407,7 @@ export function createTsgoChecker(program: any): any {
             // dominant cross-file query in multi-project lint). If the literal
             // wasn't in the file's imports list (rare — e.g. require() text in
             // a non-module position), fall through to the per-node path.
-            if (!sf.__tnbHostBound && !moduleSpecPrefetched.has(cacheName) && isModuleSpecifierStringLiteral(node)) {
+            if (!sf.__tnbHostBound && !gen.moduleSpecPrefetched.has(cacheName) && isModuleSpecifierStringLiteral(node)) {
                 if (ensureModuleSpecifierSymbolsPrefetched(sf.fileName)) {
                     cached = probeSymCache(cacheName, start, end);
                     if (cached.found) {
@@ -11504,12 +11488,12 @@ export function createTsgoChecker(program: any): any {
             // completions asks these right before getPropertiesForObjectExpression,
             // which lets the per-member calls below collapse into one batch RPC.
             if ((node.kind === SyntaxKind.ObjectLiteralExpression || node.kind === SyntaxKind.JsxAttributes) && tsgoNode.kind === node.kind) {
-                const pending = _objCompletionPending;
+                const pending = gen.objCompletionPending;
                 if (pending && pending.hostNode === node) {
                     pending.results.push(t);
                 }
                 else {
-                    _objCompletionPending = { hostNode: node, tsgoNode, results: [t] };
+                    gen.objCompletionPending = { hostNode: node, tsgoNode, results: [t] };
                 }
             }
             return t;
@@ -11659,7 +11643,7 @@ export function createTsgoChecker(program: any): any {
         getTypeOfSymbol(symbol: any): any {
             if (!symbol) return undefined;
             ensureProject();
-            return memoGet(typeOfSymbolCache, symbol, () => {
+            return memoGet(gen.typeOfSymbolCache, symbol, () => {
                 const t = rpc().getTypeOfSymbol(symbol);
                 if (t) { fixupType(t); return t; }
                 // Stock getTypeOfSymbol never returns undefined (checker.ts:12960):
@@ -11937,7 +11921,7 @@ export function createTsgoChecker(program: any): any {
         getPropertiesOfType(type: any): readonly any[] {
             ensureProject();
             if (!type) return [];
-            return memoGet(propertiesCache, type, () => project.checker.getPropertiesOfType(type) ?? []);
+            return memoGet(gen.propertiesCache, type, () => project.checker.getPropertiesOfType(type) ?? []);
         },
         getPropertyOfType(type: any, name: string): any {
             ensureProject();
@@ -13150,8 +13134,8 @@ export function createTsgoChecker(program: any): any {
             if (!moduleName) return undefined;
             const key = moduleName.replace(/^"|"$/g, "");
             ensureProject();
-            if (ambientModuleByNameCache.has(key)) {
-                return ambientModuleByNameCache.get(key) ?? undefined;
+            if (gen.ambientModuleByNameCache.has(key)) {
+                return gen.ambientModuleByNameCache.get(key) ?? undefined;
             }
             try {
                 const batch = getAmbientModuleExportBatch();
@@ -13159,13 +13143,13 @@ export function createTsgoChecker(program: any): any {
                     if (mod.moduleFileName) continue;
                     const name = mod.moduleName?.replace(/^"|"$/g, "");
                     if (name === key) {
-                        ambientModuleByNameCache.set(key, mod.moduleSymbol);
+                        gen.ambientModuleByNameCache.set(key, mod.moduleSymbol);
                         return mod.moduleSymbol;
                     }
                 }
             }
             catch { /* empty */ }
-            ambientModuleByNameCache.set(key, null);
+            gen.ambientModuleByNameCache.set(key, null);
             return undefined;
         },
 
@@ -13182,7 +13166,7 @@ export function createTsgoChecker(program: any): any {
             const start = location.getStart(sf);
             const end = location.getEnd(sf);
             const scopeKey = `${symCacheFileName(sf.fileName)}:${start}:${end}:${meaning}`;
-            const memo = symbolsInScopeCache.get(scopeKey);
+            const memo = gen.symbolsInScopeCache.get(scopeKey);
             if (memo) return memo;
             let tsgoNode = findTsgoNodeAtPosition(sf.fileName, start, location.kind, end);
             if (!tsgoNode) {
@@ -13198,13 +13182,13 @@ export function createTsgoChecker(program: any): any {
                 // host binder locals so completion sortText uses === sourceFile.
                 if (isHostParsedSourceFile(sf)) {
                     result = mergeHostLocalScopeSymbols(result, location, meaning).map(sym =>
-                        refinedSymBySym.has(sym) ? sym : refineNavSymbol(sym),
+                        gen.refinedSymBySym.has(sym) ? sym : refineNavSymbol(sym),
                     );
                 }
                 // Stock never puts module-default / re-export aliases into scope;
                 // filtering them restores the `default` keyword completion slot.
                 result = result.filter((sym: any) => !isStolenDefaultKeywordScopeSymbol(sym));
-                symbolsInScopeCache.set(scopeKey, result);
+                gen.symbolsInScopeCache.set(scopeKey, result);
                 return result;
             }
             // Genuine host-only virtual files have no tsgo mirror; walk host
