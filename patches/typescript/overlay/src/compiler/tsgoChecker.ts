@@ -417,7 +417,19 @@ function loadBridgeDeps(): void {
     // The bridge is a NAPI addon (bridge.node) — Node dlopens it directly via
     // require(); no FFI library. napi_shim.c exposes plain JS functions
     // (strings/Buffer/bool/null/int64 in and out; errors are thrown).
-    _bridgeAddon = require(resolvedBridge);
+    const addon = require(resolvedBridge);
+    // A bridge from another release speaks another wire format and fails far
+    // from the cause (a stale platform package in a pnpm store paired with a
+    // newer bundle surfaced as an ArenaClient.readHandle error).
+    const expectedVersion: string = require(path.join(packageRoot, "package.json")).version;
+    if (addon.version !== expectedVersion) {
+        throw new Error(
+            `tsgoChecker: ${resolvedBridge} was built for typescript-native-bridge ${addon.version || "(unstamped)"}, ` +
+                `this bundle is ${expectedVersion}\n` +
+                `  Reinstall so the platform package matches, or from a source checkout: npm run build:bridge`,
+        );
+    }
+    _bridgeAddon = addon;
     // Hand the bundled lib dir to Go over NAPI — the only channel that
     // reaches Go from every host thread (issue #37: worker_threads never
     // propagate process.env writes to the environ Go reads, so an env-var
