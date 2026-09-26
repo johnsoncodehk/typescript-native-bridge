@@ -2550,9 +2550,11 @@ function syncSnapshot(configFilePath: string, steady: SteadySyncParams, delta: S
 	});
 	for (const f of content) commitSyncedOverlay(f);
 	trackBuildProjectSnapshot(configFilePath, snapshot, [...(steady.openFiles ?? []), ...content.map(f => f.fileName)]);
+	// Every send opens this config, so a missing project is a broken
+	// invariant, not a state to carry on from.
 	const project = snapshot.getProject(configFilePath);
-	if (project) _lastSyncByConfig.set(configFilePath, { steady, project });
-	else _lastSyncByConfig.delete(configFilePath);
+	if (!project) throw new Error(`tsgoChecker: project not found for ${configFilePath}`);
+	_lastSyncByConfig.set(configFilePath, { steady, project });
 	return { project, snapshot };
 }
 
@@ -9770,9 +9772,6 @@ export function createTsgoChecker(program: any): any {
         });
         if (programCtx) programCtx.pendingReferencedProjects = undefined;
         project = synced.project;
-        if (!project) {
-            throw new Error(`tsgoChecker: project not found for ${configFilePath}`);
-        }
         releaseStaleBuildSnapshots(buildClose.staleSnapshots);
         // Cross-project extra-extension imports (e.g. ../other/foo.vue): the
         // program can include host-virtual files that were not in this
@@ -9791,7 +9790,7 @@ export function createTsgoChecker(program: any): any {
                 if (!isExtraExtensionFileName(hostFileName) || !isOverlayCandidatePath(hostFileName)) continue;
                 if (sentOverlayFiles.has(hostFileName) || _syncedOverlayContentByFile.has(hostFileName)) continue;
                 const content = getHostScriptContent(syncHost ?? programCtx?.overlayHostCtx?.host, hostFileName, options);
-                if (!content?.text || !content.fromHost) continue;
+                if (!content?.fromHost) continue;
                 const { entry } = planOverlayPush(hostFileName, content.text, content.scriptKind);
                 if (entry) lateOverlays.push(entry);
             }
@@ -9803,7 +9802,7 @@ export function createTsgoChecker(program: any): any {
                 // state and overlaps the remaining builder work instead
                 // of running synchronously inside getGlobalDiagnostics.
                 const late = syncSnapshot(configFilePath!, steady, { openFilesWithContent: lateOverlays, prefetchDiagnostics });
-                if (late.project) project = late.project;
+                project = late.project;
             }
         }
         _projectCache.set(configFilePath!, project);
@@ -10171,7 +10170,7 @@ export function createTsgoChecker(program: any): any {
         for (const hostFileName of openFiles) {
             if (!isOverlayCandidatePath(hostFileName)) continue;
             const content = getHostScriptContent(syncHost, hostFileName, ctx.options);
-            if (!content?.text) continue;
+            if (!content) continue;
             const { entry } = planOverlayPush(hostFileName, content.text, content.scriptKind);
             if (entry) openFilesWithContent.push(entry);
         }
@@ -10180,7 +10179,7 @@ export function createTsgoChecker(program: any): any {
             openFilesWithContent,
             ...(externalChanged ? { fileChanges: { changed: externalChanged } } : {}),
         });
-        if (!snapshot || !refreshed) return;
+        if (!snapshot) return;
         project = refreshed;
         // Wire objects route prototype API calls through their registry's
         // project, so a replacement generation must own the live checker
