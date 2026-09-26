@@ -515,7 +515,7 @@ index aa578c7ed0..0e49d57945 100644
              const result = this.tryFindDefaultConfiguredProjectAndLoadAncestorsForOpenScriptInfo(
                  info,
 diff --git a/src/server/scriptInfo.ts b/src/server/scriptInfo.ts
-index 8635d543cd..bcc848c1a6 100644
+index 8635d543cd..99cad4cab8 100644
 --- a/src/server/scriptInfo.ts
 +++ b/src/server/scriptInfo.ts
 @@ -34,6 +34,8 @@ import {
@@ -563,7 +563,17 @@ index 8635d543cd..bcc848c1a6 100644
      /**
       * Reads the contents from tempFile(if supplied) or own file and sets it as contents
       * returns true if text changed
-@@ -440,7 +471,7 @@ export class ScriptInfo {
+@@ -179,6 +210,9 @@ export class TextStorage {
+             this.getFileTextAndSize(tempFileName) :
+             { text: "", fileSize: undefined };
+         const reloaded = this.reload(newText);
++        // #74: tsserver `reload` of an open file (the client re-read it from
++        // disk after an external rewrite) — same signal as reloadForOpen.
++        if (reloaded) tnbNoteExternalFileChange(this.info.fileName);
+         this.fileSize = fileSize; // NB: after reload since reload clears it
+         this.ownFileText = !tempFileName || tempFileName === this.info.fileName;
+         // In case we update this text before mTime gets updated to present file modified time
+@@ -440,7 +474,7 @@ export class ScriptInfo {
          this.textStorage.isOpen = true;
          if (
              newText !== undefined &&
@@ -572,7 +582,7 @@ index 8635d543cd..bcc848c1a6 100644
          ) {
              // reload new contents only if the existing contents changed
              this.markContainingProjectsAsDirty();
-@@ -675,6 +706,13 @@ export class ScriptInfo {
+@@ -675,6 +709,13 @@ export class ScriptInfo {
  
      editContent(start: number, end: number, newText: string): void {
          this.textStorage.edit(start, end, newText);
