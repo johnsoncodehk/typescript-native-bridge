@@ -39,9 +39,8 @@ TNB is a tsgo-backed TypeScript fork: upstream `microsoft/TypeScript` and `micro
   export VOLAR_SHA=<.github/workflows/ci.yml value>
   git clone --depth 50 --branch master https://github.com/vuejs/language-tools.git /tmp/volar
   git -C /tmp/volar checkout "$VOLAR_SHA" || { git -C /tmp/volar fetch --deepen 50 origin master; git -C /tmp/volar checkout "$VOLAR_SHA"; }
-  # point /tmp/volar/pnpm-workspace.yaml's typescript override at this repo (link:<repo>)
-  cd /tmp/volar && corepack enable && pnpm install --no-frozen-lockfile && pnpm run build
-  cd <repo> && VOLAR_ROOT=/tmp/volar STOCK_TSSERVER_PATH=/tmp/stock-ts-p3/package/lib/tsserver.js npm run check:sim-nav
+  cd <repo> && tools/install-volar.sh /tmp/volar   # frozen install, released TNB repointed at <repo>
+  VOLAR_ROOT=/tmp/volar STOCK_TSSERVER_PATH=/tmp/stock-ts-p3/package/lib/tsserver.js npm run check:sim-nav
   ```
   `check:sourcefile-guard` needs only `VOLAR_ROOT`. Both were run in full for #72/#73. `check-pristine-attribution` clones pristine tsgo into `/tmp/tnb-pristine-tsgo` and refuses to run only if one of its own repro files is already present there — a stray file of another name goes unnoticed, so check `git -C /tmp/tnb-pristine-tsgo status --porcelain` yourself.
 - `node tools/ci-witness-groups.mjs all` (the orphan / local-only / baseline sweep) runs only locally and in nightly — ci.yml's prepare job calls `matrix` mode, so a witness added without a group entry is not caught per-commit.

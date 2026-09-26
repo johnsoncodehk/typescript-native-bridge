@@ -124,9 +124,9 @@ jobs:
       # jobs (volar-test, witnesses, sim-nav-shard) restore it with
       # fail-on-cache-miss, and their needs: build guarantees this job's
       # post-job save has landed. The tree is BUILT (install + pnpm run build,
-      # same as nightly) — the sim-nav shards need the compiled plugin; v4
-      # splits off stale install-only v2 entries so a shard never restores an
-      # unbuilt tree.
+      # same as nightly) — the sim-nav shards need the compiled plugin; v5
+      # splits off the link:-override v4 trees (install-volar.sh's frozen
+      # install + repointed store entries replaced them).
       - name: Clone volar (cache)
         id: volar-cache
         uses: actions/cache@v4
@@ -134,7 +134,7 @@ jobs:
           path: |
             ${{ runner.temp }}/volar
             ${{ runner.temp }}/volar-stock
-          key: volar-${{ env.VOLAR_SHA }}-v4
+          key: volar-${{ env.VOLAR_SHA }}-v5
 
       - name: Clone volar
         if: steps.volar-cache.outputs.cache-hit != 'true'
@@ -144,19 +144,12 @@ jobs:
             git -C "$RUNNER_TEMP/volar" fetch --deepen 50 origin "$VOLAR_BRANCH"
             git -C "$RUNNER_TEMP/volar" checkout "$VOLAR_SHA"
           }
-          # Point volar's typescript override at the CI-built TNB — volar
-          # master's override is `npm:typescript-native-bridge@<release>`, which
-          # would fetch the released package instead of the commit under test.
-          cd "$RUNNER_TEMP/volar"
-          node -e "const fs=require('fs');const p='pnpm-workspace.yaml';let s=fs.readFileSync(p,'utf8');s=s.replace(/typescript: npm:typescript-native-bridge@.*/,'typescript: link:'+process.env.GITHUB_WORKSPACE);fs.writeFileSync(p,s);console.log(s.match(/overrides:[\s\S]*/)[0])"
 
       - name: Install + build volar
         if: steps.volar-cache.outputs.cache-hit != 'true'
-        run: |
-          cd "$RUNNER_TEMP/volar"
-          corepack enable
-          pnpm install --no-frozen-lockfile
-          pnpm run build
+        # volar pins a released TNB; install-volar.sh repoints it at the
+        # commit under test.
+        run: tools/install-volar.sh "$RUNNER_TEMP/volar"
 
       - name: Pack stock typescript
         if: steps.volar-cache.outputs.cache-hit != 'true'
@@ -277,7 +270,7 @@ jobs:
           path: |
             ${{ runner.temp }}/volar
             ${{ runner.temp }}/volar-stock
-          key: volar-${{ env.VOLAR_SHA }}-v4
+          key: volar-${{ env.VOLAR_SHA }}-v5
           fail-on-cache-miss: true
 
       # Runs on every CI run: the cached node_modules links
@@ -286,7 +279,8 @@ jobs:
         run: |
           # Volar's tsserver harness resolves typescript/lib/tsserver via a
           # fresh module lookup from dirname(realpath(typescript/package.json)).
-          # With the link: override that realpath is this repo, so `typescript`
+          # install-volar.sh repoints the store entries here, so that realpath
+          # is this repo and `typescript`
           # must resolve from here too — self-link it (TNB has no typescript
           # dependency of its own; node_modules is CI-local state).
           # node_modules may not exist at all: the root package has no
@@ -332,7 +326,7 @@ jobs:
           path: |
             ${{ runner.temp }}/volar
             ${{ runner.temp }}/volar-stock
-          key: volar-${{ env.VOLAR_SHA }}-v4
+          key: volar-${{ env.VOLAR_SHA }}-v5
           fail-on-cache-miss: true
 
       - name: sweep-ls-throws
@@ -449,7 +443,7 @@ jobs:
           path: |
             ${{ runner.temp }}/volar
             ${{ runner.temp }}/volar-stock
-          key: volar-${{ env.VOLAR_SHA }}-v4
+          key: volar-${{ env.VOLAR_SHA }}-v5
           fail-on-cache-miss: true
 
       - name: Run sim-nav shard

@@ -97,33 +97,26 @@ jobs:
         id: volar-cache
         # Both workflows need a BUILT volar tree (install + pnpm run build —
         # the sim-nav shards load the compiled plugin). Keys stay per-workflow
-        # (nightly-v2 vs ci.yml's v4): first-writer-wins on a shared key would
+        # (nightly-v3 vs ci.yml's v5): first-writer-wins on a shared key would
         # let one workflow's write timing define the other's content.
         uses: actions/cache@v4
         with:
           path: |
             ${{ runner.temp }}/volar
             ${{ runner.temp }}/volar-stock
-          key: volar-${{ env.VOLAR_SHA }}-nightly-v2
+          key: volar-${{ env.VOLAR_SHA }}-nightly-v3
 
       - name: Clone volar
         if: steps.volar-cache.outputs.cache-hit != 'true'
         run: |
           git clone --depth 50 --branch "$VOLAR_BRANCH" https://github.com/vuejs/language-tools.git "$RUNNER_TEMP/volar"
           git -C "$RUNNER_TEMP/volar" checkout "$VOLAR_SHA"
-          # Point volar's typescript override at the CI-built TNB — volar
-          # master's override is `npm:typescript-native-bridge@<release>`, which
-          # would fetch the released package instead of the commit under test.
-          cd "$RUNNER_TEMP/volar"
-          node -e "const fs=require('fs');const p='pnpm-workspace.yaml';let s=fs.readFileSync(p,'utf8');s=s.replace(/typescript: npm:typescript-native-bridge@.*/,'typescript: link:'+process.env.GITHUB_WORKSPACE);fs.writeFileSync(p,s)"
 
       - name: Install + build volar
         if: steps.volar-cache.outputs.cache-hit != 'true'
-        run: |
-          cd "$RUNNER_TEMP/volar"
-          corepack enable
-          pnpm install --no-frozen-lockfile
-          pnpm run build
+        # volar pins a released TNB; install-volar.sh repoints it at the
+        # commit under test.
+        run: tools/install-volar.sh "$RUNNER_TEMP/volar"
 
       - name: Pack stock typescript
         if: steps.volar-cache.outputs.cache-hit != 'true'
@@ -238,7 +231,7 @@ jobs:
           path: |
             ${{ runner.temp }}/volar
             ${{ runner.temp }}/volar-stock
-          key: volar-${{ env.VOLAR_SHA }}-nightly-v2
+          key: volar-${{ env.VOLAR_SHA }}-nightly-v3
           fail-on-cache-miss: true
 
       - name: Run sim-nav shard
