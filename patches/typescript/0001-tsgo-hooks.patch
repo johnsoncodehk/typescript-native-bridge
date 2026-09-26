@@ -338,7 +338,7 @@ index 04ca4db0fd..e1ed32c9eb 100644
          return {
              type: UpToDateStatusType.OutOfDateBuildInfoWithErrors,
 diff --git a/src/compiler/watchPublic.ts b/src/compiler/watchPublic.ts
-index 4bcedabb7e..735d965a58 100644
+index 4bcedabb7e..ab515f345b 100644
 --- a/src/compiler/watchPublic.ts
 +++ b/src/compiler/watchPublic.ts
 @@ -63,6 +63,7 @@ import {
@@ -349,15 +349,7 @@ index 4bcedabb7e..735d965a58 100644
      ProgramUpdateLevel,
      ProjectReference,
      ResolutionCache,
-@@ -82,6 +83,7 @@ import {
-     StringLiteralLike,
-     sys,
-     System,
-+    tnbNoteExternalFileChange,
-     toPath,
-     toPath as ts_toPath,
-     updateErrorForNoInputFiles,
-@@ -448,6 +450,16 @@ export function createWatchProgram<T extends BuilderProgram>(host: WatchCompiler
+@@ -448,6 +449,16 @@ export function createWatchProgram<T extends BuilderProgram>(host: WatchCompiler
      let reportFileChangeDetectedOnCreateProgram = false; // True if synchronizeProgram should report "File change detected..." when a new program is created
  
      const sourceFilesCache = new Map<string, HostFileInfo>(); // Cache that stores the source file and version info
@@ -374,7 +366,7 @@ index 4bcedabb7e..735d965a58 100644
      let missingFilePathsRequestedForRelease: Path[] | undefined; // These paths are held temporarily so that we can remove the entry from source file cache if the file is not tracked by missing files
      let hasChangedCompilerOptions = false; // True if the compiler options have changed between compilations
  
-@@ -516,6 +528,9 @@ export function createWatchProgram<T extends BuilderProgram>(host: WatchCompiler
+@@ -516,6 +527,9 @@ export function createWatchProgram<T extends BuilderProgram>(host: WatchCompiler
      compilerHost.getCurrentProgram = getCurrentProgram;
      compilerHost.writeLog = writeLog;
      compilerHost.getParsedCommandLine = getParsedCommandLine;
@@ -384,7 +376,7 @@ index 4bcedabb7e..735d965a58 100644
  
      // Cache for the module resolution
      const resolutionCache = createResolutionCache(
-@@ -562,6 +577,7 @@ export function createWatchProgram<T extends BuilderProgram>(host: WatchCompiler
+@@ -562,6 +576,7 @@ export function createWatchProgram<T extends BuilderProgram>(host: WatchCompiler
      function close() {
          clearInvalidateResolutionsOfFailedLookupLocations();
          resolutionCache.clear();
@@ -392,7 +384,7 @@ index 4bcedabb7e..735d965a58 100644
          clearMap(sourceFilesCache, value => {
              if (value && value.fileWatcher) {
                  value.fileWatcher.close();
-@@ -706,6 +722,24 @@ export function createWatchProgram<T extends BuilderProgram>(host: WatchCompiler
+@@ -706,6 +721,24 @@ export function createWatchProgram<T extends BuilderProgram>(host: WatchCompiler
          if (needsUpdateInTypeRootWatch) {
              resolutionCache.updateTypeRootsWatch();
          }
@@ -417,7 +409,7 @@ index 4bcedabb7e..735d965a58 100644
  
          if (missingFilePathsRequestedForRelease) {
              // These are the paths that program creater told us as not in use any more but were missing on the disk.
-@@ -1053,7 +1087,17 @@ export function createWatchProgram<T extends BuilderProgram>(host: WatchCompiler
+@@ -1053,6 +1086,13 @@ export function createWatchProgram<T extends BuilderProgram>(host: WatchCompiler
          return watchFile(file, (fileName, eventKind) => callback(fileName, eventKind, path), pollingInterval, options, watchType);
      }
  
@@ -429,24 +421,8 @@ index 4bcedabb7e..735d965a58 100644
 +    }
 +
      function onSourceFileChange(fileName: string, eventKind: FileWatcherEventKind, path: Path) {
-+        // #49: forward the signal to the bridge — the next overlay collect
-+        // decides the transport (overlay push vs fileChanges.changed).
-+        tnbNoteExternalFileChange(fileName);
          updateCachedSystemWithFile(fileName, path, eventKind);
  
-         // Update the source file cache
-@@ -1140,6 +1184,11 @@ export function createWatchProgram<T extends BuilderProgram>(host: WatchCompiler
-                     })
-                 ) return;
- 
-+                // #49: a program-relevant path changed under a watched
-+                // directory — forward so the bridge re-reads it instead of
-+                // rebuilding over its frozen first-read disk view.
-+                tnbNoteExternalFileChange(fileOrDirectory);
-+
-                 // Reload is pending, do the reload
-                 if (updateLevel !== ProgramUpdateLevel.Full) {
-                     updateLevel = ProgramUpdateLevel.RootNamesAndUpdate;
 diff --git a/src/server/editorServices.ts b/src/server/editorServices.ts
 index aa578c7ed0..0e49d57945 100644
 --- a/src/server/editorServices.ts

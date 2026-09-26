@@ -80,6 +80,11 @@ interface TnbProgramContext {
      * Go drops its frozen first-read disk view and re-reads (issue #49). */
     pendingExternalChanged?: string[];
     pendingReferencedProjects?: string[];
+    /** Set for a direct createProgram (no language service): stock re-reads
+     * disk for every such program, so its files are disk-stamped
+     * (_diskStampByFile). A language service's program instead follows its
+     * host's versions. */
+    diskStampPass?: DiskStampPass;
     /** This project's thin program — checker-side host-SF lookups must use it
      * (not the global _hostProgramRef, which tracks the LAST created project). */
     thinProgram?: any;
@@ -159,10 +164,13 @@ type TnbBridgeProcessState = {
     syncedOverlayVersionByFile?: Map<string, number>;
     /** Host edit deltas (ScriptInfo.editContent) awaiting the next overlay sync. */
     pendingOverlayEditsByFile?: Map<string, { start: number; deleteLength: number; insertText: string }[]>;
-    /** Files an external-change signal fired on since the last overlay collect
-     * (watch callbacks, ScriptInfo reload/edit) — the collect drains this into
+    /** Files an external-change signal fired on since the last overlay
+     * collect (see _pendingExternalChangePaths) — the collect drains this into
      * updateSnapshot fileChanges.changed / overlay pushes (issue #49). */
     pendingExternalChangePaths?: Set<string>;
+    /** Disk stamp per file Go serves from disk, for direct createProgram
+     * programs (see _diskStampByFile). */
+    diskStampByFile?: Map<string, string>;
     /** Solution-build (tsc -b / vue-tsc -b) active-project tracker. The build
      * orchestrator finishes each project completely before the next program is
      * created, so the previously opened tsgo project can be closed when the
@@ -2389,9 +2397,9 @@ const _pendingOverlayEditsByFile: Map<string, { start: number; deleteLength: num
 
 /**
  * Files with an external-change signal since the last overlay collect (issue
- * #49). Every signal source — watch callbacks (watchPublic onSourceFileChange
- * / wildcard-directory / tnbWatchSourceFile registrations), tsserver
- * ScriptInfo reloadForOpen/reloadWithFileText/editContent,
+ * #49). Every signal source — a moved disk stamp (direct createProgram, see
+ * _diskStampByFile), a host read diverging from disk at materialization,
+ * tsserver ScriptInfo reloadForOpen/reloadWithFileText/editContent,
  * ProjectService.onSourceFileChanged — feeds this set and nothing else;
  * drainExternalFileChanges is the single choke that decides the transport:
  * host text diverging from disk rides the normal overlay push, host text
@@ -2436,6 +2444,57 @@ function drainExternalFileChanges(): { drained: Set<string>; changed: string[] |
         if (fileExistsOnDisk(f) && !_syncedOverlayContentByFile.has(f)) (changed ??= []).push(f);
     }
     return { drained, changed };
+}
+
+/**
+ * Disk stamp per file Go serves from disk, as of the last time Go's view of it
+ * was (re)established. A direct createProgram (CompilerHost, watch host) gets
+ * no change signal a program could consume — stock simply re-reads disk
+ * there — so every such program creation re-stamps its files, and a moved
+ * stamp is an external-change signal like any other: it enters
+ * _pendingExternalChangePaths, so the drain still decides overlay vs
+ * fileChanges.changed (a host serving unsaved text over a rewritten file must
+ * win over disk). A language service's programs are not stamped: Go must see
+ * what the host's snapshots serve, which moves with the host's own version
+ * events (tnbNoteExternalFileChange), not with disk.
+ * Process-global: it mirrors the shared session's SnapshotFS.
+ */
+const _diskStampByFile: Map<string, string> = tnbBridgeProcessState().diskStampByFile ??= new Map();
+/** A first stamp this close to Go's read can't be ordered against it (coarse
+ * mtime clocks), so it is recorded as unordered and re-sent next creation. */
+const DISK_STAMP_UNORDERED_MS = 2000;
+const UNORDERED_DISK_STAMP = "?";
+
+/** One program creation's stamping: files are stamped at most once, against
+ * the time Go's reads for this creation can start. */
+interface DiskStampPass {
+    goReadStartMs: number;
+    stamped: Set<string>;
+}
+
+function restampDiskFiles(fileNames: Iterable<string>, pass: DiskStampPass): string[] {
+    const fs = require("fs") as typeof import("fs");
+    const changed: string[] = [];
+    for (const f of fileNames) {
+        if (pass.stamped.has(f)) continue;
+        pass.stamped.add(f);
+        if (isBundledLibPath(f) || _syncedOverlayContentByFile.has(f)) continue;
+        const st = fs.statSync(f, { throwIfNoEntry: false });
+        if (!st) {
+            _diskStampByFile.delete(f);
+            continue;
+        }
+        const stamp = `${st.mtimeMs}:${st.size}:${st.ino}`;
+        const prev = _diskStampByFile.get(f);
+        if (prev === undefined) {
+            _diskStampByFile.set(f, st.mtimeMs < pass.goReadStartMs - DISK_STAMP_UNORDERED_MS ? stamp : UNORDERED_DISK_STAMP);
+            continue;
+        }
+        if (prev === stamp) continue;
+        _diskStampByFile.set(f, stamp);
+        changed.push(f);
+    }
+    return changed;
 }
 
 /**
@@ -7099,7 +7158,16 @@ export function createTsgoProgram(
     const programCtx: TnbProgramContext = {
         lsHost,
         overlayHostCtx: { host: lsHost, options, configFilePath },
+        diskStampPass: lsHost === host ? { goReadStartMs: Date.now(), stamped: new Set() } : undefined,
     };
+    // The previous generation's files are stamped before the drain so a moved
+    // one takes the same transport as any external-change signal; files new to
+    // this config are stamped once the program lists them (ensureProject).
+    if (programCtx.diskStampPass) {
+        for (const f of restampDiskFiles(_namesByConfig.get(configFilePath)?.names ?? [], programCtx.diskStampPass)) {
+            tnbNoteExternalFileChange(f);
+        }
+    }
     // Drained external-change signals (issue #49) — declared outside the
     // collect block: the walk bypasses contentCanDiverge on these paths and
     // ensureProject forwards externalChanged as fileChanges.changed.
@@ -9786,7 +9854,9 @@ export function createTsgoChecker(program: any): any {
             const lateOverlays: any[] = [];
             // names are host-form already (decode-boundary normalized in
             // tsgoSourceFileNames) — no per-entry re-normalization here.
-            for (const hostFileName of tsgoSourceFileNames(configFilePath!, project).names) {
+            const programNames = tsgoSourceFileNames(configFilePath!, project).names;
+            const lateDiskChanged = programCtx?.diskStampPass ? restampDiskFiles(programNames, programCtx.diskStampPass) : [];
+            for (const hostFileName of programNames) {
                 if (!isExtraExtensionFileName(hostFileName) || !isOverlayCandidatePath(hostFileName)) continue;
                 if (sentOverlayFiles.has(hostFileName) || _syncedOverlayContentByFile.has(hostFileName)) continue;
                 const content = getHostScriptContent(syncHost ?? programCtx?.overlayHostCtx?.host, hostFileName, options);
@@ -9794,14 +9864,23 @@ export function createTsgoChecker(program: any): any {
                 const { entry } = planOverlayPush(hostFileName, content.text, content.scriptKind);
                 if (entry) lateOverlays.push(entry);
             }
-            if (lateOverlays.length > 0) {
+            const lateOverlaid = new Set(lateOverlays.map(f => f.fileName));
+            const lateChanged = lateDiskChanged.filter(f => !lateOverlaid.has(f));
+            // Go already read these for this snapshot, past the drain — the
+            // drain's stable-SF eviction is repeated here.
+            for (const f of lateChanged) if (isStableHostSfPath(f)) _hostSfStableGlobal.delete(f);
+            if (lateOverlays.length > 0 || lateChanged.length > 0) {
                 // This push supersedes the snapshot that carried the
                 // build-mode prefetch, and Go cancels a superseded
                 // snapshot's in-flight pass — re-request it here so the
                 // whole-program check restarts on the virtual-content
                 // state and overlaps the remaining builder work instead
                 // of running synchronously inside getGlobalDiagnostics.
-                const late = syncSnapshot(configFilePath!, steady, { openFilesWithContent: lateOverlays, prefetchDiagnostics });
+                const late = syncSnapshot(configFilePath!, steady, {
+                    openFilesWithContent: lateOverlays,
+                    ...(lateChanged.length ? { fileChanges: { changed: lateChanged } } : {}),
+                    prefetchDiagnostics,
+                });
                 project = late.project;
             }
         }
