@@ -114,8 +114,8 @@
  *       stderr tail), the walk continues, and the final VERDICT is FAIL.
  *       The stock side stays one child (stock field reads are plain JS).
  * Full-walk also gates RPC-method coverage mechanically: every method the
- * JS side can call (ARENA_METHODS + the JSON-path literals in
- * tsgoChecker.ts, cross-checked against the Go surface in proto.go) must
+ * JS side can call (ARENA_METHODS in tsgoTransport.ts + the JSON-path
+ * literals in tsgoChecker.ts, cross-checked against the Go surface in proto.go) must
  * have a COVERAGE entry (battery / field:<prop> / symbol-battery /
  * spec-battery / module-battery / exempt: <reason>) — a new RPC method
  * shipping unwalked turns the gate red.
@@ -1490,8 +1490,8 @@ function parentMain() {
 // A new RPC method must not ship unwalked: every method the JS side can call
 // needs a COVERAGE entry naming the battery that exercises it (or an exempt
 // reason). The two parse sources are the Go method set (proto.go constants)
-// and the JS-callable surface in tsgoChecker.ts (ARENA_METHODS keys + the
-// JSON-path literals). Session lifecycle and IDE paths are exempt
+// and the JS-callable surface (ARENA_METHODS keys in tsgoTransport.ts + the
+// JSON-path literals in tsgoChecker.ts). Session lifecycle and IDE paths are exempt
 // by the documented tradeoffs (AGENTS.md) — the gate's job is the decision
 // being explicit, not the walk covering the whole surface.
 const COVERAGE = new Map([
@@ -1654,12 +1654,15 @@ function coverageGate() {
 		notes.push('go-surface cross-check skipped: typescript-go/internal/api/proto.go not present (isolated tools copy)');
 	}
 
-	const tsSrc = fs.readFileSync(path.join(repoRoot, 'patches', 'typescript', 'overlay', 'src', 'compiler', 'tsgoChecker.ts'), 'utf8');
-	const arenaStart = tsSrc.indexOf('const ARENA_METHODS');
-	const arenaBlock = tsSrc.slice(arenaStart, tsSrc.indexOf(']);', arenaStart));
+	const compilerDir = path.join(repoRoot, 'patches', 'typescript', 'overlay', 'src', 'compiler');
+	const tsSrc = fs.readFileSync(path.join(compilerDir, 'tsgoChecker.ts'), 'utf8');
+	const transportSrc = fs.readFileSync(path.join(compilerDir, 'tsgoTransport.ts'), 'utf8');
+	const arenaStart = transportSrc.indexOf('const ARENA_METHODS');
+	if (arenaStart < 0) throw new Error('no ARENA_METHODS table in tsgoTransport.ts');
+	const arenaBlock = transportSrc.slice(arenaStart, transportSrc.indexOf(']);', arenaStart));
 	const arenaMethods = new Set();
 	for (const m of arenaBlock.matchAll(/\[\s*"([A-Za-z0-9]+)"\s*,\s*\[/g)) arenaMethods.add(m[1]);
-	// JSON-path literals in the same file (the non-arena surface it calls by
+	// JSON-path literals in tsgoChecker.ts (the non-arena surface it calls by
 	// name): apiRequest("…") and tsgoLsApiRequest(…, "…") call sites.
 	const jsonMethods = new Set();
 	for (const m of tsSrc.matchAll(/apiRequest\(\s*"([A-Za-z0-9]+)"/g)) jsonMethods.add(m[1]);
