@@ -32,6 +32,9 @@ import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+// The package the estree fixture links as `typescript`: lib's realpath parent,
+// since an isolated tools copy (the CI witness job) has lib/ but no package.json.
+const tnbPackageRoot = path.dirname(fs.realpathSync(path.join(repoRoot, 'lib')));
 const cacheRoot = process.env.TNB_FW_CACHE ?? '/tmp/tnb-fw-fixtures';
 const stockDir = path.join(cacheRoot, 'stock-ts');
 const estreeDir = path.join(cacheRoot, 'estree');
@@ -101,10 +104,15 @@ function estreePhases(out) {
 	return { cold: grab('cold'), edited: grab('after disk edit'), unsaved: grab('unsaved buffer') };
 }
 
+function ensureEstree() {
+	if (fs.existsSync(path.join(estreeDir, 'node_modules', '@typescript-eslint', 'typescript-estree'))) return;
+	fs.mkdirSync(estreeDir, { recursive: true });
+	fs.writeFileSync(path.join(estreeDir, 'package.json'), '{ "private": true }\n');
+	execSync('npm install --no-audit --no-fund @typescript-eslint/typescript-estree@8.70.1', { cwd: estreeDir, stdio: 'ignore' });
+}
+
 function runEstree() {
-	if (!fs.existsSync(path.join(estreeDir, 'node_modules', '@typescript-eslint', 'typescript-estree'))) {
-		return fail('estree', `fixture missing — run triage-framework-checks.mjs once to populate ${estreeDir}`);
-	}
+	ensureEstree();
 	// Driver must live inside the fixture: ESM resolves the bare
 	// @typescript-eslint import relative to the driver file, not cwd.
 	const driver = path.join(estreeDir, '.tnb-49-driver.mjs');
@@ -113,14 +121,14 @@ function runEstree() {
 	const tsLink = path.join(estreeDir, 'node_modules', 'typescript');
 	const linkTo = (target) => { fs.rmSync(tsLink, { force: true, recursive: true }); fs.symlinkSync(target, tsLink); };
 	let outTnb, outStock;
-	linkTo(repoRoot);
+	linkTo(tnbPackageRoot);
 	try {
 		outTnb = runNode(driver, [], estreeDir);
 		linkTo(stockPkg);
 		outStock = runNode(driver, [], estreeDir);
 	}
 	finally {
-		linkTo(repoRoot);
+		linkTo(tnbPackageRoot);
 		fs.rmSync(driver, { force: true });
 	}
 	const tnb = estreePhases(outTnb), stock = estreePhases(outStock);

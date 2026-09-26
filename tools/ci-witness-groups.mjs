@@ -25,10 +25,12 @@
 // full-node checker walk with per-file tnb children, still a light).
 // 2026-09-03: shape census + census.ts corpus added — measured 4.4s (still
 // a light; wg5 headroom unchanged).
+// 2026-09-26: triage-external-edits joined wg5 (~8s) once its estree fixture
+// self-provisions — local-only let plain `tsc -w` lose every source-file
+// watcher unnoticed.
 // Witnesses intentionally NOT in the matrix are local-only — the machine-
-// readable list lives in LOCAL_ONLY below (reasons: framework-checks /
-// external-edits need the /tmp/tnb-fw-fixtures installs (network;
-// framework-checks populates them, external-edits' estree mode reads them);
+// readable list lives in LOCAL_ONLY below (reasons: framework-checks needs
+// the /tmp/tnb-fw-fixtures framework installs (network, heavy);
 // generation-retention needs in-child GC marks + --stock-tsserver slope
 // calibration; napi-fuzz is a NAPI payload fuzz probe; the perf series is
 // measurement, not pass/fail). triage-electron-abi / triage-sim-nav-shard
@@ -44,12 +46,11 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const TOTAL = 85;
+const TOTAL = 86;
 
 // Witnesses intentionally NOT in the matrix — run on demand (reasons above).
 const LOCAL_ONLY = [
 	'triage-framework-checks',
-	'triage-external-edits',
 	'triage-generation-retention',
 	'triage-napi-fuzz',
 	'triage-completion-latency',
@@ -118,6 +119,7 @@ const groups = [
 			'triage-defineprops-refs',
 			'triage-program-info',
 			'triage-ghost-close',
+			'triage-external-edits', // ~8s (self-provisions stock + estree fixture)
 			'triage-rpcsym-adversarial',
 			'triage-checker-differential',
 			'triage-checker-fullwalk', // ~4.5s (measured 2026-09-03: 4.4s)
