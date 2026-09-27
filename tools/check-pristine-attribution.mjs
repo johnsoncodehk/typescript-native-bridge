@@ -60,6 +60,14 @@ const DUAL = [
 		test: 'TestEmptyTupleLiteralBaseTypes',
 		signature: /nil pointer dereference/,
 	},
+	{
+		key: 'tsgo-relater-recursion-identity',
+		branch: 'tools/pristine-attribution/zz_repro_very_deep_relations_test.go',
+		file: 'internal/checker/zz_repro_very_deep_relations_test.go',
+		pkg: './internal/checker/',
+		test: 'TestVeryDeepRelationsNoStackDepthError',
+		signature: /TS2321/,
+	},
 ];
 
 // ── Archival entries (no stopgap: reverted to pristine behavior by policy) ──
