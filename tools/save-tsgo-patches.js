@@ -19,7 +19,7 @@ const patchDir = path.join(repoRoot, "patches", "typescript-go");
 const PATCHES = [
 	["0001-checker.patch", ["internal/checker/"]],
 	["0002-osvfs-executable-fallback.patch", ["internal/vfs/osvfs/os.go"]],
-	["0003-project-program.patch", ["internal/project/", "internal/compiler/", "internal/tsoptions/", "internal/module/", "internal/execute/"]],
+	["0003-project-program.patch", ["internal/project/", "internal/compiler/", "internal/tsoptions/", "internal/module/", "internal/execute/", "internal/outputpaths/"]],
 	["0004-api-rpc.patch", ["internal/api/"]],
 	["0005-noembed-lib-path.patch", ["internal/bundled/noembed.go"]],
 	["0006-ls.patch", ["internal/ls/"]],

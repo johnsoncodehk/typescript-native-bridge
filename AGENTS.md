@@ -32,7 +32,7 @@ TNB is a tsgo-backed TypeScript fork: upstream `microsoft/TypeScript` and `micro
 
 - `npm run check:lib` / `check:enums` / `check:sourcefile-guard`
 - `npm run check:go-as-guards` — Go-side Type-cast guard: every `Type.As*()` chain deref and unguarded nil-family assignment in the tsgo patches/overlay is fixed or carries an inline `// asguard:exempt` reason (issues #69/#70 bug class)
-- Witnesses: 90 across wg0–wg6, all wired in CI (`.github/workflows/ci.yml`), single source of truth `tools/ci-witness-groups.mjs` — `node tools/ci-witness-groups.mjs all` validates dup/missing/orphan/local-only/baseline wiring and emits the matrix (`matrix` mode feeds the ci.yml prepare job).
+- Witnesses: 91 across wg0–wg6, all wired in CI (`.github/workflows/ci.yml`), single source of truth `tools/ci-witness-groups.mjs` — `node tools/ci-witness-groups.mjs all` validates dup/missing/orphan/local-only/baseline wiring and emits the matrix (`matrix` mode feeds the ci.yml prepare job).
 - Local-only — run on demand, not in the matrix (measurement, not pass/fail): completion-latency, postedit-latency, perf-edit-rpc, perf-qi-rpc, typing-cpuprof.
 - Locally hostable gates: `check:sim-nav` and `check:sourcefile-guard` need a volar checkout. ci.yml's recipe, which is the one to copy (`VOLAR_SHA` is the ci.yml env pin — set it in your shell, a shallow clone does not carry the tag):
   ```sh
@@ -63,6 +63,7 @@ TNB is a tsgo-backed TypeScript fork: upstream `microsoft/TypeScript` and `micro
   - `triage-empty-tuple-basetypes` — issue #73: getBaseTypes on the literal-derived empty tuple (`const x: [] = []`, `[] as const`, `arr || []`) answers `never[]` per shape vs stock instead of nil-dereferencing in Go, a declared `readonly []` keeps `readonly never[]`, and the recomputed clone base is pinned to the same type instance as the memoized one (re-read through the engine, so the assertion can fail); tuple-target rows (`type.target`) pin getTupleBaseType's element loop and variadic branch, mutation-verified; the two non-empty tuple REFERENCE rows are panic/recursion canaries pinned as known divergences, since stock rejects that input outright
   - `triage-empty-file-position` — issue #72: a zero-length file through the project service reports the parser's (0, 0) — pos/end/eof/start metadata equal to stock — instead of the synthetic skeleton's -1
   - `triage-deep-relation-cache` — issue #77: a 40-deep interface chain relates clean in both assignment orders (no false TS2321, no poisoned-cache TS2322) vs stock, and the GetByString conditional chain is clean vs tsgo main's baseline (stock exhausts its heap there); mutation-verified against the pre-backport bridge
+  - `triage-extra-extension-dts` — issue #63: a host-registered extra-extension source (`Button.vue`, `Button.foo`) emits `Button.vue.d.ts` like stock, not tsgo's import-lookup name `Button.vue.d.vue.ts` — written set, sourceMappingURL and map file/sources equal to stock across outDir/declarationDir/in-place
   - `triage-custom-transformers` — issue #40: emit with non-empty customTransformers must throw (tsgo can't execute JS transformers)
   - `triage-ambient-order` — issue #42 class: ambient-module index run-stable (Go map order must not leak onto the wire)
   - `triage-diag-determinism` — issues #42/#51: whole-program diagnostics byte-identical across fresh runs (strided checker assignment)

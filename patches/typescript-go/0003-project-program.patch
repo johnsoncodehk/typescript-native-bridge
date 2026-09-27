@@ -394,6 +394,28 @@ index 52400dc2b9..29afc19574 100644
  		return continueSearching()
  	}
  }
+diff --git a/internal/outputpaths/outputpaths.go b/internal/outputpaths/outputpaths.go
+index 09d977e6f5..f1aae2d1ec 100644
+--- a/internal/outputpaths/outputpaths.go
++++ b/internal/outputpaths/outputpaths.go
+@@ -102,7 +102,7 @@ func GetOutputDeclarationFileNameWorker(inputFileName string, options *core.Comp
+ 	}
+ 	return tspath.ChangeExtension(
+ 		getOutputPathWithoutChangingExtension(inputFileName, dir, host),
+-		tspath.GetDeclarationEmitExtensionForPath(inputFileName),
++		declarationEmitExtensionForPath(inputFileName),
+ 	)
+ }
+ 
+@@ -135,7 +135,7 @@ func GetDeclarationEmitOutputFilePath(file string, options *core.CompilerOptions
+ 	} else {
+ 		path = file
+ 	}
+-	declarationExtension := tspath.GetDeclarationEmitExtensionForPath(path)
++	declarationExtension := declarationEmitExtensionForPath(path)
+ 	return tspath.RemoveFileExtension(path) + declarationExtension
+ }
+ 
 diff --git a/internal/project/checkerpool.go b/internal/project/checkerpool.go
 index 32f68d413f..2fe5c76b1b 100644
 --- a/internal/project/checkerpool.go
