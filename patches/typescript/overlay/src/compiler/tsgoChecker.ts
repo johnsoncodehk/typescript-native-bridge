@@ -87,6 +87,10 @@ interface TnbProgramContext {
      * (_diskStampByFile). A language service's program instead follows its
      * host's versions. */
     diskStampPass?: DiskStampPass;
+    /** Files the overlay collect compared against the host (rootNames + open
+     * files). Every other program file first shows up in Go's listing, so
+     * ensureProject's late pass owns its overlay-vs-disk decision. */
+    overlayCollected?: Set<string>;
     /** This project's thin program — checker-side host-SF lookups must use it
      * (not the global _hostProgramRef, which tracks the LAST created project). */
     thinProgram?: any;
@@ -1115,8 +1119,9 @@ function drainExternalFileChanges(): { drained: Set<string>; changed: string[] |
  * stamp is an external-change signal like any other: it enters
  * _pendingExternalChangePaths, so the drain still decides overlay vs
  * fileChanges.changed (a host serving unsaved text over a rewritten file must
- * win over disk). A language service's programs are not stamped: Go must see
- * what the host's snapshots serve, which moves with the host's own version
+ * win over disk); files first listed by Go take the same rule in
+ * ensureProject's late pass. A language service's programs are not stamped:
+ * Go must see what the host's snapshots serve, which moves with the host's own version
  * events (tnbNoteExternalFileChange), not with disk.
  * Process-global: it mirrors the shared session's SnapshotFS.
  */
@@ -5822,7 +5827,7 @@ export function createTsgoProgram(
             // resolve to the same file. Dedup by resolvedFn or the same file
             // goes out twice in openFilesWithContent and Go's processChanges
             // panics ("should see no changes after open", win32 release gate).
-            const seenResolved = new Set<string>();
+            const seenResolved = programCtx.overlayCollected = new Set<string>();
             for (const fn of names) {
             const resolvedFn = resolveHostFileNameMemoized(fn, host);
             if (seenResolved.has(resolvedFn)) continue;
@@ -8428,24 +8433,32 @@ export function createTsgoChecker(program: any): any {
         if (programCtx) programCtx.pendingReferencedProjects = undefined;
         project = synced.project;
         releaseStaleBuildSnapshots(buildClose.staleSnapshots);
-        // Cross-project extra-extension imports (e.g. ../other/foo.vue): the
-        // program can include host-virtual files that were not in this
-        // project's root set, so no overlay was pushed for them and tsgo
-        // parsed their raw on-disk text. Ask the host (Volar getSourceFile
-        // feeds virtual TS for any .vue path) for their content and push it
-        // in a follow-up updateSnapshot — mirroring stock vue-tsc, where
-        // program construction pulls every program file through
-        // host.getSourceFile. Only files not already overlaid are sent.
+        // Program files outside the overlay collect (imports, not roots) are
+        // first known here, from Go's listing — tsgo already read them from
+        // disk. The ones whose host text can differ take the collect's
+        // overlay-vs-disk rule in a follow-up updateSnapshot, mirroring stock,
+        // where program construction pulls every file through
+        // host.getSourceFile: extra-extension files not yet overlaid (Volar
+        // virtual TS for a cross-project ../other/foo.vue) and, for a direct
+        // createProgram, files whose disk stamp moved (the drain's re-compare,
+        // so host text over a rewritten file wins) or that hold a synced
+        // overlay (so a host back at disk releases it). A language service's
+        // own sync owns its overlays — and its getSourceFile would re-enter
+        // the program under construction.
         {
-            const sentOverlayFiles = new Set(openFilesWithContent.map(f => f.fileName));
             const lateOverlays: any[] = [];
             // names are host-form already (decode-boundary normalized in
             // tsgoSourceFileNames) — no per-entry re-normalization here.
             const programNames = tsgoSourceFileNames(configFilePath!, project).names;
-            const lateDiskChanged = programCtx?.diskStampPass ? restampDiskFiles(programNames, programCtx.diskStampPass) : [];
+            const stampPass = programCtx?.diskStampPass;
+            const lateDiskChanged = stampPass ? restampDiskFiles(programNames, stampPass) : [];
+            const lateStampMoved = new Set(lateDiskChanged);
+            const collected = programCtx?.overlayCollected;
             for (const hostFileName of programNames) {
-                if (!isExtraExtensionFileName(hostFileName) || !isOverlayCandidatePath(hostFileName)) continue;
-                if (sentOverlayFiles.has(hostFileName) || _syncedOverlayContentByFile.has(hostFileName)) continue;
+                if (!isOverlayCandidatePath(hostFileName)) continue;
+                const synced = _syncedOverlayContentByFile.has(hostFileName);
+                const redecide = !!stampPass && !collected?.has(hostFileName) && (synced || lateStampMoved.has(hostFileName));
+                if (!redecide && (synced || !isExtraExtensionFileName(hostFileName))) continue;
                 const content = getHostScriptContent(syncHost ?? programCtx?.overlayHostCtx?.host, hostFileName, options);
                 if (!content?.fromHost) continue;
                 const { entry } = planOverlayPush(hostFileName, content.text, content.scriptKind);
@@ -8455,7 +8468,7 @@ export function createTsgoChecker(program: any): any {
             const lateChanged = lateDiskChanged.filter(f => !lateOverlaid.has(f));
             // Go already read these for this snapshot, past the drain — the
             // drain's stable-SF eviction is repeated here.
-            for (const f of lateChanged) if (isStableHostSfPath(f)) _hostSfStableGlobal.delete(f);
+            for (const f of lateDiskChanged) if (isStableHostSfPath(f)) _hostSfStableGlobal.delete(f);
             if (lateOverlays.length > 0 || lateChanged.length > 0) {
                 // This push supersedes the snapshot that carried the
                 // build-mode prefetch, and Go cancels a superseded

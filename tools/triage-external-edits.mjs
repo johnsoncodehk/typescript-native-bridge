@@ -22,7 +22,10 @@
  *               stock re-reads disk on every program; each rewrite (fresh
  *               file, aged file rewritten to the same size, back-to-back
  *               rewrite) must move the diagnostics like stock.
- * Usage: node tools/triage-external-edits.mjs [estree|tsserver|tscwatch|stablecache|createprogram...]
+ *   - latefile: a rewritten file new to the config (imported, not a root)
+ *               behind a host serving unsaved text for it must check the
+ *               host text, then disk again under a plain host, like stock.
+ * Usage: node tools/triage-external-edits.mjs [estree|tsserver|tscwatch|stablecache|createprogram|latefile...]
  * Exit: 0 = PASS, 1 = FAIL. Network required on first run (stock pack).
  *
  * v5 classification: bridge-contract surface — stock's own watch/session
@@ -453,6 +456,68 @@ function runCreateprogramCase() {
 	return true;
 }
 
+// ── Repro 6: a rewritten file new to the config, behind a divergent host ─
+// A file one config's program already listed (so it carries a disk stamp),
+// rewritten on disk, then imported — not a root — by another config whose
+// CompilerHost serves unsaved text for it. The moved stamp surfaces only
+// once Go lists the second program's files, past the overlay collect; stock
+// reads the host's text, then disk again once a plain host builds.
+
+const LATEFILE_DRIVER = `
+import { createRequire } from 'node:module';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
+
+const ts = createRequire(import.meta.url)(process.argv[2]);
+const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'tnb-late-')));
+const shared = path.join(dir, 'shared.ts');
+fs.writeFileSync(shared, "export const s = 'x' as const;\\n");
+for (const n of ['a', 'b']) {
+	fs.writeFileSync(path.join(dir, n + '.ts'), "import { s } from './shared';\\nexport const t: 'x' = s;\\n");
+	fs.writeFileSync(path.join(dir, 'tsconfig.' + n + '.json'), JSON.stringify({ compilerOptions: { strict: true, noEmit: true, types: [] }, files: [n + '.ts'] }));
+}
+const age = (ms) => { const t = new Date(Date.now() - ms); for (const f of fs.readdirSync(dir)) fs.utimesSync(path.join(dir, f), t, t); };
+age(60_000);
+const build = (n, sharedText) => {
+	const tsconfig = path.join(dir, 'tsconfig.' + n + '.json');
+	const cfg = ts.getParsedCommandLineOfConfigFile(tsconfig, {}, { ...ts.sys, onUnRecoverableConfigFileDiagnostic() {} });
+	const host = ts.createCompilerHost(cfg.options);
+	if (sharedText !== undefined) {
+		const { getSourceFile, readFile } = host;
+		host.getSourceFile = (f, lang, ...rest) => path.resolve(f) === shared ? ts.createSourceFile(f, sharedText, lang, true) : getSourceFile(f, lang, ...rest);
+		host.readFile = (f) => path.resolve(f) === shared ? sharedText : readFile(f);
+	}
+	const p = ts.createProgram({ rootNames: cfg.fileNames, options: cfg.options, host, configFilePath: tsconfig });
+	return ts.getPreEmitDiagnostics(p).map(d => d.code).sort((x, y) => x - y);
+};
+console.log('stage a-cold:', JSON.stringify(build('a')));
+fs.writeFileSync(shared, "export const s = 'y' as const;\\n");
+age(30_000);
+console.log('stage b-unsaved:', JSON.stringify(build('b', "export const s = 'x' as const; // unsaved\\n")));
+console.log('stage b-disk:', JSON.stringify(build('b')));
+console.log('stage a-disk:', JSON.stringify(build('a')));
+`;
+
+function runLatefileCase() {
+	const driver = path.join(scratchRoot, 'latefile-driver.mjs');
+	fs.mkdirSync(scratchRoot, { recursive: true });
+	fs.writeFileSync(driver, LATEFILE_DRIVER);
+	const parse = (out) => Object.fromEntries([...out.matchAll(/stage ([\w-]+): (\[[^\]]*\])/g)].map(m => [m[1], m[2]]));
+	const outTnb = runNode(driver, [path.join(repoRoot, 'lib', 'typescript.js')], scratchRoot);
+	const outStock = runNode(driver, [path.join(stockPkg, 'lib', 'typescript.js')], scratchRoot);
+	const tnb = parse(outTnb), stock = parse(outStock);
+	const expected = { 'a-cold': '[]', 'b-unsaved': '[]', 'b-disk': '[2322]', 'a-disk': '[2322]' };
+	if (JSON.stringify(stock) !== JSON.stringify(expected)) {
+		return fail('latefile', `stock control diverged: ${JSON.stringify(stock)} (expected ${JSON.stringify(expected)})\n${outStock}`);
+	}
+	if (JSON.stringify(tnb) !== JSON.stringify(stock)) {
+		return fail('latefile', `stage mismatch vs stock:\n  tnb:   ${JSON.stringify(tnb)}\n  stock: ${JSON.stringify(stock)}\n--- tnb output ---\n${outTnb}`);
+	}
+	console.log('[latefile] ok (a rewritten non-root file new to the config honors the host text, then disk again, stock-identical)');
+	return true;
+}
+
 // ── driver ───────────────────────────────────────────────────────────────
 
 function fail(name, msg) {
@@ -462,7 +527,7 @@ function fail(name, msg) {
 
 ensureStock();
 const wanted = process.argv.slice(2);
-const CASES = { estree: runEstree, tsserver: runTsserver, tscwatch: runTscwatchCase, stablecache: runStablecacheCase, createprogram: runCreateprogramCase };
+const CASES = { estree: runEstree, tsserver: runTsserver, tscwatch: runTscwatchCase, stablecache: runStablecacheCase, createprogram: runCreateprogramCase, latefile: runLatefileCase };
 const names = wanted.length ? wanted : Object.keys(CASES);
 let ok = true;
 for (const name of names) {
