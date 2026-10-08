@@ -825,6 +825,9 @@ class ArenaClient {
                 }
                 data.tnbCompletionData = { autoImport };
             }
+            // The completionEntryDetails resolver sees only entry.data,
+            // not entry flags; without the flag it checks the main program.
+            if (flags & 64) data.isPackageJsonImport = true;
             d.data = data;
         }
         if (flags & 64) d.isPackageJsonImport = true;
