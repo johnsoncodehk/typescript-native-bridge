@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 /**
- * Witness: package-json auto-imports keep `isPackageJsonImport` on completion
- * entry DATA, not just the entry. Details round-trips data alone; without the
- * flag its resolver checks the main program instead of the provider and fails.
+ * Witness: package-json auto-imports keep stock provenance through details.
+ * The provider entry (`ufo`) carries the flag on entry AND data; a subpath
+ * already in the host program (`ufo/host`) does not. Details round-trips data
+ * alone, so the data flag is what selects the resolver's program.
  */
 import fs from 'node:fs';
 import os from 'node:os';
@@ -13,20 +14,32 @@ import { tnbHarnessEnv, withTsserver } from './tsserver-harness.mjs';
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const tsserverPath = path.join(repoRoot, 'lib', 'tsserver.js');
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'tnb-packagejson-autoimport-'));
-const pkg = path.join(root, 'node_modules', 'pathe');
+const pkg = path.join(root, 'node_modules/ufo');
 const main = path.join(root, 'main.ts');
-const content = 'join;\n';
-
-fs.mkdirSync(pkg, { recursive: true });
-fs.writeFileSync(main, content);
-fs.writeFileSync(path.join(root, 'package.json'), JSON.stringify({ dependencies: { pathe: '*' } }));
-fs.writeFileSync(path.join(root, 'tsconfig.json'), JSON.stringify({ compilerOptions: { module: 'nodenext', moduleResolution: 'nodenext' }, include: ['*.ts'] }));
-fs.writeFileSync(path.join(pkg, 'package.json'), JSON.stringify({
-	name: 'pathe', types: './index.d.ts',
-}));
-fs.writeFileSync(path.join(pkg, 'index.d.ts'), 'export declare function join(...paths: string[]): string;\n');
-
+const host = path.join(root, 'host.ts');
+const content = 'joinURL;\n';
 const preferences = { includePackageJsonAutoImports: 'on' };
+
+fs.mkdirSync(path.join(pkg, 'dist'), { recursive: true });
+fs.writeFileSync(main, content);
+fs.writeFileSync(host, 'import { parsePath } from "ufo/host";\nparsePath;\n');
+fs.writeFileSync(path.join(root, 'package.json'), JSON.stringify({ dependencies: { ufo: '*' } }));
+fs.writeFileSync(path.join(root, 'tsconfig.json'), JSON.stringify({
+	compilerOptions: { module: 'nodenext', moduleResolution: 'nodenext' },
+	include: ['*.ts'],
+}));
+fs.writeFileSync(path.join(pkg, 'package.json'), JSON.stringify({
+	name: 'ufo',
+	exports: {
+		'.': { types: './dist/index.d.ts', import: './dist/index.mjs' },
+		'./host': { types: './dist/host.d.ts', import: './dist/host.mjs' },
+	},
+}));
+fs.writeFileSync(path.join(pkg, 'dist/index.d.ts'), 'export declare function joinURL(...paths: string[]): string;\n');
+fs.writeFileSync(path.join(pkg, 'dist/index.mjs'), 'export function joinURL() {}\n');
+fs.writeFileSync(path.join(pkg, 'dist/host.d.ts'), 'export declare function parsePath(path: string): string;\nexport declare function joinURL(path: string): string;\n');
+fs.writeFileSync(path.join(pkg, 'dist/host.mjs'), 'export function parsePath() {}\nexport function joinURL() {}\n');
+
 try {
 	const result = await withTsserver({
 		tsserverPath,
@@ -38,29 +51,45 @@ try {
 		const completion = await send('completionInfo', {
 			file: main,
 			line: 1,
-			offset: 5,
+			offset: 8,
 			includeExternalModuleExports: true,
 		});
-		const entry = completion.body?.entries?.find(candidate => candidate.name === 'join');
-		if (!entry?.source) throw new Error('completionInfo did not return a sourced join entry');
-		if (!entry.data?.tnbCompletionData) throw new Error('completionInfo did not preserve native completion resolve data');
-		if (!entry.data.isPackageJsonImport) throw new Error('completion entry data lost isPackageJsonImport');
+		const bySource = new Map((completion.body?.entries ?? [])
+			.filter(item => item.name === 'joinURL')
+			.map(item => [item.source, item]));
+		const expected = new Map([
+			['ufo', true],
+			['ufo/host', false],
+		]);
+		if (bySource.size !== expected.size || ![...expected.keys()].every(source => bySource.has(source))) {
+			throw new Error(`expected joinURL from ${[...expected.keys()].join(' + ')}, got ${[...bySource.keys()].join(' + ')}`);
+		}
 
-		const details = await send('completionEntryDetails', {
-			file: main,
-			line: 1,
-			offset: 5,
-			includeExternalModuleExports: true,
-			entryNames: [{ name: entry.name, source: entry.source, data: entry.data }],
-			preferences,
-		});
-		if (!details.success) throw new Error(details.message || 'completionEntryDetails failed');
-		const edit = details.body?.[0]?.codeActions?.flatMap(action => action.changes ?? [])
-			.filter(change => change.fileName === main)
-			.flatMap(change => change.textChanges ?? [])
-			.find(change => change.newText.includes('join') && change.newText.includes('pathe'));
-		if (!edit) throw new Error('completionEntryDetails returned no pathe import edit');
-		return { source: entry.source, edit: edit.newText };
+		const results = [];
+		for (const [source, expectedFlag] of expected) {
+			const item = bySource.get(source);
+			if (Boolean(item.isPackageJsonImport) !== expectedFlag || Boolean(item.data?.isPackageJsonImport) !== expectedFlag) {
+				throw new Error(`${source}: flags=[${Boolean(item.isPackageJsonImport)}, ${Boolean(item.data?.isPackageJsonImport)}], want [${expectedFlag}, ${expectedFlag}]`);
+			}
+			if (expectedFlag && !item.data?.tnbCompletionData) throw new Error(`${source}: lost native completion resolve data`);
+
+			const details = await send('completionEntryDetails', {
+				file: main,
+				line: 1,
+				offset: 8,
+				includeExternalModuleExports: true,
+				entryNames: [{ name: item.name, source: item.source, data: item.data }],
+				preferences,
+			});
+			if (!details.success) throw new Error(details.message || `${source}: completionEntryDetails failed`);
+			const edit = details.body?.[0]?.codeActions?.flatMap(action => action.changes ?? [])
+				.filter(change => change.fileName === main)
+				.flatMap(change => change.textChanges ?? [])
+				.find(change => change.newText.includes(`from "${source}"`));
+			if (!edit) throw new Error(`${source}: completionEntryDetails returned no import edit`);
+			results.push({ source, edit: edit.newText });
+		}
+		return results;
 	});
 	console.log(`ok package-json auto-import completion details: ${JSON.stringify(result)}`);
 }

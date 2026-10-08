@@ -958,7 +958,7 @@ index 0917c385d6..b2c40e7440 100644
  
  // SourceFileResponse contains the binary-encoded AST data for a source file.
 diff --git a/internal/api/session.go b/internal/api/session.go
-index 7e29c44b6f..9e3442635b 100644
+index 7e29c44b6f..713e0fd9d2 100644
 --- a/internal/api/session.go
 +++ b/internal/api/session.go
 @@ -3,6 +3,7 @@ package api
@@ -2128,12 +2128,12 @@ index 7e29c44b6f..9e3442635b 100644
 +			return nil, prepErr
 +		}
 +		defer prepared.Deref(s.projectSession)
-+		prepProgram := prepProj.GetProgram()
-+		sourceFile = prepProgram.GetSourceFile(params.File.ToFileName())
++		program = prepProj.GetProgram()
++		sourceFile = program.GetSourceFile(params.File.ToFileName())
 +		if sourceFile == nil {
 +			return nil, nil
 +		}
-+		langSvc = ls.NewLanguageService(prepProj.ID(), prepProgram, &completionsPrefsHost{
++		langSvc = ls.NewLanguageService(prepProj.ID(), program, &completionsPrefsHost{
 +			Host:  prepared,
 +			prefs: mergeCompletionsPreferences(prepared.GetPreferences(""), params.Preferences),
 +		}, "")
@@ -2182,7 +2182,7 @@ index 7e29c44b6f..9e3442635b 100644
  			entry.LabelDetails = &CompletionEntryLabelDetailsResponse{
  				Detail:      item.LabelDetails.Detail,
  				Description: item.LabelDetails.Description,
-@@ -3237,12 +3940,63 @@ func (s *Session) handleGetCompletionsAtPosition(ctx context.Context, params *Ge
+@@ -3237,12 +3940,69 @@ func (s *Session) handleGetCompletionsAtPosition(ctx context.Context, params *Ge
  		if item.Symbol != nil {
  			entry.Symbol = sd.newSymbolResponse(item.Symbol, params.Project)
  		}
@@ -2201,7 +2201,13 @@ index 7e29c44b6f..9e3442635b 100644
 +					moduleSpecifier = item.Data.AutoImport.ModuleSpecifier
 +				}
 +				entry.SourceDisplay = []DisplayPartResponse{{Text: moduleSpecifier, Kind: "text"}}
-+				if providerDeps != nil && item.Data.AutoImport != nil && providerDeps.Has(packageNameFromSpecifier(item.Data.AutoImport.ModuleSpecifier)) {
++				// Provider-covered packages can also be visible in the host
++				// program; host-origin candidates must resolve through the host,
++				// not the smaller package-json provider.
++				if providerDeps != nil &&
++					item.Data.AutoImport != nil &&
++					providerDeps.Has(packageNameFromSpecifier(item.Data.AutoImport.ModuleSpecifier)) &&
++					program.GetSourceFile(item.ModuleFileName) == nil {
 +					entry.IsPackageJsonImport = ptrTrue()
 +				}
 +				entry.Data = &CompletionEntryDataResponse{
@@ -2250,7 +2256,7 @@ index 7e29c44b6f..9e3442635b 100644
  }
  
  // handleGetReferencedSymbolsForNode returns node handles for all references found at a node.
-@@ -3284,11 +4038,11 @@ func (s *Session) handleGetReferencedSymbolsForNode(ctx context.Context, params
+@@ -3284,11 +4044,11 @@ func (s *Session) handleGetReferencedSymbolsForNode(ctx context.Context, params
  		var refs []NodeHandle
  		for _, ref := range entry.References() {
  			if ref.IsNodeEntry() {
