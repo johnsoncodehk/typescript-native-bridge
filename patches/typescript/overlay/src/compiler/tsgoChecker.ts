@@ -654,7 +654,11 @@ function createSharedLightStub(hostFileName: string, configFilePath: string, met
         get lineMap() { return lineStartsOf(); },
         getLineStarts: () => lineStartsOf(),
         getLineAndCharacterOfPosition: (position: number) => ts.computeLineAndCharacterOfPosition(lineStartsOf(), position),
-        getPositionOfLineAndCharacter: (line: number, character: number) => ts.computePositionOfLineAndCharacter(lineStartsOf(), line, character, textOf()),
+        // Stock SourceFileLike contract (scanner.getPositionOfLineAndCharacter):
+        // allowEdits=true clamps out-of-range coords — declaration-map decoding
+        // (documentPositionMapper) relies on it for stale map coordinates.
+        getPositionOfLineAndCharacter: (line: number, character: number, allowEdits?: true) =>
+            ts.computePositionOfLineAndCharacter(lineStartsOf(), line, character, textOf(), allowEdits),
         forEachChild: (...args: any[]) => {
             const sf = full();
             return sf?.forEachChild ? sf.forEachChild(...args) : undefined;
