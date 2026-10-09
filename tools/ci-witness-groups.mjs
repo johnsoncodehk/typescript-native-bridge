@@ -182,7 +182,7 @@ const groups = [
 			'triage-empty-file-position', // ~2s (issue #72)
 			'triage-deep-relation-cache', // ~3s (issue #77)
 			'triage-extra-extension-dts', // ~5s (issue #63)
-			'triage-gtd-declmap-allowedits', // ~6s (unified install ~4s + two tsserver sessions)
+			'triage-gtd-declmap-allowedits', // ~1.5s (synthesized fixture + two tsserver sessions)
 		],
 	},
 	{

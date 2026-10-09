@@ -6,21 +6,27 @@
  * character, allowEdits?) — allowEdits=true clamps out-of-range coordinates
  * instead of asserting (scanner.ts). The documentPositionMapper that remaps
  * definitions through d.ts.map files (session mapDefinitionInfoLocations →
- * tryGetSourcePosition) decodes EVERY mapping in the map with allowEdits=true,
- * and real packages ship maps with generated coordinates past the line end
- * (unified@11.0.5 index.d.ts.map has one: generated 846:313 on a 301-char
- * line). TNB's host-side SourceFile skeletons dropped the allowEdits argument,
- * so stock's clamping call took the strict path, hit Debug.assert, and the
- * whole `definition` request failed (success:false) — goto definition on an
- * import of any such package resolved to nothing while quickinfo still worked.
+ * tryGetSourcePosition) decodes EVERY mapping in the map with allowEdits=true.
+ * TNB's host-side SourceFile skeletons dropped the allowEdits argument, so
+ * stock's clamping call took the strict path, hit Debug.assert, and the whole
+ * `definition` request failed (success:false) — goto definition on an import
+ * of any such package resolved to nothing while quickinfo still worked.
  *
- * Fixture: unified@11.0.5 (pinned, installed per run) — the reported
- * reproduction. Its index.d.ts.map carries a stale generated coordinate
- * (846:313 on a 301-char line); the mapper decodes EVERY mapping with
- * allowEdits=true, so decoding against the un-materialized light stub is the
- * exact crash path. Dual-engine protocol check: the definition (and
- * definitionAndBoundSpan) from the import specifier must succeed and match
- * stock, landing inside the package's .js body via the map.
+ * Fixture: synthesized `fake-unified` package (installed in-place by this
+ * script — no npm, no network). It reproduces the three conditions of the
+ * reported reproduction (unified@11.0.5, whose index.d.ts.map carries a stale
+ * generated coordinate 846:313 on a 301-char line):
+ *   1. `"exports": "./index.js"` with no types condition — the resolution
+ *      shape that leaves lib/index.d.ts un-materialized in the program at
+ *      definition time, so the session's remap decodes the map against the
+ *      light stub.
+ *   2. index.d.ts.map with a mapping whose generated column (50) is past the
+ *      end of the generated line it names — the allowEdits clamp path.
+ *   3. `//# sourceMappingURL` in index.d.ts — what routes the session mapper
+ *      through the declaration map.
+ * Dual-engine protocol check: the definition (and definitionAndBoundSpan)
+ * from the import specifier must succeed and match stock, landing inside the
+ * package's .js body via the map.
  *
  * Stock side: STOCK_TSSERVER_PATH (CI), else /tmp/stock-ts-p3/package/lib/tsserver.js.
  *
@@ -30,51 +36,47 @@
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { createRequire } from 'node:module';
-import ChildProcess from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { tnbHarnessEnv, withTsserver } from './tsserver-harness.mjs';
 
-const require2 = createRequire(import.meta.url);
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const tnbPath = path.join(repoRoot, 'lib', 'tsserver.js');
 const stockPath = process.env.STOCK_TSSERVER_PATH ?? '/tmp/stock-ts-p3/package/lib/tsserver.js';
 
-// ── Fixture: pinned unified@11.0.5, the reported reproduction ──
-// unified ships `"exports": "./index.js"` (no types condition) and an
-// index.d.ts.map with a stale generated coordinate (846:313 on a 301-char
-// line). That resolution shape is what leaves lib/index.d.ts un-materialized
-// in the program at definition time, so the session's remap decodes the map
-// against the light stub — every synthesized stand-in package materialized
-// fully and could not reach the defect. Installed once per run, pinned.
-const UNIFIED_VERSION = '11.0.5';
+// index.js has 3 short lines; the map's single mapping sits on generated line
+// 3 (the two leading ';' separators) at column 50, past that line's end.
+// VLQ for absolute [col 49, source 0, line 0, col 0] is "iDAAA".
+const mappings = ';;iDAAA';
 
 function makeFixture() {
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'tnb-gtd-declmap-'));
 	const src = path.join(dir, 'src');
+	const pkg = path.join(dir, 'node_modules', 'fake-unified');
 	fs.mkdirSync(src, { recursive: true });
+	fs.mkdirSync(pkg, { recursive: true });
 	fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({
 		name: 'consumer', private: true, type: 'module',
-		dependencies: { unified: UNIFIED_VERSION },
+		dependencies: { 'fake-unified': '1.0.0' },
 	}));
 	fs.writeFileSync(path.join(dir, 'tsconfig.json'), JSON.stringify({
 		compilerOptions: { strict: true, noEmit: true, module: 'nodenext', moduleResolution: 'nodenext', types: [], skipLibCheck: true },
 		include: ['src'],
 	}));
-	const consumer = "import { unified } from 'unified';\nconst p = unified().use(function() { return ''; });\nexport { p };\n";
+	fs.writeFileSync(path.join(pkg, 'package.json'), JSON.stringify({
+		name: 'fake-unified', version: '1.0.0', exports: './index.js',
+	}));
+	fs.writeFileSync(path.join(pkg, 'index.js'), 'export const bar = 1;\n\nexport const baz = 2;\n');
+	fs.writeFileSync(path.join(pkg, 'index.d.ts'),
+		'export declare function foo(): string;\n//# sourceMappingURL=index.d.ts.map\n');
+	fs.writeFileSync(path.join(pkg, 'index.d.ts.map'), JSON.stringify({
+		version: 3, file: 'index.js', sources: ['index.js'], names: [], mappings,
+	}));
+	const consumer = "import { foo } from 'fake-unified';\nexport const p = foo();\n";
 	fs.writeFileSync(path.join(src, 'index.ts'), consumer);
-	const install = ChildProcess.spawnSync('npm', [
-		'install', '--no-save', '--ignore-scripts', '--no-audit', '--no-fund',
-		`unified@${UNIFIED_VERSION}`,
-	], { cwd: dir, encoding: 'utf8', timeout: 120_000 });
-	if (install.status !== 0 || !fs.existsSync(path.join(dir, 'node_modules', 'unified', 'lib', 'index.d.ts'))) {
-		console.error(`fixture setup failed: npm install unified@${UNIFIED_VERSION}\n${install.stderr ?? ''}${install.stdout ?? ''}`);
-		process.exit(2);
-	}
 	return { dir, file: path.join(src, 'index.ts'), consumer };
 }
 
-// Inside the `value` import specifier (line 1, col 10).
+// Inside the `foo` import specifier (line 1, col 10).
 const POS = { line: 1, offset: 10 };
 const harnessArgs = ['--disableAutomaticTypingAcquisition', '--suppressDiagnosticEvents'];
 
@@ -120,7 +122,7 @@ const sig = (r) => JSON.stringify([r.def.success, r.def.defs, r.defBound.success
 const parity = tnb.def.success && tnb.defBound.success && sig(tnb) === sig(stock)
 	// The navigation must land in the package body, not fall back to the specifier.
 	&& tnb.def.defs.length > 0
-	&& tnb.def.defs.every(d => d.file.includes('unified/lib/index.js'));
+	&& tnb.def.defs.every(d => d.file.includes('fake-unified/index.js'));
 
 console.log(`TNB  : ${sig(tnb)}`);
 console.log(`STOCK: ${sig(stock)}`);
