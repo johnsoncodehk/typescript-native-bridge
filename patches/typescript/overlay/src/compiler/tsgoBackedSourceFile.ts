@@ -47,8 +47,9 @@ function installLazyLineHelpers(target: any, getText: () => string, cacheKey?: s
     target.getLineStarts = () => ensureLineStarts();
     target.getLineAndCharacterOfPosition = (pos: number) =>
         computeLineAndCharacterOfPosition(ensureLineStarts(), pos);
-    target.getPositionOfLineAndCharacter = (line: number, ch: number) =>
-        computePositionOfLineAndCharacter(ensureLineStarts(), line, ch);
+    target.getPositionOfLineAndCharacter = (line: number, ch: number, allowEdits?: true) =>
+        // Stock contract: allowEdits=true clamps (declaration-map decoding passes it).
+        computePositionOfLineAndCharacter(ensureLineStarts(), line, ch, getText(), allowEdits);
     if (!target.lineMap) {
         Object.defineProperty(target, "lineMap", {
             configurable: true,
@@ -138,8 +139,9 @@ function patchLineHelpers(shell: any, realSf: any): void {
     const ls = realSf.getLineStarts();
     shell.getLineStarts = () => ls;
     shell.getLineAndCharacterOfPosition = (pos: number) => computeLineAndCharacterOfPosition(ls, pos);
-    shell.getPositionOfLineAndCharacter = (line: number, ch: number) =>
-        computePositionOfLineAndCharacter(ls, line, ch);
+    shell.getPositionOfLineAndCharacter = (line: number, ch: number, allowEdits?: true) =>
+        // Stock contract: allowEdits=true clamps (declaration-map decoding passes it).
+        computePositionOfLineAndCharacter(ls, line, ch, realSf.text as string | undefined, allowEdits);
 }
 
 export function getTsgoBackedSourceFile(realSf: any): any | undefined {
