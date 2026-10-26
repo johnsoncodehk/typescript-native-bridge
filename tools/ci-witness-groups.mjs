@@ -48,7 +48,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const TOTAL = 95;
+const TOTAL = 96;
 
 // Witnesses intentionally NOT in the matrix — run on demand (reasons above).
 const LOCAL_ONLY = [
@@ -117,6 +117,7 @@ const groups = [
 			'triage-exit-codes',
 			'triage-f2hl-typesref',
 			'triage-f2hl-defaultkw',
+			'triage-f2hl-export-star',
 			'triage-geterr-5823',
 			'triage-defineprops-refs',
 			'triage-program-info',

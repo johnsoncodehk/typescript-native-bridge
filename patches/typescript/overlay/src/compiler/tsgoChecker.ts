@@ -4558,6 +4558,26 @@ function refineHostNavigationSymbol(symbol: any, getHostSf: (fileName: string) =
     refined = ensureExportedSymbolModuleParent(refined, getHostSf);
     return refined;
 }
+
+/**
+ * Stock's binder always fills ExportSpecifier.symbol. RemoteNode-backed disk
+ * declaration files do not have binder fields, but stock FAR reads that field
+ * directly while following a re-export. Materialize the already-resolved RPC
+ * symbol on the specifier so the stock services walk sees the same contract.
+ */
+function attachResolvedExportSpecifierSymbol(node: any, symbol: any): any {
+    const parent = node?.parent;
+    if (
+        symbol && node?.kind === SyntaxKind.Identifier
+        && parent?.kind === SyntaxKind.ExportSpecifier
+        && (parent.name === node || parent.propertyName === node)
+        && parent.symbol === undefined
+    ) {
+        parent.symbol = symbol;
+    }
+    return symbol;
+}
+
 function isCrossFileImportExportName(node: any): boolean {
     const parent = node?.parent;
     if (!parent) return false;
@@ -9891,7 +9911,10 @@ export function createTsgoChecker(program: any): any {
                 node = node.name;
             }
             const lookupNode = node;
-            const finish = (sym: any) => gateExternalModuleSymbolLookup(lookupNode, sym);
+            const finish = (sym: any) => attachResolvedExportSpecifierSymbol(
+                lookupNode,
+                gateExternalModuleSymbolLookup(lookupNode, sym)
+            );
             // Stock checker.getSymbolAtLocation (switch on node.kind): most
             // keywords return undefined; a few resolve via the parent
             // declaration. Never "symbol at this text position" — positional
